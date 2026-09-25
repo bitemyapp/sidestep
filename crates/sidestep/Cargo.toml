@@ -1,0 +1,18 @@
+[package]
+name = "sidestep"
+description = "Build objc2 apps for Linux: an Objective-C runtime, Foundation and AppKit written in Rust"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+
+# On Apple targets this crate is empty and objc2 talks to Apple's runtime and
+# frameworks. Everywhere else it switches objc2 to its GNUstep ABI and
+# supplies that ABI itself.
+[target.'cfg(not(target_vendor = "apple"))'.dependencies]
+sidestep-runtime.workspace = true
+sidestep-foundation.workspace = true
+objc2 = { workspace = true, features = ["gnustep-2-1"] }
+block2 = { workspace = true, features = ["gnustep-2-1"] }
+objc2-foundation = { workspace = true, features = ["gnustep-2-1"] }

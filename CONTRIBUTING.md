@@ -1,0 +1,50 @@
+# Contributing
+
+## Where behavior comes from
+
+Sidestep reimplements Apple's interfaces from the outside. Its legal footing
+([docs/legal.md](docs/legal.md)) depends on keeping it that way, so these rules
+apply to every contribution.
+
+You may use:
+
+- Apple's public documentation, read by a person for facts. Don't copy its
+  prose, and don't scrape developer.apple.com.
+- GNUstep's documentation and observed behavior, and objc2's documentation.
+- Programs you write against public APIs and run on your own Mac, such as the
+  tests in `conformance/`.
+- Apple open source under its own licence, with its notices kept, when that
+  licence allows it (Apache-2.0 swift-corelibs-foundation, for example).
+
+You may not use:
+
+- Disassembly or decompilation of Apple binaries, class-dump output, debug
+  symbols, or inspection of private API, private instance variables or
+  internal tables.
+- Leaked or otherwise non-public Apple source.
+- APSL-licensed Apple code (such as objc4) translated into Sidestep.
+- Apple SDK headers or `.tbd` files, in the repository or in Linux CI, or as
+  input to header-translator or bindgen for the Linux side.
+- Doc comments copied out of objc2's generated crates (they come from Apple's
+  headers).
+
+## Sign-off
+
+Every commit carries a [DCO](https://developercertificate.org/) sign-off
+(`git commit -s`). By signing off you also state that you used none of the
+sources listed under "You may not use" above.
+
+## Tests
+
+Behavior changes come with a test in `conformance/` that passes on macOS
+against Apple's runtime before it is expected to pass on Linux. If the two
+platforms legitimately differ, the test shouldn't assert the difference.
+
+```sh
+cargo test --workspace                     # macOS: Apple's runtime
+scripts/linux-cargo test --workspace       # Linux: Sidestep's runtime
+scripts/linux-cargo clippy --workspace --all-targets
+cargo fmt --all
+```
+
+`scripts/linux-cargo` needs Docker (OrbStack works).

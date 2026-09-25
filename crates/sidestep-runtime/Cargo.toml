@@ -1,0 +1,14 @@
+[package]
+name = "sidestep-runtime"
+description = "An Objective-C runtime with GNUstep libobjc2's C ABI, written in Rust"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+
+# objc2 is used to define NSObject and the block classes with exactly the
+# method encodings objc2 later verifies against. objc2 calls back into this
+# crate through the C ABI, so there is no dependency cycle.
+[target.'cfg(not(target_vendor = "apple"))'.dependencies]
+objc2 = { workspace = true, features = ["gnustep-2-1"] }

@@ -1,0 +1,67 @@
+# Roadmap
+
+Each milestone ends with conformance tests that pass on macOS and Linux.
+
+## 0. Runtime (done)
+
+Objective-C runtime with libobjc2's C ABI, blocks runtime, `NSObject`,
+`NSString`, `NSThread`, and 20 conformance tests: classes and subclasses,
+ivars and `Drop`, `super`, autorelease pools, weak references under thread
+contention, protocols, introspection (including before a class's first
+message), blocks, strings. Passing on macOS, and on Linux aarch64 and x86_64.
+
+## 1. Foundation core
+
+- `-description` on `NSObject`; `NSMutableString`; constant strings from static
+  memory.
+- Collections: `NSArray`, `NSMutableArray`, `NSDictionary`,
+  `NSMutableDictionary`, `NSSet`.
+- `NSNumber`, `NSValue`, `NSData`, `NSDate`, `NSError`, `NSURL`,
+  `NSProcessInfo`.
+- `NSNotificationCenter`, `NSRunLoop`, `NSTimer`, `NSAutoreleasePool`, and the
+  rest of `NSThread`.
+- Every static class findable by name, not only after first use.
+- Message forwarding.
+
+## 2. AppKit skeleton
+
+- `NSApplication` running an event loop on Wayland and X11.
+- `NSWindow` and `NSView` with `drawRect:`.
+- `NSEvent`, the responder chain, and target/action.
+- `NSColor`, `NSBezierPath`, `NSGraphicsContext` and `NSFont`.
+- `NSMenu`, which has no system-wide equivalent on Linux, so it becomes a
+  menu bar inside the window.
+
+Candidate libraries: winit or smithay-client-toolkit, vello or tiny-skia,
+parley and fontique.
+
+## 3. Text
+
+`NSAttributedString`, `NSTextField`, `NSTextView`, and the TextKit 1 subset
+(`NSLayoutManager`, `NSTextStorage`, `NSTextTable`) that real apps lean on.
+
+## 4. Controls and services
+
+Scroll, split, popup and segmented views; pasteboard and drag and drop; open
+panels through xdg-desktop-portal; appearance (dark mode); accessibility
+through AccessKit.
+
+## 5. A real app
+
+Omperor, the motivating application, building for Linux with no source
+changes beyond `use sidestep as _;`.
+
+## Swift
+
+Research, after Rust works. Swift on Linux is normally built without
+Objective-C interop. The questions are whether `-enable-objc-interop` can
+target a runtime with this ABI, and what Clang-emitted class structures (the
+libobjc2 v2 ABI's `__objc_load` path) the runtime would then need to accept.
+
+## Standing work
+
+- Raise the `NSStringEncoding` width mismatch with objc2 (see
+  [abi.md](abi.md)).
+- Keep the fallback declarations crate from [legal.md](legal.md) ready:
+  prototype the Cargo mechanics early.
+- CI on Linux x86_64 and aarch64 and on macOS.

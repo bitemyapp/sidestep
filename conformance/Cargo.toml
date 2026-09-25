@@ -1,0 +1,12 @@
+[package]
+name = "sidestep-conformance"
+description = "Tests written only against objc2, run on macOS (Apple's runtime) and Linux (Sidestep) alike"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+objc2.workspace = true
+block2.workspace = true
+objc2-foundation = { workspace = true, features = ["NSString", "NSObject", "NSThread", "NSZone"] }
+sidestep.workspace = true

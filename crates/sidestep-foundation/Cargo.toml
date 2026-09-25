@@ -1,0 +1,13 @@
+[package]
+name = "sidestep-foundation"
+description = "Foundation classes for Sidestep, written with objc2's define_class!"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[target.'cfg(not(target_vendor = "apple"))'.dependencies]
+sidestep-runtime.workspace = true
+objc2 = { workspace = true, features = ["gnustep-2-1"] }
+objc2-foundation = { workspace = true, features = ["gnustep-2-1", "NSObject", "NSString", "NSThread", "NSZone"] }

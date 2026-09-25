@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "examples/*", "conformance"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bitemyapp/sidestep"
+
+[workspace.dependencies]
+# Sidestep implements the runtime and frameworks behind these crates; it does
+# not fork them. The versions below are the ones the ABI contract in
+# docs/abi.md was taken from.
+objc2 = { version = "0.6.4", default-features = false, features = ["std"] }
+block2 = { version = "0.6.2", default-features = false, features = ["std"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std"] }
+
+sidestep = { path = "crates/sidestep" }
+sidestep-runtime = { path = "crates/sidestep-runtime" }
+sidestep-foundation = { path = "crates/sidestep-foundation" }
