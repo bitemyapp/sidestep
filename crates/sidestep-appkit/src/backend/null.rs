@@ -71,6 +71,8 @@ struct Win {
     width: u32,
     height: u32,
     state: WindowState,
+    /// The menu bar's height, part of the title bar.
+    bar: u32,
 }
 
 fn run(channel: Channel<ToRender>, to_main: MainSender) {
@@ -84,7 +86,7 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
         width: win.width,
         height: win.height,
         scale: 1.0,
-        titlebar: 0,
+        titlebar: win.bar,
         state: win.state,
     };
     let focus = |focused: &mut Option<WindowId>, window: Option<WindowId>| {
@@ -102,7 +104,7 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
     while let Ok(msg) = channel.recv() {
         match msg {
             ToRender::CreateWindow { window, width, height, popup, sheet_of, .. } => {
-                let win = Win { width, height, state: WindowState::default() };
+                let win = Win { width, height, state: WindowState::default(), bar: 0 };
                 send(configure(window, &win));
                 windows.insert(window, win);
                 note(Seen::Created { window, width, height, popup_of: popup.map(|p| p.parent), sheet_of });
@@ -147,6 +149,12 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
             ToRender::SetCursor { window, cursor } => note(Seen::Cursor { window, name: cursor.name().into() }),
             ToRender::HideCursor { hidden, until_moved } => note(Seen::CursorHidden { hidden, until_moved }),
             ToRender::SetParent { window, parent } => note(Seen::Parent { window, parent }),
+            ToRender::MenuBar { window, height, .. } => {
+                if let Some(win) = windows.get_mut(&window).filter(|w| w.bar != height) {
+                    win.bar = height;
+                    send(configure(window, win));
+                }
+            }
             _ => {}
         }
         HANDLED.fetch_add(1, Ordering::Release);

@@ -95,6 +95,18 @@ mod view_layout;
 mod views;
 mod window;
 mod window_events;
+// Menus, pop-up buttons, alerts and panels.
+mod alert;
+mod category;
+mod keyequiv;
+mod menu;
+mod menu_tracking;
+mod menu_view;
+mod menubar;
+mod panels;
+mod popup_button;
+mod portal;
+mod workspace;
 
 sidestep_runtime::static_class!(pub NSRESPONDER, NSRESPONDER_META = "NSResponder", || {
     let _ = responder::NSResponderImpl::class();

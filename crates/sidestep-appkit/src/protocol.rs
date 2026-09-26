@@ -511,6 +511,33 @@ pub(crate) struct PopupPlacement {
     pub below: bool,
     /// Take the keyboard and pointer grab, as menus do; tooltips don't.
     pub grab: bool,
+    /// Where exactly it opens and how it gives way at the output's edges,
+    /// for menus; `below` then doesn't count.
+    pub layout: Option<PopupLayout>,
+}
+
+/// How a menu's popup opens against its anchor, as xdg_positioner puts it:
+/// the anchor's corner it opens from, the way it grows from there, an
+/// offset in points, and what the compositor may do when it doesn't fit
+/// (flip to the other side, slide along the edge, shrink its height).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PopupLayout {
+    pub corner: Corner,
+    pub gravity: Corner,
+    pub offset: (i32, i32),
+    pub flip_x: bool,
+    pub flip_y: bool,
+    pub slide_x: bool,
+    pub slide_y: bool,
+    pub resize_y: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Corner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
 }
 
 pub(crate) enum ToRender {
@@ -655,6 +682,13 @@ pub(crate) enum ToRender {
     /// Image representations that went away: drop what's cached of them.
     ForgetImages {
         keys: Vec<u64>,
+    },
+    /// The main menu's bar above the window's content, `height` points
+    /// tall (none for 0), showing `ops` (top-left origin); see `menubar`.
+    MenuBar {
+        window: WindowId,
+        height: u32,
+        ops: Vec<Op>,
     },
 }
 

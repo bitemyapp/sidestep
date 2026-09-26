@@ -233,6 +233,30 @@ modal windows and tooltips; `examples/eventbench` measures):
 - A render thread without a display (`SIDESTEP_BACKEND=null`) and a testing
   module that plays the compositor for input.
 
+Menus, alerts and panels since (`examples/menus-panels` shows them; see
+[architecture.md](architecture.md#menus-alerts-and-panels)):
+
+- `NSMenu` and `NSMenuItem`: the model with its notifications, validation
+  (`update`, `validateMenuItem:`, `validateUserInterfaceItem:`), key
+  equivalents matched by a rule of Linux's own and labelled as the
+  platform names keys, and the main menu in the key-equivalent phase.
+- Pop-up and context menus (`popUpMenuPositioningItem:atLocation:inView:`,
+  `+popUpContextMenu:withEvent:forView:`, `menuForEvent:` and the default
+  `rightMouseDown:`), submenus, AppKit's tracking loop in
+  `NSEventTrackingRunLoopMode` with keyboard navigation and the delegate's
+  calls, shown as grabbing xdg_popups.
+- The main menu as a bar in every titled window, part of the title bar to
+  the frame arithmetic (`+[NSMenu setMenuBarVisible:NO]` or
+  `SIDESTEP_MENUBAR=hidden` turn it off).
+- `NSPopUpButton` and `NSPopUpButtonCell`, pop-up and pull-down.
+- `NSAlert`: modal and as a sheet, with its buttons' key equivalents, an
+  accessory view, the suppression check box and icons.
+- `NSSavePanel` and `NSOpenPanel` through xdg-desktop-portal's file
+  chooser (zenity or kdialog without a portal), modal as on macOS and
+  cancellable, `NSWorkspace` opening URLs (`NSWorkspaceOpenConfiguration`
+  too) and showing files, `NSRunningApplication.currentApplication`,
+  `NSBeep`.
+
 Next:
 
 - Popups of sheets (menus, tooltips over a sheet); `windowWillResize:toSize:`
@@ -258,8 +282,17 @@ Next:
   keeping a layer's pixels through a width change that moves its tile
   columns, and drawing tiles ahead on an idle timer rather than right
   after each frame.
-- `NSMenu`, which has no system-wide equivalent on Linux, so it becomes a
-  menu bar inside the window.
+- Menus still to do: menus taller than the screen (scrolling), the
+  pointer's path to an open submenu (a submenu closes 150 ms after the
+  pointer leaves its item), alternate items (Option), attributed titles
+  and views as items, `NSStatusItem` (the StatusNotifierItem protocol),
+  the main menu's key equivalents while a modal window is up (they go to
+  the menu as they do outside), and menus over sheets. The bar has no
+  overflow for more menus than fit.
+- Panels still to do: the portal's parent window (xdg-foreign), opening
+  files through `OpenURI.OpenFile` (it takes a file descriptor; files open
+  with `xdg-open`), `allowedContentTypes` (`UTType`), the panels'
+  delegate calls, and the workspace hearing the desktop's settings change.
 - Containers: the visual format language; bounds scaling in drawing, hit
   testing and conversion; the table's header in its scroll view, column
   dragging and resizing from the header, hidden rows, type select, drag
@@ -354,7 +387,7 @@ They are drawn in an Adwaita-like theme, light or dark. See
 Next:
 
 - Editing text fields (the field editor, with the text-editing work),
-  `NSPopUpButton`, `NSImageView` and images in buttons.
+  `NSImageView` and images in buttons.
 - Numbers in cells read as Foundation's `-[NSNumber descriptionWithLocale:]`
   gives them, which on Linux doesn't yet group digits or print "NaN" and
   "∞" as macOS does.
@@ -362,7 +395,6 @@ Next:
   title into the width given) and the width a wrapping label keeps at
   `maximumNumberOfLines`.
 - Accessibility through AccessKit, from the store.
-- Popup views; open panels through xdg-desktop-portal.
 
 ## 5. A real app
 

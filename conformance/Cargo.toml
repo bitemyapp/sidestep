@@ -161,12 +161,29 @@ name = "text_view"
 harness = false
 
 
-# Scroll views, clip views and scrollers (appkit_scroll). A table of its own,
-# so the features merge.
+# Scroll views, clip views and scrollers (appkit_scroll); menus, pop-up
+# buttons, alerts and panels (menus, popup_button, alert, panels). A table
+# of its own, so the features merge.
 [target.'cfg(any(all()))'.dev-dependencies]
-objc2-app-kit = { workspace = true, features = ["NSScroller", "NSScrollView", "NSClipView", "NSControl", "NSCell", "NSEvent", "NSColor", "NSCursor", "NSWindow", "NSGraphics", "NSGraphicsContext", "NSImageRep", "NSBitmapImageRep"] }
-objc2-foundation = { workspace = true, features = ["NSNotification", "NSGeometry", "NSString"] }
+objc2-app-kit = { workspace = true, features = ["NSScroller", "NSScrollView", "NSClipView", "NSControl", "NSCell", "NSEvent", "NSColor", "NSCursor", "NSWindow", "NSGraphics", "NSGraphicsContext", "NSImageRep", "NSBitmapImageRep", "NSMenu", "NSMenuItem", "NSUserInterfaceValidation", "NSPopUpButton", "NSPopUpButtonCell", "NSMenuItemCell", "NSButton", "NSButtonCell", "NSAlert", "NSImage", "NSApplication", "NSView", "NSResponder", "NSActionCell", "NSSavePanel", "NSOpenPanel", "NSWorkspace", "NSRunningApplication", "NSPanel", "NSAccessibility", "libc"] }
+objc2-foundation = { workspace = true, features = ["NSNotification", "NSGeometry", "NSString", "NSDictionary", "NSValue", "NSArray", "NSAttributedString", "NSURL", "NSError"] }
 
 [[test]]
 name = "appkit_scroll"
+harness = false
+
+[[test]]
+name = "menus"
+harness = false
+
+[[test]]
+name = "popup_button"
+harness = false
+
+[[test]]
+name = "alert"
+harness = false
+
+[[test]]
+name = "panels"
 harness = false

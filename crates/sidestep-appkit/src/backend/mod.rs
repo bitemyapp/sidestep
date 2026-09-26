@@ -32,6 +32,7 @@
 mod decor;
 mod dnd;
 mod keyboard;
+mod menubar;
 pub(crate) mod null;
 mod outputs;
 mod seat;
@@ -273,12 +274,14 @@ pub(crate) enum Role {
     Root(WindowId),
     /// Part of the decorations.
     Decor(WindowId, decor::Part),
+    /// The main menu's bar above the content (see `menubar`).
+    Bar(WindowId),
 }
 
 impl Role {
     fn window(self) -> WindowId {
         match self {
-            Role::Root(w) | Role::Decor(w, _) => w,
+            Role::Root(w) | Role::Decor(w, _) | Role::Bar(w) => w,
         }
     }
 }
@@ -317,6 +320,8 @@ pub(crate) struct Win {
     /// The compositor asked us to draw decorations.
     client_side: bool,
     decor: Option<decor::Decor>,
+    /// The main menu's bar, when the window shows one.
+    menubar: Option<menubar::Bar>,
     cursor: Cursor,
     /// The window geometry last set, to set it again only on changes.
     geometry: (i32, i32, i32, i32),
@@ -350,9 +355,15 @@ impl Win {
         }
     }
 
-    /// Height of the title bar drawn above the content, in points.
+    /// Height of the title bar drawn above the content, in points: the
+    /// header, and the menu bar under it.
     fn titlebar(&self) -> u32 {
-        self.decor.as_ref().map_or(0, |d| d.titlebar(&self.state))
+        self.decor.as_ref().map_or(0, |d| d.titlebar(&self.state)) + self.bar_height()
+    }
+
+    /// Height of the menu bar, in points: none in full screen.
+    pub(super) fn bar_height(&self) -> u32 {
+        if self.state.fullscreen { 0 } else { self.menubar.as_ref().map_or(0, |b| b.height) }
     }
 }
 
@@ -433,6 +444,7 @@ fn frame_info(win: &Win) -> decor::FrameInfo<'_> {
         state: WindowState { suspended: false, resizing: false, ..win.state },
         style: win.style,
         title: &win.title,
+        bar: win.bar_height(),
     }
 }
 
@@ -506,6 +518,7 @@ impl State {
                 }
             }
             ToRender::ForgetImages { keys } => raster::images::forget(&keys),
+            ToRender::MenuBar { window, height, ops } => menubar::set(self, window, height, ops),
             ToRender::ColorScheme { dark } => {
                 decor::set_dark(dark);
                 let windows: Vec<WindowId> = self.windows.keys().copied().collect();
@@ -598,6 +611,7 @@ impl State {
                 title: TitleText::default(),
                 client_side: false,
                 decor: None,
+                menubar: None,
                 cursor: Cursor::Default,
                 geometry: (0, 0, 0, 0),
                 reported: None,
@@ -633,12 +647,17 @@ impl State {
             ((a.x1 - a.x0).ceil() as i32).max(1),
             ((a.y1 - a.y0).ceil() as i32).max(1),
         );
-        positioner.set_anchor(if placement.below { Anchor::BottomLeft } else { Anchor::TopLeft });
-        positioner.set_gravity(Gravity::BottomRight);
         positioner.set_size(width.max(1) as i32, height.max(1) as i32);
-        positioner.set_constraint_adjustment(
-            ConstraintAdjustment::FlipY | ConstraintAdjustment::SlideX | ConstraintAdjustment::SlideY,
-        );
+        match placement.layout {
+            Some(layout) => menu_layout(&positioner, layout),
+            None => {
+                positioner.set_anchor(if placement.below { Anchor::BottomLeft } else { Anchor::TopLeft });
+                positioner.set_gravity(Gravity::BottomRight);
+                positioner.set_constraint_adjustment(
+                    ConstraintAdjustment::FlipY | ConstraintAdjustment::SlideX | ConstraintAdjustment::SlideY,
+                );
+            }
+        }
         let parent_xdg = match &parent.shell {
             Shell::Toplevel(w) => w.xdg_surface().clone(),
             Shell::Popup(p) => p.xdg_surface().clone(),
@@ -667,6 +686,7 @@ impl State {
         // Tiles and decorations go first: they're subsurfaces of the root.
         drop(win.layers);
         drop(win.decor);
+        drop(win.menubar);
         drop(win.shell);
     }
 
@@ -917,6 +937,7 @@ impl State {
     /// Set the window geometry, and draw and place the decorations for the
     /// window's current size, ahead of a commit of the root surface.
     fn place_decorations(&mut self, window: WindowId) {
+        let rgba = self.rgba();
         let Some(win) = self.windows.get_mut(&window) else { return };
         let bar = win.titlebar() as i32;
         let geometry = (0, -bar, win.width as i32, win.height as i32 + bar);
@@ -929,6 +950,10 @@ impl State {
                 Shell::Popup(p) => p.xdg_surface().set_window_geometry(0, 0, geometry.2, geometry.3),
                 Shell::Sheet(_) => {}
             }
+        }
+        let bar = win.bar_height();
+        if let Some(menubar) = &mut win.menubar {
+            menubar.draw(win.width, bar, win.scale, rgba, &mut self.pool, &mut self.glyphs);
         }
         let Some(mut decor) = win.decor.take() else { return };
         decor.draw(&frame_info(win), &mut self.pool, &mut self.glyphs);
@@ -945,7 +970,8 @@ impl State {
         }
         let bar = win.titlebar() as i32;
         let geometry = (0, -bar, win.width as i32, win.height as i32 + bar);
-        let redraw = win.decor.as_ref().is_some_and(|d| d.needs_draw(&frame_info(win)));
+        let redraw = win.decor.as_ref().is_some_and(|d| d.needs_draw(&frame_info(win)))
+            || win.menubar.as_ref().is_some_and(menubar::Bar::needs_draw);
         if !redraw && win.geometry == geometry {
             return;
         }
@@ -1013,9 +1039,13 @@ impl State {
     }
 
     /// Where a content surface's origin is in its window, in points: the
-    /// window's own surface is the only one taking input.
-    fn content_offset(&self, _role: Role) -> (f64, f64) {
-        (0.0, 0.0)
+    /// window's own surface takes the content's input (tiles take none),
+    /// and the menu bar sits above it.
+    fn content_offset(&self, role: Role) -> (f64, f64) {
+        match role {
+            Role::Bar(window) => (0.0, -(self.windows.get(&window).map_or(0, Win::bar_height) as f64)),
+            _ => (0.0, 0.0),
+        }
     }
 }
 
@@ -1142,6 +1172,39 @@ impl WindowHandler for State {
             self.refresh_decor(id);
         }
     }
+}
+
+/// A menu's placement on its positioner (see `PopupLayout`).
+fn menu_layout(positioner: &XdgPositioner, layout: crate::protocol::PopupLayout) {
+    use crate::protocol::Corner;
+    let anchor = match layout.corner {
+        Corner::TopLeft => Anchor::TopLeft,
+        Corner::TopRight => Anchor::TopRight,
+        Corner::BottomLeft => Anchor::BottomLeft,
+        Corner::BottomRight => Anchor::BottomRight,
+    };
+    let gravity = match layout.gravity {
+        Corner::TopLeft => Gravity::TopLeft,
+        Corner::TopRight => Gravity::TopRight,
+        Corner::BottomLeft => Gravity::BottomLeft,
+        Corner::BottomRight => Gravity::BottomRight,
+    };
+    positioner.set_anchor(anchor);
+    positioner.set_gravity(gravity);
+    positioner.set_offset(layout.offset.0, layout.offset.1);
+    let mut adjust = ConstraintAdjustment::empty();
+    for (on, bit) in [
+        (layout.flip_x, ConstraintAdjustment::FlipX),
+        (layout.flip_y, ConstraintAdjustment::FlipY),
+        (layout.slide_x, ConstraintAdjustment::SlideX),
+        (layout.slide_y, ConstraintAdjustment::SlideY),
+        (layout.resize_y, ConstraintAdjustment::ResizeY),
+    ] {
+        if on {
+            adjust |= bit;
+        }
+    }
+    positioner.set_constraint_adjustment(adjust);
 }
 
 impl PopupHandler for State {

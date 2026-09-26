@@ -91,15 +91,17 @@ enum Control {
     Minimize,
 }
 
-struct Surface {
-    surface: WlSurface,
+/// A subsurface of the window's surface: a part of the decorations, or the
+/// menu bar (`menubar`).
+pub(super) struct Surface {
+    pub(super) surface: WlSurface,
     subsurface: WlSubsurface,
     viewport: WpViewport,
-    mapped: bool,
+    pub(super) mapped: bool,
 }
 
 impl Surface {
-    fn new(
+    pub(super) fn new(
         parent: &WlSurface,
         subcompositor: &SubcompositorState,
         viewporter: &WpViewporter,
@@ -110,7 +112,7 @@ impl Surface {
         Surface { surface, subsurface, viewport, mapped: false }
     }
 
-    fn hide(&mut self) {
+    pub(super) fn hide(&mut self) {
         if self.mapped {
             self.surface.attach(None, 0, 0);
             self.surface.commit();
@@ -124,13 +126,25 @@ impl Surface {
     fn show(
         &mut self,
         pool: &mut SlotPool,
-        (pw, ph): (u32, u32),
+        size: (u32, u32),
         at: (i32, i32),
         points: (u32, u32),
         draw: impl FnOnce(&mut [u32]),
     ) {
-        let Ok((buffer, bytes)) = pool.create_buffer(pw as i32, ph as i32, pw as i32 * 4, wl_shm::Format::Argb8888)
-        else {
+        self.show_as(pool, size, wl_shm::Format::Argb8888, at, points, draw);
+    }
+
+    /// As `show`, the pixels in `format`.
+    pub(super) fn show_as(
+        &mut self,
+        pool: &mut SlotPool,
+        (pw, ph): (u32, u32),
+        format: wl_shm::Format,
+        at: (i32, i32),
+        points: (u32, u32),
+        draw: impl FnOnce(&mut [u32]),
+    ) {
+        let Ok((buffer, bytes)) = pool.create_buffer(pw as i32, ph as i32, pw as i32 * 4, format) else {
             return;
         };
         draw(&mut as_pixels(bytes)[..(pw * ph) as usize]);
@@ -159,11 +173,13 @@ pub(crate) struct FrameInfo<'a> {
     pub state: WindowState,
     pub style: Style,
     pub title: &'a TitleText,
+    /// The menu bar between the header and the content, in points.
+    pub bar: u32,
 }
 
 /// What the parts depend on besides the title and the pointer.
-fn drawn_key(f: &FrameInfo) -> (u32, u32, u64, WindowState, Style) {
-    (f.width, f.height, f.scale.to_bits(), f.state, f.style)
+fn drawn_key(f: &FrameInfo) -> (u32, u32, u64, WindowState, Style, u32) {
+    (f.width, f.height, f.scale.to_bits(), f.state, f.style, f.bar)
 }
 
 pub(crate) struct Decor {
@@ -176,7 +192,7 @@ pub(crate) struct Decor {
     header_dirty: bool,
     strips_dirty: bool,
     /// What was last drawn: content size, scale bits, state, style.
-    drawn: Option<(u32, u32, u64, WindowState, Style)>,
+    drawn: Option<(u32, u32, u64, WindowState, Style, u32)>,
 }
 
 /// How the header looks, apart from the surfaces it's shown on.
@@ -330,7 +346,7 @@ impl Decor {
     pub fn draw(&mut self, f: &FrameInfo, pool: &mut SlotPool, glyphs: &mut Glyphs) {
         let now = drawn_key(f);
         if self.drawn != Some(now) {
-            let resized = self.drawn.is_none_or(|d| (d.0, d.1, d.2) != (now.0, now.1, now.2));
+            let resized = self.drawn.is_none_or(|d| (d.0, d.1, d.2, d.5) != (now.0, now.1, now.2, now.5));
             self.header_dirty = true;
             self.strips_dirty |= resized || self.drawn.is_none_or(|d| d.3 != now.3);
             self.drawn = Some(now);
@@ -341,7 +357,8 @@ impl Decor {
                 self.header.hide();
             } else if let Some(pm) = self.look.render_header(f, glyphs) {
                 let size = (pm.width(), pm.height());
-                self.header.show(pool, size, (0, -(HEADER as i32)), (f.width, HEADER), |dst| {
+                let top = -((HEADER + f.bar) as i32);
+                self.header.show(pool, size, (0, top), (f.width, HEADER), |dst| {
                     for (d, p) in dst.iter_mut().zip(pm.pixels()) {
                         *d = u32::from_be_bytes([p.alpha(), p.red(), p.green(), p.blue()]);
                     }
@@ -364,7 +381,7 @@ impl Decor {
     fn draw_strips(&mut self, f: &FrameInfo, pool: &mut SlotPool) {
         let shade = Shadow::new(f, theme());
         let m = MARGIN as i32;
-        for (i, place) in strip_places(f.width, f.height).into_iter().enumerate() {
+        for (i, place) in strip_places(f.width, f.height, f.bar).into_iter().enumerate() {
             let size = (px(place.size.0, f.scale), px(place.size.1, f.scale));
             if let Some(regions) = &self.regions {
                 let region = &regions[i];
@@ -446,7 +463,7 @@ impl Look {
             let corner = ((radius * s).ceil() as u32).min(pw);
             for y in 0..corner.min(ph) {
                 for x in (0..corner).chain(pw.saturating_sub(corner)..pw) {
-                    let (px_, py) = ((x as f32 + 0.5) / s, (y as f32 + 0.5) / s - h);
+                    let (px_, py) = ((x as f32 + 0.5) / s, (y as f32 + 0.5) / s - h - f.bar as f32);
                     let a = shade.alpha(px_ as f64, py as f64);
                     if a > 0.0 {
                         let a8 = (a * 255.0 + 0.5) as u8;
@@ -629,9 +646,9 @@ struct StripPlace {
     size: (u32, u32),
 }
 
-fn strip_places(width: u32, height: u32) -> [StripPlace; 4] {
-    let (m, h) = (MARGIN, height + HEADER);
-    let (mi, top) = (MARGIN as i32, -(HEADER as i32));
+fn strip_places(width: u32, height: u32, bar: u32) -> [StripPlace; 4] {
+    let (m, h) = (MARGIN, height + HEADER + bar);
+    let (mi, top) = (MARGIN as i32, -((HEADER + bar) as i32));
     [
         StripPlace { part: Part::Top, at: (-mi, top - mi), size: (width + 2 * m, m) },
         StripPlace { part: Part::Bottom, at: (-mi, height as i32), size: (width + 2 * m, m) },
@@ -718,7 +735,7 @@ impl Shadow {
             .collect();
         Shadow {
             x0: 0.0,
-            y0: -(HEADER as f64),
+            y0: -((HEADER + f.bar) as f64),
             x1: f.width as f64,
             y1: f.height as f64,
             radius: if square { 0.0 } else { RADIUS as f64 },
@@ -819,7 +836,7 @@ pub(super) fn pointer_button(
     let Some(d) = win.decor.as_mut() else { return };
     if part != Part::Header {
         if pressed && code == LEFT && style.resizable {
-            toplevel.resize(seat, serial, edge(part, width, win.height, x, y));
+            toplevel.resize(seat, serial, edge(part, width, win.height + win.bar_height(), x, y));
         }
         return;
     }
@@ -914,7 +931,8 @@ pub(super) fn cursor(win: &Win, part: Part, x: f64, y: f64) -> Cursor {
     if part == Part::Header || !win.style.resizable {
         return Cursor::Default;
     }
-    match edge(part, win.width, win.height, x, y) {
+    // The frame takes in the menu bar as well as the content.
+    match edge(part, win.width, win.height + win.bar_height(), x, y) {
         ResizeEdge::Top => Cursor::NResize,
         ResizeEdge::Bottom => Cursor::SResize,
         ResizeEdge::Left => Cursor::WResize,
@@ -942,7 +960,7 @@ mod tests {
             passthrough: false,
         };
         let state = WindowState { activated: true, ..Default::default() };
-        FrameInfo { width, height, scale, state, style, title }
+        FrameInfo { width, height, scale, state, style, title, bar: 0 }
     }
 
     #[test]
@@ -981,7 +999,7 @@ mod tests {
         for scale in [1.0, 1.5, 2.0] {
             let f = frame(&title, 300, 200, scale);
             let shade = Shadow::new(&f, theme());
-            for place in strip_places(f.width, f.height) {
+            for place in strip_places(f.width, f.height, f.bar) {
                 let size = (px(place.size.0, scale), px(place.size.1, scale));
                 let mut fast = vec![0u32; (size.0 * size.1) as usize];
                 strip_pixels(&shade, &place, size, scale, &mut fast);
@@ -1033,7 +1051,7 @@ mod tests {
             let header = median(|| drop(look.render_header(&f, &mut glyphs)));
             let shade = Shadow::new(&f, theme());
             let strips = median(|| {
-                for place in strip_places(f.width, f.height) {
+                for place in strip_places(f.width, f.height, f.bar) {
                     let size = (px(place.size.0, scale), px(place.size.1, scale));
                     let mut dst = vec![0u32; (size.0 * size.1) as usize];
                     strip_pixels(&shade, &place, size, scale, &mut dst);

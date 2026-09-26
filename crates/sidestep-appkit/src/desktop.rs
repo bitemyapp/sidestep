@@ -148,27 +148,29 @@ fn run(changed: &dyn Fn(Setting), done: &mut Option<impl FnOnce()>) -> Option<()
 }
 
 const METHOD_CALL: u8 = 1;
-const METHOD_RETURN: u8 = 2;
-const SIGNAL: u8 = 4;
+pub(crate) const METHOD_RETURN: u8 = 2;
+pub(crate) const SIGNAL: u8 = 4;
 
-/// A connection to the session bus.
-struct Bus {
-    stream: UnixStream,
+/// A connection to the session bus. (`portal` speaks through it too.)
+pub(crate) struct Bus {
+    pub(crate) stream: UnixStream,
     reader: BufReader<UnixStream>,
     serial: u32,
 }
 
 /// A received message: what this client looks at.
-struct Message {
-    kind: u8,
-    big_endian: bool,
-    reply_serial: Option<u32>,
-    member: Option<String>,
-    body: Vec<u8>,
+pub(crate) struct Message {
+    pub(crate) kind: u8,
+    pub(crate) big_endian: bool,
+    pub(crate) reply_serial: Option<u32>,
+    pub(crate) member: Option<String>,
+    /// The object path, which a signal comes from.
+    pub(crate) path: Option<String>,
+    pub(crate) body: Vec<u8>,
 }
 
 impl Bus {
-    fn connect() -> Option<Bus> {
+    pub(crate) fn connect() -> Option<Bus> {
         let stream = connect_session_bus()?;
         stream.set_read_timeout(Some(ANSWER_TIMEOUT)).ok()?;
         stream.set_write_timeout(Some(ANSWER_TIMEOUT)).ok()?;
@@ -188,7 +190,7 @@ impl Bus {
     }
 
     /// Call a method and wait for its reply; None for an error reply.
-    fn call(
+    pub(crate) fn call(
         &mut self,
         destination: &str,
         path: &str,
@@ -209,7 +211,7 @@ impl Bus {
         }
     }
 
-    fn read(&mut self) -> Option<Message> {
+    pub(crate) fn read(&mut self) -> Option<Message> {
         let mut fixed = [0u8; 16];
         self.reader.read_exact(&mut fixed).ok()?;
         let big_endian = match fixed[0] {
@@ -230,9 +232,9 @@ impl Bus {
         self.reader.read_exact(&mut rest).ok()?;
         let mut header = fixed.to_vec();
         header.extend_from_slice(&rest[..fields_len]);
-        let (reply_serial, member) = header_fields(&header, big_endian)?;
+        let (reply_serial, member, path) = header_fields(&header, big_endian)?;
         let body = rest[align(16 + fields_len, 8) - 16..].to_vec();
-        Some(Message { kind: fixed[1], big_endian, reply_serial, member, body })
+        Some(Message { kind: fixed[1], big_endian, reply_serial, member, path, body })
     }
 }
 
@@ -284,37 +286,37 @@ fn unescape(value: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn align(n: usize, to: usize) -> usize {
+pub(crate) fn align(n: usize, to: usize) -> usize {
     n.div_ceil(to) * to
 }
 
 /// Writes little-endian D-Bus values, aligned from the message's start.
 #[derive(Default)]
-struct Writer {
-    buf: Vec<u8>,
+pub(crate) struct Writer {
+    pub(crate) buf: Vec<u8>,
 }
 
 impl Writer {
-    fn pad(&mut self, to: usize) {
+    pub(crate) fn pad(&mut self, to: usize) {
         self.buf.resize(align(self.buf.len(), to), 0);
     }
 
-    fn byte(&mut self, v: u8) {
+    pub(crate) fn byte(&mut self, v: u8) {
         self.buf.push(v);
     }
 
-    fn u32(&mut self, v: u32) {
+    pub(crate) fn u32(&mut self, v: u32) {
         self.pad(4);
         self.buf.extend_from_slice(&v.to_le_bytes());
     }
 
-    fn string(&mut self, s: &str) {
+    pub(crate) fn string(&mut self, s: &str) {
         self.u32(s.len() as u32);
         self.buf.extend_from_slice(s.as_bytes());
         self.buf.push(0);
     }
 
-    fn signature(&mut self, s: &str) {
+    pub(crate) fn signature(&mut self, s: &str) {
         self.byte(s.len() as u8);
         self.buf.extend_from_slice(s.as_bytes());
         self.buf.push(0);
@@ -369,42 +371,42 @@ fn method_call(
 }
 
 /// Reads D-Bus values from a body or header, aligned from its start.
-struct Reader<'a> {
-    buf: &'a [u8],
-    at: usize,
+pub(crate) struct Reader<'a> {
+    pub(crate) buf: &'a [u8],
+    pub(crate) at: usize,
     big_endian: bool,
 }
 
 impl<'a> Reader<'a> {
-    fn new(buf: &'a [u8], big_endian: bool) -> Self {
+    pub(crate) fn new(buf: &'a [u8], big_endian: bool) -> Self {
         Reader { buf, at: 0, big_endian }
     }
 
-    fn pad(&mut self, to: usize) {
+    pub(crate) fn pad(&mut self, to: usize) {
         self.at = align(self.at, to);
     }
 
-    fn byte(&mut self) -> Option<u8> {
+    pub(crate) fn byte(&mut self) -> Option<u8> {
         let b = *self.buf.get(self.at)?;
         self.at += 1;
         Some(b)
     }
 
-    fn u32(&mut self) -> Option<u32> {
+    pub(crate) fn u32(&mut self) -> Option<u32> {
         self.pad(4);
         let b: [u8; 4] = self.buf.get(self.at..self.at + 4)?.try_into().ok()?;
         self.at += 4;
         Some(if self.big_endian { u32::from_be_bytes(b) } else { u32::from_le_bytes(b) })
     }
 
-    fn string(&mut self) -> Option<&'a str> {
+    pub(crate) fn string(&mut self) -> Option<&'a str> {
         let len = self.u32()? as usize;
         let s = std::str::from_utf8(self.buf.get(self.at..self.at + len)?).ok()?;
         self.at += len + 1;
         Some(s)
     }
 
-    fn signature(&mut self) -> Option<&'a str> {
+    pub(crate) fn signature(&mut self) -> Option<&'a str> {
         let len = self.byte()? as usize;
         let s = std::str::from_utf8(self.buf.get(self.at..self.at + len)?).ok()?;
         self.at += len + 1;
@@ -455,14 +457,16 @@ enum Value {
     Rgb([f64; 3]),
 }
 
-/// The reply serial and member among a header's fields.
-fn header_fields(header: &[u8], big_endian: bool) -> Option<(Option<u32>, Option<String>)> {
+/// The reply serial, member and path among a header's fields.
+type Fields = (Option<u32>, Option<String>, Option<String>);
+
+fn header_fields(header: &[u8], big_endian: bool) -> Option<Fields> {
     let mut r = Reader::new(header, big_endian);
     r.at = 12;
     let len = r.u32()? as usize;
     r.pad(8);
     let end = r.at + len;
-    let (mut reply_serial, mut member) = (None, None);
+    let (mut reply_serial, mut member, mut path) = (None, None, None);
     while r.at < end {
         r.pad(8);
         let code = r.byte()?;
@@ -470,6 +474,7 @@ fn header_fields(header: &[u8], big_endian: bool) -> Option<(Option<u32>, Option
         match (code, kind) {
             (5, "u") => reply_serial = Some(r.u32()?),
             (3, "s") => member = Some(r.string()?.to_owned()),
+            (1, "o") => path = Some(r.string()?.to_owned()),
             (_, "s" | "o") => {
                 r.string()?;
             }
@@ -482,7 +487,7 @@ fn header_fields(header: &[u8], big_endian: bool) -> Option<(Option<u32>, Option
             _ => return None,
         }
     }
-    Some((reply_serial, member))
+    Some((reply_serial, member, path))
 }
 
 #[cfg(test)]
@@ -506,8 +511,8 @@ mod tests {
         assert_eq!(bytes.len(), body + 7);
         assert_eq!(&bytes[body..], b"\x02\x00\x00\x00ab\x00");
         // And the header reads back.
-        let (reply, member) = header_fields(&bytes[..16 + fields], false).unwrap();
-        assert_eq!((reply, member.as_deref()), (None, Some("M")));
+        let (reply, member, path) = header_fields(&bytes[..16 + fields], false).unwrap();
+        assert_eq!((reply, member.as_deref(), path.as_deref()), (None, Some("M"), Some("/p")));
     }
 
     #[test]

@@ -158,6 +158,18 @@ pub(crate) fn stop_modal(response: NSModalResponse) {
     event_loop::stop_innermost();
 }
 
+/// End the modal loop or session for `window` with `response`, wherever
+/// it is on the stack (a save panel answered by the desktop while another
+/// modal loop runs above it ends when that one does).
+pub(crate) fn stop_window(window: &NSWindow, response: NSModalResponse) {
+    MODALS.with(|m| {
+        if let Some(modal) = m.borrow_mut().iter_mut().rev().find(|e| std::ptr::eq(&*e.window, window)) {
+            modal.response.get_or_insert(response);
+        }
+    });
+    event_loop::stop_innermost();
+}
+
 pub(crate) fn modal_window() -> Option<Retained<NSWindow>> {
     MODALS.with(|m| m.borrow().last().map(|e| e.window.clone()))
 }

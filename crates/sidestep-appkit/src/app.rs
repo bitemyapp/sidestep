@@ -412,6 +412,8 @@ define_class!(
         fn set_main_menu(&self, menu: Option<&AnyObject>) {
             let old = self.ivars().main_menu.replace(menu.map(|m| m.retain()));
             drop(old);
+            // Windows show it as a bar (see `menubar`).
+            crate::menubar::visibility_changed();
         }
 
         #[unsafe(method_id(delegate))]
@@ -471,10 +473,12 @@ define_class!(
             let Some(window) = window else { return };
             // Command-key presses are key equivalents first, the key window's
             // views' and then the main menu's: one that performs it
-            // consumes the key.
-            let equivalent =
-                kind == NSEventType::KeyDown && event.modifierFlags().contains(NSEventModifierFlags::Command);
-            if !(equivalent && (window.performKeyEquivalent(event) || menu_key_equivalent(self, event))) {
+            // consumes the key. Control keys and function keys are the main
+            // menu's first too (see `keyequiv::goes_to_menu`).
+            let down = kind == NSEventType::KeyDown;
+            let equivalent = down && event.modifierFlags().contains(NSEventModifierFlags::Command);
+            let menu = down && crate::keyequiv::goes_to_menu(event);
+            if !((equivalent && window.performKeyEquivalent(event)) || (menu && menu_key_equivalent(self, event))) {
                 window.sendEvent(event);
             }
         }
@@ -863,8 +867,15 @@ pub(crate) fn launched() {
     let Some(app) = SHARED.with(|s| s.get().cloned()) else { return };
     let app = app_impl(&app);
     if app.ivars().launching.replace(false) {
+        // The desktop's portal, ready for the first panel or URL.
+        crate::portal::prewarm();
         tell(app, name!(NSApplicationDidFinishLaunchingNotification));
     }
+}
+
+/// The application, if the program made it.
+pub(crate) fn existing() -> Option<Retained<NSApplication>> {
+    SHARED.with(|s| s.get().cloned())
 }
 
 fn shared() -> Retained<NSApplication> {

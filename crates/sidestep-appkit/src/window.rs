@@ -43,8 +43,8 @@ use crate::graphics::{self, Xf};
 pub(crate) use crate::layers::record;
 use crate::notifications::name;
 use crate::protocol::{
-    Button, Cursor, LayerId, Modifiers, PopupPlacement, ROOT_LAYER, Rect, ScrollPhase, SizeLimits, Style, TitleText,
-    ToRender, WindowId, WindowRequest, WindowState,
+    Button, Cursor, LayerId, Modifiers, PopupLayout, PopupPlacement, ROOT_LAYER, Rect, ScrollPhase, SizeLimits, Style,
+    TitleText, ToRender, WindowId, WindowRequest, WindowState,
 };
 
 /// Where a scroll is in a touchpad gesture, the speed an ending one
@@ -1568,7 +1568,13 @@ fn grow(r: NSRect, dh: f64) -> NSRect {
 /// the compositor says: Sidestep's own title bar only when decorations are
 /// forced to the client, as the compositor draws them otherwise.
 fn predicted_titlebar(style: NSWindowStyleMask) -> f64 {
-    if style.contains(NSWindowStyleMask::Titled) && crate::backend::force_client_decorations() { HEADER } else { 0.0 }
+    let header = if style.contains(NSWindowStyleMask::Titled) && crate::backend::force_client_decorations() {
+        HEADER
+    } else {
+        0.0
+    };
+    // The main menu's bar is part of the title bar (see `menubar`).
+    header + crate::menubar::predicted_height(style)
 }
 
 fn to_style(style: NSWindowStyleMask) -> Style {
@@ -2209,6 +2215,7 @@ fn order_front(window: &NSWindowImpl) {
     if let Some(parent) = window.transient_showing() {
         app::send(ToRender::SetParent { window: window.id(), parent: Some(parent) });
     }
+    crate::menubar::window_shown(as_window(window));
     // The first time on screen, the initial first responder takes over from
     // the window, if it's still in it.
     let initial = {
@@ -2231,8 +2238,9 @@ fn order_out(window: &NSWindowImpl) {
         return;
     }
     // Children go first: a popup can't outlive its parent, nor a sheet or a
-    // tooltip.
+    // tooltip, nor a menu.
     crate::tooltip::window_leaving(as_window(window));
+    crate::menu_tracking::window_leaving(as_window(window));
     let children = ivars.children.borrow().clone();
     for child in children.iter().chain(&crate::window_events::attached_sheet(window)) {
         order_out(imp(child));
@@ -2306,6 +2314,7 @@ fn child_placement(window: &NSWindowImpl) -> Option<PopupPlacement> {
         anchor: Rect::new(x, top, x + 1.0, top + 1.0),
         below: false,
         grab: false,
+        layout: None,
     })
 }
 
@@ -2324,7 +2333,24 @@ pub(crate) fn show_as_popup(window: &NSWindow, parent: &NSWindow, anchor: NSRect
         (anchor.origin.x + anchor.size.width) as f32,
         (top + anchor.size.height) as f32,
     );
-    w.ivars().popup.set(Some(PopupPlacement { parent: parent.id(), anchor: rect, below: true, grab }));
+    w.ivars().popup.set(Some(PopupPlacement { parent: parent.id(), anchor: rect, below: true, grab, layout: None }));
+    order_front(w);
+}
+
+/// Show `window` as a menu's popup of `parent`, placed against `anchor` (a
+/// rectangle in `parent`'s window coordinates) as `layout` says, grabbing
+/// input (see `menu_tracking`).
+pub(crate) fn show_as_menu(window: &NSWindow, parent: &NSWindow, anchor: NSRect, layout: PopupLayout) {
+    let (w, parent) = (imp(window), imp(parent));
+    let top = parent.content_height() - (anchor.origin.y + anchor.size.height);
+    let rect = Rect::new(
+        anchor.origin.x as f32,
+        top as f32,
+        (anchor.origin.x + anchor.size.width) as f32,
+        (top + anchor.size.height) as f32,
+    );
+    let placement = PopupPlacement { parent: parent.id(), anchor: rect, below: true, grab: true, layout: Some(layout) };
+    w.ivars().popup.set(Some(placement));
     order_front(w);
 }
 
@@ -2395,6 +2421,10 @@ fn send_event(window: &NSWindowImpl, event: &NSEvent) {
         NSEventType::KeyUp => first_responder(window).keyUp(event),
         NSEventType::FlagsChanged => first_responder(window).flagsChanged(event),
         NSEventType::LeftMouseDown | NSEventType::RightMouseDown | NSEventType::OtherMouseDown => {
+            // Above the content: the main menu's bar (see `menubar`).
+            if kind == NSEventType::LeftMouseDown && crate::menubar::mouse_down(as_window(window), event) {
+                return;
+            }
             let content = window.ivars().content.borrow().clone();
             let Some(view) = content.and_then(|c| c.hitTest(event.locationInWindow())) else { return };
             // A click that only activates the window, or moves it.

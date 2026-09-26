@@ -1808,6 +1808,111 @@ swash.
   dropped with it, with fields that map onto AccessKit's node properties,
   for an adapter to read.
 
+## Menus, alerts and panels
+
+`crates/sidestep-appkit/src/` has the menu model (`menu.rs`), key
+equivalents (`keyequiv.rs`), menus on screen (`menu_view.rs`,
+`menu_tracking.rs`), the menu bar (`menubar.rs`, `backend/menubar.rs`),
+`NSPopUpButton` (`popup_button.rs`), `NSAlert` (`alert.rs`), the file
+panels and the workspace (`panels.rs`, `workspace.rs`, `portal.rs`), and
+what menus add to the responder classes (`category.rs`). Each file's
+module comment has the detail; `conformance/tests/menus.rs`,
+`popup_button.rs`, `alert.rs` and `panels.rs` pin what macOS does,
+`crates/sidestep-appkit/tests/menus.rs` drives menus with the testing
+module's input on the null backend, and `tests/panels.rs` runs panels and
+the workspace against stand-ins for the desktop's programs.
+
+- **The model.** A menu retains its items and an item its submenu; the
+  links back (an item's `menu`, a submenu's `supermenu`, targets and
+  delegates) don't retain, and a menu clears them when it lets an item go
+  or is freed. Each menu counts a generation up whenever something that
+  shows changes; its layout is kept until the generation moves, and a menu
+  on screen is laid out again at once. The bar is drawn again only when
+  the main menu or one of its menus' titles changes. Add, remove and
+  change notifications are built only when someone observes.
+- **Validation and key equivalents.** `-[NSMenu update]` finds each
+  item's target through `-[NSApplication targetForAction:to:from:]` and
+  asks it (`validateMenuItem:`, then `validateUserInterfaceItem:`). The
+  application and windows answer as AppKit's do (a window closes, zooms
+  or miniaturizes from the menu only when its style allows, goes full
+  screen when its collection behaviour says so, and has no toolbar or
+  tabs; the application arranges windows only when one shows); views
+  have no validators. `NSApp.menu` is the main menu.
+  `performKeyEquivalent:` updates by message, then offers the key depth
+  first; a disabled match takes the key and does nothing. In the
+  key-equivalent phase of `sendEvent:` the application asks the key
+  window's views first and then the main menu, which is offered keys with
+  Command or Control and function keys.
+  An item's key equivalent becomes a `Shortcut` when set, so matching
+  sends no message per item. The matching rule is Linux's own: Command,
+  Option and Control must equal the mask; Shift must agree, except that a
+  shifted key equivalent (`W`, `!`) matches with Shift pressed, and a mask
+  with Shift matches the unshifted key (`z` with Command-Shift is the `Z`
+  that Command-Shift-Z types). Labels name the keys as the platform maps
+  them: Command is Super, Option is Alt (Super+Q, Ctrl+Shift+Z).
+- **Menus on screen** are borderless windows of their own (`menu_view`)
+  that the render thread shows as grabbing xdg_popups of the window they
+  belong to, placed by the positioner as `PopupPlacement` asks: at a point
+  for pop-up and context menus (the chosen item over the point), beside
+  the row of the item a submenu comes from, below a title of the bar. The
+  compositor slides, flips and shrinks them to fit; Wayland doesn't say
+  where windows are, so a menu positioned in screen coordinates opens at
+  the pointer. Opening runs AppKit's loop, with its calls in AppKit's
+  order: the delegate's fill calls, the begin-tracking notification,
+  `menuWillOpen:`, the view's `willOpenMenu:withEvent:`, validation; then
+  a loop in `NSEventTrackingRunLoopMode` until the menu closes (pointer,
+  keyboard navigation, type select, submenus opening after 150 ms,
+  click-and-click or press-drag-release, `cancelTracking`, the
+  compositor's dismissal, the window it belongs to leaving the screen,
+  which closes the popups first); then the highlights taken away, the
+  delegates' `menuDidClose:`, the view's `didCloseMenu:withEvent:`, the
+  end-tracking notification and the chosen item's action, after which the
+  call returns. The loop keeps items, not rows, for what it does later, so
+  a menu that changes while it shows (from a timer, or its delegate) keeps
+  its highlight on the same item and shows again at its new size. Context
+  menus come from views' `menuForEvent:` through the default
+  `rightMouseDown:`, and `+popUpContextMenu:withEvent:forView:`.
+- **The menu bar** is window chrome: GNOME and KDE programs put the menu
+  bar in the window, and Wayland has nowhere else for it. Every titled
+  window that isn't a panel or a sheet shows the main menu as a bar under
+  the title bar (or at the top, when the compositor draws the
+  decorations), drawn on the main thread as ops and rasterized on the
+  render thread onto a subsurface. The window grows by the bar and its
+  content keeps its size: to the frame arithmetic the bar is part of the
+  title bar (`frameRectForContentRect:` includes it, `contentLayoutRect`
+  leaves it out). A click on a title opens its menu; moving across titles
+  and Left and Right switch menus; F10 opens the first. A program opts
+  out with `+[NSMenu setMenuBarVisible:NO]`, and a user with
+  `SIDESTEP_MENUBAR=hidden`; the bar also hides without a main menu and
+  in full screen.
+- **`NSPopUpButton`** keeps its menu and selection in its cell, as AppKit
+  does, and pops the menu up through the same tracking loop: the selected
+  item over the button for a pop-up, below it without the first item for
+  a pull-down. Items added without an action get the cell's, which
+  selects and sends the button's action.
+- **`NSAlert`** lays its panel out as GNOME's message dialogs are (message
+  and informative text centered, buttons along the bottom with the first
+  on the right, stacked from three), with macOS's buttons, tags and key
+  equivalents. `runModal` is the application's modal loop;
+  `beginSheetModalForWindow:completionHandler:` a sheet.
+- **Panels and the workspace** go to the desktop through
+  xdg-desktop-portal: `FileChooser` for `NSSavePanel` and `NSOpenPanel`,
+  `OpenURI` and `FileManager1` for `NSWorkspace`. D-Bus is spoken (with
+  `desktop.rs`'s client) off the main thread, and no request waits on
+  another: each file chooser has a thread and a connection of its own for
+  as long as the user takes, URLs and files to show go to one thread
+  whose calls end within seconds, and the programs it starts are waited
+  for on threads of their own. Answers come back as tasks on the main run
+  loop in the common modes. `runModal` is a modal loop for the panel
+  (`NSApp.modalWindow` is the panel, other windows take no input, and
+  they go on drawing) until the answer; `cancel:` gives the dialog up and
+  answers Cancel. Without a portal, `zenity` or `kdialog` stand in for the
+  file chooser and `xdg-open` for opening. `openURL:` answers at once (NO
+  for a scheme nothing handles, or a file that isn't there), and
+  `openURL:configuration:completionHandler:` calls its handler later, off
+  the main thread, as AppKit does. `NSRunningApplication` knows only this
+  program (Wayland shows it no others); `NSBeep` is silent.
+
 ## Conformance
 
 `conformance/` holds tests written only against objc2. They run on macOS

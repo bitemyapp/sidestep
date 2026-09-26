@@ -141,6 +141,14 @@ SIDESTEP_APPEARANCE=dark SCENARIO=all SHOT=/work/target/controls-dark.png \
   scripts/linux-run scripts/headless-wayland /target/release/controls-gallery
 ```
 
+`examples/menus-panels` shows menus, pop-up buttons and alerts: a context
+menu (`SCENARIO=context`, the default), its submenu (`submenu`), a menu
+popped up at a point (`popup`), pop-up and pull-down buttons (`buttons`,
+`popup-button`, `pulldown`), the menu bar (`menubar`), and alerts, modal
+(`alert`) and as a sheet (`alert-sheet`). On Linux every titled window
+shows the program's main menu as a menu bar under its title bar;
+`SIDESTEP_MENUBAR=hidden` turns it off.
+
 `examples/containers` shows split, stack and tab views, a table of 1000
 rows and a window laid out by constraints (`SCENARIO=split`, `stack`,
 `tabs`, `table`, `autolayout`), and scroll views: overlay scrollers with a

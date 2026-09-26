@@ -75,6 +75,22 @@ objc2-app-kit = { workspace = true, features = ["NSControl", "NSActionCell", "NS
 [target.'cfg(any(not(target_vendor = "apple")))'.dependencies]
 objc2-app-kit = { workspace = true, features = ["NSScroller", "NSScrollView", "NSClipView", "NSTrackingArea"] }
 
+# Menus, pop-up buttons, alerts, panels and the workspace. A table of its
+# own; Cargo unifies these features with the ones above.
+[target.'cfg(any(all(not(target_vendor = "apple"))))'.dependencies]
+objc2-app-kit = { workspace = true, features = ["NSMenu", "NSMenuItem", "NSUserInterfaceValidation", "NSImage", "NSPopUpButton", "NSPopUpButtonCell", "NSMenuItemCell", "NSAlert", "NSButton", "NSHelpManager", "NSSavePanel", "NSOpenPanel", "NSWorkspace", "NSRunningApplication"] }
+objc2-foundation = { workspace = true, features = ["NSError", "NSURL", "NSDate", "NSNotification", "NSArray"] }
+
+# Menus tracked through the null render thread, and panels and the
+# workspace with stand-ins for the desktop (see the files).
+[[test]]
+name = "menus"
+harness = false
+
+[[test]]
+name = "panels"
+harness = false
+
 # The theme's reference images (src/theme/golden).
 [target.'cfg(not(target_vendor = "apple"))'.dev-dependencies]
 png = "0.18"
