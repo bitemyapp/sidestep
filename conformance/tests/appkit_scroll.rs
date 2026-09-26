@@ -1279,7 +1279,10 @@ fn tracking_probe(mtm: MainThreadMarker) {
     // The scrollers follow after the live scroll is posted.
     let at = |n: &str| heard.iter().position(|h| h.starts_with(n));
     assert!(at("note NSScrollViewDidLiveScrollNotification") < at("reflect"), "{heard:?}");
-    assert_eq!(clip.bounds().origin.y, 698.0);
+    // 698 on a 2x screen; AppKit rounds the knob's travel to device pixels,
+    // and on a 1x screen (CI's macOS runner) it lands at 697.
+    let y = clip.bounds().origin.y;
+    assert!((697.0..=698.0).contains(&y), "{y}");
     // SAFETY: removing the observer's registrations.
     unsafe { center.removeObserver(&observer) };
     w.setContentView(None);
