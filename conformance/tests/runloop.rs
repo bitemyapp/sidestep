@@ -389,13 +389,13 @@ fn timer_phase_after_a_stall() {
         timer.invalidate();
         let fires = fires.borrow();
         // First at 100 ms; the stall until about 450 ms drops the fires due
-        // meanwhile instead of bursting them, and the timer goes on (at 500,
-        // 600, 700 on an idle machine; a loaded CI runner fires tens of
-        // milliseconds late, so only the order and spacing are pinned).
+        // meanwhile instead of bursting them, and the timer goes on in phase
+        // (500, 600, 700 on an idle machine). A loaded CI runner fires tens
+        // of milliseconds late, and then the next fire comes on time, so
+        // only the dropping is pinned (Apple's gave [191, 696, 714] there).
         assert!(fires.len() >= 2 && fires.len() <= 4, "{fires:?}");
         assert!(fires[0] >= 100, "{fires:?}");
         assert!(fires[1] >= fires[0] + 350, "no burst after the stall: {fires:?}");
-        assert!(fires.windows(2).all(|w| w[1] - w[0] >= 90), "{fires:?}");
     });
 }
 
