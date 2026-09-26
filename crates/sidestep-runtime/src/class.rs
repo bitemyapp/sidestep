@@ -551,6 +551,8 @@ pub unsafe extern "C" fn objc_registerClassPair(cls: *mut Class) {
         if let Some((total, offset)) = crate::object::instance_layout(cls, 0) {
             cls.alloc_layout.store(((total as u64) << 32) | offset as u64, Ordering::Relaxed);
         }
+        // Categories first: they may add overrides the flags count.
+        crate::category::attach(cls);
         // The flags copied from the superclass when the class was allocated
         // may be out of date: an override added to (or taken from) a
         // superclass since reached only loaded classes. The load lock
@@ -564,7 +566,29 @@ pub unsafe extern "C" fn objc_registerClassPair(cls: *mut Class) {
         // class's own caches, if anything messaged it early, start over.
         reset_cache(cls);
         reset_cache(cls.metaclass());
+        if cls.flags() & SHELL != 0 {
+            send_load(cls);
+        }
     });
+}
+
+/// Send `+load` to a static shell's class that implements it itself, once,
+/// as it registers. Apple's runtime sends it to the classes (and
+/// categories) of each image as the image loads, before `main`; a shell is
+/// Sidestep's image class, and loads when first used. Classes made at run
+/// time get none, on either runtime. Like Apple's, the call is direct: it
+/// doesn't send `+initialize` first.
+fn send_load(cls: &'static Class) {
+    let sel = crate::selector::register(c"load");
+    let Some(method) = cls.metaclass().rt().methods.read().unwrap().by_sel.get(&(sel as usize)).copied() else {
+        return;
+    };
+    // SAFETY: methods are never freed; +load takes nothing and returns
+    // nothing.
+    unsafe {
+        let imp: unsafe extern "C-unwind" fn(*const Class, Sel) = transmute(method.get().imp());
+        imp(cls, sel);
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -694,3 +718,47 @@ pub extern "C" fn class_getIvarLayout(_cls: *const Class) -> *const u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn class_setIvarLayout(_cls: *mut Class, _layout: *const u8) {}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use objc2::runtime::{AnyClass, ClassBuilder, NSObject, Sel};
+    use objc2::{ClassType, sel};
+
+    static SHELL_LOADS: AtomicUsize = AtomicUsize::new(0);
+    static RUNTIME_LOADS: AtomicUsize = AtomicUsize::new(0);
+
+    extern "C-unwind" fn shell_load(_: &AnyClass, _: Sel) {
+        SHELL_LOADS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    extern "C-unwind" fn runtime_load(_: &AnyClass, _: Sel) {
+        RUNTIME_LOADS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    crate::static_class!(UNIT_LOADED, UNIT_LOADED_META = "SidestepUnitLoaded", || {
+        let mut builder = ClassBuilder::new(c"SidestepUnitLoaded", NSObject::class()).unwrap();
+        // SAFETY: +load takes nothing and returns nothing.
+        unsafe { builder.add_class_method(sel!(load), shell_load as extern "C-unwind" fn(_, _)) };
+        builder.register();
+    });
+
+    /// A static shell's class gets `+load` once, when it loads; a class
+    /// made at run time gets none, as on Apple's runtime.
+    #[test]
+    fn load_is_sent_to_static_classes_once() {
+        assert_eq!(SHELL_LOADS.load(Ordering::SeqCst), 0);
+        for _ in 0..2 {
+            // SAFETY: a C string.
+            let cls = unsafe { super::objc_getClass(c"SidestepUnitLoaded".as_ptr()) };
+            assert!(!cls.is_null());
+            assert_eq!(SHELL_LOADS.load(Ordering::SeqCst), 1);
+        }
+        let mut builder = ClassBuilder::new(c"SidestepUnitNotLoaded", NSObject::class()).unwrap();
+        // SAFETY: +load takes nothing and returns nothing.
+        unsafe { builder.add_class_method(sel!(load), runtime_load as extern "C-unwind" fn(_, _)) };
+        builder.register();
+        assert_eq!(RUNTIME_LOADS.load(Ordering::SeqCst), 0);
+    }
+}

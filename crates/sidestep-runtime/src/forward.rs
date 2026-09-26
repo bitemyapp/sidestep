@@ -1,33 +1,47 @@
-//! Message forwarding through `-forwardingTargetForSelector:`.
+//! Message forwarding: through `-forwardingTargetForSelector:`, and then
+//! through `-methodSignatureForSelector:` and `-forwardInvocation:`.
 //!
 //! With `objc_msg_lookup` the caller calls the implementation itself, with
 //! the receiver it already has, so forwarding a message to another object
 //! means changing the receiver on the way. When a class overrides
 //! `-forwardingTargetForSelector:` (or `+forwardingTargetForSelector:` for
-//! class messages), a selector it doesn't implement resolves to
-//! [`trampoline`]: a few instructions of assembly (the frame in
-//! `trampoline`, shared with `objc_msgSend`) that save the argument
-//! registers, ask [`resolve`] for the target and its implementation, put
-//! the target where the receiver was, restore the rest and jump. The
-//! arguments, stack arguments and return value pass through untouched, so
-//! any signature forwards.
+//! class messages), or Foundation has installed its handler for
+//! `-forwardInvocation:` (see `call::set_forward_handler`), a selector the
+//! class doesn't implement resolves to [`trampoline`]: a few instructions
+//! of assembly (the frame in `trampoline`, shared with `objc_msgSend`)
+//! that save the argument registers, ask [`resolve`] what to do, restore
+//! the registers and jump.
 //!
-//! The trampoline is cached like any implementation, but the target is not:
-//! `-forwardingTargetForSelector:` is asked on every message, since its
-//! answer may change. A nil target (or the receiver itself) ends in
-//! `-doesNotRecognizeSelector:`. `-forwardInvocation:`, which needs
-//! `NSInvocation`, is not supported.
+//! [`resolve`] first asks the receiver's `-forwardingTargetForSelector:`,
+//! if its class has one. A target other than nil and the receiver itself
+//! takes the receiver's place, and the trampoline jumps to the target's
+//! implementation: the arguments, stack arguments and return value pass
+//! through untouched, so any signature forwards. Otherwise the handler
+//! gets the saved registers and the sender's stack arguments as a
+//! [`Frame`], builds an `NSInvocation` from them, sends
+//! `-forwardInvocation:` and writes the invocation's return value into the
+//! saved registers; the trampoline then restores them and jumps to
+//! [`forward_return`], a lone `ret`, which hands them to the sender. With
+//! no handler, the message is unrecognized.
+//!
+//! The trampoline is cached like any implementation, but nothing it
+//! decides is: `-forwardingTargetForSelector:` is asked on every message,
+//! since its answer may change, and so is the signature. Like Apple's
+//! `_objc_msgForward`, it is what `class_getMethodImplementation` gives
+//! for a selector the class doesn't implement, and a class doesn't respond
+//! to the selectors it forwards.
 //!
 //! The trampolines carry unwind information, so a panic in
-//! `-forwardingTargetForSelector:` or `-doesNotRecognizeSelector:` unwinds
-//! through them into the sender.
+//! `-forwardingTargetForSelector:`, `-forwardInvocation:` or
+//! `-doesNotRecognizeSelector:` unwinds through them into the sender.
 
 use std::mem::transmute;
 
 use crate::Imp;
+use crate::call::{Frame, Registers, forward_handler};
 use crate::class::{Class, lookup_imp};
 use crate::message::objc_msg_lookup;
-use crate::object::Object;
+use crate::object::{Object, isa};
 use crate::selector::{self, Sel, known};
 
 type Id = *mut Object;
@@ -55,25 +69,36 @@ pub(crate) fn is_trampoline(imp: Imp) -> bool {
 
 /// Whether messages that `cls` (a class, or a metaclass for class
 /// messages) doesn't implement should go through the trampoline: whether
-/// it overrides the root class's `forwardingTargetForSelector:`, which
+/// Foundation forwards through `-forwardInvocation:`, or the class
+/// overrides the root class's `forwardingTargetForSelector:`, which
 /// answers nil.
 pub(crate) fn forwards(cls: &'static Class) -> bool {
-    lookup_imp(cls, known().forwarding_target).is_some_and(|imp| !crate::nsobject::is_default_forwarding_target(imp))
+    forward_handler().is_some() || own_forwarding_target(cls).is_some()
 }
 
-/// Where the trampoline saved the integer argument registers, in order:
-/// x0 to x8 on aarch64 (x8 holds the address for a returned struct), and
-/// rdi, rsi, rdx, rcx, r8, r9, rax on x86_64 (followed by two words of
-/// the frame, never read).
-type Saved = [usize; 9];
+/// The class's `-forwardingTargetForSelector:`, unless it is the root
+/// class's, which forwards nothing.
+fn own_forwarding_target(cls: &'static Class) -> Option<Imp> {
+    lookup_imp(cls, known().forwarding_target).filter(|&imp| !crate::nsobject::is_default_forwarding_target(imp))
+}
 
-/// Finds the target and implementation for a forwarded message, writes
-/// the target into the saved receiver register and returns the
-/// implementation to jump to.
+/// Where the sender's stack arguments start, from the saved registers:
+/// past the trampoline's frame (`trampoline::saving_entry!`), at the stack
+/// pointer the sender called with.
+#[cfg(target_arch = "aarch64")]
+const STACK_ARGUMENTS: usize = 208;
+#[cfg(target_arch = "x86_64")]
+const STACK_ARGUMENTS: usize = 224;
+
+/// Decides what a forwarded message does. Returns the implementation to
+/// jump to: the target's, with the target written into the saved receiver
+/// register, or [`forward_return`] once the handler has written the return
+/// value into the saved registers.
 ///
 /// # Safety
 /// Called only by the trampolines, with the registers of a message send.
-unsafe extern "C-unwind" fn resolve(saved: &mut Saved) -> Imp {
+unsafe extern "C-unwind" fn resolve(regs: &mut Registers) -> Imp {
+    let saved = regs.integer_mut();
     // On x86_64, a method returning a large struct takes the address to
     // write it to first, moving the receiver and selector along by one.
     // The second argument is either the selector or, in that case, the
@@ -82,29 +107,67 @@ unsafe extern "C-unwind" fn resolve(saved: &mut Saved) -> Imp {
     let (receiver, sel) = (saved[at] as Id, saved[at + 1] as Sel);
     // SAFETY: a message's receiver is live, and its selector valid.
     unsafe {
-        let target = forwarding_target(receiver, sel);
-        if !target.is_null() && target != receiver {
-            saved[at] = target as usize;
-            return objc_msg_lookup(target, sel).expect("lookup never fails");
+        if let Some(ask) = own_forwarding_target(isa(receiver)) {
+            let ask: unsafe extern "C-unwind" fn(Id, Sel, Sel) -> Id = transmute(ask);
+            let target = ask(receiver, known().forwarding_target, sel);
+            if !target.is_null() && target != receiver {
+                regs.integer_mut()[at] = target as usize;
+                return objc_msg_lookup(target, sel).expect("lookup never fails");
+            }
+        }
+        if let Some(handler) = forward_handler() {
+            let stack = (regs as *mut Registers).cast::<u8>().add(STACK_ARGUMENTS);
+            let mut frame = Frame::new(regs, stack);
+            let objc2_sel = transmute::<Sel, objc2::runtime::Sel>(sel);
+            handler(&*receiver.cast::<objc2::runtime::AnyObject>(), objc2_sel, &mut frame);
+            return forward_return();
         }
         crate::message::does_not_recognize(receiver, sel)
     }
 }
 
-/// `[receiver forwardingTargetForSelector:sel]`.
-unsafe fn forwarding_target(receiver: Id, sel: Sel) -> Id {
-    let ask = known().forwarding_target;
-    // SAFETY: the caller passes a live receiver; the method takes a
-    // selector and returns an object.
-    unsafe {
-        let imp = objc_msg_lookup(receiver, ask).expect("lookup never fails");
-        let imp: unsafe extern "C-unwind" fn(Id, Sel, Sel) -> Id = transmute(imp);
-        imp(receiver, ask, sel)
+/// What the trampoline jumps to after a message was forwarded through
+/// `-forwardInvocation:`: a return to the sender, with the registers the
+/// handler set.
+fn forward_return() -> Imp {
+    unsafe extern "C" {
+        fn sidestep_forward_return();
     }
+    // SAFETY: only ever jumped to by the trampoline.
+    unsafe { transmute::<unsafe extern "C" fn(), Imp>(sidestep_forward_return) }
 }
 
-// The trampoline: `resolve` gets the saved integer registers, in the
-// frame `trampoline::saving_entry!` lays out.
+#[cfg(target_arch = "aarch64")]
+std::arch::global_asm!(
+    ".text",
+    ".p2align 2",
+    ".globl sidestep_forward_return",
+    ".hidden sidestep_forward_return",
+    ".type sidestep_forward_return, %function",
+    "sidestep_forward_return:",
+    ".cfi_startproc",
+    "hint #34",
+    "ret",
+    ".cfi_endproc",
+    ".size sidestep_forward_return, . - sidestep_forward_return",
+);
+
+#[cfg(target_arch = "x86_64")]
+std::arch::global_asm!(
+    ".text",
+    ".p2align 4",
+    ".globl sidestep_forward_return",
+    ".hidden sidestep_forward_return",
+    ".type sidestep_forward_return, @function",
+    "sidestep_forward_return:",
+    ".cfi_startproc",
+    "ret",
+    ".cfi_endproc",
+    ".size sidestep_forward_return, . - sidestep_forward_return",
+);
+
+// The trampoline: `resolve` gets the saved registers, laid out as
+// `call::Registers`, in the frame `trampoline::saving_entry!` lays out.
 #[cfg(target_arch = "aarch64")]
 crate::trampoline::saving_entry!(
     name: "sidestep_forward_trampoline",
@@ -120,7 +183,7 @@ crate::trampoline::saving_entry!(
     name: "sidestep_forward_trampoline",
     directives: [".hidden sidestep_forward_trampoline"],
     before: [],
-    setup: ["lea rdi, [rsp + 128]"],
+    setup: ["mov rdi, rsp"],
     call: resolve,
     after: [],
 );

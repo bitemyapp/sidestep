@@ -12,9 +12,14 @@
 //! many blocks a program turns into methods. A chunk is two regions of one
 //! page each: the stubs, and after them one data slot per stub holding its
 //! block, which each stub finds at its own address plus the region size.
-//! The stubs are written while their region is writable and then made
-//! executable and read-only, so no memory is ever writable and executable
-//! at once. Slots of removed blocks are reused.
+//! The stubs are written into an anonymous file (`memfd_create`) that is
+//! then mapped read-only and executable over the first region, so no
+//! memory is ever writable and executable, and none becomes executable
+//! after being writable: processes denied that (systemd's
+//! `MemoryDenyWriteExecute=`, the kernel's `PR_SET_MDWE`) can still make
+//! methods from blocks. Where there is no `memfd_create`, the stubs are
+//! written into the region, which is then made executable and read-only.
+//! Slots of removed blocks are reused.
 //!
 //! On x86_64, a method returning a struct in memory takes the address to
 //! write it to first, which moves `self` and `_cmd` along by one register.
@@ -129,21 +134,31 @@ impl Stubs {
         };
         assert!(base != libc::MAP_FAILED, "sidestep: out of memory for block implementations");
         let stub = template(kind, region);
-        let code = base.cast::<u8>();
-        for i in 0..region / STRIDE {
-            // SAFETY: within the first, writable region.
-            unsafe { code.add(i * STRIDE).copy_from_nonoverlapping(stub.as_ptr(), STRIDE) };
+        let mut stubs = vec![0u8; region];
+        for chunk in stubs.as_chunks_mut::<STRIDE>().0 {
+            *chunk = stub;
         }
-        // SAFETY: the stubs were just written through the data cache.
+        let code = base.cast::<u8>();
+        // SAFETY: the first region of the mapping above, which nothing
+        // uses yet.
+        let mapped = unsafe { map_code(code, &stubs) };
+        if let Err(error) = mapped {
+            // SAFETY: as above; the stubs are written while the region is
+            // writable, then it becomes executable and read-only.
+            let protected = unsafe {
+                code.copy_from_nonoverlapping(stubs.as_ptr(), region);
+                libc::mprotect(base, region, libc::PROT_READ | libc::PROT_EXEC)
+            };
+            assert!(
+                protected == 0,
+                "sidestep: imp_implementationWithBlock needs executable memory, which this process may not make \
+                 ({error}; {})",
+                std::io::Error::last_os_error()
+            );
+        }
+        // SAFETY: the stubs were just written, through the data cache or a
+        // file.
         unsafe { sync_instruction_cache(code, region) };
-        // SAFETY: the first region of the mapping above.
-        let protected = unsafe { libc::mprotect(base, region, libc::PROT_READ | libc::PROT_EXEC) };
-        assert!(
-            protected == 0,
-            "sidestep: imp_implementationWithBlock needs executable memory, which this process may not make \
-             ({})",
-            std::io::Error::last_os_error()
-        );
         let code = code.addr();
         self.chunks.push(Chunk { code, kind });
         // Hand out the chunk's first stub; the rest go on the free list,
@@ -163,6 +178,57 @@ impl Stubs {
         // atomically.
         Some(unsafe { AtomicPtr::from_ptr((imp + self.region) as *mut *mut c_void) })
     }
+}
+
+/// Map `stubs` executable at `at`, over the region there, without any
+/// memory ever being writable and executable, or becoming executable
+/// after being writable: the code goes into an anonymous file
+/// (`memfd_create`), which is then mapped for reading and executing only.
+/// Processes denied writable-then-executable memory (systemd's
+/// `MemoryDenyWriteExecute=`, the kernel's `PR_SET_MDWE`) may still map a
+/// file executable, as they do shared libraries.
+///
+/// # Safety
+/// `at` must start a mapping of the process's own of at least
+/// `stubs.len()` bytes, a whole number of pages, that nothing uses.
+unsafe fn map_code(at: *mut u8, stubs: &[u8]) -> Result<(), std::io::Error> {
+    // Through `syscall`, so as not to need a newer C library than Rust's.
+    // SAFETY: plain system call with a C string name.
+    let fd = unsafe { libc::syscall(libc::SYS_memfd_create, c"sidestep-block-imps".as_ptr(), libc::MFD_CLOEXEC) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let fd = fd as libc::c_int;
+    let result = (|| {
+        let mut written = 0;
+        while written < stubs.len() {
+            // SAFETY: writing from a live buffer to our own file.
+            let n = unsafe {
+                libc::pwrite(fd, stubs[written..].as_ptr().cast(), stubs.len() - written, written as libc::off_t)
+            };
+            if n <= 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            written += n as usize;
+        }
+        // SAFETY: replaces the caller's region, as it allows, with the
+        // file's contents, read-only and executable.
+        let mapped = unsafe {
+            libc::mmap(
+                at.cast(),
+                stubs.len(),
+                libc::PROT_READ | libc::PROT_EXEC,
+                libc::MAP_PRIVATE | libc::MAP_FIXED,
+                fd,
+                0,
+            )
+        };
+        if mapped == libc::MAP_FAILED { Err(std::io::Error::last_os_error()) } else { Ok(()) }
+    })();
+    // The mapping keeps the file.
+    // SAFETY: our own descriptor.
+    unsafe { libc::close(fd) };
+    result
 }
 
 /// Make the instruction cache see code just written at `code`.

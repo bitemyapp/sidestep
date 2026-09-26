@@ -23,7 +23,7 @@ pub(crate) fn split(mut s: &[u8]) -> Vec<&[u8]> {
 }
 
 /// The length of the single type at the start of `s`.
-fn type_len(s: &[u8]) -> usize {
+pub(crate) fn type_len(s: &[u8]) -> usize {
     let qualifiers = s.iter().take_while(|b| QUALIFIERS.contains(b)).count();
     let rest = &s[qualifiers..];
     let Some(&first) = rest.first() else { return 0 };
@@ -56,7 +56,7 @@ fn type_len(s: &[u8]) -> usize {
 
 /// The length of a bracketed type (`[...]`, `{...}`, `(...)`, `<...>`),
 /// including nested brackets and quoted field names.
-fn bracketed_len(s: &[u8]) -> usize {
+pub(crate) fn bracketed_len(s: &[u8]) -> usize {
     let mut depth = 0usize;
     let mut quoted = false;
     for (i, &b) in s.iter().enumerate() {

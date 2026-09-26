@@ -14,7 +14,7 @@ use std::time::Instant;
 use objc2::rc::{Retained, Weak, autoreleasepool};
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, Sel};
 use objc2::{AnyThread, ClassType, DefinedClass, Message, define_class, ffi, msg_send, sel};
-use objc2_foundation::NSString;
+use objc2_foundation::{NSInvocation, NSMethodSignature, NSString};
 
 use sidestep as _;
 
@@ -61,6 +61,35 @@ define_class!(
 );
 
 impl Proxy {
+    fn new() -> Retained<Self> {
+        let target: Retained<Target> = unsafe { msg_send![Target::alloc(), init] };
+        let this = Self::alloc().set_ivars(ProxyIvars { target });
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+define_class!(
+    /// Forwards what it doesn't implement to a `Target` of its own
+    /// through `-forwardInvocation:`.
+    #[unsafe(super(NSObject))]
+    #[name = "MsgBenchInvocationProxy"]
+    #[ivars = ProxyIvars]
+    struct InvocationProxy;
+
+    impl InvocationProxy {
+        #[unsafe(method_id(methodSignatureForSelector:))]
+        fn method_signature(&self, sel: Sel) -> Option<Retained<NSMethodSignature>> {
+            unsafe { msg_send![&*self.ivars().target, methodSignatureForSelector: sel] }
+        }
+
+        #[unsafe(method(forwardInvocation:))]
+        fn forward_invocation(&self, invocation: &NSInvocation) {
+            unsafe { invocation.invokeWithTarget(&self.ivars().target) };
+        }
+    }
+);
+
+impl InvocationProxy {
     fn new() -> Retained<Self> {
         let target: Retained<Target> = unsafe { msg_send![Target::alloc(), init] };
         let this = Self::alloc().set_ivars(ProxyIvars { target });
@@ -245,6 +274,27 @@ fn main() {
         let r: *mut AnyObject =
             unsafe { msg_send![black_box(&*proxy), performSelector: sel!(echo:), withObject: &*obj] };
         black_box(r);
+    });
+
+    // Messages forwarded through -forwardInvocation:, and invocations.
+    let invocation_proxy = InvocationProxy::new();
+    autoreleasepool(|_| {
+        bench("forwarded message (forwardInvocation:)", 1_000_000, || {
+            let v: i32 = unsafe { msg_send![black_box(&*invocation_proxy), value] };
+            black_box(v);
+        });
+    });
+    let signature: Option<Retained<NSMethodSignature>> =
+        unsafe { msg_send![&*target, methodSignatureForSelector: sel!(echo:)] };
+    let invocation = unsafe { NSInvocation::invocationWithMethodSignature(&signature.unwrap()) };
+    unsafe {
+        invocation.setTarget(Some(&target));
+        invocation.setSelector(sel!(echo:));
+        let arg: *const NSObject = &*obj;
+        invocation.setArgument_atIndex(std::ptr::NonNull::from(&arg).cast(), 2);
+    }
+    bench("NSInvocation invoke, one object argument", 10_000_000, || {
+        unsafe { black_box(&*invocation).invoke() };
     });
 
     // What an object allocation costs the allocator alone: an NSObject

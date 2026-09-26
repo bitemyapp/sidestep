@@ -14,6 +14,7 @@ use objc2::ClassType;
 
 mod const_string;
 mod dictionary;
+mod invocation;
 mod notification;
 mod string;
 mod thread;

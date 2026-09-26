@@ -24,6 +24,8 @@ mod associated;
 mod block_imp;
 mod blocks;
 mod cache;
+pub mod call;
+mod category;
 mod class;
 mod encoding;
 mod exception;
@@ -33,6 +35,7 @@ mod message;
 mod method;
 mod msgsend;
 mod nsobject;
+mod nsproxy;
 mod object;
 mod property;
 mod protocol;
@@ -41,11 +44,13 @@ mod sync;
 mod trampoline;
 mod util;
 
+pub use category::{Category, LinkedCategory};
 pub use class::{Class, LinkedClass};
 pub use object::{Object, ObjectRef, StaticObject};
 pub use selector::Selector;
 
 pub use nsobject::{NSOBJECT_CLASS, NSOBJECT_METACLASS};
+pub use nsproxy::{NSPROXY_CLASS, NSPROXY_METACLASS};
 
 /// A method implementation: the C function a selector resolves to.
 pub type Imp = unsafe extern "C-unwind" fn();
@@ -96,6 +101,33 @@ macro_rules! __linked_class {
             #[used]
             #[unsafe(link_section = "sidestep_classes")]
             static ENTRY: $crate::LinkedClass = $crate::LinkedClass(&$class);
+        };
+    };
+}
+
+/// Add methods to a class defined elsewhere, as an Objective-C category
+/// does: `category!("NSObject" (Name), |category| { ... })`.
+///
+/// ```ignore
+/// sidestep_runtime::category!("NSObject" (SidestepForwarding), |category| unsafe {
+///     category.add_method(sel!(forwardInvocation:), forward as extern "C-unwind" fn(_, _, _));
+/// });
+/// ```
+///
+/// The function runs once, when the class is registered, before anything
+/// can use it (see [`Category`]), so the methods are there whichever class
+/// a program touches first. Each category is also exported as
+/// `._SIDESTEP_CATEGORY_<Class>_<Name>`, which keeps its entry linked and
+/// makes a category defined twice a link error.
+#[macro_export]
+macro_rules! category {
+    ($class:literal ($name:ident), $attach:expr $(,)?) => {
+        const _: () = {
+            #[used]
+            #[unsafe(link_section = "sidestep_categories")]
+            #[unsafe(export_name = concat!("._SIDESTEP_CATEGORY_", $class, "_", stringify!($name)))]
+            static ENTRY: $crate::LinkedCategory =
+                $crate::LinkedCategory { class: $class, name: stringify!($name), attach: $attach };
         };
     };
 }

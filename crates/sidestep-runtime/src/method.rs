@@ -32,6 +32,10 @@ impl Method {
         // SAFETY: leaked C string.
         unsafe { CStr::from_ptr(self.types) }
     }
+
+    pub(crate) fn sel(&self) -> Sel {
+        self.sel
+    }
 }
 
 fn rr_selectors() -> [Sel; 4] {
@@ -83,7 +87,7 @@ pub(crate) fn own_overrides(cls: &'static Class) -> u32 {
     flags
 }
 
-fn add_method(cls: &'static Class, sel: Sel, imp: Imp, types: &CStr) -> Option<&'static Method> {
+pub(crate) fn add_method(cls: &'static Class, sel: Sel, imp: Imp, types: &CStr) -> Option<&'static Method> {
     let mut table = cls.rt().methods.write().unwrap();
     if table.by_sel.contains_key(&(sel as usize)) {
         return None;

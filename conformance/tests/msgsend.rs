@@ -120,3 +120,41 @@ fn x86_64_variants() {
     let wide: unsafe extern "C-unwind" fn(*mut AnyObject, Sel, i64) -> Wide = unsafe { std::mem::transmute(imp) };
     assert_eq!(unsafe { wide(receiver, sel!(wide:), 7) }, Wide([7, 8, 9, 10, 100]));
 }
+
+/// Answers `sidestepMethodN` with N, for any N: many selectors on one
+/// class, so the method cache fills up and selectors share slots.
+extern "C-unwind" fn numbered(_: *mut AnyObject, sel: Sel) -> usize {
+    sel.name().to_str().unwrap().trim_start_matches("sidestepMethod").parse().unwrap()
+}
+
+/// Repeated sends find the method cached; with many selectors on one class,
+/// some probe past a slot another selector took.
+#[test]
+fn objc_msg_send_hits_the_cache() {
+    let mut builder = objc2::runtime::ClassBuilder::new(c"SidestepSendNumbered", NSObject::class()).unwrap();
+    let sels: Vec<Sel> =
+        (0..200).map(|n| Sel::register(&std::ffi::CString::new(format!("sidestepMethod{n}")).unwrap())).collect();
+    for &sel in &sels {
+        unsafe { builder.add_method(sel, numbered as extern "C-unwind" fn(_, _) -> _) };
+    }
+    let cls = builder.register();
+    let obj: Retained<NSObject> = unsafe { msg_send![cls, new] };
+    let receiver = Retained::as_ptr(&obj).cast_mut().cast::<AnyObject>();
+    let send: unsafe extern "C-unwind" fn(*mut AnyObject, Sel) -> usize = msg_send_fn();
+    for _ in 0..20 {
+        for (n, &sel) in sels.iter().enumerate() {
+            assert_eq!(unsafe { send(receiver, sel) }, n);
+        }
+    }
+
+    let target = target();
+    let receiver = Retained::as_ptr(&target).cast_mut().cast::<AnyObject>();
+    let add: unsafe extern "C-unwind" fn(*mut AnyObject, Sel, i64, i64) -> i64 = msg_send_fn();
+    let half: unsafe extern "C-unwind" fn(*mut AnyObject, Sel, f64) -> f64 = msg_send_fn();
+    let class_answer: unsafe extern "C-unwind" fn(*const objc2::runtime::AnyClass, Sel) -> i32 = msg_send_fn();
+    for i in 0..100 {
+        assert_eq!(unsafe { add(receiver, sel!(add:to:), i, 2) }, 102 + i);
+        assert_eq!(unsafe { half(receiver, sel!(half:), i as f64) }, i as f64 / 2.0);
+        assert_eq!(unsafe { class_answer(Target::class(), sel!(classAnswer)) }, 42);
+    }
+}

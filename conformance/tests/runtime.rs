@@ -437,3 +437,28 @@ fn messages_race_method_changes() {
         sender.join().unwrap();
     }
 }
+
+static LOADS: AtomicUsize = AtomicUsize::new(0);
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "SidestepTestLoad"]
+    struct LoadCounter;
+
+    impl LoadCounter {
+        #[unsafe(method(load))]
+        fn load() {
+            LOADS.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+);
+
+/// `+load` goes to the classes of images as they load; a class defined at
+/// run time, as `define_class!` does, gets none, and neither registering
+/// it nor messaging it sends one.
+#[test]
+fn load_is_not_sent_to_classes_made_at_run_time() {
+    let cls = LoadCounter::class();
+    let _: *const AnyClass = unsafe { msg_send![cls, class] };
+    assert_eq!(LOADS.load(Ordering::SeqCst), 0);
+}
