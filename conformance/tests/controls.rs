@@ -742,6 +742,18 @@ struct Bezel {
 }
 
 fn buttons_of_every_bezel(mtm: MainThreadMarker) {
+    // The table is macOS 26 on a 2x screen, which Sidestep follows. CI's
+    // macOS runner (a VM, 1x) gives some bezels a point more padding on
+    // each side (a textured button there is 52x22, 50x20 here), so on macOS
+    // the table is checked only where it was measured.
+    #[cfg(target_vendor = "apple")]
+    {
+        let scale = objc2_app_kit::NSScreen::mainScreen(mtm).map_or(1.0, |s| s.backingScaleFactor());
+        if scale != 2.0 {
+            eprintln!("buttons_of_every_bezel: skipped on a {scale}x screen (the table is from a 2x Mac)");
+            return;
+        }
+    }
     use NSBezelStyle as B;
     // Push, per size: its height, which the bezel is 12, 10, 8 or 14 in
     // from each end; a titled mini bezel sits a point lower.
