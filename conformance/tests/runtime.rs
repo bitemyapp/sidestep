@@ -299,3 +299,141 @@ fn unknown_selector_fails_loudly() {
     }));
     assert!(result.is_err());
 }
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "SidestepTestAnswerBase"]
+    struct AnswerBase;
+
+    impl AnswerBase {
+        #[unsafe(method(answer))]
+        fn answer(&self) -> i32 {
+            1
+        }
+    }
+);
+
+define_class!(
+    #[unsafe(super(AnswerBase, NSObject))]
+    #[name = "SidestepTestAnswerDerived"]
+    struct AnswerDerived;
+);
+
+extern "C-unwind" fn answer_two(_: &AnyObject, _: objc2::runtime::Sel) -> i32 {
+    2
+}
+
+extern "C-unwind" fn answer_three(_: &AnyObject, _: objc2::runtime::Sel) -> i32 {
+    3
+}
+
+#[test]
+fn method_changes_reach_cached_messages() {
+    let base: Retained<AnswerBase> = unsafe { msg_send![AnswerBase::alloc(), init] };
+    let derived: Retained<AnswerDerived> = unsafe { msg_send![AnswerDerived::alloc(), init] };
+    let answer = |o: &AnyObject| -> i32 { unsafe { msg_send![o, answer] } };
+    // Send enough messages that both classes have the method cached.
+    for _ in 0..3 {
+        assert_eq!(answer(&base), 1);
+        assert_eq!(answer(&derived), 1);
+    }
+
+    // A subclass gains an override of a method it had cached.
+    let imp: objc2::runtime::Imp = unsafe { std::mem::transmute(answer_two as extern "C-unwind" fn(_, _) -> _) };
+    let cls = (AnswerDerived::class() as *const AnyClass).cast_mut();
+    let added = unsafe { objc2::ffi::class_addMethod(cls, sel!(answer), imp, c"i@:".as_ptr()) };
+    assert!(added.as_bool());
+    assert_eq!(answer(&derived), 2);
+    assert_eq!(answer(&base), 1);
+
+    // A method's implementation is replaced.
+    let method = AnswerBase::class().instance_method(sel!(answer)).expect("answer");
+    let imp: objc2::runtime::Imp = unsafe { std::mem::transmute(answer_three as extern "C-unwind" fn(_, _) -> _) };
+    unsafe { method.set_implementation(imp) };
+    assert_eq!(answer(&base), 3);
+    assert_eq!(answer(&derived), 2);
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "SidestepTestRaceTarget"]
+    struct RaceTarget;
+
+    impl RaceTarget {
+        #[unsafe(method(stable))]
+        fn stable(&self) -> i32 {
+            7
+        }
+
+        #[unsafe(method(changing))]
+        fn changing(&self) -> i32 {
+            0
+        }
+    }
+);
+
+extern "C-unwind" fn changing_one(_: &AnyObject, _: objc2::runtime::Sel) -> i32 {
+    1
+}
+
+extern "C-unwind" fn changing_two(_: &AnyObject, _: objc2::runtime::Sel) -> i32 {
+    2
+}
+
+#[test]
+fn messages_race_method_changes() {
+    use std::sync::atomic::AtomicBool;
+
+    struct Shared(Retained<RaceTarget>);
+    // SAFETY: RaceTarget has no state; messages to it are thread-safe.
+    unsafe impl Send for Shared {}
+    unsafe impl Sync for Shared {}
+
+    let target = Arc::new(Shared(unsafe { msg_send![RaceTarget::alloc(), init] }));
+    let stop = Arc::new(AtomicBool::new(false));
+    let sent = Arc::new(AtomicUsize::new(0));
+    let start = Arc::new(std::sync::Barrier::new(5));
+    let senders: Vec<_> = (0..4)
+        .map(|_| {
+            let (target, stop, sent, start) = (target.clone(), stop.clone(), sent.clone(), start.clone());
+            std::thread::spawn(move || {
+                start.wait();
+                while !stop.load(Ordering::Relaxed) {
+                    let stable: i32 = unsafe { msg_send![&*target.0, stable] };
+                    assert_eq!(stable, 7);
+                    let changing: i32 = unsafe { msg_send![&*target.0, changing] };
+                    assert!((0..=2).contains(&changing), "{changing}");
+                    let hash: usize = unsafe { msg_send![&*target.0, hash] };
+                    assert_ne!(hash, 0);
+                    sent.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+        })
+        .collect();
+
+    // Keep swapping one method's implementation while the others run, which
+    // empties every class's cache each time.
+    let method = RaceTarget::class().instance_method(sel!(changing)).expect("changing");
+    type Changing = extern "C-unwind" fn(&AnyObject, objc2::runtime::Sel) -> i32;
+    let imps: [objc2::runtime::Imp; 2] = unsafe {
+        [
+            std::mem::transmute::<Changing, objc2::runtime::Imp>(changing_one),
+            std::mem::transmute::<Changing, objc2::runtime::Imp>(changing_two),
+        ]
+    };
+    start.wait();
+    // Swap at least 2000 times, and until the senders have really raced the
+    // swaps, however the threads get scheduled.
+    let mut i = 0;
+    while i < 2000 || sent.load(Ordering::Relaxed) < 10_000 {
+        unsafe { method.set_implementation(imps[i % 2]) };
+        let now: i32 = unsafe { msg_send![&*target.0, changing] };
+        assert_eq!(now, (i % 2) as i32 + 1, "a thread sees its own change at once");
+        std::thread::yield_now();
+        i += 1;
+    }
+    stop.store(true, Ordering::Relaxed);
+    for sender in senders {
+        sender.join().unwrap();
+    }
+}

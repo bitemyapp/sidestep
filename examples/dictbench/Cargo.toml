@@ -1,0 +1,10 @@
+[package]
+name = "dictbench"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+objc2.workspace = true
+objc2-foundation = { workspace = true, features = ["NSString", "NSObject", "NSDictionary", "NSEnumerator", "NSZone"] }
+sidestep.workspace = true

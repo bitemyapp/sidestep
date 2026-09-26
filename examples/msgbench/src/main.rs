@@ -35,16 +35,22 @@ fn plain_rust(x: i32) -> i32 {
     x.wrapping_add(7)
 }
 
+/// Median of seven timed runs, after a warm-up.
 fn bench(name: &str, iters: u64, mut f: impl FnMut()) {
     for _ in 0..iters / 10 {
         f();
     }
-    let start = Instant::now();
-    for _ in 0..iters {
-        f();
-    }
-    let ns = start.elapsed().as_nanos() as f64 / iters as f64;
-    println!("{name:<44} {ns:>8.2} ns");
+    let mut runs: Vec<f64> = (0..7)
+        .map(|_| {
+            let start = Instant::now();
+            for _ in 0..iters {
+                f();
+            }
+            start.elapsed().as_nanos() as f64 / iters as f64
+        })
+        .collect();
+    runs.sort_by(f64::total_cmp);
+    println!("{name:<44} {:>8.2} ns  (min {:.2})", runs[3], runs[0]);
 }
 
 fn main() {
@@ -68,6 +74,12 @@ fn main() {
     });
     bench("retain + release (Retained clone/drop)", 50_000_000, || {
         drop(black_box(obj.clone()));
+    });
+    bench("retain + msg_send + release", 50_000_000, || {
+        let t = black_box(&target).clone();
+        let v: i32 = unsafe { msg_send![&*t, value] };
+        black_box(v);
+        drop(t);
     });
     bench("alloc + init + release NSObject", 10_000_000, || {
         drop(black_box(NSObject::new()));

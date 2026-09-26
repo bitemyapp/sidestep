@@ -2,7 +2,7 @@
 //! Foundation's API is defined in terms of.
 
 use std::ffi::{c_char, c_void};
-use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use objc2::rc::{Allocated, Retained, autoreleasepool};
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
@@ -23,6 +23,8 @@ pub(crate) struct StringIvars {
     /// The contents followed by a NUL, so `UTF8String` can point into it.
     utf8_nul: Box<[u8]>,
     utf16_len: usize,
+    /// `-hash`, computed on first use; 0 until then.
+    hash: AtomicUsize,
 }
 
 impl StringIvars {
@@ -30,7 +32,18 @@ impl StringIvars {
         let utf16_len = s.encode_utf16().count();
         let mut bytes = s.into_bytes();
         bytes.push(0);
-        StringIvars { utf8_nul: bytes.into_boxed_slice(), utf16_len }
+        StringIvars { utf8_nul: bytes.into_boxed_slice(), utf16_len, hash: AtomicUsize::new(0) }
+    }
+
+    fn hash(&self) -> NSUInteger {
+        match self.hash.load(Ordering::Relaxed) {
+            0 => {
+                let hash = hash_str(self.as_str());
+                self.hash.store(hash, Ordering::Relaxed);
+                hash
+            }
+            hash => hash,
+        }
     }
 
     fn as_str(&self) -> &str {
@@ -47,7 +60,7 @@ fn decode(bytes: &[u8], encoding: u32) -> Option<String> {
         encoding::ASCII => bytes.is_ascii().then(|| String::from_utf8(bytes.to_vec()).unwrap()),
         encoding::ISO_LATIN1 => Some(bytes.iter().map(|&b| char::from(b)).collect()),
         encoding::UTF16 | encoding::UTF16_BE | encoding::UTF16_LE => {
-            if bytes.len() % 2 != 0 {
+            if !bytes.len().is_multiple_of(2) {
                 return None;
             }
             let (mut bytes, mut big_endian) = (bytes, encoding == encoding::UTF16_BE);
@@ -76,11 +89,60 @@ fn encoding_arg(raw: i32) -> u32 {
     raw as u32
 }
 
-/// The hash every string class shares, so equal strings hash equally.
-pub(crate) fn hash_str(s: &str) -> NSUInteger {
-    let mut hasher = DefaultHasher::new();
-    s.hash(&mut hasher);
-    hasher.finish() as NSUInteger
+/// The hash every string class shares, so equal strings hash equally. It
+/// is never 0, which marks a hash not yet computed.
+pub(crate) const fn hash_str(s: &str) -> NSUInteger {
+    hash_bytes(s.as_bytes())
+}
+
+/// [`hash_str`] on the UTF-8 bytes of a string.
+pub(crate) const fn hash_bytes(b: &[u8]) -> NSUInteger {
+    // FxHash over 8-byte words, then MurmurHash3's finalizer so every bit
+    // depends on every input bit. Fast rather than collision-resistant, as
+    // Foundation's string hash is.
+    const K: u64 = 0x517c_c1b7_2722_0a95;
+    let mut h = b.len() as u64;
+    let mut i = 0;
+    while i + 8 <= b.len() {
+        let w = u64::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3], b[i + 4], b[i + 5], b[i + 6], b[i + 7]]);
+        h = (h.rotate_left(5) ^ w).wrapping_mul(K);
+        i += 8;
+    }
+    let (mut w, mut shift) = (0u64, 0);
+    while i < b.len() {
+        w |= (b[i] as u64) << shift;
+        shift += 8;
+        i += 1;
+    }
+    h = (h.rotate_left(5) ^ w).wrapping_mul(K);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    h ^= h >> 33;
+    match h as NSUInteger {
+        0 => 1,
+        h => h,
+    }
+}
+
+/// The text and hash of a string whose class is exactly one of Sidestep's,
+/// read directly. Subclasses may override `-hash` and `-isEqual:`, so they
+/// get `None` and must be sent messages.
+#[inline]
+pub(crate) fn fast_parts(obj: &AnyObject) -> Option<(&str, NSUInteger)> {
+    // SAFETY: every object starts with its class pointer.
+    let class = unsafe { *(obj as *const AnyObject).cast::<*const sidestep_runtime::Class>() };
+    if std::ptr::eq(class, &crate::NSSTRING) {
+        // SAFETY: an instance of exactly NSStringImpl.
+        let ivars = unsafe { &*(obj as *const AnyObject).cast::<NSStringImpl>() }.ivars();
+        Some((ivars.as_str(), ivars.hash()))
+    } else if std::ptr::eq(class, &crate::CONSTANT_STRING_CLASS) {
+        let body = crate::const_string::body(obj);
+        Some((body.as_str(), body.hash))
+    } else {
+        None
+    }
 }
 
 /// `-lengthOfBytesUsingEncoding:`: 0 when the text can't be encoded.
@@ -95,6 +157,9 @@ pub(crate) fn byte_length(s: &str, encoding: u32) -> NSUInteger {
 }
 
 pub(crate) fn equals(this: &str, other: &NSString) -> bool {
+    if let Some((other, _)) = fast_parts(other) {
+        return this == other;
+    }
     autoreleasepool(|pool| {
         // SAFETY: `other` is an NSString and the slice stays inside the pool.
         unsafe { other.to_str(pool) == this }
@@ -168,7 +233,7 @@ define_class!(
 
         #[unsafe(method(hash))]
         fn hash(&self) -> NSUInteger {
-            hash_str(self.ivars().as_str())
+            self.ivars().hash()
         }
 
         #[unsafe(method(isEqual:))]

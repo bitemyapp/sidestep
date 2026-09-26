@@ -150,6 +150,23 @@ extern "C-unwind" fn zone(_: Id, _: Sel) -> *mut c_void {
     std::ptr::null_mut()
 }
 
+/// `-description`: `<ClassName: 0x…>`, autoreleased. Strings belong to
+/// Foundation, so the string comes from whichever class is registered as
+/// `NSString`; before one is, the description is nil.
+unsafe extern "C-unwind" fn description(this: Id, _: Sel) -> Id {
+    let Some(string_class) = crate::class::lookup_name(c"NSString") else { return std::ptr::null_mut() };
+    let text = format!("<{}: {:p}>", class_of(this).name().to_string_lossy(), this);
+    // SAFETY: +alloc and -initWithBytes:length:encoding: (UTF-8 is 4, an
+    // int in this ABI, see docs/abi.md) are NSString's.
+    unsafe {
+        let string = send0((string_class as *const Class).cast_mut().cast(), sel!(alloc));
+        let sel = sel!(initWithBytes:length:encoding:);
+        let imp = method_for(class_of(string), raw(sel));
+        let imp: unsafe extern "C-unwind" fn(Id, Sel, *const c_void, usize, i32) -> Id = std::mem::transmute(imp);
+        crate::arc::objc_autorelease(imp(string, sel, text.as_ptr().cast(), text.len(), 4).cast()).cast()
+    }
+}
+
 unsafe extern "C-unwind" fn copy(this: Id, _: Sel) -> Id {
     // SAFETY: -copyWithZone: takes a zone and returns a +1 object.
     unsafe {
@@ -286,6 +303,7 @@ fn load() {
         builder.add_method(sel!(isEqual:), is_equal as extern "C-unwind" fn(_, _, _) -> _);
         builder.add_method(sel!(isProxy), is_proxy as extern "C-unwind" fn(_, _) -> _);
         builder.add_method(sel!(zone), zone as extern "C-unwind" fn(_, _) -> _);
+        builder.add_method(sel!(description), description as unsafe extern "C-unwind" fn(_, _) -> _);
         builder.add_method(sel!(copy), copy as unsafe extern "C-unwind" fn(_, _) -> _);
         builder.add_method(sel!(mutableCopy), mutable_copy as unsafe extern "C-unwind" fn(_, _) -> _);
         builder

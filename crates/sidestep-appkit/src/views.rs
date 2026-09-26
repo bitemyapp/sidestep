@@ -538,10 +538,10 @@ fn change_frame(view: &NSViewImpl, new: NSRect) {
         // SAFETY: resizeSubviewsWithOldSize: takes an NSSize.
         unsafe { msg_send![view, resizeSubviewsWithOldSize: old.size] }
     }
-    if let Some(window) = window_of(view) {
-        if is_clip(view) || superview(view).is_some_and(is_clip) {
-            window.layers_moved();
-        }
+    if let Some(window) = window_of(view)
+        && (is_clip(view) || superview(view).is_some_and(is_clip))
+    {
+        window.layers_moved();
     }
     invalidate(view, bounds(view));
 }
@@ -641,16 +641,16 @@ pub(crate) fn set_window(view: &NSViewImpl, window: Option<NonNull<NSWindow>>) {
     if view.ivars().window.get() == window {
         return;
     }
-    if is_clip(view) {
-        if let Some(old) = window_of(view) {
-            old.remove_clip(view);
-        }
+    if is_clip(view)
+        && let Some(old) = window_of(view)
+    {
+        old.remove_clip(view);
     }
     view.ivars().window.set(window);
-    if is_clip(view) {
-        if let Some(new) = window_of(view) {
-            new.add_clip(as_view(view));
-        }
+    if is_clip(view)
+        && let Some(new) = window_of(view)
+    {
+        new.add_clip(as_view(view));
     }
     for sub in subviews(view) {
         set_window(imp(&sub), window);

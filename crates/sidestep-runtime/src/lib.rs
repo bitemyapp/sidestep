@@ -22,6 +22,7 @@
 mod arc;
 mod associated;
 mod blocks;
+mod cache;
 mod class;
 mod encoding;
 mod ivar;

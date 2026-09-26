@@ -76,9 +76,34 @@ even before a class has loaded.
 
 `objc_msg_lookup(receiver, sel)` returns the implementation and the caller
 calls it, the GNUstep convention objc2 already supports. No assembly
-trampoline is involved, so the runtime is portable Rust. Each class keeps a
-cache of resolved implementations, invalidated by a global epoch whenever any
-method table changes. Unknown selectors go through `+resolveInstanceMethod:` /
+trampoline is involved, so the runtime is portable Rust.
+
+The lookup is built to cost less than Apple's `objc_msgSend`. Each class
+keeps its method cache in one word: a pointer to a table of slots with the
+table's index mask in the top 16 bits. A cached message is 14 straight-line
+instructions: load the receiver's class, load the word, load one slot,
+compare, return. There are no locks, no memory barriers and no "is this
+class initialized?" check, because a class only gets a table once
+`+initialize` has run. Three things make the unlocked, relaxed reads sound
+(`crates/sidestep-runtime/src/cache.rs` has the full argument):
+
+- Tables live in fresh anonymous mappings that are never unmapped or reused,
+  so a reader can only see zeros or values the runtime stored.
+- A slot holds the implementation and its selector XOR the implementation.
+  A slot seen half-written never matches a selector, so one compare checks
+  both.
+- Tables are replaced, never edited in place. Adding a method to a class in
+  use, or changing an implementation, empties every class's cache.
+
+Selectors are allocated side by side, 16-byte aligned, so selectors spread
+evenly over a table's slots, and tables grow at half full, so most
+selectors are found in the first slot they probe. On an M-series Mac, a
+message costs about 1.1 ns on Sidestep (under Linux in a VM) against 1.25 ns
+on Apple's runtime; `examples/msgbench` measures it. With link-time
+optimization (`lto = "fat"` in the release profile) the lookup inlines into
+every call site, which `objc_msgSend` never can: 0.9 ns.
+
+Unknown selectors go through `+resolveInstanceMethod:` /
 `+resolveClassMethod:` and then panic with the message Apple's runtime raises,
 `-[Class selector]: unrecognized selector sent to instance 0x…`; the panic
 unwinds into the Rust caller.

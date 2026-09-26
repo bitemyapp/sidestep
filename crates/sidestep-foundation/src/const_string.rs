@@ -14,15 +14,17 @@ use sidestep_runtime::StaticObject;
 pub struct ConstStr {
     utf8_nul: &'static str,
     utf16_len: usize,
+    pub(crate) hash: usize,
 }
 
 impl ConstStr {
     /// `utf8_nul` must end with `"\0"`; `constant_string!` arranges that.
     pub const fn new(utf8_nul: &'static str) -> Self {
-        ConstStr { utf8_nul, utf16_len: utf16_len(utf8_nul) - 1 }
+        let text = utf8_nul.as_bytes().split_at(utf8_nul.len() - 1).0;
+        ConstStr { utf8_nul, utf16_len: utf16_len(utf8_nul) - 1, hash: crate::string::hash_bytes(text) }
     }
 
-    fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         &self.utf8_nul[..self.utf8_nul.len() - 1]
     }
 }
@@ -63,7 +65,7 @@ macro_rules! constant_string {
     };
 }
 
-fn body(this: &AnyObject) -> &'static ConstStr {
+pub(crate) fn body(this: &AnyObject) -> &'static ConstStr {
     // SAFETY: instances of this class exist only as `ConstantString`s.
     unsafe { ConstantString::body_of((this as *const AnyObject).cast()) }
 }
@@ -91,7 +93,7 @@ extern "C-unwind" fn character_at_index(this: &AnyObject, _: Sel, index: usize) 
 }
 
 extern "C-unwind" fn hash(this: &AnyObject, _: Sel) -> usize {
-    crate::string::hash_str(body(this).as_str())
+    body(this).hash
 }
 
 extern "C-unwind" fn is_equal(this: &AnyObject, _: Sel, other: Option<&AnyObject>) -> Bool {

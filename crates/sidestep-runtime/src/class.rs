@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_int};
 use std::mem::transmute;
-use std::sync::atomic::{AtomicI32, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicPtr, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex, OnceLock, RwLock};
 
 use crate::ivar::Ivar;
@@ -44,6 +44,9 @@ pub struct Class {
     /// Defines a static shell on first use. `None` for metaclasses and for
     /// classes created at run time.
     pub(crate) loader: Option<fn()>,
+    /// The method cache, read on every message without locking; see
+    /// `cache`.
+    pub(crate) cache: AtomicPtr<crate::cache::Slot>,
     pub(crate) rt: OnceLock<ClassRt>,
 }
 
@@ -59,12 +62,6 @@ pub(crate) struct MethodTable {
     pub(crate) order: Vec<Shared<Method>>,
 }
 
-#[derive(Default)]
-struct Cache {
-    epoch: u64,
-    imps: HashMap<usize, Imp>,
-}
-
 /// Runtime data behind a class, created on first use.
 #[derive(Default)]
 pub(crate) struct ClassRt {
@@ -74,7 +71,6 @@ pub(crate) struct ClassRt {
     pub(crate) instance_size: AtomicUsize,
     pub(crate) instance_align: AtomicUsize,
     pub(crate) version: AtomicI32,
-    cache: RwLock<Cache>,
 }
 
 impl Class {
@@ -94,6 +90,7 @@ impl Class {
             flags: AtomicU32::new(SHELL | flags),
             peer: AtomicPtr::new(meta),
             loader: Some(load),
+            cache: crate::cache::empty(),
             rt: OnceLock::new(),
         }
     }
@@ -109,6 +106,7 @@ impl Class {
             flags: AtomicU32::new(SHELL | META),
             peer: AtomicPtr::new((class as *const Class).cast_mut()),
             loader: None,
+            cache: crate::cache::empty(),
             rt: OnceLock::new(),
         }
     }
@@ -121,6 +119,7 @@ impl Class {
             flags: AtomicU32::new(flags),
             peer: AtomicPtr::new(std::ptr::null_mut()),
             loader: None,
+            cache: crate::cache::empty(),
             rt: OnceLock::new(),
         }
     }
@@ -194,12 +193,15 @@ static REGISTRY: LazyLock<RwLock<HashMap<&'static CStr, Shared<Class>>>> = LazyL
 /// Static shells whose loader is running, waiting to be claimed by
 /// `objc_allocateClassPair`.
 static PENDING: LazyLock<Mutex<HashMap<&'static CStr, Shared<Class>>>> = LazyLock::new(Default::default);
-/// Bumped whenever a method table changes; stale method caches clear
-/// themselves.
-static EPOCH: AtomicU64 = AtomicU64::new(0);
-
+/// A method table changed: every cached implementation may be stale.
 pub(crate) fn bump_epoch() {
-    EPOCH.fetch_add(1, Ordering::AcqRel);
+    crate::cache::flush_all();
+}
+
+/// Empty one class's method cache. For a class still being built, which has
+/// no subclasses yet, this is all a method table change needs.
+pub(crate) fn reset_cache(cls: &Class) {
+    crate::cache::flush(cls);
 }
 
 pub(crate) fn lookup_name(name: &CStr) -> Option<&'static Class> {
@@ -294,24 +296,20 @@ pub(crate) fn find_method(cls: &'static Class, sel: Sel) -> Option<&'static Meth
 }
 
 /// The implementation `sel` resolves to on `cls`, through the method cache.
+#[inline]
 pub(crate) fn lookup_imp(cls: &'static Class, sel: Sel) -> Option<Imp> {
-    let epoch = EPOCH.load(Ordering::Acquire);
-    let rt = cls.rt();
-    {
-        let cache = rt.cache.read().unwrap();
-        if cache.epoch == epoch {
-            if let Some(imp) = cache.imps.get(&(sel as usize)) {
-                return Some(*imp);
-            }
-        }
+    match crate::cache::probe(cls, sel) {
+        Some(imp) => Some(imp),
+        None => lookup_slow(cls, sel),
     }
+}
+
+#[cold]
+#[inline(never)]
+fn lookup_slow(cls: &'static Class, sel: Sel) -> Option<Imp> {
+    let epoch = crate::cache::epoch();
     let imp = find_method(cls, sel)?.imp();
-    let mut cache = rt.cache.write().unwrap();
-    if cache.epoch != epoch {
-        cache.imps.clear();
-        cache.epoch = epoch;
-    }
-    cache.imps.insert(sel as usize, imp);
+    crate::cache::remember(cls, sel, imp, epoch);
     Some(imp)
 }
 
@@ -417,7 +415,10 @@ pub unsafe extern "C" fn objc_registerClassPair(cls: *mut Class) {
         cls.metaclass().flags.fetch_or(LOADED, Ordering::AcqRel);
         cls.flags.fetch_or(LOADED, Ordering::AcqRel);
         REGISTRY.write().unwrap().insert(cls.name(), Shared(cls));
-        bump_epoch();
+        // Registering changes no existing class's methods; only the new
+        // class's own caches, if anything messaged it early, start over.
+        reset_cache(cls);
+        reset_cache(cls.metaclass());
     });
 }
 

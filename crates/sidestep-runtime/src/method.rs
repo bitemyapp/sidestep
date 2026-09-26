@@ -4,7 +4,7 @@ use std::ffi::{CStr, c_char, c_uint, c_void};
 use std::mem::transmute;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-use crate::class::{CUSTOM_RR, Class, ROOT, bump_epoch, class_ref, find_method};
+use crate::class::{CUSTOM_RR, Class, ROOT, bump_epoch, class_ref, find_method, reset_cache};
 use crate::encoding;
 use crate::selector::{Sel, known};
 use crate::util::{Shared, leak_cstr, malloc_array, malloc_cstr};
@@ -48,7 +48,12 @@ fn add_method(cls: &'static Class, sel: Sel, imp: Imp, types: &CStr) -> Option<&
     if is_rr_selector(sel) && cls.flags() & ROOT == 0 && !cls.is_meta() {
         cls.flags.fetch_or(CUSTOM_RR, Ordering::AcqRel);
     }
-    bump_epoch();
+    if cls.is_loaded() {
+        // Subclasses may have cached what this method now overrides.
+        bump_epoch();
+    } else {
+        reset_cache(cls);
+    }
     Some(method)
 }
 

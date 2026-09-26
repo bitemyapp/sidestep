@@ -401,10 +401,10 @@ fn send_event(window: &NSWindowImpl, event: &NSEvent) {
         if let Some(view) = view {
             view.mouseDragged(event);
         }
-    } else if kind == NSEventType::ScrollWheel {
-        if let Some(view) = content.and_then(|c| c.hitTest(event.locationInWindow())) {
-            view.scrollWheel(event);
-        }
+    } else if kind == NSEventType::ScrollWheel
+        && let Some(view) = content.and_then(|c| c.hitTest(event.locationInWindow()))
+    {
+        view.scrollWheel(event);
     }
 }
 

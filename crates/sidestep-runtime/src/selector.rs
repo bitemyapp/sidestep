@@ -4,13 +4,15 @@
 
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char};
-use std::sync::{LazyLock, OnceLock, RwLock};
+use std::mem::MaybeUninit;
+use std::sync::{LazyLock, Mutex, OnceLock, RwLock};
 
-use crate::util::{Shared, leak_cstr};
+use crate::util::{Shared, leak_cstr, lock};
 use crate::{Bool, NO, YES};
 
-/// An interned selector.
-#[repr(C)]
+/// An interned selector. Laid out like libobjc2's, aligned to 16 bytes:
+/// method caches index by `sel >> 4`.
+#[repr(C, align(16))]
 pub struct Selector {
     name: *const c_char,
     /// libobjc2 supports typed selectors; Sidestep's are all untyped.
@@ -21,6 +23,36 @@ pub(crate) type Sel = *const Selector;
 
 static TABLE: LazyLock<RwLock<HashMap<&'static CStr, Shared<Selector>>>> = LazyLock::new(Default::default);
 
+/// Where new selectors go: side by side, so selectors registered together
+/// have consecutive addresses and land in distinct cache slots. Never freed.
+struct Arena {
+    next: *mut Selector,
+    left: usize,
+}
+
+// SAFETY: the pointer is into leaked memory, used under the lock.
+unsafe impl Send for Arena {}
+
+static ARENA: Mutex<Arena> = Mutex::new(Arena { next: std::ptr::null_mut(), left: 0 });
+
+fn allocate(selector: Selector) -> &'static Selector {
+    const CHUNK: usize = 1024;
+    let mut arena = lock(&ARENA);
+    if arena.left == 0 {
+        let chunk: &'static mut [MaybeUninit<Selector>] = Box::leak(Box::new_uninit_slice(CHUNK));
+        (arena.next, arena.left) = (chunk.as_mut_ptr().cast(), CHUNK);
+    }
+    let sel = arena.next;
+    // SAFETY: `sel` is the next unused slot of a leaked chunk.
+    unsafe {
+        sel.write(selector);
+        arena.next = sel.add(1);
+    }
+    arena.left -= 1;
+    // SAFETY: just written, and never freed or moved.
+    unsafe { &*sel }
+}
+
 pub(crate) fn register(name: &CStr) -> Sel {
     if let Some(sel) = TABLE.read().unwrap().get(name) {
         return sel.0;
@@ -30,7 +62,7 @@ pub(crate) fn register(name: &CStr) -> Sel {
         return sel.0;
     }
     let name = leak_cstr(name);
-    let sel: &'static Selector = Box::leak(Box::new(Selector { name: name.as_ptr(), types: std::ptr::null() }));
+    let sel = allocate(Selector { name: name.as_ptr(), types: std::ptr::null() });
     table.insert(name, Shared(sel));
     sel
 }

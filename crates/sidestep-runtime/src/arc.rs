@@ -260,12 +260,12 @@ pub unsafe extern "C-unwind" fn objc_storeWeak(location: *mut Id, value: Id) -> 
     // SAFETY: the caller passes a valid location holding null or a weakly
     // stored object.
     let old = unsafe { *location };
-    if !old.is_null() {
-        if let Some(list) = table.get_mut(&(old as usize)) {
-            list.retain(|&l| l != location as usize);
-            if list.is_empty() {
-                table.remove(&(old as usize));
-            }
+    if !old.is_null()
+        && let Some(list) = table.get_mut(&(old as usize))
+    {
+        list.retain(|&l| l != location as usize);
+        if list.is_empty() {
+            table.remove(&(old as usize));
         }
     }
     // SAFETY: the caller passes a live object or null.

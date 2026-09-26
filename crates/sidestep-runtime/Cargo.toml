@@ -12,3 +12,4 @@ license.workspace = true
 # crate through the C ABI, so there is no dependency cycle.
 [target.'cfg(not(target_vendor = "apple"))'.dependencies]
 objc2 = { workspace = true, features = ["gnustep-2-1"] }
+libc = "0.2"

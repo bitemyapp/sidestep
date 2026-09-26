@@ -55,6 +55,18 @@ pub(crate) unsafe fn isa(obj: *const Object) -> &'static Class {
     unsafe { &*(*obj).isa.load(Ordering::Acquire) }
 }
 
+/// [`isa`] without ordering, for message dispatch: a receiver's class was
+/// published along with the receiver, and changing it while other threads
+/// message the object is a race on Apple's runtime too.
+///
+/// # Safety
+/// `obj` must be a live object.
+#[inline(always)]
+pub(crate) unsafe fn isa_relaxed(obj: *const Object) -> &'static Class {
+    // SAFETY: as for `isa`.
+    unsafe { &*(*obj).isa.load(Ordering::Relaxed) }
+}
+
 /// What kind of memory an object lives in, which decides how it is counted.
 pub(crate) enum Kind {
     /// A class object: never counted, never freed.

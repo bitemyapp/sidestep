@@ -478,10 +478,10 @@ impl SeatHandler for State {
         }
     }
     fn remove_capability(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat, capability: Capability) {
-        if capability == Capability::Pointer {
-            if let Some(pointer) = self.pointer.take() {
-                pointer.release();
-            }
+        if capability == Capability::Pointer
+            && let Some(pointer) = self.pointer.take()
+        {
+            pointer.release();
         }
     }
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}

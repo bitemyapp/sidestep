@@ -13,10 +13,11 @@ message), blocks, strings. Passing on macOS, and on Linux aarch64 and x86_64.
 ## 1. Foundation core
 
 Done so far: constant strings from static memory, an immutable
-`NSDictionary`, `NSTimer` with blocks, a timer-only `NSRunLoop`, and
+`NSDictionary` (faster than Apple's on the same Mac, see `examples/dictbench`), `NSTimer` with blocks, a timer-only `NSRunLoop`, and
 `NSNotification` for delegate callbacks.
 
-- `-description` on `NSObject`; `NSMutableString`.
+- `NSMutableString`; `-description` on NSObject before Foundation's
+  `NSString` has loaded.
 - Collections: `NSArray`, `NSMutableArray`, `NSMutableDictionary`, `NSSet`.
 - `NSNumber`, `NSValue`, `NSData`, `NSDate`, `NSError`, `NSURL`,
   `NSProcessInfo`.

@@ -2,11 +2,12 @@
 //! implementation and the caller calls it, so no assembly trampoline is
 //! needed.
 
+use std::hint::cold_path;
 use std::mem::transmute;
 use std::sync::atomic::Ordering;
 
 use crate::class::{Class, INITIALIZED, class_ref, ensure_initialized, ensure_loaded, lookup_imp};
-use crate::object::{Object, isa};
+use crate::object::{Object, isa, isa_relaxed};
 use crate::selector::{self, Sel, known};
 use crate::{Bool, Imp, NO, YES};
 
@@ -71,11 +72,31 @@ pub(crate) unsafe fn method_for(cls: &'static Class, sel: Sel) -> Imp {
     unsafe { transmute::<unsafe extern "C-unwind" fn(Id, Sel), Imp>(unrecognized_selector) }
 }
 
+/// Every message goes through here. The hit path is a handful of
+/// instructions with no stack frame: the receiver's class, its cache word,
+/// one slot (see `cache`). A class only has a cache once it is loaded and
+/// initialized, so everything else is on the miss path.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn objc_msg_lookup(receiver: Id, sel: Sel) -> Option<Imp> {
     if receiver.is_null() {
+        cold_path();
         return Some(as_imp(nil_method));
     }
+    // SAFETY: the caller passes a live object.
+    let cls = unsafe { isa_relaxed(receiver) };
+    match crate::cache::probe(cls, sel) {
+        Some(imp) => Some(imp),
+        None => {
+            cold_path();
+            // SAFETY: forwarded contract.
+            unsafe { lookup_miss(receiver, sel) }
+        }
+    }
+}
+
+#[cold]
+#[inline(never)]
+unsafe fn lookup_miss(receiver: Id, sel: Sel) -> Option<Imp> {
     // SAFETY: the caller passes a live object.
     let cls = unsafe { isa(receiver) };
     if cls.flags.load(Ordering::Acquire) & INITIALIZED == 0 {
@@ -92,6 +113,11 @@ pub unsafe extern "C-unwind" fn objc_msg_lookup_super(sup: *const ObjcSuper, sel
     let sup = unsafe { &*sup };
     if sup.receiver.is_null() {
         return Some(as_imp(nil_method));
+    }
+    // A class with a cache is loaded, so try it first.
+    // SAFETY: the caller passes a class.
+    if let Some(imp) = unsafe { sup.super_class.as_ref() }.and_then(|c| crate::cache::probe(c, sel)) {
+        return Some(imp);
     }
     // SAFETY: the caller passes a class.
     let cls = unsafe { class_ref(sup.super_class) }?;

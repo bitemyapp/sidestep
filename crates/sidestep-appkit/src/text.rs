@@ -28,10 +28,10 @@ const MONO: &[&str] = &[
 fn load(env: &str, candidates: &[&str]) -> fontdue::Font {
     let paths = std::env::var(env).ok().into_iter().chain(candidates.iter().map(|s| s.to_string()));
     for path in paths {
-        if let Ok(bytes) = std::fs::read(&path) {
-            if let Ok(font) = fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()) {
-                return font;
-            }
+        if let Ok(bytes) = std::fs::read(&path)
+            && let Ok(font) = fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default())
+        {
+            return font;
         }
     }
     panic!("sidestep: no usable font found; set {env} to a .ttf file (tried {candidates:?})");

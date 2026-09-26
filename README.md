@@ -36,7 +36,11 @@ fn main() {
 }
 ```
 
-That `use` line is the only change an app needs. Sidestep switches objc2 to
+That `use` line is the only change an app needs. For the fastest message
+sends on Linux, build releases with `lto = "fat"`: Sidestep's method lookup
+then inlines into every call site (see
+[docs/architecture.md](docs/architecture.md#message-dispatch)). Sidestep needs
+Rust 1.95 or later. Sidestep switches objc2 to
 its GNUstep ABI on Linux by itself, and classes it hasn't implemented yet show
 up as link errors, not crashes.
 

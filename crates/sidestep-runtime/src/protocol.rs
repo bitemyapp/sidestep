@@ -49,9 +49,46 @@ pub struct ObjcMethodDescription {
 /// Every protocol ever allocated, registered or not, by name.
 static PROTOCOLS: LazyLock<RwLock<HashMap<&'static CStr, Shared<Protocol>>>> = LazyLock::new(|| {
     let nsobject = new_protocol(c"NSObject");
-    lock(&nsobject.inner).registered = true;
+    {
+        let mut inner = lock(&nsobject.inner);
+        inner.methods = NSOBJECT_METHODS
+            .iter()
+            .map(|&(name, types, required)| MethodDesc {
+                sel: crate::selector::register(name),
+                types: types.as_ptr(),
+                required,
+                instance: true,
+            })
+            .collect();
+        inner.registered = true;
+    }
     RwLock::new(HashMap::from([(c"NSObject", Shared(nsobject as *const Protocol))]))
 });
+
+/// The `NSObject` protocol's instance methods, so classes can say which
+/// ones they override: name, type encoding, required.
+const NSOBJECT_METHODS: &[(&CStr, &CStr, bool)] = &[
+    (c"isEqual:", c"C@:@", true),
+    (c"hash", c"Q@:", true),
+    (c"superclass", c"#@:", true),
+    (c"class", c"#@:", true),
+    (c"self", c"@@:", true),
+    (c"performSelector:", c"@@::", true),
+    (c"performSelector:withObject:", c"@@::@", true),
+    (c"performSelector:withObject:withObject:", c"@@::@@", true),
+    (c"isProxy", c"C@:", true),
+    (c"isKindOfClass:", c"C@:#", true),
+    (c"isMemberOfClass:", c"C@:#", true),
+    (c"conformsToProtocol:", c"C@:@", true),
+    (c"respondsToSelector:", c"C@::", true),
+    (c"retain", c"@@:", true),
+    (c"release", c"v@:", true),
+    (c"autorelease", c"@@:", true),
+    (c"retainCount", c"Q@:", true),
+    (c"zone", c"^{_NSZone=}@:", true),
+    (c"description", c"@@:", true),
+    (c"debugDescription", c"@@:", false),
+];
 
 fn new_protocol(name: &CStr) -> &'static Protocol {
     Box::leak(Box::new(Protocol {
