@@ -8,5 +8,11 @@ publish = false
 [dependencies]
 objc2.workspace = true
 block2.workspace = true
-objc2-foundation = { workspace = true, features = ["NSString", "NSObject", "NSThread", "NSZone"] }
+objc2-foundation = { workspace = true, features = ["NSString", "NSObject", "NSThread", "NSZone", "NSGeometry"] }
+objc2-app-kit = { workspace = true, features = ["NSResponder", "NSView", "NSClipView", "NSScrollView"] }
 sidestep.workspace = true
+
+# AppKit belongs to the main thread, which the test harness doesn't run on.
+[[test]]
+name = "appkit"
+harness = false

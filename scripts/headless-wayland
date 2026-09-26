@@ -1,0 +1,42 @@
+#!/bin/sh
+# Run a Wayland program under a headless sway with the software renderer,
+# inside the Linux container:
+#   scripts/linux-run scripts/headless-wayland /target/debug/appkit-slice
+# SIZE sets the output (default 1280x800). SHOT=file.png saves a screenshot
+# SHOT_AFTER seconds (default 2) after start and then stops the program.
+set -eu
+export XDG_RUNTIME_DIR=$(mktemp -d)
+export WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1
+config=$XDG_RUNTIME_DIR/sway.conf
+cat >"$config" <<CONF
+output HEADLESS-1 resolution ${SIZE:-1280x800} position 0 0
+default_border none
+default_floating_border none
+CONF
+# sway won't run as root; the container's compositor user runs it.
+if [ "$(id -u)" = 0 ]; then
+  chown compositor "$XDG_RUNTIME_DIR"
+  as_compositor="setpriv --reuid=compositor --regid=compositor --init-groups"
+else
+  as_compositor=
+fi
+$as_compositor sway -c "$config" >"$XDG_RUNTIME_DIR/sway.log" 2>&1 &
+sway_pid=$!
+i=0
+until [ -n "$(ls "$XDG_RUNTIME_DIR" | grep '^wayland-[0-9]*$' || true)" ]; do
+  i=$((i + 1))
+  if [ $i -gt 100 ]; then cat "$XDG_RUNTIME_DIR/sway.log" >&2; exit 1; fi
+  sleep 0.05
+done
+export WAYLAND_DISPLAY=$(ls "$XDG_RUNTIME_DIR" | grep '^wayland-[0-9]*$' | head -n1)
+"$@" &
+app_pid=$!
+if [ -n "${SHOT:-}" ]; then
+  sleep "${SHOT_AFTER:-2}"
+  grim "$SHOT"
+  kill $app_pid 2>/dev/null || true
+fi
+status=0
+wait $app_pid || status=$?
+kill $sway_pid 2>/dev/null || true
+exit $status

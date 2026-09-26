@@ -10,4 +10,5 @@ license.workspace = true
 [target.'cfg(not(target_vendor = "apple"))'.dependencies]
 sidestep-runtime.workspace = true
 objc2 = { workspace = true, features = ["gnustep-2-1"] }
-objc2-foundation = { workspace = true, features = ["gnustep-2-1", "NSObject", "NSString", "NSThread", "NSZone"] }
+block2 = { workspace = true, features = ["gnustep-2-1"] }
+objc2-foundation = { workspace = true, features = ["gnustep-2-1", "NSObject", "NSString", "NSThread", "NSZone", "NSDictionary", "NSTimer", "NSDate", "NSNotification", "block2"] }

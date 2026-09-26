@@ -11,7 +11,7 @@ objc2, block2                     unmodified; GNUstep ABI selected on Linux
 ───────── C ABI: objc_msg_lookup, objc_allocateClassPair, objc_retain, …,
           class symbols ._OBJC_CLASS_<Name>, _Block_copy, _NSConcreteStackBlock
 sidestep-runtime                  the Objective-C runtime, in Rust
-sidestep-foundation, (appkit)     framework classes, in Rust, via define_class!
+sidestep-foundation, -appkit      framework classes, in Rust, via define_class!
 ```
 
 [objc2]: https://github.com/madsmtm/objc2
@@ -87,6 +87,40 @@ unwinds into the Rust caller.
 first, with messages from inside `+initialize` on the same thread allowed
 through.
 
+## AppKit: a main thread and a render thread
+
+AppKit's contract is single-threaded: events, timers, the responder chain and
+`drawRect:` run on the main thread. Sidestep keeps that contract and moves
+everything that touches pixels or the display server to a render thread.
+
+- **Drawing records.** Inside `drawRect:`, `-[NSColor setFill]`,
+  `+[NSBezierPath fillRect:]`, `-[NSBezierPath fill]` and
+  `-[NSString drawAtPoint:withAttributes:]` append operations (fills, paths,
+  runs of text) to a list, already mapped to the view's layer and clipped to
+  the view and its ancestors. The main thread never rasterizes.
+- **Layers.** A window's own surface is one layer, and each `NSClipView` adds
+  one holding its document. `setNeedsDisplayInRect:` records damage per
+  layer, in layer pixels.
+- **Display.** Once the render thread reports the last frame shown, the
+  window places its scroll layers, calls `drawRect:` only for damaged areas,
+  sends the operations and presents. A window the compositor isn't showing
+  gets no frame callbacks, so it stops drawing.
+- **Rendering.** The render thread owns the Wayland connection through
+  smithay-client-toolkit. It rasterizes operations on the CPU into a cache
+  per layer (tiny-skia for paths, fontdue for glyphs), only inside damaged
+  rectangles. The window surface is presented from a few shared-memory
+  buffers, each remembering what changed since it was last written, so a
+  frame copies and damages only changed pixels.
+- **Scrolling.** A document layer is cut into 512-pixel-tall tiles, each on
+  its own subsurface and cropped to the clip view with wp_viewporter.
+  Scrolling moves tiles and changes crops. A tile is drawn and uploaded when
+  it comes within a tile of the viewport or its content changes, and dropped
+  when it is two tiles away.
+
+This design keeps GPU wake-ups and uploads proportional to what changed,
+which is what dominates power on a mostly idle desktop. A GPU rasterizer can
+replace the CPU one behind the same operations later.
+
 ## Conformance
 
 `conformance/` holds tests written only against objc2. They run on macOS
@@ -109,4 +143,13 @@ scripts/linux-cargo run -p hello
 ```
 
 On macOS, plain `cargo test --workspace` runs the same conformance tests
-against Apple's runtime.
+against Apple's runtime. `conformance/tests/appkit.rs` checks AppKit view
+geometry the same way, without opening a window.
+
+To see an AppKit program on Linux without a display, `scripts/headless-wayland`
+runs it under a headless sway and can take a screenshot:
+
+```sh
+scripts/linux-cargo build -p appkit-slice
+SCENARIO=scroll SHOT=/work/target/scroll.png scripts/linux-run scripts/headless-wayland /target/debug/appkit-slice
+```

@@ -104,7 +104,34 @@ impl<T> StaticObject<T> {
     pub fn as_object(&'static self) -> *mut Object {
         (&raw const self.isa).cast_mut().cast()
     }
+
+    /// The object pointer, usable in a `static` initializer.
+    pub const fn object_ref(&'static self) -> ObjectRef {
+        ObjectRef((&raw const self.isa).cast())
+    }
+
+    /// The object's body, given a pointer to the object.
+    ///
+    /// # Safety
+    /// `obj` must point to a `StaticObject<T>`'s object.
+    pub unsafe fn body_of<'a>(obj: *const Object) -> &'a T {
+        // SAFETY: the body follows the isa pointer, as laid out above.
+        unsafe { &*obj.cast::<*const Class>().add(1).cast::<u8>().add(Self::BODY_PAD).cast::<T>() }
+    }
+
+    const BODY_PAD: usize = std::mem::offset_of!(StaticObject<T>, body)
+        - std::mem::offset_of!(StaticObject<T>, isa)
+        - size_of::<*const Class>();
 }
+
+/// A pointer to an object in static memory, laid out as a plain pointer so
+/// it can be exported as an Objective-C constant such as
+/// `NSFontAttributeName`.
+#[repr(transparent)]
+pub struct ObjectRef(*const Object);
+
+// SAFETY: points to an immutable, immortal object.
+unsafe impl Sync for ObjectRef {}
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn class_createInstance(cls: *const Class, extra_bytes: usize) -> *mut Object {

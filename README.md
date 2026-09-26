@@ -9,8 +9,10 @@ objc2 and its framework crates stay unmodified.
 
 **Status:** early. The runtime is complete enough for objc2's core features
 (classes, subclassing, ivars, `super`, reference counting, autorelease pools,
-weak references, protocols, blocks), and Foundation has `NSString` and
-`NSThread`. AppKit is next; see the [roadmap](docs/roadmap.md).
+weak references, protocols, blocks). Foundation has strings, a dictionary,
+timers and threads. AppKit runs a first slice on Wayland: an application,
+windows, views with `drawRect:`, mouse and scroll events, scroll views, and
+fills, paths and text. See the [roadmap](docs/roadmap.md).
 
 [objc2]: https://github.com/madsmtm/objc2
 
@@ -37,6 +39,58 @@ fn main() {
 That `use` line is the only change an app needs. Sidestep switches objc2 to
 its GNUstep ABI on Linux by itself, and classes it hasn't implemented yet show
 up as link errors, not crashes.
+
+## Test drive
+
+`examples/appkit-slice` is an AppKit program written only against
+objc2-app-kit: a window showing a page of code with a caret you can move by
+clicking. `SCENARIO` chooses what it does:
+
+| `SCENARIO` | What you see |
+|---|---|
+| `caret` (default) | the page, with the caret blinking twice a second |
+| `idle` | the page, with nothing moving |
+| `anim` | the page, with a spinner turning at 60 fps in the top right corner |
+| `scroll` | a 2000-line list in an `NSScrollView`, scrolling at 120 px/s |
+
+`SLICE_QUIT_AFTER=<seconds>` makes it quit by itself.
+
+**macOS** runs it on Apple's AppKit:
+
+```sh
+cargo run -p appkit-slice
+SCENARIO=scroll cargo run -p appkit-slice
+```
+
+**Linux** runs the same source on Sidestep. It needs a Wayland session (X11
+isn't supported yet) and a DejaVu or Noto font where distributions usually
+put them. Otherwise, point `SIDESTEP_FONT` and `SIDESTEP_MONO_FONT` at a sans
+and a monospaced `.ttf`. Nothing else is needed:
+no libobjc, no GNUstep, no system libraries beyond the C runtime every Rust
+program links.
+
+```sh
+cargo run --release -p appkit-slice
+SCENARIO=anim cargo run --release -p appkit-slice
+```
+
+**Linux from a Mac, or without a desktop.** With Docker, `scripts/linux-cargo`
+builds in a Linux container and `scripts/headless-wayland` runs a program
+under a headless sway compositor. With `SHOT`, it saves a screenshot
+`SHOT_AFTER` seconds in (default 2) and stops the program. The repository is
+mounted at `/work` and the build output at `/target`:
+
+```sh
+scripts/linux-cargo build --release -p appkit-slice
+SCENARIO=anim SHOT=/work/target/anim.png scripts/linux-run scripts/headless-wayland /target/release/appkit-slice
+open target/anim.png
+```
+
+The first run builds the container image, which takes a few minutes.
+
+On Linux, drawing is recorded on the main thread and rasterized on a
+separate render thread, and scroll views are tiled onto Wayland subsurfaces;
+see [docs/architecture.md](docs/architecture.md#appkit-a-main-thread-and-a-render-thread).
 
 ## How it works
 

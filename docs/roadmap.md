@@ -12,28 +12,39 @@ message), blocks, strings. Passing on macOS, and on Linux aarch64 and x86_64.
 
 ## 1. Foundation core
 
-- `-description` on `NSObject`; `NSMutableString`; constant strings from static
-  memory.
-- Collections: `NSArray`, `NSMutableArray`, `NSDictionary`,
-  `NSMutableDictionary`, `NSSet`.
+Done so far: constant strings from static memory, an immutable
+`NSDictionary`, `NSTimer` with blocks, a timer-only `NSRunLoop`, and
+`NSNotification` for delegate callbacks.
+
+- `-description` on `NSObject`; `NSMutableString`.
+- Collections: `NSArray`, `NSMutableArray`, `NSMutableDictionary`, `NSSet`.
 - `NSNumber`, `NSValue`, `NSData`, `NSDate`, `NSError`, `NSURL`,
   `NSProcessInfo`.
-- `NSNotificationCenter`, `NSRunLoop`, `NSTimer`, `NSAutoreleasePool`, and the
-  rest of `NSThread`.
+- `NSNotificationCenter`, the rest of `NSRunLoop`, `NSAutoreleasePool`, and
+  the rest of `NSThread`.
 - Every static class findable by name, not only after first use.
 - Message forwarding.
 
 ## 2. AppKit skeleton
 
-- `NSApplication` running an event loop on Wayland and X11.
-- `NSWindow` and `NSView` with `drawRect:`.
-- `NSEvent`, the responder chain, and target/action.
-- `NSColor`, `NSBezierPath`, `NSGraphicsContext` and `NSFont`.
+The first slice runs `examples/appkit-slice` unchanged on Wayland: one
+window, a flipped view drawing text with `drawRect:`, mouse clicks moving a
+blinking caret, a spinner at 60 fps, and a 2000-line list in an
+`NSScrollView`. It has `NSApplication` and its delegate, `NSWindow`,
+`NSView` (frames, bounds, flipping, conversion, hit testing, autoresizing),
+`NSClipView`, `NSScrollView`, mouse and scroll `NSEvent`s through the
+responder chain, `NSColor`, `NSFont`, `NSBezierPath` fills and string
+drawing. The design is in [architecture.md](architecture.md).
+
+Next:
+
+- Keyboard input and text input methods; target/action.
+- `NSGraphicsContext`, strokes, curves, images, transforms.
+- Scrollers, resizing by the user, several windows, HiDPI.
+- Text shaping and fallback with parley and fontique.
 - `NSMenu`, which has no system-wide equivalent on Linux, so it becomes a
   menu bar inside the window.
-
-Candidate libraries: winit or smithay-client-toolkit, vello or tiny-skia,
-parley and fontique.
+- X11, after Wayland is solid.
 
 ## 3. Text
 

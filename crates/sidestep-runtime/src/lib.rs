@@ -35,7 +35,7 @@ mod sync;
 mod util;
 
 pub use class::Class;
-pub use object::{Object, StaticObject};
+pub use object::{Object, ObjectRef, StaticObject};
 pub use selector::Selector;
 
 pub use nsobject::{NSOBJECT_CLASS, NSOBJECT_METACLASS};

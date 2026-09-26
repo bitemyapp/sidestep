@@ -1,7 +1,7 @@
 #!/bin/sh
-# Run cargo inside a Linux container, e.g. `scripts/linux-cargo test -p hello`.
-# The image comes from scripts/linux.Dockerfile and is built on first use.
-# Registry and target directories live in named volumes so rebuilds are fast.
+# Run a command in the Linux container scripts/linux-cargo builds in, with
+# the same target directory, e.g.
+#   scripts/linux-run scripts/headless-wayland /target/debug/appkit-slice
 set -eu
 repo=$(cd "$(dirname "$0")/.." && pwd)
 image=${SIDESTEP_LINUX_IMAGE:-sidestep-linux:1.96-trixie}
@@ -14,4 +14,5 @@ exec docker run --rm ${SIDESTEP_DOCKER_FLAGS:-} \
   -v sidestep-cargo-git:/usr/local/cargo/git \
   -v sidestep-target:/target -e CARGO_TARGET_DIR=/target \
   -e RUST_BACKTRACE="${RUST_BACKTRACE:-0}" \
-  "$image" cargo "$@"
+  -e SCENARIO -e SLICE_QUIT_AFTER -e SHOT -e SHOT_AFTER -e SIZE \
+  "$image" "$@"

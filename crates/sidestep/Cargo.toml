@@ -16,3 +16,9 @@ sidestep-foundation.workspace = true
 objc2 = { workspace = true, features = ["gnustep-2-1"] }
 block2 = { workspace = true, features = ["gnustep-2-1"] }
 objc2-foundation = { workspace = true, features = ["gnustep-2-1"] }
+sidestep-appkit = { workspace = true, optional = true }
+
+[features]
+default = ["appkit"]
+# AppKit: windows, views and events, drawn through Wayland.
+appkit = ["dep:sidestep-appkit"]

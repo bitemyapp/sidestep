@@ -76,7 +76,25 @@ fn encoding_arg(raw: i32) -> u32 {
     raw as u32
 }
 
-fn equals(this: &str, other: &NSString) -> bool {
+/// The hash every string class shares, so equal strings hash equally.
+pub(crate) fn hash_str(s: &str) -> NSUInteger {
+    let mut hasher = DefaultHasher::new();
+    s.hash(&mut hasher);
+    hasher.finish() as NSUInteger
+}
+
+/// `-lengthOfBytesUsingEncoding:`: 0 when the text can't be encoded.
+pub(crate) fn byte_length(s: &str, encoding: u32) -> NSUInteger {
+    match encoding {
+        encoding::UTF8 => s.len(),
+        encoding::ASCII if s.is_ascii() => s.len(),
+        encoding::ISO_LATIN1 if s.chars().all(|c| (c as u32) < 0x100) => s.chars().count(),
+        encoding::UTF16 | encoding::UTF16_BE | encoding::UTF16_LE => 2 * s.encode_utf16().count(),
+        _ => 0,
+    }
+}
+
+pub(crate) fn equals(this: &str, other: &NSString) -> bool {
     autoreleasepool(|pool| {
         // SAFETY: `other` is an NSString and the slice stays inside the pool.
         unsafe { other.to_str(pool) == this }
@@ -129,14 +147,7 @@ define_class!(
 
         #[unsafe(method(lengthOfBytesUsingEncoding:))]
         fn length_of_bytes_using_encoding(&self, encoding: i32) -> NSUInteger {
-            let s = self.ivars().as_str();
-            match encoding_arg(encoding) {
-                encoding::UTF8 => s.len(),
-                encoding::ASCII if s.is_ascii() => s.len(),
-                encoding::ISO_LATIN1 if s.chars().all(|c| (c as u32) < 0x100) => s.chars().count(),
-                encoding::UTF16 | encoding::UTF16_BE | encoding::UTF16_LE => 2 * self.ivars().utf16_len,
-                _ => 0,
-            }
+            byte_length(self.ivars().as_str(), encoding_arg(encoding))
         }
 
         #[unsafe(method(UTF8String))]
@@ -157,9 +168,7 @@ define_class!(
 
         #[unsafe(method(hash))]
         fn hash(&self) -> NSUInteger {
-            let mut hasher = DefaultHasher::new();
-            self.ivars().as_str().hash(&mut hasher);
-            hasher.finish() as NSUInteger
+            hash_str(self.ivars().as_str())
         }
 
         #[unsafe(method(isEqual:))]
