@@ -1,7 +1,7 @@
 //! Classes: layout, the name registry, construction, loading of static
 //! shells, and `+initialize`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::{CStr, c_char, c_int};
 use std::mem::transmute;
 use std::sync::atomic::{AtomicI32, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
@@ -271,6 +271,19 @@ static REGISTRY: LazyLock<RwLock<HashMap<&'static CStr, Shared<Class>>>> = LazyL
 /// Static shells whose loader is running, waiting to be claimed by
 /// `objc_allocateClassPair`.
 static PENDING: LazyLock<Mutex<HashMap<&'static CStr, Shared<Class>>>> = LazyLock::new(Default::default);
+/// Shells registered and waiting for `+load` (see [`send_loads`]), and
+/// how many loaders are running, nested, on the thread holding the load
+/// lock.
+static LOADS: Mutex<Loads> = Mutex::new(Loads { loaders: 0, sending: false, ready: VecDeque::new() });
+
+struct Loads {
+    loaders: usize,
+    /// A `+load` is running, which sends those registered meanwhile once
+    /// it returns.
+    sending: bool,
+    ready: VecDeque<Shared<Class>>,
+}
+
 /// A method table changed: every cached implementation may be stale.
 pub(crate) fn bump_epoch() {
     crate::cache::flush_all();
@@ -375,7 +388,18 @@ fn load_slow(cls: &'static Class) {
             panic!("sidestep: class {name:?} was used before objc_registerClassPair");
         };
         lock(&PENDING).insert(name, Shared(target));
-        loader();
+        {
+            // Counted, and uncounted even if the loader panics.
+            struct Running;
+            impl Drop for Running {
+                fn drop(&mut self) {
+                    lock(&LOADS).loaders -= 1;
+                }
+            }
+            lock(&LOADS).loaders += 1;
+            let _running = Running;
+            loader();
+        }
         let unclaimed = lock(&PENDING).remove(name).is_some();
         if unclaimed || !target.is_loaded() {
             panic!(
@@ -384,6 +408,7 @@ fn load_slow(cls: &'static Class) {
                  nothing may define that class before the runtime asks for it"
             );
         }
+        send_loads();
     });
 }
 
@@ -551,6 +576,8 @@ pub unsafe extern "C" fn objc_registerClassPair(cls: *mut Class) {
         if let Some((total, offset)) = crate::object::instance_layout(cls, 0) {
             cls.alloc_layout.store(((total as u64) << 32) | offset as u64, Ordering::Relaxed);
         }
+        // Categories first: they may add overrides the flags count.
+        crate::category::attach(cls);
         // The flags copied from the superclass when the class was allocated
         // may be out of date: an override added to (or taken from) a
         // superclass since reached only loaded classes. The load lock
@@ -564,7 +591,63 @@ pub unsafe extern "C" fn objc_registerClassPair(cls: *mut Class) {
         // class's own caches, if anything messaged it early, start over.
         reset_cache(cls);
         reset_cache(cls.metaclass());
+        if cls.flags() & SHELL != 0 && own_load(cls).is_some() {
+            lock(&LOADS).ready.push_back(Shared(cls));
+        }
     });
+}
+
+/// `+load`, if `cls` implements it itself.
+fn own_load(cls: &'static Class) -> Option<Imp> {
+    let sel = crate::selector::register(c"load");
+    let method = cls.metaclass().rt().methods.read().unwrap().by_sel.get(&(sel as usize)).copied()?;
+    // SAFETY: methods are never freed.
+    Some(unsafe { method.get() }.imp())
+}
+
+/// Send `+load`, once, to each static shell's class that implements it
+/// itself, in the order they registered (superclasses first). Apple's
+/// runtime sends it to the classes (and categories) of each image as the
+/// image loads, before `main`; a shell is Sidestep's image class, and
+/// loads when first used, so its `+load` comes before the message that
+/// loaded it. Classes made at run time get none, on either runtime. Like
+/// Apple's, the call is direct: it doesn't send `+initialize` first.
+///
+/// A class registers inside its loader, which for a `define_class!` type
+/// is objc2's once-only registration: its `class()` would wait for itself
+/// there, and its instance variables' offsets aren't set yet. So `+load`
+/// waits until no loader is running, and one `+load` runs at a time: a
+/// class that another's `+load` loads gets its own when that one returns.
+/// Called holding the load lock.
+fn send_loads() {
+    {
+        let mut loads = lock(&LOADS);
+        if loads.loaders != 0 || loads.sending {
+            return;
+        }
+        loads.sending = true;
+    }
+    struct Sent;
+    impl Drop for Sent {
+        fn drop(&mut self) {
+            lock(&LOADS).sending = false;
+        }
+    }
+    let _sent = Sent;
+    let sel = crate::selector::register(c"load");
+    loop {
+        let next = lock(&LOADS).ready.pop_front();
+        let Some(cls) = next else { break };
+        // SAFETY: classes are never freed.
+        let cls = unsafe { cls.get() };
+        if let Some(imp) = own_load(cls) {
+            // SAFETY: +load takes nothing and returns nothing.
+            unsafe {
+                let imp: unsafe extern "C-unwind" fn(*const Class, Sel) = transmute(imp);
+                imp(cls, sel);
+            }
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -694,3 +777,150 @@ pub extern "C" fn class_getIvarLayout(_cls: *const Class) -> *const u8 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn class_setIvarLayout(_cls: *mut Class, _layout: *const u8) {}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::ffi::CStr;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyClass, ClassBuilder, MethodImplementation, NSObject, Sel};
+    use objc2::{AnyThread, ClassType, DefinedClass, define_class, msg_send, sel};
+
+    static SHELL_LOADS: AtomicUsize = AtomicUsize::new(0);
+    static RUNTIME_LOADS: AtomicUsize = AtomicUsize::new(0);
+
+    extern "C-unwind" fn shell_load(_: &AnyClass, _: Sel) {
+        SHELL_LOADS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    extern "C-unwind" fn runtime_load(_: &AnyClass, _: Sel) {
+        RUNTIME_LOADS.fetch_add(1, Ordering::SeqCst);
+    }
+
+    crate::static_class!(UNIT_LOADED, UNIT_LOADED_META = "SidestepUnitLoaded", || {
+        let mut builder = ClassBuilder::new(c"SidestepUnitLoaded", NSObject::class()).unwrap();
+        // SAFETY: +load takes nothing and returns nothing.
+        unsafe { builder.add_class_method(sel!(load), shell_load as extern "C-unwind" fn(_, _)) };
+        builder.register();
+    });
+
+    /// A static shell's class gets `+load` once, when it loads; a class
+    /// made at run time gets none, as on Apple's runtime.
+    #[test]
+    fn load_is_sent_to_static_classes_once() {
+        assert_eq!(SHELL_LOADS.load(Ordering::SeqCst), 0);
+        for _ in 0..2 {
+            // SAFETY: a C string.
+            let cls = unsafe { super::objc_getClass(c"SidestepUnitLoaded".as_ptr()) };
+            assert!(!cls.is_null());
+            assert_eq!(SHELL_LOADS.load(Ordering::SeqCst), 1);
+        }
+        let mut builder = ClassBuilder::new(c"SidestepUnitNotLoaded", NSObject::class()).unwrap();
+        // SAFETY: +load takes nothing and returns nothing.
+        unsafe { builder.add_class_method(sel!(load), runtime_load as extern "C-unwind" fn(_, _)) };
+        builder.register();
+        assert_eq!(RUNTIME_LOADS.load(Ordering::SeqCst), 0);
+    }
+
+    static SELF_LOADS: AtomicUsize = AtomicUsize::new(0);
+
+    define_class!(
+        #[unsafe(super(NSObject))]
+        #[name = "SidestepUnitSelfLoading"]
+        #[ivars = Cell<u32>]
+        struct SelfLoading;
+
+        impl SelfLoading {
+            /// Uses its own class, and an instance variable: objc2's
+            /// registration of the class has finished.
+            #[unsafe(method(load))]
+            fn load() {
+                let this = Self::alloc().set_ivars(Cell::new(5));
+                let obj: Retained<Self> = unsafe { msg_send![super(this), init] };
+                assert_eq!(obj.ivars().get(), 5);
+                assert!(std::ptr::eq(obj.class(), Self::class()));
+                SELF_LOADS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    );
+
+    crate::static_class!(UNIT_SELF_LOADING, UNIT_SELF_LOADING_META = "SidestepUnitSelfLoading", || {
+        let _ = SelfLoading::class();
+    });
+
+    /// `+load` comes after a `define_class!` type's registration, so it
+    /// may use the class, instead of waiting for objc2's once-only
+    /// registration to finish, for ever.
+    #[test]
+    fn load_may_use_its_class() {
+        // SAFETY: a C string.
+        let cls = unsafe { super::objc_getClass(c"SidestepUnitSelfLoading".as_ptr()) };
+        assert!(!cls.is_null());
+        assert_eq!(SELF_LOADS.load(Ordering::SeqCst), 1);
+    }
+
+    static ORDER: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+
+    fn log(what: &'static str) {
+        ORDER.lock().unwrap().push(what);
+    }
+
+    extern "C-unwind" fn base_load(_: &AnyClass, _: Sel) {
+        log("base");
+    }
+
+    extern "C-unwind" fn derived_load(_: &AnyClass, _: Sel) {
+        log("derived");
+    }
+
+    /// Loads another shell, whose `+load` comes once this one returns.
+    extern "C-unwind" fn loading_load(_: &AnyClass, _: Sel) {
+        log("loading: start");
+        // SAFETY: a C string.
+        assert!(!unsafe { super::objc_getClass(c"SidestepUnitLoadedLater".as_ptr()) }.is_null());
+        log("loading: end");
+    }
+
+    extern "C-unwind" fn later_load(_: &AnyClass, _: Sel) {
+        log("later");
+    }
+
+    fn shell_with_load<F: MethodImplementation<Callee = AnyClass>>(name: &CStr, superclass: &AnyClass, load: F) {
+        let mut builder = ClassBuilder::new(name, superclass).unwrap();
+        // SAFETY: +load takes nothing and returns nothing.
+        unsafe { builder.add_class_method(sel!(load), load) };
+        builder.register();
+    }
+
+    crate::static_class!(UNIT_LOAD_BASE, UNIT_LOAD_BASE_META = "SidestepUnitLoadBase", || {
+        shell_with_load(c"SidestepUnitLoadBase", NSObject::class(), base_load as extern "C-unwind" fn(_, _));
+    });
+
+    crate::static_class!(UNIT_LOAD_DERIVED, UNIT_LOAD_DERIVED_META = "SidestepUnitLoadDerived", || {
+        // Loads the superclass's shell, as a framework subclass does.
+        let base = AnyClass::get(c"SidestepUnitLoadBase").unwrap();
+        shell_with_load(c"SidestepUnitLoadDerived", base, derived_load as extern "C-unwind" fn(_, _));
+    });
+
+    crate::static_class!(UNIT_LOADING, UNIT_LOADING_META = "SidestepUnitLoading", || {
+        shell_with_load(c"SidestepUnitLoading", NSObject::class(), loading_load as extern "C-unwind" fn(_, _));
+    });
+
+    crate::static_class!(UNIT_LOADED_LATER, UNIT_LOADED_LATER_META = "SidestepUnitLoadedLater", || {
+        shell_with_load(c"SidestepUnitLoadedLater", NSObject::class(), later_load as extern "C-unwind" fn(_, _));
+    });
+
+    /// Superclasses get `+load` first, and one `+load` runs at a time.
+    #[test]
+    fn loads_go_in_order() {
+        // SAFETY: C strings.
+        unsafe {
+            assert!(!super::objc_getClass(c"SidestepUnitLoadDerived".as_ptr()).is_null());
+            assert!(!super::objc_getClass(c"SidestepUnitLoading".as_ptr()).is_null());
+        }
+        assert_eq!(*ORDER.lock().unwrap(), ["base", "derived", "loading: start", "loading: end", "later"]);
+    }
+}

@@ -9,9 +9,10 @@
 //!
 //! [`saving_entry!`] takes the entry's name and extra symbol directives,
 //! code to run on entry before the frame (which may branch to the local
-//! label `1`), code setting up the call's arguments (the message's are
-//! still in their registers), the function to call, and code placed after
-//! the jump (the code at label `1`).
+//! label `1`, or fall through into the frame), code setting up the call's
+//! arguments (the message's are still in their registers), the function
+//! to call, code placed after the jump (the code at label `1`), and
+//! optionally constants the code refers to as `{name}`.
 
 /// aarch64. The frame: x29/x30, then x0-x8 at sp+16 (x8 holds the address
 /// of a struct returned in memory), then q0-q7 at sp+96. `bti c`
@@ -22,10 +23,11 @@ macro_rules! saving_entry {
     (
         name: $name:literal,
         directives: [$($directive:literal),* $(,)?],
-        before: [$($before:literal),* $(,)?],
+        before: [$($before:expr),* $(,)?],
         setup: [$($setup:literal),* $(,)?],
         call: $callee:path,
-        after: [$($after:literal),* $(,)?] $(,)?
+        after: [$($after:literal),* $(,)?]
+        $(, consts: [$($cname:ident = $cvalue:expr),* $(,)?])? $(,)?
     ) => {
         std::arch::global_asm!(
             ".text",
@@ -73,6 +75,7 @@ macro_rules! saving_entry {
             ".cfi_endproc",
             concat!(".size ", $name, ", . - ", $name),
             callee = sym $callee,
+            $($($cname = const $cvalue,)*)?
         );
     };
 }
@@ -86,10 +89,11 @@ macro_rules! saving_entry {
     (
         name: $name:literal,
         directives: [$($directive:literal),* $(,)?],
-        before: [$($before:literal),* $(,)?],
+        before: [$($before:expr),* $(,)?],
         setup: [$($setup:literal),* $(,)?],
         call: $callee:path,
-        after: [$($after:literal),* $(,)?] $(,)?
+        after: [$($after:literal),* $(,)?]
+        $(, consts: [$($cname:ident = $cvalue:expr),* $(,)?])? $(,)?
     ) => {
         std::arch::global_asm!(
             ".text",
@@ -147,6 +151,7 @@ macro_rules! saving_entry {
             ".cfi_endproc",
             concat!(".size ", $name, ", . - ", $name),
             callee = sym $callee,
+            $($($cname = const $cvalue,)*)?
         );
     };
 }

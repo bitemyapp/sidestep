@@ -59,14 +59,31 @@ pub(crate) struct Slot {
     imp: AtomicUsize,
 }
 
+// `objc_msgSend` (see `msgsend`) probes caches in assembly: it takes the
+// layout of a cache word and of a slot, and the home slot's offset, from
+// these constants, and relies on what these assertions check.
+const _: () = {
+    assert!(size_of::<Slot>() == 1 << SLOT_SHIFT);
+    // The tag first, the implementation right after it, so one load pair
+    // reads both.
+    assert!(std::mem::offset_of!(Slot, tag) == 0 && IMP_OFFSET == size_of::<usize>());
+    // `sel & (word >> (MASK_SHIFT - SLOT_SHIFT))` is `home(sel, mask)`
+    // times the size of a slot only if a selector's low bits are zero.
+    assert!(align_of::<crate::selector::Selector>() >= 1 << SLOT_SHIFT);
+};
+
 /// The table every class starts with: one free slot.
 static EMPTY: [Slot; 1] = [Slot { tag: AtomicUsize::new(0), imp: AtomicUsize::new(0) }];
 
 /// Where the mask starts in a cache word. User-space addresses on the 64-bit
 /// targets Sidestep supports fit below it; a table that doesn't is simply
 /// never installed.
-const MASK_SHIFT: u32 = 48;
-const ADDRESS: usize = (1 << MASK_SHIFT) - 1;
+pub(crate) const MASK_SHIFT: u32 = 48;
+pub(crate) const ADDRESS: usize = (1 << MASK_SHIFT) - 1;
+/// A slot is `1 << SLOT_SHIFT` bytes, and selectors are aligned to that.
+pub(crate) const SLOT_SHIFT: u32 = 4;
+/// Where a slot keeps its implementation.
+pub(crate) const IMP_OFFSET: usize = std::mem::offset_of!(Slot, imp);
 /// The largest table whose mask fits in a cache word.
 const MAX_SLOTS: usize = 1 << (usize::BITS - MASK_SHIFT);
 
@@ -108,10 +125,12 @@ fn unpack(word: *mut Slot) -> (*const Slot, usize) {
     (word.map_addr(|a| a & ADDRESS).cast_const(), word.addr() >> MASK_SHIFT)
 }
 
-/// Where a selector starts probing. Selectors are 16-byte aligned.
+/// Where a selector starts probing. Selectors are aligned to a slot's
+/// size, so their low bits carry nothing. `objc_msgSend` computes this in
+/// assembly, and probes on from it as `probe` does.
 #[inline(always)]
 fn home(sel: usize, mask: usize) -> usize {
-    (sel >> 4) & mask
+    (sel >> SLOT_SHIFT) & mask
 }
 
 /// The cached implementation of `sel` for `cls`, found without locking.

@@ -15,7 +15,7 @@ use crate::selector::known;
 
 crate::static_class!(pub NSOBJECT_CLASS, NSOBJECT_METACLASS = "NSObject", load);
 
-type Id = *mut AnyObject;
+pub(crate) type Id = *mut AnyObject;
 
 fn obj(this: Id) -> *mut Object {
     this.cast()
@@ -44,7 +44,7 @@ fn builtin(sel: crate::selector::Sel) -> Sel {
     unsafe { std::mem::transmute::<crate::selector::Sel, Sel>(sel) }
 }
 
-fn bool(b: bool) -> Bool {
+pub(crate) fn bool(b: bool) -> Bool {
     Bool::new(b)
 }
 
@@ -67,12 +67,12 @@ extern "C-unwind" fn init(this: Id, _: Sel) -> Id {
     this
 }
 
-unsafe extern "C-unwind" fn dealloc(this: Id, _: Sel) {
+pub(crate) unsafe extern "C-unwind" fn dealloc(this: Id, _: Sel) {
     // SAFETY: -dealloc is sent once, when the last reference goes away.
     unsafe { object_dispose(obj(this)) };
 }
 
-unsafe extern "C-unwind" fn retain(this: Id, _: Sel) -> Id {
+pub(crate) unsafe extern "C-unwind" fn retain(this: Id, _: Sel) -> Id {
     // SAFETY: a live, counted receiver. Classes reach this method through
     // the root metaclass and are left alone.
     if !class_of(this).is_meta() {
@@ -81,21 +81,21 @@ unsafe extern "C-unwind" fn retain(this: Id, _: Sel) -> Id {
     this
 }
 
-unsafe extern "C-unwind" fn release(this: Id, _: Sel) {
+pub(crate) unsafe extern "C-unwind" fn release(this: Id, _: Sel) {
     if !class_of(this).is_meta() {
         // SAFETY: the caller owns a reference.
         unsafe { crate::arc::raw_release(obj(this)) };
     }
 }
 
-extern "C-unwind" fn autorelease(this: Id, _: Sel) -> Id {
+pub(crate) extern "C-unwind" fn autorelease(this: Id, _: Sel) -> Id {
     if !class_of(this).is_meta() {
         crate::arc::pool_add(obj(this));
     }
     this
 }
 
-unsafe extern "C-unwind" fn retain_count(this: Id, _: Sel) -> usize {
+pub(crate) unsafe extern "C-unwind" fn retain_count(this: Id, _: Sel) -> usize {
     if class_of(this).is_meta() {
         return usize::MAX;
     }
@@ -103,27 +103,27 @@ unsafe extern "C-unwind" fn retain_count(this: Id, _: Sel) -> usize {
     unsafe { crate::arc::retain_count(obj(this)) }
 }
 
-extern "C-unwind" fn class(this: Id, _: Sel) -> *const AnyClass {
+pub(crate) extern "C-unwind" fn class(this: Id, _: Sel) -> *const AnyClass {
     (class_of(this) as *const Class).cast()
 }
 
-extern "C-unwind" fn superclass(this: Id, _: Sel) -> *const AnyClass {
+pub(crate) extern "C-unwind" fn superclass(this: Id, _: Sel) -> *const AnyClass {
     class_of(this).superclass().map_or(std::ptr::null(), |c| (c as *const Class).cast())
 }
 
-extern "C-unwind" fn self_(this: Id, _: Sel) -> Id {
+pub(crate) extern "C-unwind" fn self_(this: Id, _: Sel) -> Id {
     this
 }
 
-extern "C-unwind" fn is_kind_of_class(this: Id, _: Sel, cls: *const AnyClass) -> Bool {
+pub(crate) extern "C-unwind" fn is_kind_of_class(this: Id, _: Sel, cls: *const AnyClass) -> Bool {
     bool(!cls.is_null() && class_of(this).is_subclass_of(as_class(cls)))
 }
 
-extern "C-unwind" fn is_member_of_class(this: Id, _: Sel, cls: *const AnyClass) -> Bool {
+pub(crate) extern "C-unwind" fn is_member_of_class(this: Id, _: Sel, cls: *const AnyClass) -> Bool {
     bool(std::ptr::eq(class_of(this), cls.cast::<Class>()))
 }
 
-extern "C-unwind" fn responds_to_selector(this: Id, _: Sel, sel: Sel) -> Bool {
+pub(crate) extern "C-unwind" fn responds_to_selector(this: Id, _: Sel, sel: Sel) -> Bool {
     bool(lookup_imp(class_of(this), raw(sel)).is_some())
 }
 
@@ -142,11 +142,11 @@ extern "C-unwind" fn conforms_to_protocol(this: Id, _: Sel, proto: *const AnyPro
     bool(conforms(Some(class_of(this).instance_class()), proto))
 }
 
-extern "C-unwind" fn hash(this: Id, _: Sel) -> usize {
+pub(crate) extern "C-unwind" fn hash(this: Id, _: Sel) -> usize {
     this as usize
 }
 
-extern "C-unwind" fn is_equal(this: Id, _: Sel, other: Id) -> Bool {
+pub(crate) extern "C-unwind" fn is_equal(this: Id, _: Sel, other: Id) -> Bool {
     bool(this == other)
 }
 
@@ -154,16 +154,15 @@ extern "C-unwind" fn is_proxy(_: Id, _: Sel) -> Bool {
     bool(false)
 }
 
-extern "C-unwind" fn zone(_: Id, _: Sel) -> *mut NSZone {
+pub(crate) extern "C-unwind" fn zone(_: Id, _: Sel) -> *mut NSZone {
     std::ptr::null_mut()
 }
 
-/// `-description`: `<ClassName: 0x…>`, autoreleased. Strings belong to
+/// A new `NSString` holding `text`, autoreleased. Strings belong to
 /// Foundation, so the string comes from whichever class is registered as
-/// `NSString`; before one is, the description is nil.
-unsafe extern "C-unwind" fn description(this: Id, _: Sel) -> Id {
+/// `NSString`; before one is, there is none (nil).
+fn string(text: &str) -> Id {
     let Some(string_class) = crate::class::lookup_name(c"NSString") else { return std::ptr::null_mut() };
-    let text = format!("<{}: {:p}>", class_of(this).name().to_string_lossy(), this);
     // SAFETY: +alloc and -initWithBytes:length:encoding: (UTF-8 is 4, an
     // int in this ABI, see docs/abi.md) are NSString's.
     unsafe {
@@ -175,6 +174,30 @@ unsafe extern "C-unwind" fn description(this: Id, _: Sel) -> Id {
         let imp: unsafe extern "C-unwind" fn(Id, Sel, *const c_void, usize, i32) -> Id = std::mem::transmute(imp);
         crate::arc::objc_autorelease(imp(string, sel, text.as_ptr().cast(), text.len(), 4).cast()).cast()
     }
+}
+
+/// `-description`: `<ClassName: 0x…>`, autoreleased.
+pub(crate) unsafe extern "C-unwind" fn description(this: Id, _: Sel) -> Id {
+    string(&format!("<{}: {:p}>", class_of(this).name().to_string_lossy(), this))
+}
+
+/// `-debugDescription`: whatever `-description` says.
+pub(crate) unsafe extern "C-unwind" fn debug_description(this: Id, _: Sel) -> Id {
+    // SAFETY: -description takes nothing and returns an object.
+    unsafe { send0(this, sel!(description)) }
+}
+
+/// `+description`: the class's name.
+pub(crate) unsafe extern "C-unwind" fn class_description(cls: *const AnyClass, _: Sel) -> Id {
+    string(&as_class(cls).name().to_string_lossy())
+}
+
+/// `+debugDescription`: whatever `+description` says, which a class may
+/// override.
+pub(crate) unsafe extern "C-unwind" fn class_debug_description(cls: *const AnyClass, cmd: Sel) -> Id {
+    // SAFETY: a class is an object, and -description takes nothing and
+    // returns an object.
+    unsafe { debug_description(cls.cast_mut().cast(), cmd) }
 }
 
 unsafe extern "C-unwind" fn copy(this: Id, _: Sel) -> Id {
@@ -197,7 +220,7 @@ unsafe extern "C-unwind" fn mutable_copy(this: Id, _: Sel) -> Id {
     }
 }
 
-extern "C-unwind" fn does_not_recognize_selector(this: Id, _: Sel, sel: Sel) {
+pub(crate) extern "C-unwind" fn does_not_recognize_selector(this: Id, _: Sel, sel: Sel) {
     let cls = class_of(this);
     let (prefix, what) = if cls.is_meta() { ('+', "class") } else { ('-', "instance") };
     panic!(
@@ -206,13 +229,13 @@ extern "C-unwind" fn does_not_recognize_selector(this: Id, _: Sel, sel: Sel) {
     );
 }
 
-unsafe extern "C-unwind" fn perform_selector(this: Id, _: Sel, sel: Sel) -> Id {
+pub(crate) unsafe extern "C-unwind" fn perform_selector(this: Id, _: Sel, sel: Sel) -> Id {
     // SAFETY: -performSelector: requires an object-returning, no-argument
     // method.
     unsafe { send0(this, sel) }
 }
 
-unsafe extern "C-unwind" fn perform_selector_with(this: Id, _: Sel, sel: Sel, a: Id) -> Id {
+pub(crate) unsafe extern "C-unwind" fn perform_selector_with(this: Id, _: Sel, sel: Sel, a: Id) -> Id {
     // SAFETY: the method takes one object and returns an object.
     unsafe {
         let imp = method_for(class_of(this), raw(sel));
@@ -221,7 +244,7 @@ unsafe extern "C-unwind" fn perform_selector_with(this: Id, _: Sel, sel: Sel, a:
     }
 }
 
-unsafe extern "C-unwind" fn perform_selector_with_with(this: Id, _: Sel, sel: Sel, a: Id, b: Id) -> Id {
+pub(crate) unsafe extern "C-unwind" fn perform_selector_with_with(this: Id, _: Sel, sel: Sel, a: Id, b: Id) -> Id {
     // SAFETY: the method takes two objects and returns an object.
     unsafe {
         let imp = method_for(class_of(this), raw(sel));
@@ -235,7 +258,7 @@ unsafe extern "C-unwind" fn method_for_selector(this: Id, _: Sel, sel: Sel) -> O
     Some(unsafe { method_for(class_of(this), raw(sel)) })
 }
 
-extern "C-unwind" fn forwarding_target(_: Id, _: Sel, _sel: Sel) -> Id {
+pub(crate) extern "C-unwind" fn forwarding_target(_: Id, _: Sel, _sel: Sel) -> Id {
     std::ptr::null_mut()
 }
 
@@ -248,11 +271,11 @@ pub(crate) fn is_default_forwarding_target(imp: Imp) -> bool {
 
 // Class methods.
 
-extern "C-unwind" fn initialize(_: &AnyClass, _: Sel) {}
+pub(crate) extern "C-unwind" fn initialize(_: &AnyClass, _: Sel) {}
 
 /// `+alloc` is `+allocWithZone:` with no zone, so a class overriding only
 /// the latter still has every allocation go through it.
-unsafe extern "C-unwind" fn alloc(cls: *const AnyClass, _: Sel) -> Id {
+pub(crate) unsafe extern "C-unwind" fn alloc(cls: *const AnyClass, _: Sel) -> Id {
     if as_class(cls).flags() & CUSTOM_ALLOC != 0 {
         let sel = builtin(known().alloc_with_zone);
         // SAFETY: +allocWithZone: takes a zone and returns a +1 object.
@@ -266,7 +289,7 @@ unsafe extern "C-unwind" fn alloc(cls: *const AnyClass, _: Sel) -> Id {
     unsafe { class_createInstance(cls.cast(), 0).cast() }
 }
 
-unsafe extern "C-unwind" fn alloc_with_zone(cls: *const AnyClass, _: Sel, _zone: *mut NSZone) -> Id {
+pub(crate) unsafe extern "C-unwind" fn alloc_with_zone(cls: *const AnyClass, _: Sel, _zone: *mut NSZone) -> Id {
     // SAFETY: as above.
     unsafe { class_createInstance(cls.cast(), 0).cast() }
 }
@@ -286,19 +309,19 @@ unsafe extern "C-unwind" fn new(cls: *const AnyClass, _: Sel) -> Id {
     unsafe { send0(obj, builtin(known().init)) }
 }
 
-extern "C-unwind" fn class_self(cls: *const AnyClass, _: Sel) -> *const AnyClass {
+pub(crate) extern "C-unwind" fn class_self(cls: *const AnyClass, _: Sel) -> *const AnyClass {
     cls
 }
 
-extern "C-unwind" fn class_superclass(cls: *const AnyClass, _: Sel) -> *const AnyClass {
+pub(crate) extern "C-unwind" fn class_superclass(cls: *const AnyClass, _: Sel) -> *const AnyClass {
     as_class(cls).superclass().map_or(std::ptr::null(), |c| (c as *const Class).cast())
 }
 
-extern "C-unwind" fn instances_respond_to_selector(cls: *const AnyClass, _: Sel, sel: Sel) -> Bool {
+pub(crate) extern "C-unwind" fn instances_respond_to_selector(cls: *const AnyClass, _: Sel, sel: Sel) -> Bool {
     bool(lookup_imp(as_class(cls), raw(sel)).is_some())
 }
 
-extern "C-unwind" fn is_subclass_of_class(cls: *const AnyClass, _: Sel, other: *const AnyClass) -> Bool {
+pub(crate) extern "C-unwind" fn is_subclass_of_class(cls: *const AnyClass, _: Sel, other: *const AnyClass) -> Bool {
     bool(!other.is_null() && as_class(cls).is_subclass_of(as_class(other)))
 }
 
@@ -311,7 +334,11 @@ unsafe extern "C-unwind" fn instance_method_for_selector(cls: *const AnyClass, _
     Some(unsafe { method_for(as_class(cls), raw(sel)) })
 }
 
-extern "C-unwind" fn class_conforms_to_protocol(cls: *const AnyClass, _: Sel, proto: *const AnyProtocol) -> Bool {
+pub(crate) extern "C-unwind" fn class_conforms_to_protocol(
+    cls: *const AnyClass,
+    _: Sel,
+    proto: *const AnyProtocol,
+) -> Bool {
     bool(conforms(Some(as_class(cls)), proto))
 }
 
@@ -339,6 +366,7 @@ fn load() {
         builder.add_method(sel!(isProxy), is_proxy as extern "C-unwind" fn(_, _) -> _);
         builder.add_method(sel!(zone), zone as extern "C-unwind" fn(_, _) -> _);
         builder.add_method(sel!(description), description as unsafe extern "C-unwind" fn(_, _) -> _);
+        builder.add_method(sel!(debugDescription), debug_description as unsafe extern "C-unwind" fn(_, _) -> _);
         builder.add_method(sel!(copy), copy as unsafe extern "C-unwind" fn(_, _) -> _);
         builder.add_method(sel!(mutableCopy), mutable_copy as unsafe extern "C-unwind" fn(_, _) -> _);
         builder
@@ -359,6 +387,11 @@ fn load() {
         builder.add_class_method(sel!(allocWithZone:), alloc_with_zone as unsafe extern "C-unwind" fn(_, _, _) -> _);
         builder.add_class_method(sel!(new), new as unsafe extern "C-unwind" fn(_, _) -> _);
         builder.add_class_method(sel!(class), class_self as extern "C-unwind" fn(_, _) -> _);
+        builder.add_class_method(sel!(description), class_description as unsafe extern "C-unwind" fn(_, _) -> _);
+        builder.add_class_method(
+            sel!(debugDescription),
+            class_debug_description as unsafe extern "C-unwind" fn(_, _) -> _,
+        );
         builder.add_class_method(sel!(superclass), class_superclass as extern "C-unwind" fn(_, _) -> _);
         builder.add_class_method(
             sel!(instancesRespondToSelector:),

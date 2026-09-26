@@ -27,6 +27,7 @@ mod dispatch;
 mod error;
 mod file_manager;
 mod geometry;
+mod invocation;
 mod json;
 mod locale;
 mod lock;

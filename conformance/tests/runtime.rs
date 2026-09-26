@@ -437,3 +437,64 @@ fn messages_race_method_changes() {
         sender.join().unwrap();
     }
 }
+
+static LOADS: AtomicUsize = AtomicUsize::new(0);
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "SidestepTestLoad"]
+    struct LoadCounter;
+
+    impl LoadCounter {
+        #[unsafe(method(load))]
+        fn load() {
+            LOADS.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+);
+
+/// `+load` goes to the classes of images as they load; a class defined at
+/// run time, as `define_class!` does, gets none, and neither registering
+/// it nor messaging it sends one.
+#[test]
+fn load_is_not_sent_to_classes_made_at_run_time() {
+    let cls = LoadCounter::class();
+    let _: *const AnyClass = unsafe { msg_send![cls, class] };
+    assert_eq!(LOADS.load(Ordering::SeqCst), 0);
+}
+
+define_class!(
+    /// Describes its class in its own words.
+    #[unsafe(super(NSObject))]
+    #[name = "SidestepTestDescribed"]
+    struct Described;
+
+    impl Described {
+        #[unsafe(method_id(description))]
+        fn class_description() -> Retained<objc2_foundation::NSString> {
+            objc2_foundation::NSString::from_str("described in its own words")
+        }
+    }
+);
+
+/// A class describes itself by its name; a debug description, a class's
+/// or an object's, is its description.
+#[test]
+fn descriptions() {
+    use objc2_foundation::NSString;
+    autoreleasepool(|_| {
+        let name: Retained<NSString> = unsafe { msg_send![Described::class(), debugDescription] };
+        assert_eq!(name.to_string(), "described in its own words");
+        let name: Retained<NSString> = unsafe { msg_send![NSObject::class(), description] };
+        assert_eq!(name.to_string(), "NSObject");
+        let name: Retained<NSString> = unsafe { msg_send![Counter::class(), description] };
+        assert_eq!(name.to_string(), "SidestepTestCounter");
+        let name: Retained<NSString> = unsafe { msg_send![Counter::class(), debugDescription] };
+        assert_eq!(name.to_string(), "SidestepTestCounter");
+        let (obj, _) = counter();
+        let description: Retained<NSString> = unsafe { msg_send![&*obj, description] };
+        let debug: Retained<NSString> = unsafe { msg_send![&*obj, debugDescription] };
+        assert!(description.to_string().starts_with("<SidestepTestCounter: 0x"), "{description}");
+        assert_eq!(debug.to_string(), description.to_string());
+    });
+}

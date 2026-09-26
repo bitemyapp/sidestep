@@ -32,6 +32,21 @@ impl Method {
         // SAFETY: leaked C string.
         unsafe { CStr::from_ptr(self.types) }
     }
+
+    pub(crate) fn sel(&self) -> Sel {
+        self.sel
+    }
+
+    /// Replace the implementation of a method of `cls`, a class being
+    /// registered: nothing has cached it and it has no subclasses yet, so
+    /// only its own cache changes, and registration works out its
+    /// override flags afterwards. `method_setImplementation` would empty
+    /// every class's cache.
+    pub(crate) fn replace_before_registration(&self, cls: &'static Class, imp: Imp) {
+        debug_assert!(!cls.is_loaded());
+        self.imp.store(imp as *mut c_void, Ordering::Release);
+        reset_cache(cls);
+    }
 }
 
 fn rr_selectors() -> [Sel; 4] {
@@ -83,7 +98,7 @@ pub(crate) fn own_overrides(cls: &'static Class) -> u32 {
     flags
 }
 
-fn add_method(cls: &'static Class, sel: Sel, imp: Imp, types: &CStr) -> Option<&'static Method> {
+pub(crate) fn add_method(cls: &'static Class, sel: Sel, imp: Imp, types: &CStr) -> Option<&'static Method> {
     let mut table = cls.rt().methods.write().unwrap();
     if table.by_sel.contains_key(&(sel as usize)) {
         return None;

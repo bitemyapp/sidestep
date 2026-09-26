@@ -18,6 +18,17 @@ tables (weak references, associated objects, `@synchronized`) sharded so
 threads don't contend. Allocating and freeing an object costs about 4 ns
 beyond `malloc` and `free`.
 
+Then: categories linked into the program (`category!`), attached before a
+class's first use; `NSMethodSignature`, `NSInvocation` and forwarding
+through `-forwardInvocation:`, with calls laid out for the aarch64 and
+x86_64 calling conventions; `NSProxy`; `objc_msgSend` probing the method
+cache in assembly (0.94 ns, against Apple's 1.17); `+load` for framework
+classes; methods made from blocks without writable-then-executable
+memory.
+
+- Categories' own `+load`; `long double` returns through `NSInvocation` on
+  x86_64 (the x87 stack).
+
 ## 1. Foundation core
 
 Done so far: constant strings from static memory, an immutable
@@ -72,8 +83,6 @@ numbers; `NSAttributedString` and `NSMutableAttributedString`;
   dispatch blocks (`dispatch_block_create`).
 - Remove sidestep-foundation's `collections` feature gates (the feature is
   on by default now that the collections exist).
-- `-forwardInvocation:`, once `NSInvocation` exists (the runtime forwards
-  through `-forwardingTargetForSelector:` already).
 
 ## 2. AppKit skeleton
 

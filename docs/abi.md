@@ -21,7 +21,8 @@ untested.
 | Weak references | `objc_storeWeak`, `objc_initWeak`, `objc_destroyWeak`, `objc_loadWeak`, `objc_loadWeakRetained`, `objc_copyWeak`, `objc_moveWeak` |
 | Other | `objc_setAssociatedObject`, `objc_getAssociatedObject`, `objc_removeAssociatedObjects` (every association policy), `objc_sync_enter`, `objc_sync_exit`, `objc_enumerationMutation`, `objc_setEnumerationMutationHandler`, `objc_exception_throw`, `imp_implementationWithBlock`, `imp_getBlock`, `imp_removeBlock` |
 | Blocks | `_Block_copy`, `_Block_release`, `_Block_object_assign`, `_Block_object_dispose`, `_Block_has_signature`, `_Block_signature`, and the classes `_NSConcreteStackBlock`, `_NSConcreteMallocBlock`, `_NSConcreteGlobalBlock` |
-| Class symbols | `._OBJC_CLASS_<Name>` and `._OBJC_METACLASS_<Name>` for `NSObject` (runtime) and each Foundation and AppKit class, each also listed in the `sidestep_classes` linker section |
+| Class symbols | `._OBJC_CLASS_<Name>` and `._OBJC_METACLASS_<Name>` for `NSObject` and `NSProxy` (runtime) and each Foundation and AppKit class, each also listed in the `sidestep_classes` linker section |
+| Categories | `._SIDESTEP_CATEGORY_<Class>_<Name>` for each category a framework links, also listed in the `sidestep_categories` linker section |
 | libdispatch | `dispatch_get_global_queue`, `_dispatch_main_q`, `_dispatch_queue_attr_concurrent`, `dispatch_queue_create(_with_target)`, `dispatch_queue_attr_make_*`, `dispatch_(barrier_)async(_f)`, `dispatch_(barrier_)sync(_f)`, `dispatch_(barrier_)async_and_wait(_f)`, `dispatch_apply(_f)`, `dispatch_after(_f)`, `dispatch_once(_f)`, `dispatch_group_*`, `dispatch_semaphore_*`, `dispatch_source_*` (data add/or/replace, timer, vnode), `dispatch_time`, `dispatch_walltime`, `dispatch_retain`/`release`/`suspend`/`resume`/`activate`, `dispatch_set_context`/`get_context`/`set_finalizer_f`/`set_target_queue`, `dispatch_queue_set_specific`/`get_specific`, `dispatch_assert_queue*`, `dispatch_main` |
 | CoreFoundation | Retain/release/equality (`CFRetain`, `CFRelease`, `CFAutorelease`, `CFEqual`, `CFHash`, `CFGetTypeID`, `CFCopyDescription`, `CFShow`); the run loop (`CFRunLoop*`, `CFRunLoopTimer*`, `CFRunLoopObserver*`, `kCFRunLoopDefaultMode`, `kCFRunLoopCommonModes`); and toll-free `CFString`, `CFData`, `CFDate`, `CFError`, `CFURL`, `CFDictionary`, `CFPreferences`, with `CFArray`, `CFNumber` and mutable dictionaries under the `collections` feature; the `kCFAllocator*` constants and the `kCFType…CallBacks` |
 | Foundation functions | `NSUnionRange`, `NSIntersectionRange`, `NSStringFromRange`, `NSRangeFromString`; the `NSGeometry` functions (`NSEqualRects`, `NSInsetRect`, `NSIntegralRectWithOptions`, `NSDivideRect`, `NSPointInRect`, `NSStringFromRect`, `NSRectFromString` and the rest objc2-foundation declares); `NSHomeDirectory(ForUser)`, `NSTemporaryDirectory`, `NSUserName`, `NSFullUserName`, `NSOpenStepRootDirectory`, `NSSearchPathForDirectoriesInDomains` (collections), `NSClassFromString`, `NSStringFromClass`, `NSSelectorFromString`, `NSStringFromSelector`, `NSProtocolFromString`, `NSStringFromProtocol`, and the string constants (`NSDefaultRunLoopMode`, error domains and keys, file attribute and URL resource keys, defaults domains, notification names) |
@@ -54,6 +55,26 @@ Specification.
 - `sidestep_classes` is a section of pointers, one to each static class
   shell, bracketed by the linker's `__start_sidestep_classes` and
   `__stop_sidestep_classes`. `static_class!` writes the entries.
+- `sidestep_categories` is a section of `LinkedCategory` entries (a class
+  name, a category name and a function), bracketed the same way and
+  written by `category!`. `objc_registerClassPair` runs a class's
+  categories before it marks the class loaded. The runtime's own entry,
+  which names no class, keeps the section present. A panic in a
+  category's function ends the program: it runs inside
+  `objc_registerClassPair`, which objc2 declares as never unwinding. So
+  does one in `+load` when `objc_getClass` loaded the class; one sent
+  while looking up a message unwinds into the sender.
+- Selectors a class doesn't implement resolve to the forwarding
+  trampoline, as Apple's resolve to `_objc_msgForward`, once Foundation
+  has installed its handler for `-forwardInvocation:`; before that (a
+  program without Foundation), only for classes that override
+  `-forwardingTargetForSelector:`.
+- `NSMethodSignature` reads encodings as Apple's Foundation does: offsets
+  are ignored, qualifiers kept, `l` is 4 bytes, and unions, bit-fields,
+  `?`, `j` and `A` raise. `long double` (`D`) is 16 bytes, as on Linux;
+  on x86_64 a method returning one can't be invoked or forwarded.
+  Signatures compare as Foundation's do: an object type without a class
+  name equals one with, and a block type without a signature one with.
 - The main thread is the one whose thread id equals the process id.
 
 ## Deliberate differences from libobjc2
@@ -83,18 +104,23 @@ Specification.
   pool.
 - `imp_removeBlock` on an implementation already removed returns NO (Apple's
   runtime crashes).
+- `+load` goes to a framework class that implements it when the class's
+  static shell loads, on first use, rather than before `main`. Classes
+  registered at run time get none, as on Apple's runtime; categories have
+  no `+load` (their functions run when their class registers).
+- `NSInvocation` passes narrow integer arguments sign- or zero-extended to
+  a whole register; Apple's leaves them as they are.
+- `-methodSignatureForSelector:` describes a class's own method before a
+  protocol's declaration of it; Apple's Foundation prefers the
+  protocol's. They differ only for a method implemented with other types
+  than its protocol declares.
 
 ## Known gaps
 
-- Forwarding stops at `-forwardingTargetForSelector:`: `-forwardInvocation:`
-  and `-methodSignatureForSelector:` need `NSInvocation` and
-  `NSMethodSignature` from Foundation, and an invocation needs to call a
-  method with arguments rebuilt from a signature.
 - objc2's `exception` feature: its helper crate compiles Objective-C with
   Clang at build time, which Sidestep's builds don't have, and catching
   would need a GNUstep-style personality routine.
-- `+load`.
-- The forwarding trampoline, `imp_implementationWithBlock`,
+- The forwarding trampoline, `NSInvocation`, `imp_implementationWithBlock`,
   `objc_msgSend` and the return-value handoff exist for aarch64 and x86_64
   only. On x86_64, `imp_implementationWithBlock` takes a block as returning
   a struct in memory when its flags have both `BLOCK_USE_STRET` and
@@ -102,12 +128,10 @@ Specification.
   block that way, so on x86_64 (as on Apple's runtime) a block2 block
   returning a struct in memory can't be used as a method; its other blocks,
   global ones included, can.
-- `imp_implementationWithBlock` makes pages executable, which a process
-  denied that (systemd's `MemoryDenyWriteExecute=`, for one) can't do; it
-  panics there.
-- `objc_msgSend` saves the argument registers and calls `objc_msg_lookup`
-  rather than probing the cache in assembly, so it costs a few nanoseconds
-  more than objc2's own sends.
+- `imp_implementationWithBlock` maps its stubs from an anonymous file; a
+  kernel without `memfd_create` (before 3.17), or one refusing executable
+  anonymous files (`vm.memfd_noexec=2`), makes pages executable after
+  writing them instead, which a process denied that can't do.
 - libdispatch: no `dispatch_io_*`, `dispatch_read`/`write`,
   `dispatch_data_*`, `dispatch_block_*` or workloops; dispatch2 declares
   them, so an app calling one fails to link.

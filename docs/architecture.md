@@ -80,6 +80,21 @@ upstream crate exports under a fixed name, and each shell is exported as
 entries. `objc_getClass("NSTimer")`, which `NSClassFromString` rests on,
 works in a program that never mentions `NSTimer`.
 
+**Categories.** A framework adds methods to a class it doesn't define
+(Foundation's forwarding methods on `NSObject`, AppKit's drawing methods
+on `NSString`) with `sidestep_runtime::category!`, which puts the class's
+name and a function adding the methods in a sibling section,
+`sidestep_categories`. `objc_registerClassPair` runs a class's categories
+before it marks the class loaded, and other threads wait for loading, so
+the methods are there before anything can message or inspect the class,
+whichever class a program uses first. A category's method replaces one of
+the class's own, as on Apple's runtime, without emptying other classes'
+method caches, since nothing has used the class yet. Two categories adding
+one selector to a class panic in debug builds, and debug builds check a
+category's encodings against the methods they override, as objc2 does for
+subclasses. Such a panic ends the program with its message: registration
+is a C function that objc2 declares as never unwinding.
+
 ## Objects
 
 Every object is preceded by a 16-byte header holding an atomic word: the retain
@@ -158,8 +173,18 @@ trampoline is involved, so dispatch is portable Rust. Small stubs for
 aarch64 and x86_64 serve the rest: forwarding (below) and `objc_msgSend`
 for code that calls it directly, which share one register-saving frame
 (`trampoline.rs`), the autorelease handoff's entry points, and methods made
-from blocks with `imp_implementationWithBlock`, whose stubs are written
-into pages made executable only once written.
+from blocks with `imp_implementationWithBlock`, whose stubs are written to
+an anonymous file (`memfd_create`) mapped read-only and executable, so a
+process denied writable-then-executable memory (systemd's
+`MemoryDenyWriteExecute=`) can still make them.
+
+`objc_msgSend` probes the method cache in assembly, as the lookup below
+does, and on a hit jumps to the implementation with the argument
+registers untouched; only a miss saves them and calls `objc_msg_lookup`.
+Called directly it costs 0.94 ns (against Apple's 1.17 ns on the same
+Mac). The assembly takes the cache's layout from `cache.rs`'s constants,
+which compile-time assertions tie to the slot type, and a unit test
+counts the messages that reach the slow path.
 
 The lookup is built to cost less than Apple's `objc_msgSend`. Each class
 keeps its method cache in one word: a pointer to a table of slots with the
@@ -196,27 +221,71 @@ runtime raises, `-[Class selector]: unrecognized selector sent to instance
 
 **Forwarding.** Since the caller calls the implementation with the receiver
 it already has, sending a message on to another object means changing the
-receiver on the way. When a class overrides `-forwardingTargetForSelector:`
-(or `+forwardingTargetForSelector:`), selectors it doesn't implement resolve
-to a trampoline of a few dozen instructions, one per architecture (aarch64
-and x86_64, in `forward.rs`): it saves the argument registers, asks the
-receiver for its target, puts the target where the receiver was, restores
-the rest and jumps to the target's implementation. Arguments, stack
-arguments and struct returns pass through untouched; on x86_64, where a
-struct returned in memory moves the receiver to the second register, the
-trampoline tells the two cases apart by whether that register holds a
-selector (a lock-free range check: selectors live in a few chunks, each
-twice the size of the one before). The trampoline is cached like a method,
-so `-performSelector:withObject:` and `-methodForSelector:` find it as a
-message does, but the target is asked for on every message. The
-trampolines carry unwind tables, so a panic in
-`-forwardingTargetForSelector:` or from an unrecognized selector unwinds
-through them. `-forwardInvocation:` is not supported: it needs
-`NSInvocation`.
+receiver on the way. Selectors a class doesn't implement resolve to a
+trampoline of a few dozen instructions, one per architecture (aarch64 and
+x86_64, in `forward.rs`), as Apple's resolve to `_objc_msgForward`: it saves
+the argument registers and asks Rust what to do. If the receiver's class
+overrides `-forwardingTargetForSelector:` (or
+`+forwardingTargetForSelector:`) and it names another object, the
+trampoline puts the target where the receiver was, restores the rest and
+jumps to the target's implementation. Arguments, stack arguments and struct
+returns pass through untouched; on x86_64, where a struct returned in
+memory moves the receiver to the second register, the trampoline tells the
+two cases apart by whether that register holds a selector (a lock-free
+range check: selectors live in a few chunks, each twice the size of the one
+before). The trampoline is cached like a method, so
+`-performSelector:withObject:` and `-methodForSelector:` find it as a
+message does, but the target is asked for on every message.
+
+Otherwise the message goes to `-forwardInvocation:`. The runtime can't
+make an `NSInvocation`, so Foundation's category on `NSObject` installs a
+handler that the trampoline calls with the saved registers and the
+sender's stack arguments. It asks the receiver for
+`-methodSignatureForSelector:` (nil means the selector is unrecognized),
+makes an invocation whose arguments are read out of the registers as the
+signature lays them out, sends `-forwardInvocation:`, and writes the
+invocation's return value into the saved registers; the trampoline
+restores them and returns to the sender. `NSInvocation` calls the other way
+through the same layout: it loads a block of registers and a stack area and
+calls through a small assembly routine. The layouts (`call.rs`) follow
+Linux's calling conventions: on aarch64, structs of up to four floats or
+doubles in floating-point registers, other structs of up to 16 bytes in
+integer registers and larger ones by address; on x86_64, structs of up to
+16 bytes classified by eightbyte, larger ones copied onto the stack, and a
+struct returned in memory through a hidden first argument. A message
+forwarded to `-forwardInvocation:` costs about 90 ns and an `-invoke` 17 ns
+(Apple's: 390 ns and 72 ns). The trampolines carry unwind tables, so a
+panic in `-forwardingTargetForSelector:`, `-forwardInvocation:` or from an
+unrecognized selector unwinds through them.
+
+`-methodSignatureForSelector:` also describes the instance methods that
+the protocols a class adopts declare, implemented or not, so a forwarder
+gets the optional protocol messages nobody implements (a multicast
+delegate, say). An invocation told to `-retainArguments` keeps every
+object, block copy and C string copy it has held, replaced ones too,
+until it goes, as Foundation's does; a forwarded message's invocation
+that holds its return value that way is autoreleased rather than freed,
+so the sender gets the value alive.
+
+`NSProxy` is a root class of its own, in the runtime beside `NSObject`,
+with the same implementations of reference counting and identity. It
+forwards everything else, as Apple's does, and its own
+`-methodSignatureForSelector:` and `-forwardInvocation:` raise.
+`-isKindOfClass:`, `-isMemberOfClass:`, `-respondsToSelector:` and
+`-conformsToProtocol:` are methods of its own, as on Apple's, so objc2's
+debug-build check that a receiver has a method passes, but their
+implementation is a second trampoline that goes straight to
+`-forwardInvocation:`, never to a forwarding target.
 
 `+initialize` is sent lazily before a class's first message, superclasses
 first, with messages from inside `+initialize` on the same thread allowed
-through.
+through. `+load` goes to a framework class that implements it when its
+static shell loads (Apple's runtime sends it to an image's classes before
+`main`); classes made at run time, as `define_class!` makes them, get none
+on either runtime. It waits until the shell's loader has returned, since
+objc2 registers a `define_class!` type once only and a `+load` using its
+class there would wait for itself; superclasses go first, one `+load` at
+a time.
 
 ## Foundation collections
 
