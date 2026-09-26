@@ -35,3 +35,10 @@ swash = { version = "0.2.10", default-features = false, features = ["std", "scal
 icu_provider = { version = "2.1", default-features = false, features = ["logging"] }
 # Which characters are emoji, to draw them in color (compiled into the binary).
 icu_properties = { version = "2.1", default-features = false, features = ["compiled_data"] }
+
+# Controls (src/controls): the control and cell classes' bindings, and the
+# Foundation types their values use. A table of its own; Cargo unifies these
+# features with the ones above.
+[target.'cfg(all(not(target_vendor = "apple")))'.dependencies]
+objc2-foundation = { workspace = true, features = ["NSValue", "NSAttributedString", "NSArray", "NSObjCRuntime"] }
+objc2-app-kit = { workspace = true, features = ["NSControl", "NSActionCell", "NSButton", "NSButtonCell", "NSTextField", "NSTextFieldCell", "NSSecureTextField", "NSSearchField", "NSSearchFieldCell", "NSBox", "NSProgressIndicator", "NSSegmentedControl", "NSSegmentedCell", "NSStepper", "NSStepperCell", "NSSlider", "NSSliderCell", "NSSwitch", "NSUserInterfaceLayout", "NSLayoutConstraint"] }

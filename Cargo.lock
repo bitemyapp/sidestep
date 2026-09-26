@@ -179,6 +179,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "controlbench"
+version = "0.0.0"
+dependencies = [
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "sidestep",
+]
+
+[[package]]
+name = "controls-gallery"
+version = "0.0.0"
+dependencies = [
+ "block2",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "sidestep",
+]
+
+[[package]]
 name = "crossbeam-utils"
 version = "0.8.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -694,6 +694,13 @@ define_class!(
         fn terminate(&self, _sender: Option<&AnyObject>) {
             terminate(self);
         }
+
+        /// On, as on GNOME, unless `SIDESTEP_FULL_KEYBOARD_ACCESS=0` (see
+        /// `controls::focus`).
+        #[unsafe(method(isFullKeyboardAccessEnabled))]
+        fn is_full_keyboard_access_enabled(&self) -> bool {
+            crate::controls::focus::full_keyboard_access()
+        }
     }
 
     unsafe impl NSObjectProtocol for NSApplicationImpl {}

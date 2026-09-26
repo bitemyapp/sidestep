@@ -33,6 +33,15 @@ objc2-foundation = { workspace = true, features = ["NSRange", "NSAttributedStrin
 name = "appkit_input"
 harness = false
 
+# Controls, without a window and with one that is never shown.
+[[test]]
+name = "controls"
+harness = false
+
+[[test]]
+name = "control_events"
+harness = false
+
 [[test]]
 name = "appkit_keybindings"
 harness = false
@@ -71,3 +80,8 @@ harness = false
 [features]
 default = ["collections"]
 collections = []
+
+# The control classes (controls, control_events), in a table of their own;
+# Cargo unifies these features with the ones above.
+[target.'cfg(all())'.dev-dependencies]
+objc2-app-kit = { workspace = true, features = ["NSControl", "NSCell", "NSActionCell", "NSButton", "NSButtonCell", "NSTextField", "NSTextFieldCell", "NSSecureTextField", "NSSearchField", "NSSearchFieldCell", "NSBox", "NSProgressIndicator", "NSSegmentedControl", "NSSegmentedCell", "NSStepper", "NSStepperCell", "NSSlider", "NSSliderCell", "NSSwitch", "NSLayoutConstraint", "NSUserInterfaceLayout", "NSText", "NSParagraphStyle"] }

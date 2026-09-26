@@ -31,6 +31,7 @@ pub(crate) fn load_shell<T: ClassType>() {
 mod app;
 mod backend;
 mod clipboard;
+mod controls;
 mod cursor;
 mod desktop;
 mod event;
@@ -48,6 +49,7 @@ mod string_drawing;
 #[cfg(test)]
 mod test_objects;
 mod text;
+mod theme;
 mod tracking;
 mod views;
 mod window;
