@@ -29,6 +29,7 @@ pub(crate) fn load_shell<T: ClassType>() {
 }
 
 mod app;
+mod autolayout;
 mod backend;
 mod category;
 mod clipboard;
@@ -55,6 +56,7 @@ mod string_drawing;
 mod test_objects;
 mod text;
 mod tracking;
+mod view_layout;
 mod views;
 mod window;
 

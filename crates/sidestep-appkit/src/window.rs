@@ -1374,7 +1374,7 @@ impl Drop for WindowIvars {
         if let Some(content) = self.content.get_mut().take() {
             // Also clears the view's link to the window as its next
             // responder.
-            views::set_window(views::imp(&content), None);
+            views::leave_dying_window(views::imp(&content));
         }
         for child in self.children.get_mut().drain(..) {
             imp(&child).ivars().parent.set(None);
@@ -1595,6 +1595,17 @@ impl NSWindowImpl {
     /// A scroll layer moved or resized: place it again at the next frame.
     pub(crate) fn layers_moved(&self) {
         self.ivars().needs_display.set(true);
+    }
+
+    /// A view needs layout or its constraints updated: run a pass before
+    /// the next frame (see `view_layout`).
+    pub(crate) fn needs_layout_pass(&self) {
+        self.ivars().needs_display.set(true);
+    }
+
+    /// Some layer has damage to draw in the next pass.
+    pub(crate) fn has_damage(&self) -> bool {
+        self.ivars().damage.borrow().values().any(|rects| !rects.is_empty())
     }
 
     pub(crate) fn add_clip(&self, clip: &NSView) {
@@ -2217,6 +2228,8 @@ pub(crate) fn display_if_needed(window: &NSWindowImpl) {
     if !ivars.visible.get() || !ivars.configured.get() || ivars.frame_pending.get() || !ivars.needs_display.get() {
         return;
     }
+    // Constraints, layout and viewWillDraw, before anything is drawn.
+    crate::view_layout::run(window);
     ivars.needs_display.set(false);
     let id = window.id();
     if ivars.title_dirty.replace(false) {

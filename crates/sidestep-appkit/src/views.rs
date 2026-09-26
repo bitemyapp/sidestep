@@ -14,6 +14,7 @@
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::ptr::NonNull;
+use std::rc::Rc;
 
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyObject, MessageReceiver, NSObject, NSObjectProtocol, Sel};
@@ -252,7 +253,9 @@ pub(crate) struct ViewIvars {
     frame: Cell<NSRect>,
     bounds_origin: Cell<NSPoint>,
     superview: Unretained<NSView>,
-    subviews: RefCell<Vec<Retained<NSView>>>,
+    /// Copy-on-write, so snapshots (`subviews`, the display pass) cost a
+    /// reference count rather than a copy.
+    subviews: RefCell<Rc<Vec<Retained<NSView>>>>,
     window: Unretained<NSWindow>,
     autoresizing: Cell<NSAutoresizingMaskOptions>,
     hidden: Cell<bool>,
@@ -261,6 +264,9 @@ pub(crate) struct ViewIvars {
     tracking: RefCell<crate::tracking::ViewTracking>,
     /// Made when first asked for, for views that are text input clients.
     input_context: RefCell<Option<Retained<NSTextInputContext>>>,
+    /// The layout pass's flags and the rest of the view contract's state
+    /// (see `view_layout`).
+    pub(crate) state: crate::view_layout::ViewState,
 }
 
 impl ViewIvars {
@@ -269,13 +275,14 @@ impl ViewIvars {
             frame: Cell::new(frame),
             bounds_origin: Cell::new(NSPoint::ZERO),
             superview: Cell::new(None),
-            subviews: RefCell::new(Vec::new()),
+            subviews: RefCell::default(),
             window: Cell::new(None),
             autoresizing: Cell::new(NSAutoresizingMaskOptions::ViewNotSizable),
             hidden: Cell::new(false),
             is_clip: Cell::new(false),
             tracking: RefCell::default(),
             input_context: RefCell::new(None),
+            state: crate::view_layout::ViewState::default(),
         }
     }
 }
@@ -323,7 +330,7 @@ define_class!(
 
         #[unsafe(method(bounds))]
         fn bounds(&self) -> NSRect {
-            bounds(self)
+            crate::view_layout::bounds(self)
         }
 
         #[unsafe(method(setBoundsOrigin:))]
@@ -333,7 +340,7 @@ define_class!(
 
         #[unsafe(method(visibleRect))]
         fn visible_rect(&self) -> NSRect {
-            visible_rect(self)
+            crate::view_layout::visible_rect(self)
         }
 
         #[unsafe(method(isFlipped))]
@@ -353,10 +360,14 @@ define_class!(
 
         #[unsafe(method(setHidden:))]
         fn set_hidden(&self, hidden: bool) {
+            if self.ivars().hidden.get() == hidden {
+                return;
+            }
             invalidate(self, bounds(self));
             self.ivars().hidden.set(hidden);
             invalidate(self, bounds(self));
             moved(self);
+            crate::view_layout::hidden_changed(self, hidden);
         }
 
         #[unsafe(method(isHiddenOrHasHiddenAncestor))]
@@ -377,12 +388,12 @@ define_class!(
 
         #[unsafe(method(addSubview:))]
         fn add_subview(&self, view: &NSView) {
-            add_subview(self, view);
+            crate::view_layout::add_subview(self, view, crate::view_layout::Place::Top);
         }
 
         #[unsafe(method(removeFromSuperview))]
         fn remove_from_superview(&self) {
-            remove_from_superview(self);
+            crate::view_layout::remove_from_superview(self, true);
         }
 
         #[unsafe(method(autoresizingMask))]
@@ -397,8 +408,7 @@ define_class!(
 
         #[unsafe(method(resizeSubviewsWithOldSize:))]
         fn resize_subviews(&self, old: NSSize) {
-            let subviews = self.ivars().subviews.borrow().clone();
-            for view in subviews {
+            for view in subviews(self) {
                 view.resizeWithOldSuperviewSize(old);
             }
         }
@@ -544,13 +554,98 @@ pub(crate) fn window_of(view: &NSViewImpl) -> Option<&NSWindowImpl> {
     view.ivars().window.get().map(|p| window::imp(unsafe { p.as_ref() }))
 }
 
-pub(crate) fn subviews(view: &NSViewImpl) -> Vec<Retained<NSView>> {
-    view.ivars().subviews.borrow().clone()
+/// A view's subviews as they are now, bottom to top: a snapshot that later
+/// changes to the view don't touch.
+pub(crate) fn subviews(view: &NSViewImpl) -> Subviews {
+    Subviews(view.ivars().subviews.borrow().clone())
 }
 
 /// The `i`th subview, if there is one.
 pub(crate) fn subview_at(view: &NSViewImpl, i: usize) -> Option<Retained<NSView>> {
     view.ivars().subviews.borrow().get(i).cloned()
+}
+
+/// A snapshot of a view's subviews (see [`subviews`]). It derefs to a
+/// slice, and iterating it by value yields each subview retained.
+pub(crate) struct Subviews(Rc<Vec<Retained<NSView>>>);
+
+impl std::ops::Deref for Subviews {
+    type Target = [Retained<NSView>];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl IntoIterator for Subviews {
+    type Item = Retained<NSView>;
+    type IntoIter = SubviewsIter;
+
+    fn into_iter(self) -> SubviewsIter {
+        SubviewsIter(self.0, 0)
+    }
+}
+
+pub(crate) struct SubviewsIter(Rc<Vec<Retained<NSView>>>, usize);
+
+impl Iterator for SubviewsIter {
+    type Item = Retained<NSView>;
+
+    fn next(&mut self) -> Option<Retained<NSView>> {
+        let view = self.0.get(self.1)?.clone();
+        self.1 += 1;
+        Some(view)
+    }
+}
+
+/// Where `view` is among `this`'s subviews.
+pub(crate) fn index_of(this: &NSViewImpl, view: &NSViewImpl) -> Option<usize> {
+    this.ivars().subviews.borrow().iter().position(|v| std::ptr::eq(imp(v), view))
+}
+
+/// Put `view`, which has no superview, among `this`'s subviews at `index`
+/// (on top if it's past the end). Only the links: callbacks are
+/// `view_layout`'s business.
+pub(crate) fn link(this: &NSViewImpl, view: &NSView, index: usize) {
+    let v = imp(view);
+    debug_assert!(superview(v).is_none());
+    v.ivars().superview.set(Some(NonNull::from(as_view(this))));
+    // SAFETY: the superview owns the view, so outlives the link.
+    unsafe { view.setNextResponder(Some(this)) };
+    {
+        let mut subviews = this.ivars().subviews.borrow_mut();
+        let list = Rc::make_mut(&mut subviews);
+        list.insert(index.min(list.len()), view.retain());
+    }
+    invalidate(v, bounds(v));
+}
+
+/// Take `view` out of its superview's subviews, redrawing where it was if
+/// `display`. Only the links, as for [`link`]; the caller keeps the view
+/// alive.
+pub(crate) fn unlink(view: &NSViewImpl, display: bool) {
+    let Some(sup) = superview(view) else { return };
+    if display {
+        invalidate(sup, frame(view));
+    }
+    // Released outside the borrow: releasing may run arbitrary code.
+    let removed = {
+        let mut subviews = sup.ivars().subviews.borrow_mut();
+        let list = Rc::make_mut(&mut subviews);
+        list.iter().position(|v| std::ptr::eq(imp(v), view)).map(|i| list.remove(i))
+    };
+    view.ivars().superview.set(None);
+    // SAFETY: clearing the link.
+    unsafe { as_view(view).setNextResponder(None) };
+    drop(removed);
+}
+
+/// Give `this` the subviews it has, in a new order.
+pub(crate) fn reorder(this: &NSViewImpl, order: Vec<Retained<NSView>>) {
+    debug_assert_eq!(order.len(), this.ivars().subviews.borrow().len());
+    let old = this.ivars().subviews.replace(Rc::new(order));
+    drop(old);
+    invalidate(this, bounds(this));
 }
 
 pub(crate) fn superview_of(view: &NSViewImpl) -> Option<&NSViewImpl> {
@@ -725,12 +820,6 @@ pub(crate) fn invalidate(view: &NSViewImpl, rect: NSRect) {
     }
 }
 
-fn visible_rect(view: &NSViewImpl) -> NSRect {
-    match placement(view) {
-        Some(p) if !p.clip.is_empty() => p.xf.inverse_rect(p.clip),
-        _ => NSRect::ZERO,
-    }
-}
 
 fn change_frame(view: &NSViewImpl, new: NSRect) {
     let old = frame(view);
@@ -741,10 +830,8 @@ fn change_frame(view: &NSViewImpl, new: NSRect) {
         invalidate(sup, old);
     }
     view.ivars().frame.set(new);
-    if old.size != new.size {
-        // SAFETY: resizeSubviewsWithOldSize: takes an NSSize.
-        unsafe { msg_send![view, resizeSubviewsWithOldSize: old.size] }
-    }
+    // Bounds scaling, the layout flag, autoresizing and Auto Layout.
+    crate::view_layout::frame_changed(view, old);
     if let Some(window) = window_of(view)
         && (is_clip(view) || superview(view).is_some_and(is_clip))
     {
@@ -820,33 +907,33 @@ fn share(pos: f64, size: f64, max_margin: f64, delta: f64, flexible: [bool; 3]) 
     (pos + part(0), size + part(1))
 }
 
-fn add_subview(this: &NSViewImpl, view: &NSView) {
-    let v = imp(view);
-    if superview(v).is_some() {
-        remove_from_superview(v);
-    }
-    v.ivars().superview.set(Some(NonNull::from(as_view(this))));
-    // SAFETY: the superview owns the view, so outlives the link.
-    unsafe { view.setNextResponder(Some(this)) };
-    this.ivars().subviews.borrow_mut().push(view.retain());
-    set_window(v, this.ivars().window.get());
-    invalidate(v, bounds(v));
-}
-
-fn remove_from_superview(view: &NSViewImpl) {
-    let Some(sup) = superview(view) else { return };
-    // Keep the view alive until it is fully detached.
-    let this = as_view(view).retain();
-    invalidate(sup, frame(view));
-    sup.ivars().subviews.borrow_mut().retain(|v| !std::ptr::eq(&**v, &*this));
-    view.ivars().superview.set(None);
-    // SAFETY: clearing the link.
-    unsafe { this.setNextResponder(None) };
-    set_window(view, None);
-}
-
-/// Move a view and its subviews into a window, or out of one.
+/// Move a view and its subviews into a window, or out of one, telling
+/// each as AppKit does: `viewWillMoveToWindow:` before its subviews move,
+/// `viewDidMoveToWindow` after. A view moving within its window hears both
+/// too.
 pub(crate) fn set_window(view: &NSViewImpl, window: Option<NonNull<NSWindow>>) {
+    // SAFETY: the caller holds the window.
+    let to = window.map(|w| unsafe { w.as_ref() });
+    as_view(view).viewWillMoveToWindow(to);
+    relink_window(view, window);
+    for sub in subviews(view) {
+        set_window(imp(&sub), window);
+    }
+    as_view(view).viewDidMoveToWindow();
+}
+
+/// Take a view and its subviews out of a window that is going away,
+/// telling none of them: the window can't be reached any more.
+pub(crate) fn leave_dying_window(view: &NSViewImpl) {
+    relink_window(view, None);
+    for sub in subviews(view) {
+        leave_dying_window(imp(&sub));
+    }
+}
+
+/// Update one view's link to its window and what the window keeps about
+/// it.
+fn relink_window(view: &NSViewImpl, window: Option<NonNull<NSWindow>>) {
     if view.ivars().window.get() == window {
         return;
     }
@@ -876,9 +963,6 @@ pub(crate) fn set_window(view: &NSViewImpl, window: Option<NonNull<NSWindow>>) {
     }
     if let Some(new) = window_of(view) {
         crate::tracking::view_joined(new, view);
-    }
-    for sub in subviews(view) {
-        set_window(imp(&sub), window);
     }
 }
 
