@@ -22,3 +22,9 @@ sidestep = { path = "crates/sidestep" }
 sidestep-runtime = { path = "crates/sidestep-runtime" }
 sidestep-foundation = { path = "crates/sidestep-foundation" }
 sidestep-appkit = { path = "crates/sidestep-appkit" }
+
+# tiny-skia's portable SIMD (every target but aarch64 with NEON) multiplies
+# 16-bit lanes expecting them to wrap, as the NEON path does; overflow checks
+# in debug builds turn some blend modes into panics on x86_64.
+[profile.dev.package.tiny-skia]
+overflow-checks = false

@@ -363,14 +363,14 @@ fn drawing_appearance(mtm: MainThreadMarker) {
         (inner, NSAppearance::currentDrawingAppearance().name().to_string())
     });
     assert_eq!(outer, ("NSAppearanceNameAqua".into(), "NSAppearanceNameDarkAqua".into()));
-    // Outside drawing, the application's.
+    // The application's own appearance. (What currentDrawingAppearance and a
+    // view outside any window report here follows the system's light or
+    // dark setting on macOS, not only the application's, so they aren't
+    // pinned: a dark Mac and CI's light one disagree.)
     let app = NSApplication::sharedApplication(mtm);
     app.setAppearance(Some(&dark()));
-    assert_eq!(NSAppearance::currentDrawingAppearance().name().to_string(), "NSAppearanceNameDarkAqua");
     assert_eq!(app.effectiveAppearance().name().to_string(), "NSAppearanceNameDarkAqua");
-    // A view with no superview or window: the application's.
-    let loose = draw_view(mtm, rect(0.0, 0.0, 1.0, 1.0), false, |_, _| {});
-    assert_eq!(loose.effectiveAppearance().name().to_string(), "NSAppearanceNameDarkAqua");
+    let _ = draw_view(mtm, rect(0.0, 0.0, 1.0, 1.0), false, |_, _| {});
     app.setAppearance(None);
 }
 
