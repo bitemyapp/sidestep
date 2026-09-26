@@ -20,6 +20,7 @@
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::VecDeque;
+use std::mem::ManuallyDrop;
 use std::time::{Duration, Instant};
 
 use objc2::rc::{Allocated, Retained, Weak};
@@ -39,18 +40,22 @@ use crate::notifications::{Owner, name};
 use crate::protocol::{Cursor, FromRender, ToRender, WindowRequest};
 use crate::{event, window};
 
+// What holds windows (and through them views, menus and the rest) is
+// never dropped when the main thread exits, as on macOS, where a program
+// that exits doesn't deallocate its windows: tearing them down then runs
+// program code against thread-locals already gone.
 thread_local! {
     static BACKEND: OnceCell<Backend> = const { OnceCell::new() };
-    static SHARED: OnceCell<Retained<NSApplication>> = const { OnceCell::new() };
+    static SHARED: ManuallyDrop<OnceCell<Retained<NSApplication>>> = const { ManuallyDrop::new(OnceCell::new()) };
     /// Windows on screen, in the order they were shown.
-    static WINDOWS: RefCell<Vec<Retained<NSWindow>>> = const { RefCell::new(Vec::new()) };
+    static WINDOWS: ManuallyDrop<RefCell<Vec<Retained<NSWindow>>>> = const { ManuallyDrop::new(RefCell::new(Vec::new())) };
     /// Every window the program has, on screen or not, in the order they
     /// were made: `windows` and `windowWithWindowNumber:`.
     static ALL_WINDOWS: RefCell<Vec<Weak<NSWindow>>> = const { RefCell::new(Vec::new()) };
     /// The window with the keyboard, as the render thread names it.
     static FOCUSED: Cell<Option<u32>> = const { Cell::new(None) };
     /// The event being dispatched, for `currentEvent`.
-    static CURRENT_EVENT: RefCell<Option<Retained<NSEvent>>> = const { RefCell::new(None) };
+    static CURRENT_EVENT: ManuallyDrop<RefCell<Option<Retained<NSEvent>>>> = const { ManuallyDrop::new(RefCell::new(None)) };
     /// Whether a window of ours had the keyboard after the last batch of input.
     static ACTIVE: Cell<bool> = const { Cell::new(false) };
     /// When to decide the application went inactive, if no window of ours
@@ -81,9 +86,11 @@ pub(crate) fn is_active() -> bool {
     ACTIVE.with(Cell::get)
 }
 
-/// Send to the render thread, starting it with the first message.
+/// Send to the render thread, starting it with the first message. Once
+/// the main thread is exiting and its connection is gone, there is nobody
+/// to tell.
 pub(crate) fn send(msg: ToRender) {
-    BACKEND.with(|b| {
+    let _ = BACKEND.try_with(|b| {
         let backend = b.get_or_init(|| {
             let backend = backend::start(event_loop::install());
             let _ = ANY_THREAD.set(backend.tx.clone());

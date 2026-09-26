@@ -52,6 +52,7 @@
 //! One menu tracks at a time; asking for another meanwhile opens nothing.
 
 use std::cell::{Cell, RefCell};
+use std::mem::ManuallyDrop;
 use std::time::{Duration, Instant};
 
 use objc2::rc::Retained;
@@ -77,14 +78,18 @@ const CLICK: Duration = Duration::from_millis(400);
 const WAKE_SUBTYPE: i16 = 0x5344;
 const WAKE_DATA: isize = 0x4d45_4e55;
 
+/// A menu showing and the window it shows in.
+type Shown = (Retained<NSMenu>, Retained<NSWindow>);
+
 thread_local! {
     /// A loop is running.
     static TRACKING: Cell<bool> = const { Cell::new(false) };
     /// The menus it shows and their windows, outermost first, for
     /// `cancelTracking`, changes and windows leaving.
-    static OPEN: RefCell<Vec<(Retained<NSMenu>, Retained<NSWindow>)>> = const { RefCell::new(Vec::new()) };
+    /// (Never dropped when the thread exits: see `app`'s windows.)
+    static OPEN: ManuallyDrop<RefCell<Vec<Shown>>> = const { ManuallyDrop::new(RefCell::new(Vec::new())) };
     /// The window the outermost menu belongs to.
-    static ROOT: RefCell<Option<Retained<NSWindow>>> = const { RefCell::new(None) };
+    static ROOT: ManuallyDrop<RefCell<Option<Retained<NSWindow>>>> = const { ManuallyDrop::new(RefCell::new(None)) };
     static CANCELLED: Cell<bool> = const { Cell::new(false) };
     /// A menu showing changed since the loop last looked.
     static CHANGED: Cell<bool> = const { Cell::new(false) };
