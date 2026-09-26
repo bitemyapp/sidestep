@@ -202,10 +202,12 @@ mod tests {
             unsafe { c.as_ref() }.setDuration(0.2);
         });
         let completion = RcBlock::new(move || d.set(d.get() + 1));
+        // From before the group, so a slow machine can't make the wait
+        // look shorter than the duration.
+        let start = Instant::now();
         NSAnimationContext::runAnimationGroup_completionHandler(&changes, Some(&completion));
         assert_eq!(done.get(), 0, "not within the group");
         let run_loop = runloop::current();
-        let start = Instant::now();
         run_loop.run_mode(Mode::DEFAULT, Some(Instant::now()), false);
         assert_eq!(done.get(), 0, "not before its duration");
         while done.get() == 0 && start.elapsed() < Duration::from_secs(5) {

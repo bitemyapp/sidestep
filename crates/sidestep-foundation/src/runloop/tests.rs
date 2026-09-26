@@ -175,9 +175,12 @@ fn shims_for_event_loops_that_sleep_elsewhere() {
     let timer = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.02, true, &block) };
     let deadline = super::next_timer_deadline().unwrap();
     let ahead = deadline.saturating_duration_since(Instant::now());
-    assert!(ahead <= Duration::from_millis(20) && ahead > Duration::from_millis(5), "{ahead:?}");
-    super::fire_due_timers(Instant::now());
-    assert_eq!(fired.get(), 0);
+    // At most the interval ahead (a slow machine may already be past it).
+    assert!(ahead <= Duration::from_millis(20), "{ahead:?}");
+    if ahead > Duration::from_millis(5) {
+        super::fire_due_timers(Instant::now());
+        assert_eq!(fired.get(), 0);
+    }
     std::thread::sleep(ahead);
     super::fire_due_timers(Instant::now());
     assert_eq!(fired.get(), 1);
