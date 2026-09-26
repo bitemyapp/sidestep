@@ -70,6 +70,12 @@ sidestep_runtime::static_class!(pub NSBEZIERPATH, NSBEZIERPATH_META = "NSBezierP
 sidestep_foundation::constant_string!(NSFontAttributeName = "NSFont");
 sidestep_foundation::constant_string!(NSForegroundColorAttributeName = "NSColor");
 sidestep_foundation::constant_string!(NSBackgroundColorAttributeName = "NSBackgroundColor");
+// Keys only newer macOS versions define (values as macOS prints them).
+sidestep_foundation::constant_string!(NSCharacterShapeAttributeName = "NSCharacterShape");
+sidestep_foundation::constant_string!(NSTextHighlightStyleAttributeName = "NSTextHighlightStyle");
+sidestep_foundation::constant_string!(NSTextHighlightColorSchemeAttributeName = "NSTextHighlightColorScheme");
+sidestep_foundation::constant_string!(NSAdaptiveImageGlyphAttributeName = "CTAdaptiveImageProvider");
+sidestep_foundation::constant_string!(NSWritingToolsExclusionAttributeName = "WTWritingToolsPreserved");
 
 // Font weights, as `NSFontWeight` values.
 #[unsafe(no_mangle)]

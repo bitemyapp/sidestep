@@ -12,9 +12,14 @@
 
 use objc2::ClassType;
 
+mod attributed;
+mod charset;
 mod const_string;
 mod dictionary;
+mod geometry;
 mod notification;
+mod regex;
+mod scanner;
 mod string;
 mod thread;
 mod timer;
@@ -24,13 +29,24 @@ pub use notification::notification;
 pub use timer::{fire_due_timers, next_timer_deadline};
 
 #[doc(hidden)]
+pub use attributed::{RunRef, with_runs};
+#[doc(hidden)]
+pub use string::with_str;
+
+/// Make sure a static class shell has been defined, for code that uses a
+/// private class's implementation type directly (its `class()` must not run
+/// before the runtime has asked the shell's loader to).
+pub(crate) fn load_shell(shell: &'static sidestep_runtime::Class) {
+    // SAFETY: any runtime function that takes a class loads it first.
+    let _ = unsafe { objc2::ffi::class_getInstanceSize((shell as *const sidestep_runtime::Class).cast()) };
+}
+
+#[doc(hidden)]
 pub mod __private {
     pub use sidestep_runtime::ObjectRef;
 }
 
-sidestep_runtime::static_class!(pub NSSTRING, NSSTRING_META = "NSString", || {
-    let _ = string::NSStringImpl::class();
-});
+sidestep_runtime::static_class!(pub NSSTRING, NSSTRING_META = "NSString", string::load);
 
 sidestep_runtime::static_class!(pub NSTHREAD, NSTHREAD_META = "NSThread", || {
     let _ = thread::NSThreadImpl::class();

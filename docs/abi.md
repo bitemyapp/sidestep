@@ -21,6 +21,7 @@ untested.
 | Other | `objc_setAssociatedObject`, `objc_getAssociatedObject`, `objc_removeAssociatedObjects`, `objc_sync_enter`, `objc_sync_exit` |
 | Blocks | `_Block_copy`, `_Block_release`, `_Block_object_assign`, `_Block_object_dispose`, `_Block_has_signature`, `_Block_signature`, and the classes `_NSConcreteStackBlock`, `_NSConcreteMallocBlock`, `_NSConcreteGlobalBlock` |
 | Class symbols | `._OBJC_CLASS_<Name>` and `._OBJC_METACLASS_<Name>` for `NSObject` (runtime) and each Foundation class |
+| Foundation functions | `NSUnionRange`, `NSIntersectionRange`, `NSStringFromRange`, `NSRangeFromString`; the `NSGeometry` functions (`NSEqualRects`, `NSInsetRect`, `NSIntegralRectWithOptions`, `NSDivideRect`, `NSPointInRect`, `NSStringFromRect`, `NSRectFromString` and the rest objc2-foundation declares) |
 
 The blocks runtime follows Clang's published Block Implementation
 Specification.
@@ -66,7 +67,9 @@ Specification.
   objc2's debug-mode signature check only tolerates integer size differences on
   Apple targets, so on Linux one of the two paths fails it whatever the method
   is registered with. Sidestep registers `i32` to match the helpers (the path
-  every string conversion takes) and reads only the low 32 bits, which is
-  correct for either caller. Direct calls such as
-  `s.lengthOfBytesUsingEncoding(NSUTF8StringEncoding)` work in release builds
-  but fail the debug check. To be raised with objc2.
+  every string conversion takes) for the two methods the helpers send,
+  `-initWithBytes:length:encoding:` and `-lengthOfBytesUsingEncoding:`, and
+  `NSUInteger` for every other method taking an encoding; all of them read
+  only the low 32 bits, which is correct for either caller. Direct calls such
+  as `s.lengthOfBytesUsingEncoding(NSUTF8StringEncoding)` work in release
+  builds but fail the debug check. To be raised with objc2.

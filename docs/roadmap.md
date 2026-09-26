@@ -14,10 +14,21 @@ message), blocks, strings. Passing on macOS, and on Linux aarch64 and x86_64.
 
 Done so far: constant strings from static memory, an immutable
 `NSDictionary` (faster than Apple's on the same Mac, see `examples/dictbench`), `NSTimer` with blocks, a timer-only `NSRunLoop`, and
-`NSNotification` for delegate callbacks.
+`NSNotification` for delegate callbacks. Strings: `NSString` and
+`NSMutableString` with encodings, comparison, search, case mapping,
+normalization, lines and enumeration, paths and numbers;
+`NSAttributedString` and `NSMutableAttributedString`; `NSCharacterSet`,
+`NSScanner`, `NSRegularExpression` and `NSTextCheckingResult`; the
+`NSRange` and `NSGeometry` functions (see `examples/strbench`).
 
-- `NSMutableString`; `-description` on NSObject before Foundation's
-  `NSString` has loaded.
+- Strings, still to do: initializers and writers for files, URLs and
+  `NSData`; encodings beyond ASCII, Latin-1, Windows-1252, Mac Roman and
+  the UTF forms; locale tailoring for case mapping and collation, and
+  `NSLocale` arguments generally; dictionary-based word breaks for CJK and
+  Thai; in regular expressions, character names (`\N{…}`), `\G`, full case
+  folding and exact hit-end flags; attributed string drawing (with the text
+  engine).
+- `-description` on NSObject before Foundation's `NSString` has loaded.
 - Collections: `NSArray`, `NSMutableArray`, `NSMutableDictionary`, `NSSet`.
 - `NSNumber`, `NSValue`, `NSData`, `NSDate`, `NSError`, `NSURL`,
   `NSProcessInfo`.
