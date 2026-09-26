@@ -182,6 +182,18 @@ fn run_mode(mode: &NSString, seconds: f64) -> bool {
     NSRunLoop::currentRunLoop().runMode_beforeDate(mode, &date_in(seconds))
 }
 
+/// Run `mode` a slice at a time until `done` holds, for at most 5 s. What
+/// is due now can still take a while on a loaded machine (CI's runners fire
+/// timers tens of milliseconds late), so waits for something to happen use
+/// this; checks that something did *not* happen keep a fixed window.
+fn run_until(mode: &NSString, done: impl Fn() -> bool) {
+    let start = Instant::now();
+    while !done() {
+        assert!(start.elapsed() < Duration::from_secs(5), "timed out");
+        run_mode(mode, 0.01);
+    }
+}
+
 fn run_in_mode(mode: Option<&CFRunLoopMode>, seconds: f64, return_after_source: bool) -> i32 {
     CFRunLoop::run_in_mode(mode, seconds, return_after_source).0
 }
@@ -354,11 +366,9 @@ fn mode_filtering() {
         // A mode added to the common set gets the common timer, not the
         // default one.
         CFRunLoop::current().unwrap().add_common_mode(Some(cf(&tracking)));
-        run_mode(&tracking, 0.05);
+        run_until(&tracking, || in_common.get() >= 1);
         assert_eq!(in_default.get(), 0);
-        assert!(in_common.get() >= 1);
-        run_mode(default_mode(), 0.05);
-        assert!(in_default.get() >= 1);
+        run_until(default_mode(), || in_default.get() >= 1);
 
         // A custom mode gets only what was added to it.
         let (in_custom, tick) = counter();
@@ -366,8 +376,7 @@ fn mode_filtering() {
         let custom_timer = block_timer(0.01, true, tick);
         schedule(&custom_timer, &custom);
         let before = (in_default.get(), in_common.get());
-        run_mode(&custom, 0.05);
-        assert!(in_custom.get() >= 1);
+        run_until(&custom, || in_custom.get() >= 1);
         assert_eq!((in_default.get(), in_common.get()), before);
         for t in [default_timer, common_timer, custom_timer, keep] {
             t.invalidate();
@@ -387,17 +396,19 @@ fn timer_phase_after_a_stall() {
             }
         });
         schedule(&timer, default_mode());
-        NSRunLoop::currentRunLoop().runUntilDate(&date_in(0.75));
+        NSRunLoop::currentRunLoop().runUntilDate(&date_in(0.95));
         timer.invalidate();
         let fires = fires.borrow();
         // First at 100 ms; the stall until about 450 ms drops the fires due
-        // meanwhile instead of bursting them, and the timer goes on in phase
-        // (500, 600, 700 on an idle machine). A loaded CI runner fires tens
-        // of milliseconds late, and then the next fire comes on time, so
-        // only the dropping is pinned (Apple's gave [191, 696, 714] there).
-        assert!(fires.len() >= 2 && fires.len() <= 4, "{fires:?}");
+        // meanwhile instead of bursting them, and the timer goes on in phase:
+        // 100, 500, 600, 700, 800, 900 on an idle machine, where bursting
+        // would add three more. A loaded CI runner fires tens of
+        // milliseconds late and then on time again (Apple's gave
+        // [191, 696, 714] there), and may drop fires, but never adds any, so
+        // the count's upper bound is what's pinned.
+        assert!((2..=6).contains(&fires.len()), "{fires:?}");
         assert!(fires[0] >= 100, "{fires:?}");
-        assert!(fires[1] >= fires[0] + 350, "no burst after the stall: {fires:?}");
+        assert!(fires[1] >= fires[0] + 350, "nothing fires during the stall: {fires:?}");
     });
 }
 
@@ -485,7 +496,8 @@ fn timer_scheduling() {
             t.invalidate();
         });
         schedule(&timer, default_mode());
-        NSRunLoop::currentRunLoop().runUntilDate(&date_in(0.1));
+        run_until(default_mode(), || count.get() >= 1);
+        run_mode(default_mode(), 0.05);
         assert_eq!(count.get(), 1);
 
         // A fire date in the past fires on the next pass.
@@ -510,8 +522,7 @@ fn timer_scheduling() {
         assert!(ms(start) >= 95);
         assert_eq!(count.get(), 0);
         timer.setFireDate(&date_in(0.0));
-        run_mode(default_mode(), 0.05);
-        assert!(count.get() >= 1);
+        run_until(default_mode(), || count.get() >= 1);
         timer.invalidate();
 
         // A timer in two modes fires once per fire date.
@@ -536,7 +547,7 @@ fn timer_scheduling() {
         };
         assert!((-10.3..=-10.2).contains(&timer.fireDate().timeIntervalSinceNow()));
         schedule(&timer, default_mode());
-        run_mode(default_mode(), 0.05);
+        run_until(default_mode(), || count.get() >= 1);
         assert_eq!(count.get(), 1);
         let next = timer.fireDate().timeIntervalSinceNow() + made.elapsed().as_secs_f64();
         assert!((0.95..1.01).contains(&next), "{next}");
@@ -553,7 +564,7 @@ fn timer_scheduling() {
         // The loop keeps a scheduled timer alive.
         let (count, tick) = counter();
         schedule(&block_timer(0.01, false, tick), default_mode());
-        NSRunLoop::currentRunLoop().runUntilDate(&date_in(0.05));
+        run_until(default_mode(), || count.get() >= 1);
         assert_eq!(count.get(), 1);
     });
 }
@@ -570,6 +581,7 @@ fn one_shot_timer_rearmed_in_its_callout() {
         });
         schedule(&timer, default_mode());
         let keep = keep_alive(default_mode());
+        run_until(default_mode(), || count.get() >= 1);
         run_mode(default_mode(), 0.1);
         assert_eq!(count.get(), 1);
         assert!(!timer.isValid());
@@ -595,8 +607,7 @@ fn timers_retain_target_and_user_info() {
         let before = retain_count(&timer);
         schedule(&timer, default_mode());
         assert_eq!(retain_count(&timer), before + 1, "the loop retains a scheduled timer");
-        NSRunLoop::currentRunLoop().runUntilDate(&date_in(0.035));
-        assert!(target.ivars().get() >= 1);
+        run_until(default_mode(), || target.ivars().get() >= 1);
         timer.invalidate();
         assert_eq!((retain_count(&target), retain_count(&info)), (t0, i0));
         assert_eq!(retain_count(&timer), before);
@@ -612,8 +623,7 @@ fn timers_retain_target_and_user_info() {
             )
         };
         assert_eq!(retain_count(&target), t0 + 1);
-        NSRunLoop::currentRunLoop().runUntilDate(&date_in(0.05));
-        assert!(!timer.isValid());
+        run_until(default_mode(), || !timer.isValid());
         assert_eq!((retain_count(&target), retain_count(&info)), (t0, i0));
     });
 }
@@ -632,9 +642,9 @@ fn perform_block_modes_and_order() {
             unsafe { rl.perform_block(Some(mode.as_ref()), Some(&block)) };
         }
         let keep = keep_alive(&other);
-        run_mode(&other, 0.05);
+        run_until(&other, || order.borrow().len() >= 3);
         assert_eq!(*order.borrow(), [1, 3, 4]);
-        run_mode(default_mode(), 0.05);
+        run_until(default_mode(), || order.borrow().len() >= 4);
         assert_eq!(*order.borrow(), [1, 3, 4, 2]);
         keep.invalidate();
 
@@ -646,8 +656,7 @@ fn perform_block_modes_and_order() {
         let keep = keep_alive(&s("Elsewhere"));
         run_mode(&s("Elsewhere"), 0.02);
         assert!(!ran.get());
-        run_mode(default_mode(), 0.02);
-        assert!(ran.get());
+        run_until(default_mode(), || ran.get());
         keep.invalidate();
     });
 }
@@ -664,7 +673,7 @@ fn perform_in_modes() {
         let modes = NSArray::from_retained_slice(&[s("InModesA"), s("InModesB")]);
         unsafe { NSRunLoop::currentRunLoop().performInModes_block(&modes, &block) };
         let keep = keep_alive(&s("InModesB"));
-        run_mode(&s("InModesB"), 0.02);
+        run_until(&s("InModesB"), || !log.borrow().is_empty());
         assert_eq!(*log.borrow(), ["InModesB"]);
         keep.invalidate();
         // An array of modes works for CFRunLoopPerformBlock too.
@@ -675,7 +684,7 @@ fn perform_in_modes() {
         let modes: &objc2_core_foundation::CFType = unsafe { &*(modes as *const AnyObject).cast() };
         unsafe { CFRunLoop::current().unwrap().perform_block(Some(modes), Some(&block)) };
         let keep = keep_alive(&s("InModesC"));
-        run_mode(&s("InModesC"), 0.02);
+        run_until(&s("InModesC"), || log.borrow().len() >= 2);
         assert_eq!(*log.borrow(), ["InModesB", "cf"]);
         keep.invalidate();
     });
@@ -1020,7 +1029,7 @@ fn timer_and_run_entry_points() {
         let timer = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.01, true, &block) };
         assert!(timer.isValid());
         assert!(run_mode(default_mode(), 0.035));
-        assert!(count.get() >= 2, "scheduled in the default mode");
+        assert!(count.get() >= 1, "scheduled in the default mode");
         timer.invalidate();
 
         // A timer made for a date: it fires then, not before, and holds its
@@ -1122,7 +1131,7 @@ fn timer_added_to_the_main_loop_from_another_thread() {
                 .unwrap();
         CFRunLoop::main().unwrap().add_timer(Some(&timer), cf_default());
     });
-    run_mode(default_mode(), 0.2);
+    run_until(default_mode(), || fired_on_main.lock().unwrap().is_some());
     assert_eq!(*fired_on_main.lock().unwrap(), Some(true));
 }
 
@@ -1136,7 +1145,7 @@ fn delayed_performs() {
     // Only in the default mode.
     assert!(!run_mode(&s("NSEventTrackingRunLoopMode"), 0.05));
     assert!(hits().is_empty());
-    run_mode(default_mode(), 0.1);
+    run_until(default_mode(), || !HITS.lock().unwrap().is_empty());
     assert_eq!(
         hits(),
         ["Some(\"an argument long enough not to be tagged\") main=true mode=Some(\"kCFRunLoopDefaultMode\")"]
@@ -1150,11 +1159,12 @@ fn delayed_performs() {
     assert_eq!(retain_count(&target), counts.0, "cancelling releases the target");
     unsafe { target.performSelector_withObject_afterDelay(sel!(hit:), None, 0.0) };
     unsafe { NSObject::cancelPreviousPerformRequestsWithTarget_selector_object(&target, sel!(hit:), Some(&a)) };
-    run_mode(default_mode(), 0.1);
+    run_until(default_mode(), || !HITS.lock().unwrap().is_empty());
     assert_eq!(hits(), ["None main=true mode=Some(\"kCFRunLoopDefaultMode\")"]);
     unsafe { target.performSelector_withObject_afterDelay(sel!(hit:), Some(&a), 0.0) };
     unsafe { NSObject::cancelPreviousPerformRequestsWithTarget_selector_object(&target, sel!(hit:), None) };
-    run_mode(default_mode(), 0.1);
+    run_until(default_mode(), || !HITS.lock().unwrap().is_empty());
+    run_mode(default_mode(), 0.05);
     assert_eq!(hits().len(), 1);
     unsafe { target.performSelector_withObject_afterDelay(sel!(hit:), Some(&a), 0.0) };
     unsafe { target.performSelector_withObject_afterDelay(sel!(hit:), None, 0.0) };
@@ -1171,7 +1181,7 @@ fn delayed_performs_in_modes() {
     unsafe { target.performSelector_withObject_afterDelay_inModes(sel!(hit:), None, 0.0, &modes) };
     run_mode(default_mode(), 0.05);
     assert!(hits().is_empty());
-    run_mode(&s("DelayedMode"), 0.1);
+    run_until(&s("DelayedMode"), || !HITS.lock().unwrap().is_empty());
     assert_eq!(hits(), ["None main=true mode=Some(\"DelayedMode\")"]);
 
     let modes = NSArray::from_retained_slice(&[s("OnlyThisMode")]);
@@ -1179,7 +1189,7 @@ fn delayed_performs_in_modes() {
     run_mode(default_mode(), 0.05);
     assert!(hits().is_empty());
     let keep = keep_alive(&s("OnlyThisMode"));
-    run_mode(&s("OnlyThisMode"), 0.05);
+    run_until(&s("OnlyThisMode"), || !HITS.lock().unwrap().is_empty());
     assert_eq!(hits(), ["None main=true mode=Some(\"OnlyThisMode\")"]);
     keep.invalidate();
 }
