@@ -932,7 +932,9 @@ fn limit_date_and_next_fire_date() {
         let keep = keep_alive(default_mode());
         let (count, tick) = counter();
         schedule(&block_timer(0.01, false, tick), default_mode());
-        std::thread::sleep(Duration::from_millis(20));
+        // Well past the fire date: CI's runners have made Apple's loop treat
+        // a timer 10 ms overdue as not due yet.
+        std::thread::sleep(Duration::from_millis(100));
         // One pass, firing what is due, then the next timer's date.
         let limit = rl.limitDateForMode(default_mode()).unwrap();
         assert_eq!(count.get(), 1);
@@ -1104,8 +1106,13 @@ fn other_threads_see_and_stop_a_loop() {
         let s2 = seen.clone();
         let other = std::thread::spawn(move || {
             let here = here;
-            std::thread::sleep(Duration::from_millis(30));
             let rl = unsafe { &*here.0 };
+            // Until the loop sleeps (a loaded machine may take a while to
+            // get it there).
+            let start = Instant::now();
+            while !rl.is_waiting() && start.elapsed() < Duration::from_secs(2) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
             let mode =
                 rl.current_mode().map(|m| unsafe { &*(&*m as *const CFRunLoopMode).cast::<NSString>() }.to_string());
             *s2.lock().unwrap() = Some((rl.is_waiting(), mode));
