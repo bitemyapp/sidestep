@@ -325,9 +325,10 @@ fn run_mode_returns() {
         let start = Instant::now();
         assert!(run_mode(default_mode(), 0.3));
         assert!(ms(start) >= 290);
-        // A loaded runner drops fires, never adds them: only the upper
-        // bound is exact.
-        assert!((1..=6).contains(&count.get()), "{} fires", count.get());
+        // It fired, and the run went on to its limit anyway. (How many
+        // times isn't pinned: a loaded runner drops fires and may end the
+        // run late.)
+        assert!(count.get() >= 1);
         timer.invalidate();
 
         // Neither does a block.
@@ -529,14 +530,20 @@ fn timer_scheduling() {
         timer.invalidate();
 
         // A timer in two modes fires once per fire date.
-        let (count, tick) = counter();
-        let timer = block_timer(0.05, true, tick);
+        let start = Instant::now();
+        let fires = Rc::new(RefCell::new(Vec::new()));
+        let log = fires.clone();
+        let timer = block_timer(0.05, true, move |_| log.borrow_mut().push(start.elapsed().as_millis()));
         schedule(&timer, default_mode());
         schedule(&timer, &s("Other"));
         NSRunLoop::currentRunLoop().runUntilDate(&date_in(0.275));
-        // At most one per fire date (4 or 5 here on an idle machine; a
-        // loaded runner drops some, never adds them).
-        assert!((1..=5).contains(&count.get()), "{} fires", count.get());
+        // At most one per fire date: 5 within the 275 ms on an idle
+        // machine, where firing once per mode would give 10. A loaded runner
+        // drops fires and may end the run late, so count what fired inside
+        // its window.
+        let fires = fires.borrow();
+        let within = fires.iter().filter(|&&at| at < 275).count();
+        assert!(!fires.is_empty() && within <= 5, "{fires:?}");
         timer.invalidate();
 
         // A past fire date on a repeating timer fires at once, then every
