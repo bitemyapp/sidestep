@@ -264,6 +264,13 @@ pub fn set_tile_memory_cap(bytes: Option<usize>) {
     crate::layers::set_memory_cap(bytes);
 }
 
+/// Change how long a display pass may spend before it puts the tiles
+/// ahead of its scroll layers off to the next, or with `None` restore it
+/// (4 ms).
+pub fn set_prefetch_budget(budget: Option<Duration>) {
+    crate::layers::set_prefetch_budget(budget);
+}
+
 /// The compositor asked to close the window (its close button).
 pub fn inject_close_request(window: u32) {
     event_loop::inject(FromRender::CloseRequested { window });

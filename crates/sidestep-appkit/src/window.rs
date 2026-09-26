@@ -2529,12 +2529,20 @@ pub(crate) fn display_if_needed(window: &NSWindowImpl) {
     // The scroll layers, the damaged parts of every layer, the overlays;
     // damage made meanwhile waits for the next pass. A pass that changed
     // nothing the render thread shows commits nothing.
-    crate::layers::display(window, |changed| {
+    let put_off = crate::layers::display(window, |changed| {
         if (changed || titled) && ivars.visible.get() {
             app::send(ToRender::Present { window: id });
             ivars.frame_pending.set(true);
         }
     });
+    // Tiles ahead put off for want of time: the next pass draws them. The
+    // frame's callback wakes the loop for it; without a frame, nothing would.
+    if put_off {
+        ivars.needs_display.set(true);
+        if !ivars.frame_pending.get() {
+            sidestep_foundation::runloop::main().wake();
+        }
+    }
 }
 
 /// Send the title, set as drawing ops for the title bar when Sidestep

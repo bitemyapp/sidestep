@@ -20,6 +20,7 @@ fn main() {
 #[cfg(not(target_vendor = "apple"))]
 mod linux {
     use std::cell::RefCell;
+    use std::time::Duration;
 
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
@@ -278,6 +279,34 @@ mod linux {
         let layers = testing::scroll_layers(&w);
         let l = layer_of(&layers, &sv).expect("a layer");
         assert!(l.tiles.contains(&[0, 4]), "{:?}", l.tiles);
+        close(&w);
+    }
+
+    /// With no time for tiles ahead, as on a slow machine, each pass puts
+    /// them off to the next, which draws them the way the layer went.
+    fn tiles_ahead_come_a_pass_late(mtm: MainThreadMarker) {
+        testing::set_prefetch_budget(Some(Duration::ZERO));
+        let (sv, _) =
+            scroll_view(mtm, rect(0.0, 0.0, 200.0, 150.0), NSScrollerStyle::Overlay, NSSize::new(400.0, 5000.0), true);
+        let (w, _, _) = shown(mtm, &[&sv]);
+        let layers = testing::scroll_layers(&w);
+        assert_eq!(layer_of(&layers, &sv).expect("a layer").tiles, [[0, 0], [0, 1]]);
+        let clip = sv.contentView();
+        clip.scrollToPoint(pt(0.0, 3000.0));
+        sv.reflectScrolledClipView(&clip);
+        testing::settle();
+        let layers = testing::scroll_layers(&w);
+        let l = layer_of(&layers, &sv).expect("a layer");
+        assert!(l.tiles.contains(&[0, 7]), "{:?}", l.tiles);
+        // Only row 5 is in view here, and row 6 is still held: the pass
+        // late goes up, as the scroll did, not down as a still layer does.
+        clip.scrollToPoint(pt(0.0, 2600.0));
+        sv.reflectScrolledClipView(&clip);
+        testing::settle();
+        let layers = testing::scroll_layers(&w);
+        let l = layer_of(&layers, &sv).expect("a layer");
+        assert!(l.tiles.contains(&[0, 4]), "{:?}", l.tiles);
+        testing::set_prefetch_budget(None);
         close(&w);
     }
 
@@ -771,6 +800,7 @@ mod linux {
         let tests: &[Test] = &[
             ("promotion", promotion),
             ("scrolling_moves_layers", scrolling_moves_layers),
+            ("tiles_ahead_come_a_pass_late", tiles_ahead_come_a_pass_late),
             ("anchored_rows_and_columns", anchored_rows_and_columns),
             ("nested_layers_stack_in_paint_order", nested_layers_stack_in_paint_order),
             ("transparency_and_overlays", transparency_and_overlays),

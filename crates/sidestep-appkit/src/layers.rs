@@ -24,10 +24,11 @@
 //! 2048, so horizontal scrolling moves tiles too.
 //!
 //! **Tiles.** Each pass records the tiles that come into the viewport, the
-//! damaged parts of the tiles the render thread keeps, and, while the pass
-//! has spent less than [`PREFETCH_BUDGET`], one tile ahead in the
-//! direction the layer is scrolling (after telling the document with
-//! `prepareContentInRect:`). Tiles more than two tiles from the viewport
+//! damaged parts of the tiles the render thread keeps, and one tile ahead
+//! in the direction the layer is scrolling (after telling the document
+//! with `prepareContentInRect:`). Tiles ahead past [`PREFETCH_BUDGET`] are
+//! put off to a pass of their own, which draws them whatever it spends
+//! and puts off nothing more. Tiles more than two tiles from the viewport
 //! are dropped, and the farthest ones too while a window's tiles hold more
 //! than [`MEMORY_CAP`]; so is a tile out of view that is damaged over half
 //! of it or more (a document drawn whole again), rather than drawn before
@@ -54,9 +55,9 @@
 //! or its views change.
 //!
 //! **Passes.** A pass records the tiles in view, the damaged parts of the
-//! layers and the overlays, and has the window present; then, while it
-//! has spent less than [`PREFETCH_BUDGET`], it records tiles ahead, which
-//! the render thread draws while the compositor shows the frame. Drawing
+//! layers and the overlays, and has the window present; then it records
+//! tiles ahead, which the render thread draws while the compositor shows
+//! the frame, or puts them off to the next pass past the budget. Drawing
 //! runs program code, which may order the window out, see its scale
 //! change, remove clip views or display another window: the layers are
 //! out of the window during a pass, and what happens to them meanwhile is
@@ -96,7 +97,7 @@ const KEEP: i32 = 2;
 /// The most a window's tiles hold, in bytes, before the farthest go.
 const MEMORY_CAP: usize = 96 << 20;
 
-/// How long a pass may have spent before it stops drawing tiles ahead.
+/// How long a pass may have spent before it puts tiles ahead off.
 const PREFETCH_BUDGET: Duration = Duration::from_millis(4);
 
 /// Whether `SIDESTEP_TRACE_FRAMES` asks for counters (read once).
@@ -177,6 +178,9 @@ struct Layer {
     /// The part of the layer shown at the last pass (layer points), to
     /// tell which way it scrolls.
     visible: Rect,
+    /// The way it was scrolling when a pass put its tiles ahead off: the
+    /// next pass owes them.
+    put_off: Option<(f32, f32)>,
     /// What passes have drawn, for tests: paints of tiles and of the
     /// overlay, and the area painted into tiles (points squared).
     painted: (u32, u32, f64),
@@ -274,11 +278,20 @@ thread_local! {
     static MODE: Cell<Mode> = const { Cell::new(Mode::Inline) };
     /// The most a window's tiles may hold (tests lower it).
     static CAP: Cell<usize> = const { Cell::new(MEMORY_CAP) };
+    /// How long a pass may spend before it puts tiles ahead off (tests
+    /// change it).
+    static BUDGET: Cell<Duration> = const { Cell::new(PREFETCH_BUDGET) };
 }
 
 /// Lower the tile memory cap, or restore it (`testing`).
 pub(crate) fn set_memory_cap(bytes: Option<usize>) {
     CAP.with(|c| c.set(bytes.unwrap_or(MEMORY_CAP)));
+}
+
+/// Change the time a pass may spend before it puts tiles ahead off, or
+/// restore it (`testing`).
+pub(crate) fn set_prefetch_budget(budget: Option<Duration>) {
+    BUDGET.with(|b| b.set(budget.unwrap_or(PREFETCH_BUDGET)));
 }
 
 /// What [`record`] draws.
@@ -322,8 +335,8 @@ struct Counts {
 /// its layers, draw new and damaged tiles, the window's surface and the
 /// overlays; then have `present` present the frame (told whether anything
 /// changed), and draw tiles ahead. Does nothing while a pass of the window
-/// is running.
-pub(crate) fn display(window: &NSWindowImpl, present: impl FnOnce(bool)) {
+/// is running. Returns whether tiles ahead were put off to another pass.
+pub(crate) fn display(window: &NSWindowImpl, present: impl FnOnce(bool)) -> bool {
     let start = Instant::now();
     let mut counts = Counts::default();
     // Out of the window while the pass runs, with a stand-in noting what
@@ -331,7 +344,7 @@ pub(crate) fn display(window: &NSWindowImpl, present: impl FnOnce(bool)) {
     let mut layers = {
         let mut kept = window.layers().borrow_mut();
         if kept.out.is_some() {
-            return;
+            return false;
         }
         std::mem::replace(&mut *kept, Layers { layers: HashMap::new(), out: Some(Meanwhile::default()) })
     };
@@ -363,14 +376,25 @@ pub(crate) fn display(window: &NSWindowImpl, present: impl FnOnce(bool)) {
     }
     present(counts.paints + counts.placed > 0);
     // Tiles ahead, after the frame: the render thread draws them while the
-    // compositor shows it.
-    let budget = start + PREFETCH_BUDGET;
+    // compositor shows it. Past the budget they are put off to the next
+    // pass, which draws what it owes whatever it has spent (on a slow
+    // machine they come a pass late, not at the next scroll) and puts off
+    // nothing more, so one pass late is the most.
+    let budget = start + BUDGET.with(Cell::get);
+    let owing = plans.iter().any(|p| layers.layers.get(&p.id).is_some_and(|l| l.put_off.is_some()));
+    let mut put_off = false;
     for plan in &plans {
-        if Instant::now() >= budget {
-            break;
-        }
         let layer = layers.layers.get_mut(&plan.id).expect("a planned layer");
-        prefetch(window, plan, layer, scale, ring.as_deref(), &mut counts);
+        let owed = layer.put_off.take();
+        let way = heading(plan, layer, owed);
+        if owed.is_none() && Instant::now() >= budget {
+            if !owing && !tiles_ahead(plan, layer, way, scale).is_empty() {
+                layer.put_off = Some(way);
+                put_off = true;
+            }
+            continue;
+        }
+        prefetch(window, plan, layer, way, scale, ring.as_deref(), &mut counts);
     }
     evict(window, &mut layers, &plans, scale);
     for plan in &plans {
@@ -399,6 +423,7 @@ pub(crate) fn display(window: &NSWindowImpl, present: impl FnOnce(bool)) {
             plans.len()
         );
     }
+    put_off
 }
 
 /// Clip views that gained or lost their layers: flag them, tell the render
@@ -433,6 +458,7 @@ fn apply_promotions(window: &NSWindowImpl, layers: &mut Layers, plans: &[Plan]) 
                 overlay_views: Vec::new(),
                 overlay_drawn: false,
                 visible: Rect::default(),
+                put_off: None,
                 painted: (0, 0, 0.0),
             });
             // Its document was drawn inline; now it's in the tiles.
@@ -950,22 +976,26 @@ fn note_tiles(layer: &mut Layer, area: &Rect) {
     layer.painted.2 += f64::from((area.x1 - area.x0) * (area.y1 - area.y0));
 }
 
-/// Draw one tile ahead of the viewport, in the direction the layer is
-/// scrolling (down, when it hasn't moved), after telling the document.
-fn prefetch(
-    window: &NSWindowImpl,
-    plan: &Plan,
-    layer: &mut Layer,
-    scale: f64,
-    ring: Option<&NSView>,
-    counts: &mut Counts,
-) {
+/// The way the layer is scrolling: how its viewport moved since the last
+/// pass or, when it hasn't, the way it went when its tiles ahead were put
+/// off (`owed`).
+fn heading(plan: &Plan, layer: &Layer, owed: Option<(f32, f32)>) -> (f32, f32) {
+    let visible = visible_part(&plan.place);
+    let moved = (visible.x0 - layer.visible.x0, visible.y0 - layer.visible.y0);
+    match owed {
+        Some(owed) if moved == (0.0, 0.0) => owed,
+        _ => moved,
+    }
+}
+
+/// The tiles one ahead of the viewport going `heading` (down, when it is
+/// still) that the render thread doesn't hold.
+fn tiles_ahead(plan: &Plan, layer: &Layer, (dx, dy): (f32, f32), scale: f64) -> Vec<TileKey> {
     let place = plan.place;
     let grid = place.grid;
     let visible = visible_part(&place);
-    let Some((columns, rows)) = grid.keys(&visible, scale) else { return };
-    let Some((all_columns, all_rows)) = grid.keys(&place.extent, scale) else { return };
-    let (dx, dy) = (visible.x0 - layer.visible.x0, visible.y0 - layer.visible.y0);
+    let Some((columns, rows)) = grid.keys(&visible, scale) else { return Vec::new() };
+    let Some((all_columns, all_rows)) = grid.keys(&place.extent, scale) else { return Vec::new() };
     let ahead: Vec<TileKey> = if dx.abs() > dy.abs() {
         let column = if dx < 0.0 { columns.start() - 1 } else { columns.end() + 1 };
         rows.map(|row| [column, row]).collect()
@@ -973,13 +1003,30 @@ fn prefetch(
         let row = if dy < 0.0 { rows.start() - 1 } else { rows.end() + 1 };
         columns.map(|column| [column, row]).collect()
     };
-    let ahead: Vec<TileKey> = ahead
+    ahead
         .into_iter()
         .filter(|k| all_columns.contains(&k[0]) && all_rows.contains(&k[1]) && !layer.valid.contains(k))
-        .collect();
+        .collect()
+}
+
+/// Draw one tile ahead of the viewport going `heading`, after telling the
+/// document.
+fn prefetch(
+    window: &NSWindowImpl,
+    plan: &Plan,
+    layer: &mut Layer,
+    heading: (f32, f32),
+    scale: f64,
+    ring: Option<&NSView>,
+    counts: &mut Counts,
+) {
+    let ahead = tiles_ahead(plan, layer, heading, scale);
     if ahead.is_empty() {
         return;
     }
+    let place = plan.place;
+    let grid = place.grid;
+    let visible = visible_part(&place);
     // The document gets ready to draw what comes next.
     let clip = views::imp(&plan.clip);
     if let Some(document) = crate::scroll::document_of(clip) {
