@@ -818,8 +818,13 @@ fn tab_layout() {
         s.setTabStops(Some(&NSArray::from_retained_slice(&[tab(NSTextTabType::LeftTabStopType, 10.0)])));
         s.setDefaultTabInterval(30.0);
     });
-    assert!(size("abcdef", &plain).width > 10.0 && size("abcdef", &plain).width < 40.0);
-    assert!(close(size("abcdef\tx", &attrs_with_style(&font, &after_ten)).width, 40.0 + x, 0.01));
+    // Past the stop at 10, the tab goes to the next of the stops every 30
+    // from it (which one depends on the font's width for "abcdef", so the
+    // expected stop is worked out from it).
+    let before = size("abcdef", &plain).width;
+    assert!(before > 10.0);
+    let stop = 10.0 + 30.0 * (((before - 10.0) / 30.0).floor() + 1.0);
+    assert!(close(size("abcdef\tx", &attrs_with_style(&font, &after_ten)).width, stop + x, 0.01));
 
     let right = attrs_with_style(&font, &one(tab(NSTextTabType::RightTabStopType, 30.0)));
     assert!(close(size("a\tlong text here", &right).width, size("along text here", &plain).width, 0.01));
