@@ -245,7 +245,22 @@ fn arbitrary_values() {
     let mixed = Mixed { c: 7, d: 2.5 };
     let v = NSValue::new(mixed);
     assert_eq!(unsafe { v.get::<Mixed>() }, mixed);
-    assert!(v.isEqualToValue(&NSValue::new(mixed)));
+
+    // Equality compares every byte, padding included, on Apple's side as on
+    // Sidestep's, so two copies of `Mixed` (whose padding holds whatever was
+    // on the stack) may differ. Compare a struct without padding.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Pair {
+        a: u32,
+        b: f32,
+    }
+    unsafe impl objc2::encode::Encode for Pair {
+        const ENCODING: Encoding = Encoding::Struct("Pair", &[Encoding::UInt, Encoding::Float]);
+    }
+    let pair = NSValue::new(Pair { a: 7, b: 2.5 });
+    assert!(pair.isEqualToValue(&NSValue::new(Pair { a: 7, b: 2.5 })));
+    assert!(!pair.isEqualToValue(&NSValue::new(Pair { a: 8, b: 2.5 })));
 }
 
 #[test]
