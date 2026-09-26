@@ -212,7 +212,7 @@ define_class!(
 
         #[unsafe(method_id(port))]
         fn port(&self) -> Option<Retained<AnyObject>> {
-            self.port_value().and_then(number)
+            self.port_value().map(number)
         }
 
         #[unsafe(method_id(user))]
@@ -311,7 +311,6 @@ define_class!(
             self.path_text().map(|p| NSString::from_str(extension(last_component(&p)).unwrap_or("")))
         }
 
-        #[cfg(feature = "collections")]
         #[unsafe(method_id(pathComponents))]
         fn path_components(&self) -> Option<Retained<AnyObject>> {
             self.path_text().map(|path| {
@@ -605,7 +604,6 @@ fn last_component(path: &str) -> &str {
 
 /// The components of a decoded path: "/" first for an absolute one, no
 /// empty ones.
-#[cfg_attr(not(feature = "collections"), allow(dead_code))]
 fn path_components(path: &str) -> Vec<&str> {
     let root = path.starts_with('/').then_some("/");
     root.into_iter().chain(path.split('/').filter(|s| !s.is_empty())).collect()
@@ -716,16 +714,9 @@ pub(crate) fn port_value(digits: &str) -> Option<i64> {
     Some(digits.parse::<i64>().map_or(max, |p| p.min(max)))
 }
 
-#[cfg(feature = "collections")]
-pub(crate) fn number(value: i64) -> Option<Retained<AnyObject>> {
-    Some(objc2_foundation::NSNumber::new_i64(value).into())
-}
-
-/// `NSNumber` arrives with Foundation's collections; until then there is
-/// nothing to box a port in.
-#[cfg(not(feature = "collections"))]
-pub(crate) fn number(_value: i64) -> Option<Retained<AnyObject>> {
-    None
+/// A port boxed in an `NSNumber`.
+pub(crate) fn number(value: i64) -> Retained<AnyObject> {
+    objc2_foundation::NSNumber::new_i64(value).into()
 }
 
 pub(crate) fn url_impl(url: &NSURL) -> &NSURLImpl {

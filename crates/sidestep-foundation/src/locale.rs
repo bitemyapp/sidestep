@@ -113,7 +113,6 @@ define_class!(
             make(String::new())
         }
 
-        #[cfg(feature = "collections")]
         #[unsafe(method_id(preferredLanguages))]
         fn preferred_languages() -> Retained<AnyObject> {
             let id = current_identifier();

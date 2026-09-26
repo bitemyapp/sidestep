@@ -11,10 +11,6 @@
 //! The writer escapes `/` unless asked not to, writes doubles as `%.17g`,
 //! and pretty-prints with two-space indents and `" : "` between key and
 //! value, an empty container as an open line, as macOS does.
-//!
-//! Arrays, numbers and `null` need `NSArray`, `NSNumber` and `NSNull`:
-//! until Foundation's collections are in, JSON holding them fails to read
-//! (with an error saying so) and objects holding them fail to write.
 
 use std::fmt::Write as _;
 
@@ -515,23 +511,15 @@ fn to_object(json: &Json) -> Result<Retained<AnyObject>, String> {
             let values = members.iter().map(|(_, v)| to_object(v)).collect::<Result<Vec<_>, _>>()?;
             Ok(NSDictionary::from_retained_objects(&keys, &values).into())
         }
-        #[cfg(feature = "collections")]
         Json::Array(items) => {
             let items = items.iter().map(to_object).collect::<Result<Vec<_>, _>>()?;
             Ok(objc2_foundation::NSArray::from_retained_slice(&items).into())
         }
-        #[cfg(feature = "collections")]
         Json::Null => Ok(objc2_foundation::NSNull::null().into()),
-        #[cfg(feature = "collections")]
         Json::Bool(b) => Ok(objc2_foundation::NSNumber::new_bool(*b).into()),
-        #[cfg(feature = "collections")]
         Json::Int(n) => Ok(objc2_foundation::NSNumber::new_i64(*n).into()),
-        #[cfg(feature = "collections")]
         Json::UInt(n) => Ok(objc2_foundation::NSNumber::new_u64(*n).into()),
-        #[cfg(feature = "collections")]
         Json::Double(d) => Ok(objc2_foundation::NSNumber::new_f64(*d).into()),
-        #[cfg(not(feature = "collections"))]
-        _ => Err("JSON arrays, numbers and null need Foundation's collections".into()),
     }
 }
 
@@ -548,30 +536,27 @@ fn from_object(object: &AnyObject) -> Result<Json, String> {
         }
         return Ok(Json::Object(members));
     }
-    #[cfg(feature = "collections")]
-    {
-        if let Some(array) = object.downcast_ref::<objc2_foundation::NSArray>() {
-            return (0..array.count())
-                .map(|i| from_object(&array.objectAtIndex(i)))
-                .collect::<Result<_, _>>()
-                .map(Json::Array);
-        }
-        if object.downcast_ref::<objc2_foundation::NSNull>().is_some() {
-            return Ok(Json::Null);
-        }
-        if let Some(number) = object.downcast_ref::<objc2_foundation::NSNumber>() {
-            return match crate::plist::number_value(number) {
-                plist::Value::Boolean(b) => Ok(Json::Bool(b)),
-                plist::Value::Real(d) if !d.is_finite() => {
-                    Err("Invalid number value (infinite or NaN) in JSON write".into())
-                }
-                plist::Value::Real(d) => Ok(Json::Double(d)),
-                plist::Value::Integer(n) => {
-                    Ok(n.as_signed().map_or_else(|| Json::UInt(n.as_unsigned().unwrap_or(0)), Json::Int))
-                }
-                _ => Err("Invalid number in JSON write".into()),
-            };
-        }
+    if let Some(array) = object.downcast_ref::<objc2_foundation::NSArray>() {
+        return (0..array.count())
+            .map(|i| from_object(&array.objectAtIndex(i)))
+            .collect::<Result<_, _>>()
+            .map(Json::Array);
+    }
+    if object.downcast_ref::<objc2_foundation::NSNull>().is_some() {
+        return Ok(Json::Null);
+    }
+    if let Some(number) = object.downcast_ref::<objc2_foundation::NSNumber>() {
+        return match crate::plist::number_value(number) {
+            plist::Value::Boolean(b) => Ok(Json::Bool(b)),
+            plist::Value::Real(d) if !d.is_finite() => {
+                Err("Invalid number value (infinite or NaN) in JSON write".into())
+            }
+            plist::Value::Real(d) => Ok(Json::Double(d)),
+            plist::Value::Integer(n) => {
+                Ok(n.as_signed().map_or_else(|| Json::UInt(n.as_unsigned().unwrap_or(0)), Json::Int))
+            }
+            _ => Err("Invalid number in JSON write".into()),
+        };
     }
     let class = object.class().name().to_string_lossy().into_owned();
     Err(format!("Invalid type in JSON write ({class})"))

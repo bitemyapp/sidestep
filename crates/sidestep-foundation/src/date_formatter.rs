@@ -436,31 +436,26 @@ define_class!(
             self.state().symbols.short_weekdays = list;
         }
 
-        #[cfg(feature = "collections")]
         #[unsafe(method_id(monthSymbols))]
         fn month_symbols(&self) -> Retained<AnyObject> {
             array(&self.state().symbols.months)
         }
 
-        #[cfg(feature = "collections")]
         #[unsafe(method_id(shortMonthSymbols))]
         fn short_month_symbols(&self) -> Retained<AnyObject> {
             array(&self.state().symbols.short_months)
         }
 
-        #[cfg(feature = "collections")]
         #[unsafe(method_id(weekdaySymbols))]
         fn weekday_symbols(&self) -> Retained<AnyObject> {
             array(&self.state().symbols.weekdays)
         }
 
-        #[cfg(feature = "collections")]
         #[unsafe(method_id(shortWeekdaySymbols))]
         fn short_weekday_symbols(&self) -> Retained<AnyObject> {
             array(&self.state().symbols.short_weekdays)
         }
 
-        #[cfg(feature = "collections")]
         #[unsafe(method_id(eraSymbols))]
         fn era_symbols(&self) -> Retained<AnyObject> {
             array(&self.state().symbols.eras)
@@ -526,7 +521,6 @@ fn string_list(list: Option<&AnyObject>, len: usize) -> Option<Vec<String>> {
         .collect()
 }
 
-#[cfg(feature = "collections")]
 fn array(list: &[String]) -> Retained<AnyObject> {
     let strings: Vec<Retained<NSString>> = list.iter().map(|s| NSString::from_str(s)).collect();
     objc2_foundation::NSArray::from_retained_slice(&strings).into()

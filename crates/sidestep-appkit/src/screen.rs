@@ -27,7 +27,7 @@
 //! `applicationDidChangeScreenParameters:`, whether or not the program has
 //! asked about screens yet, and a window whose screen changed has its
 //! delegate told `windowDidChangeScreen:`; both are posted to the default
-//! notification center too, once Foundation has one.
+//! notification center too.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -35,10 +35,11 @@ use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use objc2::rc::Retained;
-use objc2::runtime::{AnyClass, AnyObject, NSObject, NSObjectProtocol, Sel};
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, Sel};
 use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{NSApplication, NSScreen, NSWindow};
 use objc2_foundation::{NSArray, NSDictionary, NSEdgeInsets, NSNumber, NSPoint, NSRect, NSSize, NSString, NSValue};
+use sidestep_foundation::notification_center::post;
 
 use crate::pasteboard_item::responds;
 use crate::protocol::{ToRender, WindowId};
@@ -445,7 +446,7 @@ pub(crate) fn changed(mtm: MainThreadMarker) {
             let _: () = unsafe { msg_send![delegate, applicationDidChangeScreenParameters: &*note] };
         }
     }
-    post(&name, Some(app.as_ref()));
+    post(&name, Some(app.as_ref()), None);
 }
 
 fn tell_window(window: &NSWindow, selector: Sel, name: &str) {
@@ -457,24 +458,12 @@ fn tell_window(window: &NSWindow, selector: Sel, name: &str) {
         // SAFETY: window delegate notifications take the notification.
         unsafe { objc2::runtime::MessageReceiver::send_message::<_, ()>(&*delegate, selector, (&*note,)) };
     }
-    post(&name, Some(window.as_ref()));
-}
-
-/// Post to the default notification center, once Foundation has one (found
-/// by name, so AppKit links without it).
-fn post(name: &NSString, object: Option<&AnyObject>) {
-    let Some(center) = AnyClass::get(c"NSNotificationCenter") else { return };
-    // SAFETY: +defaultCenter returns the center, and
-    // postNotificationName:object: takes a name and an object or nil.
-    unsafe {
-        let center: Retained<AnyObject> = msg_send![center, defaultCenter];
-        let _: () = msg_send![&*center, postNotificationName: name, object: object];
-    }
+    post(&name, Some(window.as_ref()), None);
 }
 
 define_class!(
-    // Holds NSWindow's screen methods beyond `screen` itself, which
-    // `install_window_methods` copies onto NSWindow (see `category`).
+    // Holds NSWindow's screen methods beyond `screen` itself, which the
+    // `SidestepScreens` category adds to NSWindow.
     #[unsafe(super(NSObject))]
     #[name = "_SidestepWindowScreens"]
     struct WindowScreens;
@@ -483,18 +472,19 @@ define_class!(
         /// The screen with the deepest color, which is the window's own.
         #[unsafe(method_id(deepestScreen))]
         fn deepest_screen(&self) -> Option<Retained<NSScreen>> {
-            // SAFETY: the method was copied onto NSWindow, so `self` is a
-            // window.
+            // SAFETY: the category adds the method to NSWindow, so `self` is
+            // a window.
             let window = unsafe { &*(self as *const Self).cast::<NSWindow>() };
             window_screen(window::imp(window))
         }
     }
 );
 
-/// Give NSWindow its screen methods; from NSWindow's loader.
-pub(crate) fn install_window_methods() {
-    crate::category::install(WindowScreens::class(), <NSWindow as ClassType>::class(), &[sel!(deepestScreen)]);
-}
+// NSWindow's screen methods.
+sidestep_runtime::category!("NSWindow"(SidestepScreens), |category| {
+    // SAFETY: the helper's method treats its receiver as an NSWindow.
+    unsafe { category.add_methods_of(WindowScreens::class()) };
+});
 
 sidestep_foundation::constant_string!(NSDeviceIsScreen = "NSDeviceIsScreen");
 sidestep_foundation::constant_string!(NSDeviceIsPrinter = "NSDeviceIsPrinter");

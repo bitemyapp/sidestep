@@ -9,10 +9,8 @@
 //! 76-character lines), which `conformance/tests/defaults.rs` pins byte
 //! for byte.
 //!
-//! Numbers need `NSNumber`, and arrays `NSArray`: until Foundation's
-//! collections are in, converting to objects leaves them out. An
-//! `NSNumber` whose C type is `c` and whose value is 0 or 1 is a boolean,
-//! as GNUstep also has it.
+//! An `NSNumber` whose C type is `c` and whose value is 0 or 1 is a
+//! boolean, as GNUstep also has it.
 
 use std::fmt::Write as _;
 use std::io::Cursor;
@@ -320,20 +318,16 @@ pub(crate) fn to_object(value: &Value) -> Option<Retained<AnyObject>> {
             };
             Some(NSDate::dateWithTimeIntervalSinceReferenceDate(unix - crate::date::UNIX_TO_REFERENCE).into())
         }
-        #[cfg(feature = "collections")]
         Value::Array(items) => {
             let items: Vec<Retained<AnyObject>> = items.iter().filter_map(to_object).collect();
             Some(objc2_foundation::NSArray::from_retained_slice(&items).into())
         }
-        #[cfg(feature = "collections")]
         Value::Boolean(b) => Some(objc2_foundation::NSNumber::new_bool(*b).into()),
-        #[cfg(feature = "collections")]
         Value::Integer(n) => Some(match (n.as_signed(), n.as_unsigned()) {
             (Some(v), _) => objc2_foundation::NSNumber::new_i64(v).into(),
             (None, Some(v)) => objc2_foundation::NSNumber::new_u64(v).into(),
             (None, None) => return None,
         }),
-        #[cfg(feature = "collections")]
         Value::Real(r) => Some(objc2_foundation::NSNumber::new_f64(*r).into()),
         _ => None,
     }
@@ -365,20 +359,16 @@ pub(crate) fn from_object(object: &AnyObject) -> Option<Value> {
         }
         return Some(Value::Dictionary(out));
     }
-    #[cfg(feature = "collections")]
-    {
-        if let Some(array) = object.downcast_ref::<objc2_foundation::NSArray>() {
-            let items: Option<Vec<Value>> = (0..array.count()).map(|i| from_object(&array.objectAtIndex(i))).collect();
-            return items.map(Value::Array);
-        }
-        if let Some(number) = object.downcast_ref::<objc2_foundation::NSNumber>() {
-            return Some(number_value(number));
-        }
+    if let Some(array) = object.downcast_ref::<objc2_foundation::NSArray>() {
+        let items: Option<Vec<Value>> = (0..array.count()).map(|i| from_object(&array.objectAtIndex(i))).collect();
+        return items.map(Value::Array);
+    }
+    if let Some(number) = object.downcast_ref::<objc2_foundation::NSNumber>() {
+        return Some(number_value(number));
     }
     None
 }
 
-#[cfg(feature = "collections")]
 pub(crate) fn number_value(number: &objc2_foundation::NSNumber) -> Value {
     // SAFETY: -objCType returns a C string that lives as long as the number.
     let kind = unsafe { std::ffi::CStr::from_ptr(number.objCType().as_ptr()) }.to_bytes().first().copied();

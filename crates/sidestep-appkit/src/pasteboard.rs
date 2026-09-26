@@ -46,7 +46,7 @@ use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyClass, AnyObject, MessageReceiver, NSObject, NSObjectProtocol};
 use objc2::{AnyThread, ClassType, DefinedClass, MainThreadMarker, Message, define_class, msg_send, sel};
 use objc2_app_kit::{NSPasteboard, NSPasteboardItem};
-use objc2_foundation::{NSArray, NSData, NSString};
+use objc2_foundation::{NSArray, NSData, NSString, NSURL};
 
 use crate::clipboard::{self, Contents, Source};
 use crate::pasteboard_item::{
@@ -206,7 +206,7 @@ define_class!(
         #[unsafe(method_id(dataForType:))]
         fn data_for_type(&self, kind: &NSString) -> Option<Retained<NSData>> {
             let bytes = self.read(&types::from_ns(kind)).and_then(|r| r.bytes());
-            bytes.and_then(|b| item::data_object(&b))
+            bytes.map(|b| NSData::with_bytes(&b))
         }
 
         #[unsafe(method_id(stringForType:))]
@@ -538,12 +538,9 @@ impl NSPasteboardImpl {
         if let Some(string) = object.downcast_ref::<NSString>() {
             return one(STRING, item::string_value(string));
         }
-        if item::is_kind_of(object, c"NSURL") {
-            // SAFETY: NSURL's absoluteString and isFileURL take nothing.
-            let (string, file): (Option<Retained<NSString>>, bool) =
-                unsafe { (msg_send![object, absoluteString], msg_send![object, isFileURL]) };
-            let Some(string) = string else { return Some(None) };
-            return one(if file { FILE_URL } else { URL }, item::string_value(&string));
+        if let Some(url) = object.downcast_ref::<NSURL>() {
+            let Some(string) = url.absoluteString() else { return Some(None) };
+            return one(if url.isFileURL() { FILE_URL } else { URL }, item::string_value(&string));
         }
         if !item::writes_itself(object) {
             return None;
@@ -755,8 +752,8 @@ fn readers(classes: &NSArray<AnyClass>, options: Option<&AnyObject>, board: &NSP
         // SAFETY: as above.
         value.is_some_and(|v| unsafe { msg_send![&*v, boolValue] })
     });
-    let (item_class, string_class) = (<NSPasteboardItem as ClassType>::class(), NSString::class());
-    let url_class = AnyClass::get(c"NSURL");
+    let (item_class, string_class, url_class) =
+        (<NSPasteboardItem as ClassType>::class(), NSString::class(), NSURL::class());
     classes
         .iter()
         .filter_map(|class| {
@@ -767,7 +764,7 @@ fn readers(classes: &NSArray<AnyClass>, options: Option<&AnyObject>, board: &NSP
             if is(string_class) {
                 return Some(Reader::Text);
             }
-            if url_class.is_some_and(is) {
+            if is(url_class) {
                 return Some(Reader::Url(class, file_urls_only));
             }
             if !class.metaclass().responds_to(sel!(readableTypesForPasteboard:)) {
@@ -828,7 +825,7 @@ impl Reader {
                     // Sidestep has no keyed archives.
                     return None;
                 } else {
-                    Retained::into_super(Retained::into_super(item::data_object(&read.bytes()?)?))
+                    Retained::into_super(Retained::into_super(NSData::with_bytes(&read.bytes()?)))
                 };
                 // SAFETY: +alloc makes an instance to initialize, and
                 // readers implement initWithPasteboardPropertyList:ofType:,

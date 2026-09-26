@@ -199,7 +199,6 @@ define_class!(
             self.find(name, ext, directory).as_deref().and_then(crate::url::file_url)
         }
 
-        #[cfg(feature = "collections")]
         #[unsafe(method_id(pathsForResourcesOfType:inDirectory:))]
         fn paths_for_resources(&self, ext: Option<&NSString>, directory: Option<&NSString>) -> Retained<AnyObject> {
             let paths: Vec<Retained<NSString>> =
@@ -207,7 +206,6 @@ define_class!(
             objc2_foundation::NSArray::from_retained_slice(&paths).into()
         }
 
-        #[cfg(feature = "collections")]
         #[unsafe(method_id(URLsForResourcesWithExtension:subdirectory:))]
         fn urls_for_resources(&self, ext: Option<&NSString>, directory: Option<&NSString>) -> Option<Retained<AnyObject>> {
             let urls: Vec<Retained<NSURL>> =
@@ -308,7 +306,6 @@ impl NSBundleImpl {
         None
     }
 
-    #[cfg(feature = "collections")]
     fn find_all(&self, ext: Option<&NSString>, directory: Option<&NSString>) -> Vec<PathBuf> {
         let ext = extension(ext);
         let directory = directory.map(|d| d.to_string());

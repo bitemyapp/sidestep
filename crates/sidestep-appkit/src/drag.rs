@@ -471,11 +471,11 @@ fn register(object: &AnyObject, new: &NSArray<NSString>) {
     set_registered(object, Some(&NSArray::from_retained_slice(&all)));
 }
 
-// The methods views and windows get (see `category`).
+// The methods views and windows get, through categories.
 
 define_class!(
-    // Holds NSView's drag destination methods, which `install` copies onto
-    // NSView. `self` is an NSView there.
+    // Holds NSView's drag destination methods, which the `SidestepDragging`
+    // category adds to NSView. `self` is an NSView there.
     #[unsafe(super(NSObject))]
     #[name = "_SidestepViewDragging"]
     struct ViewDragging;
@@ -526,10 +526,10 @@ define_class!(
 );
 
 define_class!(
-    // Holds NSWindow's drag destination methods, which `install` copies
-    // onto NSWindow. `self` is an NSWindow there. A window has every
-    // destination method, passing each on to its delegate if it has it, as
-    // on macOS.
+    // Holds NSWindow's drag destination methods, which the
+    // `SidestepDragging` category adds to NSWindow. `self` is an NSWindow
+    // there. A window has every destination method, passing each on to its
+    // delegate if it has it, as on macOS.
     #[unsafe(super(NSObject))]
     #[name = "_SidestepWindowDragging"]
     struct WindowDragging;
@@ -629,7 +629,7 @@ fn last_answer() -> NSDragOperation {
 }
 
 /// A category method's receiver, which is an instance of the class the
-/// method was copied onto, not of the helper.
+/// category adds the method to, not of the helper.
 fn object<T>(this: &T) -> &AnyObject {
     // SAFETY: every receiver is an object.
     unsafe { &*(this as *const T).cast::<AnyObject>() }
@@ -637,8 +637,8 @@ fn object<T>(this: &T) -> &AnyObject {
 
 /// The window's delegate, if it has `selector`. `this` is an NSWindow.
 fn delegate_with(this: &WindowDragging, selector: Sel) -> Option<Retained<AnyObject>> {
-    // SAFETY: the method was copied onto NSWindow, so `this` is a window,
-    // whose delegate is an object or nil.
+    // SAFETY: the category adds the method to NSWindow, so `this` is a
+    // window, whose delegate is an object or nil.
     let window = unsafe { &*(this as *const WindowDragging).cast::<NSWindow>() };
     let delegate = window::imp(window).delegate_object()?;
     responds(&delegate, selector).then_some(delegate)
@@ -651,46 +651,17 @@ fn delegated(this: &WindowDragging, selector: Sel, sender: &AnyObject) -> Option
     Some(unsafe { MessageReceiver::send_message::<_, NSDragOperation>(&*delegate, selector, (sender,)) })
 }
 
-/// Give NSView its drag destination methods; from NSView's loader.
-pub(crate) fn install_view_methods() {
-    crate::category::install(
-        ViewDragging::class(),
-        <NSView as ClassType>::class(),
-        &[
-            sel!(registerForDraggedTypes:),
-            sel!(unregisterDraggedTypes),
-            sel!(registeredDraggedTypes),
-            sel!(draggingEntered:),
-            sel!(draggingUpdated:),
-            sel!(draggingExited:),
-            sel!(prepareForDragOperation:),
-            sel!(performDragOperation:),
-            sel!(concludeDragOperation:),
-        ],
-    );
-}
+// NSView's drag destination methods.
+sidestep_runtime::category!("NSView"(SidestepDragging), |category| {
+    // SAFETY: the helper's methods treat their receiver as an NSView.
+    unsafe { category.add_methods_of(ViewDragging::class()) };
+});
 
-/// Give NSWindow its drag destination methods; from NSWindow's loader.
-pub(crate) fn install_window_methods() {
-    crate::category::install(
-        WindowDragging::class(),
-        <NSWindow as ClassType>::class(),
-        &[
-            sel!(registerForDraggedTypes:),
-            sel!(unregisterDraggedTypes),
-            sel!(registeredDraggedTypes),
-            sel!(draggingEntered:),
-            sel!(draggingUpdated:),
-            sel!(draggingExited:),
-            sel!(prepareForDragOperation:),
-            sel!(performDragOperation:),
-            sel!(concludeDragOperation:),
-            sel!(draggingEnded:),
-            sel!(wantsPeriodicDraggingUpdates),
-            sel!(updateDraggingItemsForDrag:),
-        ],
-    );
-}
+// NSWindow's drag destination methods.
+sidestep_runtime::category!("NSWindow"(SidestepDragging), |category| {
+    // SAFETY: the helper's methods treat their receiver as an NSWindow.
+    unsafe { category.add_methods_of(WindowDragging::class()) };
+});
 
 // The dragging info destinations are handed.
 

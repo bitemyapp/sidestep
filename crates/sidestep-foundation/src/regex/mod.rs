@@ -27,10 +27,10 @@ use std::rc::Rc;
 use block2::DynBlock;
 use fancy_regex::{Regex, RegexBuilder};
 use objc2::rc::{Allocated, Retained};
-use objc2::runtime::{AnyClass, AnyObject, Bool, NSObject, NSObjectProtocol};
+use objc2::runtime::{AnyObject, Bool, NSObject, NSObjectProtocol};
 use objc2::{AnyThread, ClassType, DefinedClass, Message, define_class, msg_send};
 use objc2_foundation::{
-    NSDictionary, NSInteger, NSMatchingFlags, NSMatchingOptions, NSMutableString, NSRange, NSRegularExpression,
+    NSError, NSInteger, NSMatchingFlags, NSMatchingOptions, NSMutableString, NSRange, NSRegularExpression,
     NSRegularExpressionOptions, NSString, NSTextCheckingResult, NSTextCheckingType, NSUInteger, NSZone,
 };
 
@@ -337,16 +337,14 @@ pub(crate) struct RegexIvars {
     compiled: Pattern,
 }
 
-/// An NSError for an invalid pattern, if Foundation's NSError is there.
-fn invalid_pattern_error(pattern: &NSString) -> Option<Retained<AnyObject>> {
-    let class = AnyClass::get(c"NSError")?;
-    let domain = NSString::from_str("NSCocoaErrorDomain");
-    let key = NSString::from_str("NSInvalidValue");
-    let info = NSDictionary::<NSString, AnyObject>::from_slices(&[&*key], &[pattern.as_ref()]);
+/// The user-info key an invalid pattern's error holds it under.
+static INVALID_VALUE: crate::ConstantString =
+    crate::ConstantString::new(&crate::CONSTANT_STRING_CLASS, crate::ConstStr::new("NSInvalidValue\0"));
+
+/// The error for an invalid pattern.
+fn invalid_pattern_error(pattern: &NSString) -> Retained<NSError> {
     // NSFormattingError, as macOS reports it.
-    let code: NSInteger = 2048;
-    // SAFETY: NSError's class method.
-    unsafe { msg_send![class, errorWithDomain: &*domain, code: code, userInfo: &*info] }
+    crate::error::cocoa(2048, &[(&INVALID_VALUE, pattern.retain().into())])
 }
 
 /// A new regular expression, or nil with `error` set.
@@ -370,12 +368,8 @@ fn compile(
             Some(unsafe { msg_send![super(this), init] })
         }
         Err(_) => {
-            if !error.is_null() {
-                let e = invalid_pattern_error(pattern);
-                // SAFETY: the caller passes a valid out-parameter; the error
-                // is handed over autoreleased.
-                unsafe { *error = e.map_or(std::ptr::null_mut(), Retained::autorelease_ptr) };
-            }
+            // SAFETY: the caller passes null or room for an error.
+            unsafe { crate::error::set(error.cast(), invalid_pattern_error(pattern)) };
             None
         }
     }

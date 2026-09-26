@@ -66,12 +66,6 @@ harness = false
 name = "defaults"
 harness = false
 
-# Checks that need Foundation's collections build on Linux only with this
-# feature (on by default); on macOS they always run.
-[features]
-default = ["collections"]
-collections = []
-
 # Pasteboards, drag and drop, and screens (pasteboard, drag_defaults,
 # screen). A table of its own, so the features merge with the ones above.
 [target.'cfg(all())'.dev-dependencies]

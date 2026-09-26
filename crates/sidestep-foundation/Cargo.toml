@@ -25,12 +25,3 @@ fancy-regex = "0.16"
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "objc2", "CFRunLoop", "CFDate"] }
 plist = { version = "1.10.1", default-features = false }
 jiff = { version = "0.2.37", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
-
-[features]
-default = ["collections"]
-# Every method and function that returns or takes NSArray, NSNumber or
-# NSNull: in URLs, the file manager, search paths, bundles, process info,
-# operations, user defaults, formatters, locales and time zones, property
-# lists and JSON, and CFArray and CFNumber. On by default now that the
-# collections exist; the gates are to be removed.
-collections = ["objc2-foundation/NSArray", "objc2-foundation/NSNull"]

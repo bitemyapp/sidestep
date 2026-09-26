@@ -557,11 +557,6 @@ patterns; `NSTimeZone` uses jiff over the system's tz database.
 class behind it. `CFGetTypeID` goes by class name, so it needs no link
 reference to classes that may not be built.
 
-Parts that return arrays or numbers (`URLsForDirectory:inDomains:`,
-`queryItems`, `-[NSURL port]`, `CFArray`, `CFNumber`, JSON arrays) build
-with sidestep-foundation's `collections` feature, until Foundation's
-collections land; the rest never needs them.
-
 ## AppKit: a main thread and a render thread
 
 AppKit's contract is single-threaded: events, timers, the responder chain and
@@ -940,9 +935,10 @@ there's nothing to read, and reads give nil), and
 the classes asked for. Wayland's copy is Copy and its move Move and
 Generic; Wayland has no link, so a source's operations never include
 Link. NSWindow has every destination method and passes each to its
-delegate. Views and windows get the methods as a category
-(`category.rs`), from their classes' loaders. Drags from our windows
-(sources) aren't there yet.
+delegate. Views and windows get the methods from link-time categories
+(`SidestepDragging`, the methods of a helper class each), which the
+runtime attaches when `NSView` and `NSWindow` register. Drags from our
+windows (sources) aren't there yet.
 
 ### Screens
 
@@ -966,7 +962,7 @@ of outputs after the first snapshot calls the application delegate's
 `applicationDidChangeScreenParameters:`, whether or not the program has
 asked about screens yet, and a window moving to another output its
 delegate's `windowDidChangeScreen:`; both are posted to the default
-notification center too, once Foundation has one.
+notification center too.
 `backingAlignedRect:options:` rounds halfway to the nearest pixel up, as
 macOS does (down on y in a flipped rectangle). The first
 `NSScreen.screens` takes about 0.5 ms before any window (on macOS, about

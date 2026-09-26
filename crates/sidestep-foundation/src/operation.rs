@@ -176,7 +176,6 @@ define_class!(
             dependency_finished();
         }
 
-        #[cfg(feature = "collections")]
         #[unsafe(method_id(dependencies))]
         fn dependencies(&self) -> Retained<AnyObject> {
             let dependencies = lock(&self.ivars().dependencies).clone();

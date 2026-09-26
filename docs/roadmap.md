@@ -98,8 +98,6 @@ numbers; `NSAttributedString` and `NSMutableAttributedString`;
   `NSNumberFormatter`; locale data beyond English.
 - `NSStream`; `NSURLSession`; `dispatch_io`, `dispatch_data` and
   dispatch blocks (`dispatch_block_create`).
-- Remove sidestep-foundation's `collections` feature gates (the feature is
-  on by default now that the collections exist).
 
 ## 2. AppKit skeleton
 

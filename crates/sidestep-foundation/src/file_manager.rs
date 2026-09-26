@@ -12,9 +12,6 @@
 //! freedesktop.org trash specification: the home trash for items on the
 //! home file system, `$topdir/.Trash-$uid` for others, with a
 //! `.trashinfo` record beside each item.
-//!
-//! Directory listings, attributes and search-path arrays return
-//! collections, so they build with the `collections` feature.
 
 use std::ffi::{CString, c_char};
 use std::io;
@@ -116,10 +113,8 @@ exported_strings! {
 }
 
 /// `NSDirectoryEnumerationSkipsHiddenFiles`.
-#[cfg_attr(not(feature = "collections"), allow(dead_code))]
 const SKIPS_HIDDEN_FILES: NSUInteger = 1 << 2;
 /// `NSDirectoryEnumerationProducesRelativePathURLs`.
-#[cfg_attr(not(feature = "collections"), allow(dead_code))]
 const PRODUCES_RELATIVE_PATH_URLS: NSUInteger = 1 << 4;
 
 #[derive(Default)]
@@ -407,7 +402,6 @@ define_class!(
             NSString::from_str(&String::from_utf8_lossy(bytes))
         }
 
-        #[cfg(feature = "collections")]
         #[unsafe(method_id(contentsOfDirectoryAtPath:error:))]
         fn contents_of_directory_at_path(&self, path: &NSString, error: *mut *mut NSError) -> Option<Retained<AnyObject>> {
             let path = path.to_string();
@@ -416,7 +410,6 @@ define_class!(
             unsafe { report(result, error) }
         }
 
-        #[cfg(feature = "collections")]
         #[unsafe(method_id(contentsOfDirectoryAtURL:includingPropertiesForKeys:options:error:))]
         fn contents_of_directory_at_url(
             &self,
@@ -429,7 +422,6 @@ define_class!(
             unsafe { report(contents_of_directory_at_url(url, options), error) }
         }
 
-        #[cfg(feature = "collections")]
         #[unsafe(method_id(subpathsOfDirectoryAtPath:error:))]
         fn subpaths_of_directory_at_path(&self, path: &NSString, error: *mut *mut NSError) -> Option<Retained<AnyObject>> {
             let path = path.to_string();
@@ -438,13 +430,11 @@ define_class!(
             unsafe { report(result, error) }
         }
 
-        #[cfg(feature = "collections")]
         #[unsafe(method_id(subpathsAtPath:))]
         fn subpaths_at_path(&self, path: &NSString) -> Option<Retained<AnyObject>> {
             subpaths(Path::new(&path.to_string())).ok().map(|names| strings(&names))
         }
 
-        #[cfg(feature = "collections")]
         #[unsafe(method_id(attributesOfItemAtPath:error:))]
         fn attributes_of_item(&self, path: &NSString, error: *mut *mut NSError) -> Option<Retained<AnyObject>> {
             let path = path.to_string();
@@ -455,7 +445,6 @@ define_class!(
             unsafe { report(result, error) }
         }
 
-        #[cfg(feature = "collections")]
         #[unsafe(method_id(attributesOfFileSystemForPath:error:))]
         fn attributes_of_file_system(&self, path: &NSString, error: *mut *mut NSError) -> Option<Retained<AnyObject>> {
             let path = path.to_string();
@@ -463,7 +452,6 @@ define_class!(
             unsafe { report(attributes::of_file_system(&path), error) }
         }
 
-        #[cfg(feature = "collections")]
         #[unsafe(method_id(URLsForDirectory:inDomains:))]
         fn urls_for_directory(&self, directory: NSUInteger, domains: NSUInteger) -> Retained<AnyObject> {
             let urls: Vec<Retained<NSURL>> =
@@ -471,7 +459,6 @@ define_class!(
             objc2_foundation::NSArray::from_retained_slice(&urls).into()
         }
 
-        #[cfg(feature = "collections")]
         #[unsafe(method_id(componentsToDisplayForPath:))]
         fn components_to_display(&self, path: &NSString) -> Option<Retained<AnyObject>> {
             let path = path.to_string();
@@ -804,14 +791,12 @@ fn local_time_now() -> String {
     }
 }
 
-#[cfg(feature = "collections")]
 fn strings(names: &[String]) -> Retained<AnyObject> {
     let strings: Vec<Retained<NSString>> = names.iter().map(|n| NSString::from_str(n)).collect();
     objc2_foundation::NSArray::from_retained_slice(&strings).into()
 }
 
 /// A directory's entry names, sorted.
-#[cfg(any(test, feature = "collections"))]
 fn list(path: &str) -> Result<Vec<String>, Retained<NSError>> {
     let entries = std::fs::read_dir(path).map_err(|e| error::file(FileOp::Read, &e, path))?;
     let mut names: Vec<String> =
@@ -821,7 +806,6 @@ fn list(path: &str) -> Result<Vec<String>, Retained<NSError>> {
 }
 
 /// Every path under a directory, relative to it, without following links.
-#[cfg(any(test, feature = "collections"))]
 fn subpaths(root: &Path) -> io::Result<Vec<String>> {
     fn walk(root: &Path, prefix: &str, out: &mut Vec<String>) -> io::Result<()> {
         let mut entries: Vec<_> = std::fs::read_dir(root)?.filter_map(|e| e.ok()).collect();
@@ -841,7 +825,6 @@ fn subpaths(root: &Path) -> io::Result<Vec<String>> {
     Ok(out)
 }
 
-#[cfg(feature = "collections")]
 fn contents_of_directory_at_url(url: &NSURL, options: NSUInteger) -> Result<Retained<AnyObject>, Retained<NSError>> {
     let path = read_path(url)?;
     let mut names = list(&path)?;
@@ -870,7 +853,6 @@ fn contents_of_directory_at_url(url: &NSURL, options: NSUInteger) -> Result<Reta
     Ok(objc2_foundation::NSArray::from_retained_slice(&urls).into())
 }
 
-#[cfg(feature = "collections")]
 mod attributes {
     use super::*;
     use objc2_foundation::{NSDate, NSDictionary, NSNumber};

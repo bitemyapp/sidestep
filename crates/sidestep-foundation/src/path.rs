@@ -95,7 +95,6 @@ pub extern "C" fn NSOpenStepRootDirectory() -> *mut NSString {
 
 /// Search paths, with the home directory abbreviated to "~" unless asked
 /// to expand it.
-#[cfg(feature = "collections")]
 pub(crate) fn search_paths(directory: usize, mask: usize, expand_tilde: bool) -> Vec<String> {
     let home = without_slash(&xdg::home());
     xdg::search_path(directory, mask)
@@ -110,7 +109,6 @@ pub(crate) fn search_paths(directory: usize, mask: usize, expand_tilde: bool) ->
         .collect()
 }
 
-#[cfg(feature = "collections")]
 #[unsafe(no_mangle)]
 pub extern "C" fn NSSearchPathForDirectoriesInDomains(
     directory: objc2_foundation::NSUInteger,

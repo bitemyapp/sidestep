@@ -146,7 +146,6 @@ define_class!(
             self.info_text(&HELP_ANCHOR).map(|t| NSString::from_str(&t))
         }
 
-        #[cfg(feature = "collections")]
         #[unsafe(method_id(underlyingErrors))]
         fn underlying_errors(&self) -> Retained<AnyObject> {
             let errors: Vec<Retained<AnyObject>> = self.info(&UNDERLYING).into_iter().collect();

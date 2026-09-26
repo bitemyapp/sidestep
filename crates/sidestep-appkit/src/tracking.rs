@@ -22,7 +22,7 @@ use objc2::rc::{Allocated, Retained, Weak};
 use objc2::runtime::{AnyObject, MessageReceiver, NSObject, NSObjectProtocol, Sel};
 use objc2::{AnyThread, DefinedClass, Message, define_class, msg_send, sel};
 use objc2_app_kit::{NSCursor, NSEvent, NSEventType, NSTrackingArea, NSTrackingAreaOptions, NSView};
-use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSZone};
+use objc2_foundation::{NSArray, NSDictionary, NSPoint, NSRect, NSZone};
 
 use crate::views::{self, NSViewImpl};
 use crate::window::NSWindowImpl;
@@ -178,11 +178,10 @@ pub(crate) fn remove_area(view: &NSViewImpl, area: &NSTrackingArea) {
     drop(removed);
 }
 
-/// The view's areas as an `NSArray`, which Foundation provides when it
-/// has one.
+/// The view's areas as an `NSArray`.
 pub(crate) fn areas_array(view: &NSViewImpl) -> Retained<AnyObject> {
     let areas = views::tracking(view).borrow().areas.clone();
-    crate::app::array_of(&areas)
+    NSArray::from_retained_slice(&areas).into()
 }
 
 thread_local!(static NEXT_TAG: Cell<isize> = const { Cell::new(1) });

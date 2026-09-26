@@ -215,7 +215,7 @@ define_class!(
         #[unsafe(method_id(port))]
         fn port(&self) -> Option<Retained<AnyObject>> {
             let port = self.parts().port.clone();
-            port.and_then(|p| super::port_value(&p)).and_then(super::number)
+            port.and_then(|p| super::port_value(&p)).map(super::number)
         }
 
         #[unsafe(method(setPort:))]
@@ -318,13 +318,11 @@ define_class!(
             self.parts().fragment = fragment.map(|s| s.to_string());
         }
 
-        #[cfg(feature = "collections")]
         #[unsafe(method_id(queryItems))]
         fn query_items(&self) -> Option<Retained<AnyObject>> {
             self.items(true)
         }
 
-        #[cfg(feature = "collections")]
         #[unsafe(method_id(percentEncodedQueryItems))]
         fn percent_encoded_query_items(&self) -> Option<Retained<AnyObject>> {
             self.items(false)
@@ -383,7 +381,6 @@ define_class!(
     unsafe impl NSObjectProtocol for NSURLComponentsImpl {}
 );
 
-#[cfg(feature = "collections")]
 impl NSURLComponentsImpl {
     fn items(&self, decode: bool) -> Option<Retained<AnyObject>> {
         let query = self.parts().query.clone()?;
@@ -391,9 +388,7 @@ impl NSURLComponentsImpl {
             split_items(&query, decode).into_iter().map(|(name, value)| item(&name, value.as_deref())).collect();
         Some(objc2_foundation::NSArray::from_retained_slice(&items).into())
     }
-}
 
-impl NSURLComponentsImpl {
     fn parts(&self) -> MutexGuard<'_, Parts> {
         crate::thread::lock(&self.ivars().parts)
     }
@@ -475,7 +470,6 @@ fn encode_host(host: &str) -> String {
 
 /// Split a query into names and values, decoded or not. An item without
 /// `=` has no value; an empty query has no items.
-#[cfg(any(test, feature = "collections"))]
 fn split_items(query: &str, decode: bool) -> Vec<(String, Option<String>)> {
     if query.is_empty() {
         return Vec::new();
@@ -597,7 +591,6 @@ fn query_item_impl(item: &NSURLQueryItem) -> &NSURLQueryItemImpl {
 }
 
 /// A new query item.
-#[cfg(feature = "collections")]
 fn item(name: &str, value: Option<&str>) -> Retained<NSURLQueryItem> {
     let name = NSString::from_str(name);
     let value = value.map(NSString::from_str);

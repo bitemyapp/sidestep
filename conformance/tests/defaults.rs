@@ -115,7 +115,6 @@ fn coercions() {
     }
 }
 
-#[cfg(any(target_vendor = "apple", feature = "collections"))]
 fn numbers_and_arrays() {
     // SAFETY: the setters take property lists, which these are.
     unsafe {
@@ -403,7 +402,6 @@ fn main() {
     };
     let checks: &[(&str, fn())] = &[
         ("coercions", coercions),
-        #[cfg(any(target_vendor = "apple", feature = "collections"))]
         ("numbers_and_arrays", numbers_and_arrays),
         ("registration_and_suites", registration_and_suites),
         ("domains", domains),

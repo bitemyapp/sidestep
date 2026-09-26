@@ -429,7 +429,6 @@ define_class!(
             make(default_zone())
         }
 
-        #[cfg(feature = "collections")]
         #[unsafe(method_id(knownTimeZoneNames))]
         fn known_time_zone_names() -> Retained<AnyObject> {
             let names: Vec<Retained<NSString>> = known_names().iter().map(|n| NSString::from_str(n)).collect();
@@ -624,7 +623,6 @@ fn zone_for_abbreviation(abbreviation: &str) -> Option<&'static str> {
 }
 
 /// The names in the tz database: region directories' zone files.
-#[cfg_attr(not(feature = "collections"), allow(dead_code))]
 fn known_names() -> Vec<String> {
     fn walk(dir: &std::path::Path, prefix: &str, out: &mut Vec<String>) {
         let Ok(entries) = std::fs::read_dir(dir) else { return };

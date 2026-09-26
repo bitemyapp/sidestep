@@ -22,9 +22,7 @@
 //! so the exit hook, finding nothing left to write, knows every change is
 //! on disk rather than on its way there.
 //!
-//! Values are held as `plist::Value`s, so the typed accessors work
-//! without Foundation's collections; `objectForKey:` hands out numbers
-//! and arrays only once those exist. The typed getters coerce as macOS
+//! Values are held as `plist::Value`s. The typed getters coerce as macOS
 //! does (`conformance/tests/defaults.rs`): strings that are whole
 //! integers for `integerForKey:`, decimal numbers for `doubleForKey:`,
 //! and "YES", "true" or "1" for `boolForKey:`. File URLs are stored as
@@ -302,7 +300,6 @@ define_class!(
             }
         }
 
-        #[cfg(feature = "collections")]
         #[unsafe(method_id(arrayForKey:))]
         fn array_for_key(&self, key: &NSString) -> Option<Retained<AnyObject>> {
             match self.value(&key.to_string()) {
@@ -311,7 +308,6 @@ define_class!(
             }
         }
 
-        #[cfg(feature = "collections")]
         #[unsafe(method_id(stringArrayForKey:))]
         fn string_array_for_key(&self, key: &NSString) -> Option<Retained<AnyObject>> {
             match self.value(&key.to_string()) {
@@ -421,7 +417,6 @@ define_class!(
             crate::thread::lock_write(store()).volatile.remove(&name.to_string());
         }
 
-        #[cfg(feature = "collections")]
         #[unsafe(method_id(volatileDomainNames))]
         fn volatile_domain_names(&self) -> Retained<AnyObject> {
             let mut names: Vec<String> = crate::thread::lock_read(store()).volatile.keys().cloned().collect();

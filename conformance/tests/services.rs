@@ -537,7 +537,6 @@ fn url_components_of_strings() {
     assert!(NSURL::URLWithString(&ns("http://host:abc/p")).is_none());
 }
 
-#[cfg(any(target_vendor = "apple", feature = "collections"))]
 #[test]
 fn url_ports_and_path_components() {
     use objc2_foundation::{NSArray, NSNumber};
@@ -1036,7 +1035,6 @@ fn url_components() {
     assert_eq!(valueless.value(), None);
 }
 
-#[cfg(any(target_vendor = "apple", feature = "collections"))]
 #[test]
 fn url_query_items() {
     use objc2_foundation::NSArray;
@@ -1485,7 +1483,6 @@ fn trash_on_linux() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-#[cfg(any(target_vendor = "apple", feature = "collections"))]
 #[test]
 fn file_manager_listings_and_attributes() {
     use objc2_foundation::{NSDirectoryEnumerationOptions, NSNumber, NSSearchPathForDirectoriesInDomains};
@@ -1629,7 +1626,6 @@ fn process_info() {
     assert!(!info.isiOSAppOnMac());
 }
 
-#[cfg(any(target_vendor = "apple", feature = "collections"))]
 #[test]
 fn process_arguments() {
     let arguments: Vec<String> = NSProcessInfo::processInfo().arguments().iter().map(|a| a.to_string()).collect();
@@ -1896,7 +1892,6 @@ fn property_list_serialization() {
     assert!(!valid(&not_a_plist, NSPropertyListFormat::XMLFormat_v1_0));
 }
 
-#[cfg(any(target_vendor = "apple", feature = "collections"))]
 #[test]
 fn property_list_numbers_and_arrays() {
     use objc2_foundation::{NSArray, NSNumber};
@@ -2223,7 +2218,6 @@ fn json() {
     assert!(!unsafe { NSJSONSerialization::isValidJSONObject(&ns("x")) }, "top level must be a container");
 }
 
-#[cfg(any(target_vendor = "apple", feature = "collections"))]
 #[test]
 fn json_arrays_and_numbers() {
     use objc2_foundation::{
@@ -2426,7 +2420,6 @@ fn core_foundation_preferences() {
     other.removePersistentDomainForName(&ns(&app.to_string()));
 }
 
-#[cfg(any(target_vendor = "apple", feature = "collections"))]
 #[test]
 fn core_foundation_numbers_and_arrays() {
     use objc2_core_foundation::{CFArray, CFGetTypeID, CFNumber, CFString, ConcreteType};

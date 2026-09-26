@@ -24,12 +24,11 @@
 //! Items may be used from any thread, as AppKit allows: their values are
 //! behind a mutex, which is never held while other code runs.
 
-use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use objc2::rc::{Allocated, Retained};
-use objc2::runtime::{AnyClass, AnyObject, NSObject, NSObjectProtocol};
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
 use objc2::{ClassType, DefinedClass, Message, define_class, msg_send, sel};
 use objc2_app_kit::{NSPasteboard, NSPasteboardItem};
 use objc2_foundation::{NSArray, NSData, NSDictionary, NSString};
@@ -222,7 +221,7 @@ define_class!(
         #[unsafe(method_id(dataForType:))]
         fn data_for_type(&self, kind: &NSString) -> Option<Retained<NSData>> {
             let bytes = self.read(&types::from_ns(kind)).and_then(|r| r.bytes());
-            bytes.and_then(|b| data_object(&b))
+            bytes.map(|b| NSData::with_bytes(&b))
         }
 
         #[unsafe(method_id(stringForType:))]
@@ -244,7 +243,7 @@ define_class!(
         #[unsafe(method_id(pasteboardPropertyListForType:))]
         fn pasteboard_property_list_for_type(&self, kind: &NSString) -> Option<Retained<AnyObject>> {
             match self.read(&types::from_ns(kind)) {
-                Some(Read::Data(d)) => data_object(&d).map(|d| Retained::into_super(Retained::into_super(d))),
+                Some(Read::Data(d)) => Some(Retained::into_super(Retained::into_super(NSData::with_bytes(&d)))),
                 other => other.and_then(|r| r.property_list()),
             }
         }
@@ -467,12 +466,7 @@ pub(crate) fn value_of_property_list(list: &AnyObject) -> Value {
     if let Some(string) = list.downcast_ref::<NSString>() {
         return string_value(string);
     }
-    if let Some(class) = AnyClass::get(c"NSData")
-        // SAFETY: isKindOfClass: takes a class and returns BOOL.
-        && unsafe { msg_send![list, isKindOfClass: class] }
-    {
-        // SAFETY: the object is an NSData.
-        let data = unsafe { &*(list as *const AnyObject).cast::<NSData>() };
+    if let Some(data) = list.downcast_ref::<NSData>() {
         return Value::Data(bytes_of(data));
     }
     property_list_value(list)
@@ -480,33 +474,8 @@ pub(crate) fn value_of_property_list(list: &AnyObject) -> Value {
 
 /// An NSData's bytes.
 pub(crate) fn bytes_of(data: &NSData) -> Arc<[u8]> {
-    // SAFETY: -bytes points at -length bytes, alive and unchanged while
-    // the data is (an immutable copy is taken first, so a mutable data
-    // changing later doesn't matter).
-    let copy: Retained<NSData> = unsafe { msg_send![data, copy] };
-    let (ptr, len): (*const c_void, usize) = unsafe { (msg_send![&*copy, bytes], msg_send![&*copy, length]) };
-    if ptr.is_null() || len == 0 {
-        return Arc::from(&[][..]);
-    }
-    // SAFETY: as above.
-    Arc::from(unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len) })
-}
-
-/// Bytes as an NSData, if Foundation has NSData (found by name, so AppKit
-/// links without it).
-pub(crate) fn data_object(bytes: &[u8]) -> Option<Retained<NSData>> {
-    let class = AnyClass::get(c"NSData")?;
-    // SAFETY: dataWithBytes:length: copies `length` bytes from the pointer
-    // and returns a new data object.
-    Some(unsafe { msg_send![class, dataWithBytes: bytes.as_ptr().cast::<c_void>(), length: bytes.len()] })
-}
-
-/// Whether `object`'s class is `name`'s or a subclass of it; false if the
-/// program has no such class.
-pub(crate) fn is_kind_of(object: &AnyObject, name: &std::ffi::CStr) -> bool {
-    let Some(class) = AnyClass::get(name) else { return false };
-    // SAFETY: isKindOfClass: takes a class and returns BOOL.
-    unsafe { msg_send![object, isKindOfClass: class] }
+    // SAFETY: the bytes are copied before anything else runs.
+    Arc::from(unsafe { sidestep_foundation::data::bytes(data) })
 }
 
 /// Whether `object` responds to `selector`.

@@ -25,7 +25,6 @@ type OsVersion = NSOperatingSystemVersion;
 
 pub(crate) struct InfoIvars {
     name: Mutex<String>,
-    #[cfg_attr(not(feature = "collections"), allow(dead_code))]
     arguments: Vec<String>,
     environment: Vec<(String, String)>,
     host: String,
@@ -54,7 +53,6 @@ define_class!(
             NSDictionary::from_retained_objects(&keys, &values).into()
         }
 
-        #[cfg(feature = "collections")]
         #[unsafe(method_id(arguments))]
         fn arguments(&self) -> Retained<AnyObject> {
             let arguments: Vec<Retained<NSString>> =
