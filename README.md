@@ -133,13 +133,17 @@ a render thread that answers at once and draws nothing (see
 `examples/controls-gallery` shows the controls (buttons, text fields, boxes,
 indicators, segmented controls, steppers, sliders and switches) in their
 states; `SCENARIO` is `buttons`, `text`, `indicators`, `segmented` or `all`,
-and `SIDESTEP_THEME=dark` draws them dark:
+and `SIDESTEP_APPEARANCE=dark` draws them dark:
 
 ```sh
 scripts/linux-cargo build --release -p controls-gallery
-SIDESTEP_THEME=dark SCENARIO=all SHOT=/work/target/controls-dark.png \
+SIDESTEP_APPEARANCE=dark SCENARIO=all SHOT=/work/target/controls-dark.png \
   scripts/linux-run scripts/headless-wayland /target/release/controls-gallery
 ```
+
+`examples/containers` shows split, stack and tab views, a table of 1000
+rows and a window laid out by constraints (`SCENARIO=split`, `stack`,
+`tabs`, `table`, `autolayout`).
 
 On Linux, drawing is recorded on the main thread and rasterized on a
 separate render thread, and scroll views are tiled onto Wayland subsurfaces;

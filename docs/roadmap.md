@@ -155,6 +155,17 @@ The platform layer since (`examples/appkit-input` shows it):
   dragging items and the drag pasteboard over wl_data_device.
 - `NSScreen`: the outputs, their frames, work areas and scales, a window's
   screen, and the delegate calls when they change.
+- Views and containers (`examples/containers` shows them): the NSView
+  contract (hierarchy messages in AppKit's order, identifiers, bounds
+  sizes stored, scrolling helpers), a layout pass before each frame, Auto
+  Layout on kasuari (constraints, anchors, layout guides, autoresizing
+  masks as constraints, intrinsic sizes, priorities as tiers, content
+  that resizes its window, `fittingSize`, ambiguity), `NSStackView`,
+  `NSSplitView` (dragged dividers, autosave), `NSTabView`, and a
+  view-based `NSTableView` (the plain, inset, full-width and source list
+  styles' geometry; views only for rows near the visible ones, reused by
+  identifier; variable heights; selection following rows; column
+  notifications; clicks).
 
 Drawing (`examples/drawing-gallery` shows it, and draws the same
 pictures on macOS for comparison):
@@ -224,6 +235,14 @@ Next:
 - Scrollers.
 - `NSMenu`, which has no system-wide equivalent on Linux, so it becomes a
   menu bar inside the window.
+- Containers: the visual format language; bounds scaling in drawing, hit
+  testing and conversion; the table's header in its scroll view, column
+  dragging and resizing from the header, hidden rows, type select, drag
+  and drop;
+  `NSOutlineView`, `NSCollectionView`; changing a constraint's constant
+  in place and removing constraints without scanning the solver (kasuari
+  needs ways to), or a solver per independent group of views; a window's
+  minimum and maximum sizes from its content's constraints.
 - X11, after Wayland is solid.
 
 ## 3. Text
@@ -300,7 +319,7 @@ Next:
   title into the width given) and the width a wrapping label keeps at
   `maximumNumberOfLines`.
 - Accessibility through AccessKit, from the store.
-- Scroll views' scrollers, split and popup views; open panels through
+- Scroll views' scrollers and layers, popup views; open panels through
   xdg-desktop-portal.
 
 ## 5. A real app

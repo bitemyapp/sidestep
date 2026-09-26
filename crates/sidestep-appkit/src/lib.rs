@@ -29,6 +29,7 @@ pub(crate) fn load_shell<T: ClassType>() {
 }
 
 mod app;
+mod autolayout;
 mod backend;
 mod clipboard;
 mod controllers;
@@ -72,8 +73,11 @@ mod responder;
 mod screen;
 mod settings;
 mod shadow;
+mod split;
 mod string_drawing;
 mod symbols;
+mod tab;
+mod table;
 #[cfg(test)]
 mod test_objects;
 #[doc(hidden)]
@@ -82,6 +86,7 @@ mod text;
 mod theme;
 mod tooltip;
 mod tracking;
+mod view_layout;
 mod views;
 mod window;
 mod window_events;

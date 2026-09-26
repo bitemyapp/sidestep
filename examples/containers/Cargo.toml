@@ -1,0 +1,12 @@
+[package]
+name = "containers"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+objc2.workspace = true
+block2.workspace = true
+objc2-foundation = { workspace = true, features = ["NSString", "NSObject", "NSTimer", "NSDate", "NSDictionary", "NSGeometry", "NSNotification", "NSZone", "NSArray", "NSIndexSet", "NSValue", "block2"] }
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics", "NSColor", "NSFont", "NSBezierPath", "NSStringDrawing", "NSAttributedString", "NSEvent", "NSScrollView", "NSClipView", "NSRunningApplication", "objc2-core-foundation", "NSLayoutConstraint", "NSLayoutAnchor", "NSStackView", "NSSplitView", "NSTabView", "NSTabViewItem", "NSTableView", "NSTableColumn", "NSTableRowView", "NSTableCellView", "NSControl", "NSUserInterfaceLayout", "NSUserInterfaceItemIdentification", "NSCell", "NSTableHeaderView"] }
+sidestep.workspace = true

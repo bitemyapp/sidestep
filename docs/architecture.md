@@ -1265,6 +1265,137 @@ window; without a bus or a portal the answer is light at once.
 `SIDESTEP_APPEARANCE=light` or `dark` (else `SIDESTEP_THEME`) and
 `SIDESTEP_ACCENT=#rrggbb` override the desktop.
 
+
+### Views, layout and containers
+
+A view's subviews are a shared, reference-counted list: Sidestep's own
+code takes a snapshot of it for the cost of a reference count, and a change
+copies the list only while such a snapshot is still held, so iterating
+while callbacks rearrange views is safe. `-subviews` gives programs a new
+NSArray, as AppKit does. Moving a view sends AppKit's messages in AppKit's
+order: `viewWillMoveToSuperview:`, the old superview's
+`willRemoveSubview:`, `didAddSubview:`, `viewDidHide` when it joins a
+hidden branch, `viewDidMoveToSuperview`, then `viewWillMoveToWindow:` and
+`viewDidMoveToWindow` down the subtree. Every callback is program code
+that may move views itself, so a move reads the view's place again after
+each one: the view leaves whatever superview it has by then, and each view
+joins the window its place puts it in once its own callback has run. A
+window that is going away detaches its views without telling them.
+`setBoundsSize:` is stored and reported by `bounds`, but drawing, hit
+testing and conversion don't scale yet. The scrolling helpers
+(`scrollRectToVisible:`, `autoscroll:`) work through the enclosing clip
+views.
+
+**The layout pass.** Each view has a few flags: it needs layout, its
+constraints need updating, and "some view below does" for each, raised
+along its ancestors when set. Before a window draws, the pass walks only
+flagged branches from the content view, once a round: `updateConstraints`
+bottom up, the constraint solver, `layout` top down. A view's own request
+made during its `layout` is dropped, as on macOS, so it is laid out once
+a pass; requests for other views (a subview's `layout` flagging its
+superview, views added during layout) make another round, at most sixteen,
+so a pass costs at most sixteen walks of the flagged views. Then
+`viewWillDraw` if something will be drawn, and a round more if that asked
+for layout. A window where nothing is flagged pays one flag test a frame.
+`layoutIfNeeded`, `layoutSubtreeIfNeeded` and `display` run the same pass
+on demand, in windows that aren't shown too. Autoresizing happens as a
+frame changes, not in the pass.
+
+**Auto Layout** solves with kasuari, a Cassowary solver in Rust. One
+engine serves each tree of views taking part: it is made on the first
+layout that needs it, for the topmost view whose subtree has constraints
+or stack views (the content view in a window), kept in that view, and
+updated as constraints are activated, deactivated or changed, and as
+views move: a subtree leaving takes its variables and the constraints
+installed in it out, one joining puts its own in, so a move costs what the
+moved subtree holds. Only subtrees flagged as having taken part are looked
+at, so views that never used Auto Layout cost it nothing as they move.
+Each view and layout guide has four variables: its alignment rectangle's x
+and y (downward, from its superview's frame origin), width and height. An
+anchor is a sum of these along the path to the two items' common ancestor,
+so a view that moves doesn't rewrite anyone's constraints.
+
+AppKit satisfies priorities strongest first: any number of constraints at
+250 give way to one at 251. Cassowary weighs errors instead, so each
+engine ranks the optional priorities it has seen and spreads the ranks'
+strengths evenly over seven powers of ten: with k priorities in use, each
+outweighs the next one down 10^(7/k) times, whatever their values. That is
+AppKit's order for the handful of priorities a window uses, though not
+for any number of them; kasuari loses optima (at random, as its tables are
+hashed) once optional strengths reach 10^8 beside small ones, which caps
+the span. A new priority reweighs the optional constraints once before the
+next solve; priorities stay ranked once seen, so views coming and going
+don't reweigh anything. A required constraint that can't be satisfied is
+added at 999 instead, with a message, as AppKit breaks one.
+
+Views that translate their autoresizing masks get constraints that share
+their superview's size among margins and size as the mask does, so
+autoresizing a view already gives the frame its constraints do and doesn't
+make them again; views with an intrinsic size get hugging and compression
+resistance. A window's content view holds its size at priority 500, as
+AppKit's window does, so stronger constraints resize the window (the
+engine asks `setContentSize:` once for each size the content needs); a
+tree outside a window keeps its root's frame, or, when the root doesn't
+translate its mask, lets its constraints size it. Frames come out with
+their edges on the window's pixels (whole points outside a window).
+`fittingSize` solves a separate engine that pulls the root's size to zero
+at priority 50, and ambiguity is found by pulling a variable with an edit
+constraint and seeing whether it moves. `NSStackView` makes its
+constraints inside the engine rather than as `NSLayoutConstraint`s, so
+they aren't in its `constraints`.
+
+Views own what points at them, and clear it when they go: a constraint
+installed on a view that is deallocated becomes inactive, a layout guide
+loses its owning view, and anchors, which a view keeps one per attribute
+(so the same anchor object comes back, as in AppKit), name their view
+weakly. Each view also keeps the constraints naming it, so a view leaving
+its superview finds the constraints that cross its subtree's edge in the
+subtree itself; those go unless the view they are installed on still
+holds the view where it goes, as in AppKit.
+
+**Split views** place their panes by frames: resizing shares the change
+among panes in proportion to their sizes (holding priorities are kept but
+don't yet change that), the delegate constrains positions and collapsing, dividers are dragged from
+the mouse events themselves (no nested loop), and `autosaveName` keeps
+the frames in `NSUserDefaults` under AppKit's key and in its format.
+**Tab views** inset their content by tab type as AppKit does and draw
+their tabs straddling the bezel's edge, hit-tested where AppKit's are.
+Items point back to their tab view weakly; one added to another tab view
+leaves the first.
+
+**Tables** are view-based. Their geometry follows the style, as measured
+on macOS: the default (automatic) style is the inset one, which pads the
+outer edges of the first and last columns by 6 points and insets the
+columns by 10 and the rows by 5 above and below; the full-width style has
+just the padding, the source list more room above the rows, the plain
+style none of it. Row heights sit in a Fenwick tree (uniform heights are
+plain arithmetic), so a row's rectangle and the rows in a rectangle take
+logarithmic time whatever the row count, and inserting, removing or
+moving rows keeps the others' heights, asking the delegate about new rows
+only. `layout` gives views only to rows near the visible ones: those in the
+visible rectangle, and in a shown window those within a tile of it (the
+tiles its scroll view draws ahead), keeping rows two beyond the edge so
+small scrolls back and forth make nothing. Rows that leave give their cell
+views to pools by identifier, where `makeViewWithIdentifier:owner:` finds
+them after `prepareForReuse`. The table follows its clip view through a
+hook in the clip view's bounds change, not a notification. Rows carry the
+selection with them as they come and go, and show it strongly while the
+table is the first responder of the key window (the window tells it,
+through a hook, when that changes). Columns point back to their table
+weakly.
+
+Scrolling a million-row table a page at a time and laying it out takes
+8 µs (118 µs on macOS). Appending a row to 10,000 whose delegate sizes
+them takes 34 µs (31 µs). Solving 1200 constraints in a row of 300 views
+first takes 15 ms (22 ms), and changing one constant 0.9 ms (0.3 ms), as
+kasuari has no way to change a constraint's constant in place and the
+constraint is removed and added again. Resizing a window holding 200
+autoresizing views, each with a view pinned inside by four constraints,
+takes 0.4 ms (1.0 ms). A page of table cells with constraints, in a window
+holding 1,200 other constraints, takes 5.1 ms (0.16 ms): each cell's
+constraints leave and join the one solver, and kasuari's removal looks
+through all of its rows.
+
 ## Text
 
 AppKit measures text synchronously (`sizeWithAttributes:`,

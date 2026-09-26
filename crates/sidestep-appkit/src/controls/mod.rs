@@ -43,10 +43,8 @@ pub(crate) mod text_field;
 pub(crate) mod track;
 pub(crate) mod value;
 
+use objc2::ClassType;
 use objc2::runtime::{AnyClass, AnyObject};
-use objc2::{ClassType, msg_send};
-use objc2_app_kit::NSView;
-use objc2_foundation::NSSize;
 
 sidestep_runtime::static_class!(pub NSCELL, NSCELL_META = "NSCell", || {
     a11y::install(cell::NSCellImpl::class());
@@ -169,12 +167,4 @@ pub(crate) unsafe fn impl_of<T: ClassType, I>(object: &AnyObject) -> Option<&I> 
     // SAFETY: the object's class descends from T's, whose instances are
     // I's (the caller's promise).
     kind_of(object, T::class()).then(|| unsafe { &*(object as *const AnyObject).cast::<I>() })
-}
-
-/// `-[NSView fittingSize]` without constraints: the intrinsic size, none
-/// counting as zero.
-pub(crate) fn fitting_size(view: &NSView) -> NSSize {
-    // SAFETY: intrinsicContentSize takes nothing and returns a size.
-    let size: NSSize = unsafe { msg_send![view, intrinsicContentSize] };
-    NSSize::new(size.width.max(0.0), size.height.max(0.0))
 }

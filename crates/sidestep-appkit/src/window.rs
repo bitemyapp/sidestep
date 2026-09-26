@@ -1549,7 +1549,7 @@ impl Drop for WindowIvars {
         if let Some(content) = self.content.get_mut().take() {
             // Also clears the view's link to the window as its next
             // responder.
-            views::set_window(views::imp(&content), None);
+            views::leave_dying_window(views::imp(&content));
         }
         for child in self.children.get_mut().drain(..) {
             imp(&child).ivars().parent.set(None);
@@ -1767,6 +1767,17 @@ impl NSWindowImpl {
         self.ivars().needs_display.set(true);
     }
 
+    /// A view needs layout or its constraints updated: run a pass before
+    /// the next frame (see `view_layout`).
+    pub(crate) fn needs_layout_pass(&self) {
+        self.ivars().needs_display.set(true);
+    }
+
+    /// Some layer has damage to draw in the next pass.
+    pub(crate) fn has_damage(&self) -> bool {
+        self.ivars().damage.borrow().values().any(|rects| !rects.is_empty())
+    }
+
     pub(crate) fn add_clip(&self, clip: &NSView) {
         self.ivars().clips.borrow_mut().push(clip.retain());
         self.ivars().needs_display.set(true);
@@ -1926,6 +1937,8 @@ impl NSWindowImpl {
         let first = self.ivars().first_responder.borrow().clone();
         crate::controls::focus::focus_moved(first.as_deref().and_then(|r| r.downcast_ref::<NSView>()), None);
         let this = as_window(self);
+        // A table with the focus shows its selection strongly while key.
+        crate::table::key_changed(this);
         if key {
             self.deminiaturized();
             this.becomeKeyWindow();
@@ -2441,6 +2454,8 @@ pub(crate) fn display_if_needed(window: &NSWindowImpl) {
     if !crate::settings::ready() {
         return;
     }
+    // Constraints, layout and viewWillDraw, before anything is drawn.
+    crate::view_layout::run(window);
     ivars.needs_display.set(false);
     let id = window.id();
     if ivars.title_dirty.replace(false) {

@@ -117,3 +117,34 @@ harness = false
 [[test]]
 name = "animation"
 harness = false
+
+# Containers: the view contract, Auto Layout, stack, split, tab and table
+# views (appkit_views, appkit_autolayout, appkit_stack, appkit_split,
+# appkit_tab, appkit_table). A table of its own, so the features merge.
+[target.'cfg(not(any()))'.dev-dependencies]
+objc2-app-kit = { workspace = true, features = ["NSGraphics", "NSUserInterfaceItemIdentification", "NSScrollView", "NSClipView", "NSWindow", "NSLayoutConstraint", "NSLayoutAnchor", "NSLayoutGuide", "NSStackView", "NSSplitView", "NSTabView", "NSTabViewItem", "NSTableView", "NSTableColumn", "NSTableRowView", "NSTableCellView", "NSTableHeaderView", "NSControl", "NSUserInterfaceLayout", "NSCell"] }
+objc2-foundation = { workspace = true, features = ["NSGeometry", "NSIndexSet", "NSNotification", "NSUserDefaults"] }
+
+[[test]]
+name = "appkit_views"
+harness = false
+
+[[test]]
+name = "appkit_autolayout"
+harness = false
+
+[[test]]
+name = "appkit_stack"
+harness = false
+
+[[test]]
+name = "appkit_split"
+harness = false
+
+[[test]]
+name = "appkit_tab"
+harness = false
+
+[[test]]
+name = "appkit_table"
+harness = false
