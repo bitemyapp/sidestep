@@ -406,7 +406,10 @@ fn timer_phase_after_a_stall() {
         // milliseconds late and then on time again (Apple's gave
         // [191, 696, 714] there), and may drop fires, but never adds any, so
         // the count's upper bound is what's pinned.
-        assert!((2..=6).contains(&fires.len()), "{fires:?}");
+        // The run may end late on a loaded machine (a CI runner's went on
+        // to fire at 1025 ms): count what fired within its 950 ms.
+        let within = fires.iter().filter(|&&at| at < 950).count();
+        assert!(fires.len() >= 2 && within <= 6, "{fires:?}");
         assert!(fires[0] >= 100, "{fires:?}");
         assert!(fires[1] >= fires[0] + 350, "nothing fires during the stall: {fires:?}");
     });
