@@ -1,0 +1,16 @@
+[package]
+name = "drawing-gallery"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+objc2.workspace = true
+block2.workspace = true
+objc2-foundation = { workspace = true, features = ["NSString", "NSObject", "NSThread", "NSTimer", "NSDate", "NSDictionary", "NSGeometry", "NSNotification", "NSZone", "NSArray", "NSAffineTransform", "block2", "objc2-core-foundation"] }
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics", "NSGraphicsContext", "NSColor", "NSColorSpace", "NSFont", "NSFontDescriptor", "NSBezierPath", "NSStringDrawing", "NSAttributedString", "NSRunningApplication", "NSAffineTransform", "NSAppearance", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSCustomImageRep", "NSGradient", "NSShadow", "NSAnimationContext", "NSAnimation", "block2", "objc2-core-foundation"] }
+sidestep.workspace = true
+# For writing PNG files (GALLERY_PNG) and for make-image-fixtures, which
+# writes the conformance tests' image files (never made with Apple's
+# tools).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }

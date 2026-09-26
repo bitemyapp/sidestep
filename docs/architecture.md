@@ -569,10 +569,11 @@ AppKit's contract is single-threaded: events, timers, the responder chain and
 everything that touches pixels or the display server to a render thread.
 
 - **Drawing records.** Inside `drawRect:`, `-[NSColor setFill]`,
-  `+[NSBezierPath fillRect:]`, `-[NSBezierPath fill]` and
-  `-[NSString drawAtPoint:withAttributes:]` append operations (fills, paths,
-  runs of shaped glyphs) to a list, already mapped to the view's layer and
-  clipped to the view and its ancestors. The main thread never rasterizes.
+  `NSRectFill`, `-[NSBezierPath fill]`, `-[NSImage drawInRect:]` and
+  `-[NSString drawAtPoint:withAttributes:]` append operations (fills,
+  paths, strokes, images, runs of shaped glyphs) to a list, in the view's
+  layer and clipped to the view and its ancestors (see
+  [Drawing](#drawing)). The main thread never rasterizes a window.
 - **Layers.** A window's own surface is one layer, and each `NSClipView` adds
   one holding its document. `setNeedsDisplayInRect:` records damage per
   layer, in layer points.
@@ -582,7 +583,7 @@ everything that touches pixels or the display server to a render thread.
   gets no frame callbacks, so it stops drawing.
 - **Rendering.** The render thread owns the Wayland connection through
   smithay-client-toolkit. It rasterizes operations on the CPU into a cache
-  per layer (tiny-skia for paths, swash for glyphs), only inside damaged
+  per layer (tiny-skia for paths and images, swash for glyphs), only inside damaged
   rectangles. The window surface is presented from a few shared-memory
   buffers, each remembering what changed since it was last written, so a
   frame copies and damages only changed pixels. A Wayland protocol error
@@ -809,12 +810,10 @@ sctk-adwaita so they render at fractional scales like everything else, the
 title is set with the same text drawing as the content (the main thread
 sends it as operations), and nothing runs a subprocess to find a font.
 `SIDESTEP_DECORATIONS=client` draws them on compositors that would draw
-their own (sway). They're light or dark as the desktop prefers: a thread
-of its own asks xdg-desktop-portal's Settings interface for
-`org.freedesktop.appearance` `color-scheme` over the session bus (a
-minimal D-Bus client, `desktop.rs`, rather than a D-Bus crate and its
-async runtime) and redraws them when the desktop signals a change.
-`SIDESTEP_THEME=dark` or `light` (or a dark `GTK_THEME`) overrides it.
+their own (sway). They're light or dark as the desktop prefers, as the
+views are (see [Colors and appearance](#colors-and-appearance)).
+`SIDESTEP_THEME=dark` or `light` (or a dark `GTK_THEME`) overrides the
+desktop for both.
 
 A window keeps the settings programs give it (background color, level,
 shadow, alpha, collection behavior and the rest) and reads them back. The
@@ -972,6 +971,125 @@ notification center too, once Foundation has one.
 macOS does (down on y in a flipped rectangle). The first
 `NSScreen.screens` takes about 0.5 ms before any window (on macOS, about
 36 ms).
+
+### Drawing
+
+Drawing goes through a graphics context (`context.rs`) with a real
+graphics state, as a CGContext keeps: the transform (user space to layer
+points, any affine), the clip, fill and stroke colors resolved to RGBA,
+the compositing operation, antialiasing, image interpolation and the
+shadow. `saveGraphicsState` and `restoreGraphicsState` push and pop it.
+The current context is per thread, as in AppKit, and drawing reaches its
+state through a thread local, with no message sends. A context records
+either for the render thread (a window's display pass) or into a bitmap
+(`+graphicsContextWithBitmapImageRep:`, `cacheDisplayInRect:toBitmapImageRep:`,
+image drawing handlers, `lockFocus`), where each operation is rasterized
+at once on the calling thread by the same rasterizer the render thread
+uses. That is also how the conformance tests read pixels with no
+compositor.
+
+- **Views.** The display pass makes the window's context current and
+  gives each `drawRect:` a fresh state: the view's transform, its visible
+  part as the clip, black to draw with, and the view's effective
+  appearance as the drawing appearance. Saves a view leaves unbalanced
+  are dropped. A view with an `alphaValue` below 1 is drawn with its
+  subviews into a group that is composited at that opacity; at 0 it isn't
+  drawn. (Snapshots with `cacheDisplayInRect:` leave partial opacity out,
+  as AppKit's do.)
+- **Operations.** A rectangle filled under a transform that keeps it a
+  rectangle, with no path in the clip, is clipped on the main thread and
+  sent as a plain fill, the fast path. Everything else (paths, strokes,
+  images, gradients, rotated rectangles) carries its transform,
+  compositing operation, antialiasing, clip rectangle and, for `addClip`
+  and `setClip`, the clip's paths, which the rasterizer turns into a mask
+  only for the pixels the operation touches. `NSBezierPath` keeps a
+  `kurbo` path (bounds, winding, flattening, arcs as AppKit splits them)
+  and makes the tiny-skia path once, shared by every operation drawing
+  it. Text under a path clip is drawn into a group the clip masks.
+- **Rasterizing.** Canvases hold premultiplied RGBA, tiny-skia's format,
+  which buffers show as they are where the compositor takes XBGR8888
+  (wlroots, Mutter and KWin do; the formats are read once they've
+  arrived, at the first buffer), and swizzled to XRGB8888 in the same
+  copy otherwise. Each operation draws into a scratch copy of just the
+  pixels it can reach, so a clip rectangle needs no mask; a clip path's
+  mask is kept while the next operations ask for the same one. The 29
+  compositing operations map onto tiny-skia's blend modes, except
+  `PlusDarker`, done by hand; for the modes where a transparent source
+  still changes the destination (`Copy`, `SourceIn`, …) a clip mask is
+  applied by mixing afterwards, as tiny-skia's masks would clear what they
+  leave out. Groups draw into a transparent layer the size of what their
+  operations reach. A shadow is the operation's coverage blurred by three
+  box blurs (a Gaussian of half the radius), moved by the offset in base
+  coordinates (up is up, flipped or not) and drawn under it; the coverage
+  is taken wherever it can reach the pixels being drawn, so a shadow
+  doesn't change with how the damage was cut or crosses tiles. Gradients are
+  tiny-skia shaders, two-point conical for the radial ones; where the
+  options don't extend them, the filled shape is the band they cover.
+- **Images.** An `NSImage` holds representations and draws the smallest
+  bitmap whose pixels cover the destination in device pixels. Files are
+  read with the pure-Rust codecs of the `image` crate (PNG, JPEG, GIF,
+  WebP, BMP, TIFF, ICO): opening one reads only its header (size, alpha,
+  EXIF orientation, density for the size in points), and the pixels are
+  decoded on the render thread the first time the image is drawn in a
+  window, or when a program asks for them. A drawn bitmap is an `Arc`
+  snapshot of its pixels, made again only after something could have
+  written them (`bitmapData`, `setColor:atX:y:`, drawing into it). Each
+  thread that draws images keeps a cache: the snapshots themselves
+  (shared, not copied) or decoded files, halvings made the first time an
+  image is drawn below half size, and a few tinted copies for templates,
+  dropped least recently used past 256 MiB (`SIDESTEP_IMAGE_CACHE_MB`)
+  and when their representation goes away; the main loop tells the render
+  thread which went away once a turn, after that turn's paints. A
+  drawing handler's image is drawn into a bitmap as many pixels as the
+  destination, kept per size and appearance. Bitmaps whose bytes wouldn't
+  fit in memory, asked for or claimed by a file, are refused, as AppKit
+  refuses them. `NSImage` isn't shared between threads, so neither are
+  the names `setName:` registers: each thread has its own.
+- **Symbols.** `imageWithSystemSymbolName:` maps about a hundred common
+  symbol names to Sidestep's own line drawings, template images drawn by
+  a handler, sized and weighted by an `NSImageSymbolConfiguration`. No SF
+  Symbols artwork is used; other names give nil.
+- **Animation.** Nothing animates yet: `animator` is the view or window
+  itself, so changes apply at once, and `NSAnimationContext` keeps its
+  settings per group and runs completion handlers from the run loop once
+  a group's duration has passed.
+
+### Colors and appearance
+
+`NSColor` is one immutable class: components in a color space, a system
+color, a dynamic color (a provider block) or a pattern. A color is turned
+into sRGB when it's set or converted, in the current drawing appearance:
+the innermost `performAsCurrentDrawingAppearance:`, else the view being
+drawn, else the application's. System colors come from Sidestep's own
+palette (`palette.rs`), made for GNOME and KDE desktops rather than read
+off macOS, in light, dark and high-contrast versions; the accent comes
+from the desktop and the selection colors from the accent. There is no
+color management: device, calibrated and generic RGB are sRGB, Display P3
+converts through its matrix, and gray is RGB's luminance weighed in
+linear light. Components are kept as given, beyond 0 to 1 too, and
+clamped when drawn or converted into a space that isn't extended; a
+system effect (`colorWithSystemEffect:`) on a system or dynamic color
+goes on following the appearance.
+
+A view's effective appearance is its own, its superview's, its window's
+or the application's, which follows the desktop's. Views cache it; a
+change of any of them (or a view moving) walks the views below, telling
+each whose appearance changed with `viewDidChangeEffectiveAppearance` and
+redrawing it.
+
+The desktop's settings come from one thread, `sidestep-settings`, which
+xdg-desktop-portal's Settings interface answers over the session bus (a
+minimal D-Bus client, `desktop.rs`, rather than a D-Bus crate and its
+async runtime): `color-scheme`, `accent-color` and `contrast` under
+`org.freedesktop.appearance`, and GNOME's text scale, fonts, cursor size
+and animation setting under `org.gnome.desktop.interface`. It starts with
+the shared application, alongside the Wayland connection, and follows
+changes, waking the main thread, which redraws every window once. A
+window's first frame waits, the event loop running, until the desktop has
+answered or 150 ms have passed, so a dark desktop doesn't flash a light
+window; without a bus or a portal the answer is light at once.
+`SIDESTEP_APPEARANCE=light` or `dark` (else `SIDESTEP_THEME`) and
+`SIDESTEP_ACCENT=#rrggbb` override the desktop.
 
 ## Text
 

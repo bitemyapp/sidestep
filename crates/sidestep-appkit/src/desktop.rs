@@ -1,11 +1,16 @@
-//! The desktop's light or dark preference, from the settings portal.
+//! The desktop's appearance preferences, from the settings portal.
 //!
-//! Desktops publish it as `org.freedesktop.appearance` `color-scheme`
-//! through xdg-desktop-portal's `org.freedesktop.portal.Settings` (1: prefer
-//! dark, 2: prefer light, 0: no preference) and signal changes. A thread of
-//! its own asks the session bus once and then waits for changes, so neither
-//! the main thread nor the render thread ever waits for D-Bus. Only the few
-//! messages this needs are spoken, with a minimal client below.
+//! Desktops publish them under `org.freedesktop.appearance` through
+//! xdg-desktop-portal's `org.freedesktop.portal.Settings`: `color-scheme`
+//! (1: prefer dark, 2: prefer light, 0: no preference), `accent-color` (an
+//! sRGB triple, out of range when unset) and `contrast` (1: high), and
+//! signal changes. GNOME's portal also publishes its interface settings
+//! under `org.gnome.desktop.interface`: the text scale, the interface and
+//! monospaced fonts, the cursor size and whether to animate. A thread of
+//! its own (`settings`) asks the session bus once and then waits for
+//! changes, so neither the main thread nor the render thread ever waits
+//! for D-Bus. Only the few messages this needs are spoken, with a minimal
+//! client below.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::MetadataExt;
@@ -16,7 +21,36 @@ const PORTAL: &str = "org.freedesktop.portal.Desktop";
 const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
 const SETTINGS: &str = "org.freedesktop.portal.Settings";
 const NAMESPACE: &str = "org.freedesktop.appearance";
-const KEY: &str = "color-scheme";
+const INTERFACE: &str = "org.gnome.desktop.interface";
+/// The settings read, appearance first: a window's first frame waits for
+/// those.
+const KEYS: [(&str, &str); 8] = [
+    (NAMESPACE, "color-scheme"),
+    (NAMESPACE, "accent-color"),
+    (NAMESPACE, "contrast"),
+    (INTERFACE, "text-scaling-factor"),
+    (INTERFACE, "font-name"),
+    (INTERFACE, "monospace-font-name"),
+    (INTERFACE, "cursor-size"),
+    (INTERFACE, "enable-animations"),
+];
+
+/// A setting the portal told.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Setting {
+    Scheme(Scheme),
+    /// sRGB red, green and blue; `None` when the desktop has no accent.
+    Accent(Option<[f64; 3]>),
+    Contrast(bool),
+    /// How much larger than their size text is shown.
+    TextScale(f64),
+    /// Fonts as GNOME names them: a family, styles and a size in points
+    /// (`Cantarell 11`).
+    Font(String),
+    MonospaceFont(String),
+    CursorSize(i32),
+    Animations(bool),
+}
 /// How long the first answer may take before the thread gives up.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -38,44 +72,76 @@ impl Scheme {
     }
 }
 
-/// Watch the preference on a thread of its own, calling `changed` with it
-/// once known and at every change. Without a session bus or a portal
-/// nothing is called.
-pub(crate) fn watch(changed: impl Fn(Scheme) + Send + 'static) {
-    let _ = std::thread::Builder::new().name("sidestep-desktop".into()).spawn(move || {
-        let _ = run(&changed);
+/// Watch the settings on a thread of its own, calling `changed` with each
+/// once known and at every change, and `done` when the first answers are
+/// in (or there's no session bus or portal to ask).
+pub(crate) fn watch(changed: impl Fn(Setting) + Send + 'static, done: impl FnOnce() + Send + 'static) {
+    let _ = std::thread::Builder::new().name("sidestep-settings".into()).spawn(move || {
+        let mut done = Some(done);
+        let _ = run(&changed, &mut done);
+        if let Some(done) = done.take() {
+            done();
+        }
     });
 }
 
-fn run(changed: &dyn Fn(Scheme)) -> Option<()> {
+/// The setting `key` of `namespace` holds the variant `r` is at.
+fn setting(namespace: &str, key: &str, r: &mut Reader) -> Option<Setting> {
+    Some(match (namespace, key, r.variant()?) {
+        (NAMESPACE, "color-scheme", Value::U32(v)) => Setting::Scheme(Scheme::from_portal(v)),
+        (NAMESPACE, "accent-color", Value::Rgb(c)) => {
+            Setting::Accent(c.iter().all(|v| (0.0..=1.0).contains(v)).then_some(c))
+        }
+        (NAMESPACE, "contrast", Value::U32(v)) => Setting::Contrast(v == 1),
+        (INTERFACE, "text-scaling-factor", Value::F64(v)) if v > 0.0 => Setting::TextScale(v),
+        (INTERFACE, "font-name", Value::Str(s)) => Setting::Font(s),
+        (INTERFACE, "monospace-font-name", Value::Str(s)) => Setting::MonospaceFont(s),
+        (INTERFACE, "cursor-size", Value::I32(v)) => Setting::CursorSize(v),
+        (INTERFACE, "enable-animations", Value::Bool(b)) => Setting::Animations(b),
+        _ => return None,
+    })
+}
+
+fn run(changed: &dyn Fn(Setting), done: &mut Option<impl FnOnce()>) -> Option<()> {
     let mut bus = Bus::connect()?;
     bus.call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "Hello", "", |_| {})?;
-    let rule = format!(
-        "type='signal',interface='{SETTINGS}',member='SettingChanged',path='{PORTAL_PATH}',arg0='{NAMESPACE}',arg1='{KEY}'"
-    );
-    bus.call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "AddMatch", "s", |w| {
-        w.string(&rule)
-    })?;
-    // ReadOne answers with the value; older portals only have Read, which
-    // wraps it in one more variant.
-    let args = |w: &mut Writer| {
-        w.string(NAMESPACE);
-        w.string(KEY);
-    };
-    let reply = match bus.call(PORTAL, PORTAL_PATH, SETTINGS, "ReadOne", "ss", args) {
-        Some(reply) => Some(reply),
-        None => bus.call(PORTAL, PORTAL_PATH, SETTINGS, "Read", "ss", args),
-    };
-    if let Some(value) = reply.and_then(|m| Reader::new(&m.body, m.big_endian).variant_u32()) {
-        changed(Scheme::from_portal(value));
+    for namespace in [NAMESPACE, INTERFACE] {
+        let rule = format!(
+            "type='signal',interface='{SETTINGS}',member='SettingChanged',path='{PORTAL_PATH}',arg0='{namespace}'"
+        );
+        bus.call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "AddMatch", "s", |w| {
+            w.string(&rule)
+        })?;
+    }
+    for (i, (namespace, key)) in KEYS.into_iter().enumerate() {
+        // ReadOne answers with the value; older portals only have Read,
+        // which wraps it in one more variant.
+        let args = |w: &mut Writer| {
+            w.string(namespace);
+            w.string(key);
+        };
+        let reply = match bus.call(PORTAL, PORTAL_PATH, SETTINGS, "ReadOne", "ss", args) {
+            Some(reply) => Some(reply),
+            None => bus.call(PORTAL, PORTAL_PATH, SETTINGS, "Read", "ss", args),
+        };
+        if let Some(value) = reply.and_then(|m| setting(namespace, key, &mut Reader::new(&m.body, m.big_endian))) {
+            changed(value);
+        }
+        // The appearance is in: windows may show.
+        if i == 2
+            && let Some(done) = done.take()
+        {
+            done();
+        }
     }
     bus.stream.set_read_timeout(None).ok()?;
     loop {
         let message = bus.read()?;
         if message.kind == SIGNAL && message.member.as_deref() == Some("SettingChanged") {
             let mut r = Reader::new(&message.body, message.big_endian);
-            if r.string()? == NAMESPACE && r.string()? == KEY {
-                changed(Scheme::from_portal(r.variant_u32()?));
+            let (namespace, key) = (r.string()?, r.string()?);
+            if let Some(value) = setting(namespace, key, &mut r) {
+                changed(value);
             }
         }
     }
@@ -346,6 +412,7 @@ impl<'a> Reader<'a> {
     }
 
     /// A variant holding a u32, possibly inside more variants.
+    #[cfg(test)]
     fn variant_u32(&mut self) -> Option<u32> {
         match self.signature()? {
             "u" => self.u32(),
@@ -353,6 +420,39 @@ impl<'a> Reader<'a> {
             _ => None,
         }
     }
+
+    fn f64(&mut self) -> Option<f64> {
+        self.pad(8);
+        let b: [u8; 8] = self.buf.get(self.at..self.at + 8)?.try_into().ok()?;
+        self.at += 8;
+        Some(f64::from_bits(if self.big_endian { u64::from_be_bytes(b) } else { u64::from_le_bytes(b) }))
+    }
+
+    /// A variant holding one of the values settings have, possibly inside
+    /// more variants.
+    fn variant(&mut self) -> Option<Value> {
+        Some(match self.signature()? {
+            "u" => Value::U32(self.u32()?),
+            "i" => Value::I32(self.u32()? as i32),
+            "b" => Value::Bool(self.u32()? != 0),
+            "d" => Value::F64(self.f64()?),
+            "s" => Value::Str(self.string()?.to_owned()),
+            "(ddd)" => Value::Rgb([self.f64()?, self.f64()?, self.f64()?]),
+            "v" => self.variant()?,
+            _ => return None,
+        })
+    }
+}
+
+/// A setting's value.
+#[derive(Clone, Debug, PartialEq)]
+enum Value {
+    U32(u32),
+    I32(i32),
+    Bool(bool),
+    F64(f64),
+    Str(String),
+    Rgb([f64; 3]),
 }
 
 /// The reply serial and member among a header's fields.
@@ -428,13 +528,64 @@ mod tests {
     fn signals_carry_the_setting() {
         let mut w = Writer::default();
         w.string(NAMESPACE);
-        w.string(KEY);
+        w.string("color-scheme");
         w.signature("u");
         w.u32(2);
         let mut r = Reader::new(&w.buf, false);
         assert_eq!(r.string(), Some(NAMESPACE));
-        assert_eq!(r.string(), Some(KEY));
+        assert_eq!(r.string(), Some("color-scheme"));
         assert_eq!(r.variant_u32().map(Scheme::from_portal), Some(Scheme::Light));
+    }
+
+    #[test]
+    fn accents_and_contrast_decode() {
+        let mut w = Writer::default();
+        w.signature("(ddd)");
+        for v in [0.2f64, 0.4, 0.6] {
+            w.pad(8);
+            w.buf.extend_from_slice(&v.to_le_bytes());
+        }
+        let got = setting(NAMESPACE, "accent-color", &mut Reader::new(&w.buf, false));
+        assert_eq!(got, Some(Setting::Accent(Some([0.2, 0.4, 0.6]))));
+        // Out of range: no accent.
+        let mut w = Writer::default();
+        w.signature("(ddd)");
+        for v in [-1.0f64, -1.0, -1.0] {
+            w.pad(8);
+            w.buf.extend_from_slice(&v.to_le_bytes());
+        }
+        assert_eq!(setting(NAMESPACE, "accent-color", &mut Reader::new(&w.buf, false)), Some(Setting::Accent(None)));
+        let one = b"\x01u\x00\x00\x01\x00\x00\x00";
+        assert_eq!(setting(NAMESPACE, "contrast", &mut Reader::new(one, false)), Some(Setting::Contrast(true)));
+    }
+
+    #[test]
+    fn interface_settings_decode() {
+        let mut w = Writer::default();
+        w.signature("d");
+        w.pad(8);
+        w.buf.extend_from_slice(&1.25f64.to_le_bytes());
+        assert_eq!(
+            setting(INTERFACE, "text-scaling-factor", &mut Reader::new(&w.buf, false)),
+            Some(Setting::TextScale(1.25))
+        );
+        let mut w = Writer::default();
+        w.signature("v");
+        w.signature("s");
+        w.string("Cantarell 11");
+        assert_eq!(
+            setting(INTERFACE, "font-name", &mut Reader::new(&w.buf, false)),
+            Some(Setting::Font("Cantarell 11".into()))
+        );
+        let b = b"\x01b\x00\x00\x00\x00\x00\x00";
+        assert_eq!(
+            setting(INTERFACE, "enable-animations", &mut Reader::new(b, false)),
+            Some(Setting::Animations(false))
+        );
+        let i = b"\x01i\x00\x00\x18\x00\x00\x00";
+        assert_eq!(setting(INTERFACE, "cursor-size", &mut Reader::new(i, false)), Some(Setting::CursorSize(24)));
+        // A key of the wrong type, or another namespace's, is nothing.
+        assert_eq!(setting(NAMESPACE, "cursor-size", &mut Reader::new(i, false)), None);
     }
 
     #[test]

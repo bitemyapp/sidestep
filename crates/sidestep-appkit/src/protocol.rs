@@ -54,12 +54,212 @@ impl Rect {
 /// Straight (not premultiplied) RGBA.
 pub(crate) type Color = [f32; 4];
 
-/// A recorded drawing operation, in layer coordinates, clipped to `clip`.
+/// A recorded drawing operation, in layer coordinates.
+///
+/// `Fill` is the fast path: a rectangle already clipped, composited over
+/// what's there. The others but glyphs carry a [`Draw`]: their transform
+/// from user space, compositing, clip and shadow; the rasterizer
+/// (`raster::ops`) draws them with tiny-skia.
 #[derive(Clone, Debug)]
 pub(crate) enum Op {
-    Fill { rect: Rect, color: Color },
-    Path { points: Vec<[f32; 2]>, color: Color, clip: Rect },
+    Fill {
+        rect: Rect,
+        color: Color,
+    },
+    /// A clipped rectangle composited another way (`Copy` is how
+    /// `NSRectFill` fills; `Clear` erases).
+    FillWith {
+        rect: Rect,
+        color: Color,
+        blend: Blend,
+    },
+    FillPath {
+        path: Arc<tiny_skia::Path>,
+        even_odd: bool,
+        paint: Paint,
+        draw: Draw,
+    },
+    StrokePath {
+        path: Arc<tiny_skia::Path>,
+        stroke: Arc<StrokeSpec>,
+        paint: Paint,
+        draw: Draw,
+    },
+    /// `src` of the image's pixels (top-left origin) drawn into `dst`
+    /// (user space, `y0` its edge nearer the origin), faded by `alpha`; a
+    /// template image is drawn in `tint` wherever it has alpha.
+    Image {
+        image: Arc<ImageData>,
+        src: Rect,
+        dst: Rect,
+        alpha: f32,
+        quality: Quality,
+        tint: Option<Color>,
+        draw: Draw,
+    },
+    /// What follows until the matching `EndGroup` is drawn into a
+    /// transparent layer, then composited with `alpha` and `draw.blend`
+    /// (`NSView.alphaValue`). `draw.xf` is unused.
+    BeginGroup {
+        alpha: f32,
+        draw: Draw,
+    },
+    EndGroup,
     Glyphs(GlyphRun),
+}
+
+pub(crate) use crate::raster::images::ImageData;
+use std::sync::Arc;
+
+/// How an op combines with what it's drawn over: `NSCompositingOperation`,
+/// value for value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub(crate) enum Blend {
+    Clear,
+    Copy,
+    #[default]
+    SourceOver,
+    SourceIn,
+    SourceOut,
+    SourceAtop,
+    DestinationOver,
+    DestinationIn,
+    DestinationOut,
+    DestinationAtop,
+    Xor,
+    PlusDarker,
+    Highlight,
+    PlusLighter,
+    Multiply,
+    Screen,
+    Overlay,
+    Darken,
+    Lighten,
+    ColorDodge,
+    ColorBurn,
+    SoftLight,
+    HardLight,
+    Difference,
+    Exclusion,
+    Hue,
+    Saturation,
+    Color,
+    Luminosity,
+}
+
+impl Blend {
+    /// The `NSCompositingOperation` value `op`; out-of-range ones are
+    /// source over.
+    pub fn from_raw(op: usize) -> Blend {
+        const ALL: [Blend; 29] = [
+            Blend::Clear,
+            Blend::Copy,
+            Blend::SourceOver,
+            Blend::SourceIn,
+            Blend::SourceOut,
+            Blend::SourceAtop,
+            Blend::DestinationOver,
+            Blend::DestinationIn,
+            Blend::DestinationOut,
+            Blend::DestinationAtop,
+            Blend::Xor,
+            Blend::PlusDarker,
+            Blend::Highlight,
+            Blend::PlusLighter,
+            Blend::Multiply,
+            Blend::Screen,
+            Blend::Overlay,
+            Blend::Darken,
+            Blend::Lighten,
+            Blend::ColorDodge,
+            Blend::ColorBurn,
+            Blend::SoftLight,
+            Blend::HardLight,
+            Blend::Difference,
+            Blend::Exclusion,
+            Blend::Hue,
+            Blend::Saturation,
+            Blend::Color,
+            Blend::Luminosity,
+        ];
+        ALL.get(op).copied().unwrap_or_default()
+    }
+}
+
+/// What an op needs besides its shape and paint.
+#[derive(Clone, Debug)]
+pub(crate) struct Draw {
+    /// User space to layer points.
+    pub xf: tiny_skia::Transform,
+    pub blend: Blend,
+    pub aa: bool,
+    /// Where the op may draw, in layer points: the clip's bounds.
+    pub clip: Rect,
+    /// The clip's shape where it isn't `clip` itself: paths the op must be
+    /// inside of, all of them.
+    pub mask: Option<Arc<[ClipPath]>>,
+    pub shadow: Option<Arc<ShadowSpec>>,
+}
+
+/// A path clipping ops: layer points are `xf` of its points.
+#[derive(Clone, Debug)]
+pub(crate) struct ClipPath {
+    pub path: Arc<tiny_skia::Path>,
+    pub even_odd: bool,
+    pub xf: tiny_skia::Transform,
+    pub aa: bool,
+}
+
+/// What a shape is filled or stroked with.
+#[derive(Clone, Debug)]
+pub(crate) enum Paint {
+    Solid(Color),
+    Gradient(Arc<GradientSpec>),
+}
+
+/// A linear gradient from `start` to `end`, or a radial one between two
+/// circles, in the op's user space. `extend` says whether the end colors
+/// continue before the start and after the end.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct GradientSpec {
+    pub stops: Vec<(f32, Color)>,
+    pub start: (f32, f32),
+    pub end: (f32, f32),
+    /// The circles' radii, for a radial gradient.
+    pub radii: Option<(f32, f32)>,
+    pub extend: (bool, bool),
+}
+
+/// How a path is stroked, in user space: `NSLineCapStyle` and
+/// `NSLineJoinStyle` values, and a dash pattern with its phase.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct StrokeSpec {
+    /// 0 draws the thinnest line the device can show.
+    pub width: f32,
+    pub cap: u8,
+    pub join: u8,
+    pub miter: f32,
+    pub dash: Option<(Vec<f32>, f32)>,
+}
+
+/// A shadow: offset in layer points (y down), blur radius and color.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ShadowSpec {
+    pub dx: f32,
+    pub dy: f32,
+    pub blur: f32,
+    pub color: Color,
+}
+
+/// How images are resampled (`NSImageInterpolation`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum Quality {
+    None,
+    Low,
+    #[default]
+    Medium,
+    High,
 }
 
 /// Text, shaped and laid out on the main thread: glyphs of one face in one
@@ -313,6 +513,10 @@ pub(crate) enum ToRender {
         window: WindowId,
         parent: Option<WindowId>,
     },
+    /// Image representations that went away: drop what's cached of them.
+    ForgetImages {
+        keys: Vec<u64>,
+    },
 }
 
 /// Where a scroll is in a touchpad gesture; `None` for wheels and other
@@ -489,4 +693,7 @@ pub(crate) enum FromRender {
         window: WindowId,
         outputs: Vec<u32>,
     },
+    /// The desktop's appearance changed (from the settings thread, which
+    /// sends this only to wake the main thread; `settings` has the rest).
+    Appearance,
 }

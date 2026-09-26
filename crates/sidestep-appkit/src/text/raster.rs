@@ -26,7 +26,7 @@ use swash::zeno::{Angle, Format, Stroke, Transform, Vector};
 use super::fonts::{self, FaceData};
 use super::layout::FxBuild;
 use crate::protocol::{Color, GlyphRun, Rect};
-use crate::raster::Canvas;
+use crate::raster::{Canvas, blend, over};
 
 /// Horizontal positions per pixel that a glyph is rasterized at.
 const SUBPIXEL: f32 = 4.0;
@@ -105,7 +105,7 @@ struct Image {
 enum Pixels {
     /// Coverage, one byte per pixel.
     Mask(Box<[u8]>),
-    /// Premultiplied ARGB.
+    /// Premultiplied, as canvases hold pixels.
     Color(Box<[u32]>),
 }
 
@@ -123,16 +123,11 @@ fn cost(image: &Option<Image>) -> usize {
     }
 }
 
-/// Pixels per point on `canvas`. Points map to pixels as
-/// `((x, y - origin_y) × scale)`.
-fn scale_of(canvas: &Canvas) -> f32 {
-    canvas.scale
-}
-
 /// Draw `run` into `canvas`, inside `clip` (layer coordinates).
 pub(crate) fn draw_glyphs(canvas: &mut Canvas, cache: &mut Glyphs, run: &GlyphRun, clip: &Rect) {
-    let scale = scale_of(canvas);
-    let Some((cx0, cy0, cx1, cy1)) = pixel_clip(canvas, clip, scale) else { return };
+    let scale = canvas.scale;
+    let Some((cx0, cy0, cx1, cy1)) = canvas.pixels(clip) else { return };
+    let (cx0, cy0, cx1, cy1) = (cx0 as i32, cy0 as i32, cx1 as i32, cy1 as i32);
     let size = run.size * scale;
     if !(size > 0.0 && size < 4096.0) {
         return;
@@ -150,8 +145,8 @@ pub(crate) fn draw_glyphs(canvas: &mut Canvas, cache: &mut Glyphs, run: &GlyphRu
     // The scaler is made on the run's first miss, and serves the rest.
     let mut context = Some(context);
     let mut scaler: Option<Scaler<'_>> = None;
-    let (rgb, alpha) = channels(run.color);
-    let (ox, oy) = (run.x * scale, (run.y - canvas.origin_y) * scale);
+    let (solid, alpha) = channels(run.color);
+    let (ox, oy) = (run.x * scale - canvas.x0 as f32, (run.y - canvas.origin_y) * scale - canvas.y0 as f32);
     // Glyphs rarely reach further than this from their origin.
     let reach = size * 2.0;
     for g in run.glyphs.iter() {
@@ -189,7 +184,7 @@ pub(crate) fn draw_glyphs(canvas: &mut Canvas, cache: &mut Glyphs, run: &GlyphRu
             }
         };
         if let Some(image) = image {
-            blit(canvas, image, px as i32 + image.left, y as i32 - image.top, (cx0, cy0, cx1, cy1), rgb, alpha);
+            blit(canvas, image, px as i32 + image.left, y as i32 - image.top, (cx0, cy0, cx1, cy1), solid, alpha);
         }
     }
 }
@@ -229,8 +224,9 @@ fn convert(r: Rendered) -> Option<Image> {
                     .iter()
                     .map(|p| {
                         let a = u32::from(p[3]);
-                        let c = |v: u8| if straight { (u32::from(v) * a + 127) / 255 } else { u32::from(v).min(a) };
-                        (a << 24) | (c(p[0]) << 16) | (c(p[1]) << 8) | c(p[2])
+                        let c =
+                            |v: u8| (if straight { (u32::from(v) * a + 127) / 255 } else { u32::from(v).min(a) }) as u8;
+                        u32::from_ne_bytes([c(p[0]), c(p[1]), c(p[2]), p[3]])
                     })
                     .collect(),
             )
@@ -240,24 +236,13 @@ fn convert(r: Rendered) -> Option<Image> {
     Some(Image { left: r.placement.left, top: r.placement.top, width, height, pixels })
 }
 
-/// The pixels of `clip` on the canvas, as x0, y0, x1, y1: those whose
-/// centers lie inside it, as for fills.
-fn pixel_clip(canvas: &Canvas, clip: &Rect, scale: f32) -> Option<(i32, i32, i32, i32)> {
-    let edge = |v: f32| (v * scale - 0.5).ceil();
-    let x0 = edge(clip.x0).max(0.0);
-    let y0 = edge(clip.y0 - canvas.origin_y).max(0.0);
-    let x1 = edge(clip.x1).min(canvas.width as f32);
-    let y1 = edge(clip.y1 - canvas.origin_y).min(canvas.height as f32);
-    (x0 < x1 && y0 < y1).then_some((x0 as i32, y0 as i32, x1 as i32, y1 as i32))
-}
-
-fn channels(c: Color) -> ([u32; 3], u32) {
-    let ch = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
-    ([ch(c[0]), ch(c[1]), ch(c[2])], ch(c[3]))
+/// A color as an opaque canvas pixel and its alpha (0 to 255).
+fn channels(c: Color) -> (u32, u32) {
+    (crate::raster::premultiplied([c[0], c[1], c[2], 1.0]), (c[3].clamp(0.0, 1.0) * 255.0 + 0.5) as u32)
 }
 
 /// Composite `image` with its top left corner at (`x`, `y`).
-fn blit(canvas: &mut Canvas, image: &Image, x: i32, y: i32, clip: (i32, i32, i32, i32), rgb: [u32; 3], alpha: u32) {
+fn blit(canvas: &mut Canvas, image: &Image, x: i32, y: i32, clip: (i32, i32, i32, i32), solid: u32, alpha: u32) {
     let (cx0, cy0, cx1, cy1) = clip;
     let (w, h) = (image.width as i32, image.height as i32);
     let (c0, c1) = ((cx0 - x).max(0), (cx1 - x).min(w));
@@ -265,12 +250,11 @@ fn blit(canvas: &mut Canvas, image: &Image, x: i32, y: i32, clip: (i32, i32, i32
     if c0 >= c1 || r0 >= r1 {
         return;
     }
-    let stride = canvas.width as usize;
+    let stride = canvas.stride;
     let len = (c1 - c0) as usize;
     let rows = (r0..r1).map(|row| ((y + row) as usize * stride + (x + c0) as usize, (row * w + c0) as usize));
     match &image.pixels {
         Pixels::Mask(mask) => {
-            let solid = (rgb[0] << 16) | (rgb[1] << 8) | rgb[2];
             for (dst, src) in rows {
                 for (d, &cov) in canvas.px[dst..dst + len].iter_mut().zip(&mask[src..src + len]) {
                     let a = if alpha == 255 { u32::from(cov) } else { (u32::from(cov) * alpha * 257 + 32896) >> 16 };
@@ -284,37 +268,12 @@ fn blit(canvas: &mut Canvas, image: &Image, x: i32, y: i32, clip: (i32, i32, i32
         Pixels::Color(color) => {
             for (dst, src) in rows {
                 for (d, &s) in canvas.px[dst..dst + len].iter_mut().zip(&color[src..src + len]) {
-                    *d = over(*d, s, alpha);
+                    let s = if alpha == 255 { s } else { crate::raster::lerp(0, s, alpha) };
+                    *d = over(*d, s);
                 }
             }
         }
     }
-}
-
-/// `solid` over `dst` with coverage `a` (below 255), rounded: red and blue
-/// share a multiply, green has its own, and each lane's sum stays below
-/// 2¹⁶, since `dst · (255 − a) + solid · a` is at most 255².
-#[inline]
-fn blend(dst: u32, solid: u32, a: u32) -> u32 {
-    let inv = 255 - a;
-    let rb = (dst & 0x00ff_00ff) * inv + (solid & 0x00ff_00ff) * a + 0x0080_0080;
-    let g = (dst & 0x0000_ff00) * inv + (solid & 0x0000_ff00) * a + 0x0000_8000;
-    let rb = ((rb + ((rb >> 8) & 0x00ff_00ff)) >> 8) & 0x00ff_00ff;
-    let g = ((g + ((g >> 8) & 0x0000_ff00)) >> 8) & 0x0000_ff00;
-    rb | g
-}
-
-/// Premultiplied `src`, faded by `alpha`, over `dst`.
-#[inline]
-fn over(dst: u32, src: u32, alpha: u32) -> u32 {
-    let fade = |v: u32| if alpha == 255 { v } else { (v * alpha + 127) / 255 };
-    let sa = fade(src >> 24);
-    if sa == 0 {
-        return dst;
-    }
-    let inv = 255 - sa;
-    let mix = |shift: u32| fade((src >> shift) & 0xff) + ((((dst >> shift) & 0xff) * inv) + 127) / 255;
-    (mix(16).min(255) << 16) | (mix(8).min(255) << 8) | mix(0).min(255)
 }
 
 #[cfg(test)]
@@ -360,13 +319,13 @@ mod tests {
         if let Some(emoji) = face(&mut context, "Noto Color Emoji") {
             let smile = raster(&mut context, &emoji, 32.0, glyph(&emoji, '😀'), 0.0).expect("an emoji");
             let Pixels::Color(px) = &smile.pixels else { panic!("emoji come in color") };
-            assert!(px.iter().any(|p| (p >> 16) & 0xff != p & 0xff), "not gray");
+            assert!(px.iter().any(|p| p.to_ne_bytes()[0] != p.to_ne_bytes()[2]), "not gray");
             assert!((28..=40).contains(&smile.width), "scaled to the size asked ({})", smile.width);
         }
     }
 
     fn canvas(px: &mut [u32], width: u32, height: u32) -> Canvas<'_> {
-        Canvas { px, width, height, origin_y: 0.0, scale: 1.0 }
+        Canvas::new(px, width, height, 0.0, 1.0)
     }
 
     fn run(font: u32, size: f32, glyphs: &[Glyph]) -> GlyphRun {
@@ -445,22 +404,6 @@ mod tests {
         let image = |pixels| Some(Image { left: 0, top: 0, width: 10, height: 10, pixels });
         assert_eq!(cost(&image(Pixels::Mask(vec![0; 100].into()))), 48 + 100);
         assert_eq!(cost(&image(Pixels::Color(vec![0; 100].into()))), 48 + 400);
-    }
-
-    #[test]
-    fn blending_rounds_like_dividing() {
-        let exact = |dst: u32, solid: u32, a: u32| {
-            let mix = |shift: u32| ((((dst >> shift) & 0xff) * (255 - a) + ((solid >> shift) & 0xff) * a) + 127) / 255;
-            (mix(16) << 16) | (mix(8) << 8) | mix(0)
-        };
-        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
-        for _ in 0..200_000 {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            let (dst, solid, a) = (seed as u32 & 0xff_ffff, (seed >> 24) as u32 & 0xff_ffff, (seed >> 56) as u32 % 255);
-            assert_eq!(blend(dst, solid, a), exact(dst, solid, a), "{dst:06x} {solid:06x} {a}");
-        }
     }
 
     #[test]

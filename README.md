@@ -13,9 +13,12 @@ weak references, protocols, blocks). Foundation has strings, a dictionary,
 timers and threads. AppKit runs a first slice on Wayland: an application,
 windows (with GNOME-style decorations where the compositor leaves them to
 the program), views with `drawRect:`, keyboard, mouse and scroll events,
-scroll views, fills and paths at any display scale, text with fonts from
-fontconfig, shaping, bidi, fallback and color emoji, the clipboard with any
-type, drag and drop into windows, and screens. See the [roadmap](docs/roadmap.md).
+scroll views, drawing at any display scale (graphics contexts, paths and
+strokes, transforms, clips, gradients, shadows, compositing, images in the
+common formats, symbol images), colors in the desktop's light or dark
+appearance, text with fonts from fontconfig, shaping, bidi, fallback and
+color emoji, the clipboard with any type, drag and drop into windows, and
+screens. See the [roadmap](docs/roadmap.md).
 
 [objc2]: https://github.com/madsmtm/objc2
 
@@ -63,9 +66,12 @@ clicking. `SCENARIO` chooses what it does:
 `SLICE_QUIT_AFTER=<seconds>` makes it quit by itself. `examples/text-demo`
 shows text: weights, kerning and ligatures, CJK, emoji, right-to-left and
 mixed scripts, alignment, wrapping and truncation; with
-`SCENARIO=attributes`, underline styles, strikethrough, outlined and
-slanted text, baseline offsets, tab stops and wrapped mixed-direction
-paragraphs.
+`SCENARIO=attributes`, underline styles, strikethrough, outlined and slanted
+text, baseline offsets, tab stops and wrapped mixed-direction paragraphs.
+`examples/drawing-gallery` shows drawing (`SCENARIO=shapes`, `colors`,
+`images`, `symbols`, `alpha` or `bench`); with `GALLERY_PNG=file.png` it
+opens no window and writes the picture to a file instead, on macOS too, for
+comparing the two.
 
 **macOS** runs it on Apple's AppKit:
 
@@ -104,7 +110,9 @@ The first run builds the container image, which takes a few minutes.
 (`SIDESTEP_NO_FRACTIONAL_SCALE=1` makes a program use integer scales only);
 `FLOATING=1` floats windows as most desktops do; and
 `SIDESTEP_DECORATIONS=client` makes the program draw its own title bar, as
-it does on GNOME (sway draws one otherwise):
+it does on GNOME (sway draws one otherwise); `SIDESTEP_APPEARANCE=dark`
+(or `light`) and `SIDESTEP_ACCENT=#rrggbb` stand in for the desktop's
+settings:
 
 ```sh
 SIDESTEP_DECORATIONS=client FLOATING=1 SCALE=2 SIZE=2560x1600 SHOT=/work/target/hidpi.png \

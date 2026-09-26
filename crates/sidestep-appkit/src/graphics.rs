@@ -1,17 +1,14 @@
-//! Drawing during `drawRect:`. Nothing here touches pixels: `NSColor`,
-//! `NSBezierPath` and string drawing (`string_drawing`) append [`Op`]s to
-//! the recorder of the view being drawn, in its layer's coordinates, for
-//! the render thread.
+//! Drawing during `drawRect:`, as the display pass and string drawing see
+//! it. Nothing here touches pixels: the current graphics context
+//! (`context`) records [`Op`]s in its layer's coordinates for the render
+//! thread, or rasterizes them at once into a bitmap. `NSColor` lives in
+//! `color`, `NSBezierPath` in `path`; what remains here is the view
+//! geometry map ([`Xf`]) and the recorder that string drawing appends to,
+//! whose functions are adapters over the current context.
 
-use std::cell::{Cell, RefCell};
-
-use objc2::rc::Retained;
-use objc2::runtime::{NSObject, NSObjectProtocol};
-use objc2::{AnyThread, DefinedClass, define_class, msg_send};
-use objc2_app_kit::NSColor;
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 
-use crate::protocol::{Color, Op, Rect};
+use crate::protocol::{Op, Rect};
 
 /// Maps a view's coordinates to its layer's: `x' = x + tx`, `y' = a·y + ty`
 /// with `a = ±1` (views may be flipped relative to each other).
@@ -53,291 +50,75 @@ impl Xf {
     }
 }
 
-/// What the view being drawn records into.
+/// What the current context records into, as string drawing sees it: the
+/// ops so far, the CTM as the nearest translate-and-flip, and the clip's
+/// bounds.
 pub(crate) struct Recorder {
     pub ops: Vec<Op>,
     pub xf: Xf,
     pub clip: Rect,
-    fill: Color,
-    stroke: Color,
     /// Text drawn before being laid out, to lay out together at the end.
     pub pending: crate::string_drawing::Pending,
+    /// Ops are rasterized as they come (a bitmap context), so text is laid
+    /// out at once rather than at the end of the pass.
+    pub immediate: bool,
 }
 
-thread_local!(static CURRENT: RefCell<Option<Recorder>> = const { RefCell::new(None) });
+impl Recorder {
+    pub fn new(immediate: bool) -> Recorder {
+        Recorder { ops: Vec::new(), xf: Xf::IDENTITY, clip: Rect::default(), pending: Default::default(), immediate }
+    }
+}
 
+/// Start recording ops for the render thread, in a context of their own.
 pub(crate) fn begin_recording() {
-    CURRENT.with(|c| {
-        *c.borrow_mut() = Some(Recorder {
-            ops: Vec::new(),
-            xf: Xf::IDENTITY,
-            clip: Rect::default(),
-            fill: [0.0, 0.0, 0.0, 1.0],
-            stroke: [0.0, 0.0, 0.0, 1.0],
-            pending: Default::default(),
-        })
-    });
+    crate::context::begin_recording(Xf::IDENTITY, 1.0);
 }
 
+/// The ops recorded since [`begin_recording`], text laid out.
 pub(crate) fn end_recording() -> Vec<Op> {
-    let Some(rec) = CURRENT.with(|c| c.borrow_mut().take()) else { return Vec::new() };
+    let rec = crate::context::end_recording();
     crate::string_drawing::finish(rec.ops, rec.pending)
 }
 
-/// Whether a view is being drawn.
+/// Whether anything is being drawn.
 pub(crate) fn recording() -> bool {
-    CURRENT.with(|c| c.borrow().is_some())
+    crate::context::with_state(|_| ()).is_some()
 }
 
-/// Position the recorder for the view about to draw.
+/// A fresh state for drawing with `xf` and `clip`, outside any view (the
+/// title bar's text, tests).
 pub(crate) fn set_view(xf: Xf, clip: Rect) {
-    with_recorder(|r| {
-        r.xf = xf;
-        r.clip = clip;
-    });
+    crate::context::with_state(|st| st.reset(xf, clip));
 }
 
-/// Record directly, outside any view (the window background).
+/// Record directly (the window background).
 pub(crate) fn push(op: Op) {
-    with_recorder(|r| r.ops.push(op));
+    crate::context::with_state(|st| st.push(op));
 }
 
+/// Let string drawing append to the ops. Text knows only the clip's
+/// bounds, so under a path clip (`addClip`) it goes in a group the clip
+/// masks.
 pub(crate) fn with_recorder(f: impl FnOnce(&mut Recorder)) {
-    CURRENT.with(|c| {
-        if let Some(r) = c.borrow_mut().as_mut() {
-            f(r)
+    crate::context::with_state(|st| {
+        let mask = st.gs.mask.clone();
+        let group = mask.is_some();
+        if group {
+            let draw = crate::protocol::Draw {
+                xf: tiny_skia::Transform::identity(),
+                blend: crate::protocol::Blend::SourceOver,
+                aa: true,
+                clip: st.gs.clip,
+                mask,
+                shadow: None,
+            };
+            st.rec.ops.push(Op::BeginGroup { alpha: 1.0, draw });
         }
+        f(&mut st.rec);
+        if group {
+            st.rec.ops.push(Op::EndGroup);
+        }
+        st.flush();
     });
-}
-
-// NSColor
-
-pub(crate) struct ColorIvars {
-    rgba: [f64; 4],
-}
-
-define_class!(
-    #[unsafe(super(NSObject))]
-    #[name = "NSColor"]
-    #[ivars = ColorIvars]
-    pub(crate) struct NSColorImpl;
-
-    impl NSColorImpl {
-        #[unsafe(method_id(colorWithSRGBRed:green:blue:alpha:))]
-        fn srgb(r: f64, g: f64, b: f64, a: f64) -> Retained<Self> {
-            color(r, g, b, a)
-        }
-
-        #[unsafe(method_id(colorWithRed:green:blue:alpha:))]
-        fn rgb(r: f64, g: f64, b: f64, a: f64) -> Retained<Self> {
-            color(r, g, b, a)
-        }
-
-        #[unsafe(method_id(colorWithCalibratedRed:green:blue:alpha:))]
-        fn calibrated(r: f64, g: f64, b: f64, a: f64) -> Retained<Self> {
-            color(r, g, b, a)
-        }
-
-        #[unsafe(method_id(colorWithDeviceRed:green:blue:alpha:))]
-        fn device(r: f64, g: f64, b: f64, a: f64) -> Retained<Self> {
-            color(r, g, b, a)
-        }
-
-        #[unsafe(method_id(colorWithWhite:alpha:))]
-        fn white_alpha(w: f64, a: f64) -> Retained<Self> {
-            color(w, w, w, a)
-        }
-
-        #[unsafe(method_id(blackColor))]
-        fn black() -> Retained<Self> {
-            color(0.0, 0.0, 0.0, 1.0)
-        }
-
-        #[unsafe(method_id(whiteColor))]
-        fn white() -> Retained<Self> {
-            color(1.0, 1.0, 1.0, 1.0)
-        }
-
-        #[unsafe(method_id(clearColor))]
-        fn clear() -> Retained<Self> {
-            color(0.0, 0.0, 0.0, 0.0)
-        }
-
-        #[unsafe(method_id(redColor))]
-        fn red() -> Retained<Self> {
-            color(1.0, 0.0, 0.0, 1.0)
-        }
-
-        #[unsafe(method_id(textColor))]
-        fn text() -> Retained<Self> {
-            color(0.0, 0.0, 0.0, 0.85)
-        }
-
-        #[unsafe(method_id(windowBackgroundColor))]
-        fn window_background() -> Retained<Self> {
-            color(0.925, 0.925, 0.925, 1.0)
-        }
-
-        #[unsafe(method(set))]
-        fn set(&self) {
-            let c = self.color();
-            with_recorder(|r| {
-                r.fill = c;
-                r.stroke = c;
-            });
-        }
-
-        #[unsafe(method(setFill))]
-        fn set_fill(&self) {
-            let c = self.color();
-            with_recorder(|r| r.fill = c);
-        }
-
-        #[unsafe(method(setStroke))]
-        fn set_stroke(&self) {
-            let c = self.color();
-            with_recorder(|r| r.stroke = c);
-        }
-
-        #[unsafe(method(redComponent))]
-        fn red_component(&self) -> f64 {
-            self.ivars().rgba[0]
-        }
-
-        #[unsafe(method(greenComponent))]
-        fn green_component(&self) -> f64 {
-            self.ivars().rgba[1]
-        }
-
-        #[unsafe(method(blueComponent))]
-        fn blue_component(&self) -> f64 {
-            self.ivars().rgba[2]
-        }
-
-        #[unsafe(method(alphaComponent))]
-        fn alpha_component(&self) -> f64 {
-            self.ivars().rgba[3]
-        }
-    }
-
-    unsafe impl NSObjectProtocol for NSColorImpl {}
-);
-
-impl NSColorImpl {
-    fn color(&self) -> Color {
-        self.ivars().rgba.map(|v| v as f32)
-    }
-}
-
-fn color(r: f64, g: f64, b: f64, a: f64) -> Retained<NSColorImpl> {
-    crate::load_shell::<objc2_app_kit::NSColor>();
-    let this = NSColorImpl::alloc().set_ivars(ColorIvars { rgba: [r, g, b, a] });
-    unsafe { msg_send![super(this), init] }
-}
-
-pub(crate) fn color_of(c: &NSColor) -> Color {
-    // SAFETY: every NSColor is an instance of NSColorImpl.
-    unsafe { &*(c as *const NSColor).cast::<NSColorImpl>() }.color()
-}
-
-// NSBezierPath
-
-#[derive(Default)]
-pub(crate) struct PathIvars {
-    subpaths: RefCell<Vec<Vec<[f64; 2]>>>,
-    line_width: Cell<f64>,
-}
-
-define_class!(
-    #[unsafe(super(NSObject))]
-    #[name = "NSBezierPath"]
-    #[ivars = PathIvars]
-    pub(crate) struct NSBezierPathImpl;
-
-    impl NSBezierPathImpl {
-        #[unsafe(method_id(bezierPath))]
-        fn bezier_path() -> Retained<Self> {
-            path()
-        }
-
-        #[unsafe(method_id(bezierPathWithRect:))]
-        fn with_rect(r: NSRect) -> Retained<Self> {
-            let p = path();
-            p.ivars().subpaths.borrow_mut().push(rect_points(r));
-            p
-        }
-
-        #[unsafe(method(fillRect:))]
-        fn fill_rect(r: NSRect) {
-            with_recorder(|rec| {
-                let rect = rec.xf.rect(r).intersect(&rec.clip);
-                if !rect.is_empty() {
-                    rec.ops.push(Op::Fill { rect, color: rec.fill });
-                }
-            });
-        }
-
-        #[unsafe(method(moveToPoint:))]
-        fn move_to(&self, p: NSPoint) {
-            self.ivars().subpaths.borrow_mut().push(vec![[p.x, p.y]]);
-        }
-
-        #[unsafe(method(lineToPoint:))]
-        fn line_to(&self, p: NSPoint) {
-            let mut subpaths = self.ivars().subpaths.borrow_mut();
-            match subpaths.last_mut() {
-                Some(last) => last.push([p.x, p.y]),
-                None => subpaths.push(vec![[p.x, p.y]]),
-            }
-        }
-
-        #[unsafe(method(closePath))]
-        fn close_path(&self) {}
-
-        #[unsafe(method(appendBezierPathWithRect:))]
-        fn append_rect(&self, r: NSRect) {
-            self.ivars().subpaths.borrow_mut().push(rect_points(r));
-        }
-
-        #[unsafe(method(setLineWidth:))]
-        fn set_line_width(&self, w: f64) {
-            self.ivars().line_width.set(w);
-        }
-
-        #[unsafe(method(lineWidth))]
-        fn line_width(&self) -> f64 {
-            self.ivars().line_width.get()
-        }
-
-        #[unsafe(method(fill))]
-        fn fill(&self) {
-            let subpaths = self.ivars().subpaths.borrow();
-            with_recorder(|rec| {
-                for sub in subpaths.iter().filter(|s| s.len() >= 3) {
-                    let points: Vec<[f32; 2]> = sub
-                        .iter()
-                        .map(|p| {
-                            let (x, y) = rec.xf.point(p[0], p[1]);
-                            [x as f32, y as f32]
-                        })
-                        .collect();
-                    rec.ops.push(Op::Path { points, color: rec.fill, clip: rec.clip });
-                }
-            });
-        }
-    }
-
-    unsafe impl NSObjectProtocol for NSBezierPathImpl {}
-);
-
-fn path() -> Retained<NSBezierPathImpl> {
-    crate::load_shell::<objc2_app_kit::NSBezierPath>();
-    let this = NSBezierPathImpl::alloc().set_ivars(PathIvars { line_width: Cell::new(1.0), ..Default::default() });
-    unsafe { msg_send![super(this), init] }
-}
-
-fn rect_points(r: NSRect) -> Vec<[f64; 2]> {
-    let (x0, y0) = (r.origin.x, r.origin.y);
-    let (x1, y1) = (x0 + r.size.width, y0 + r.size.height);
-    vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
 }

@@ -74,6 +74,9 @@ mod pointer_array;
 mod pointer_table;
 mod sort_descriptor;
 
+// Geometry.
+mod affine;
+
 pub use const_string::{ConstStr, ConstantString};
 pub use notification::notification;
 pub use runloop::{fire_due_timers, next_timer_deadline};
@@ -172,4 +175,8 @@ sidestep_runtime::static_class!(pub NSINDEXSET, NSINDEXSET_META = "NSIndexSet", 
 
 sidestep_runtime::static_class!(pub NSMUTABLEINDEXSET, NSMUTABLEINDEXSET_META = "NSMutableIndexSet", || {
     let _ = index_set::NSMutableIndexSetImpl::class();
+});
+
+sidestep_runtime::static_class!(pub NSAFFINETRANSFORM, NSAFFINETRANSFORM_META = "NSAffineTransform", || {
+    let _ = affine::NSAffineTransformImpl::class();
 });

@@ -36,7 +36,7 @@ use objc2_app_kit::{
 use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString};
 
 use crate::font::{number, text_font};
-use crate::graphics::{self, Xf, color_of, with_recorder};
+use crate::graphics::{self, Xf, with_recorder};
 use crate::paragraph::paragraph_of;
 use crate::protocol::{GlyphRun, Op, Rect};
 use crate::text::fonts::{self, Design, FontSpec};
@@ -86,6 +86,13 @@ pub(crate) fn draw(text: &str, attrs: &[Attrs], runs: &[Run], place: Place) {
     match recorded {
         Ok(()) => {}
         Err(hash) => with_recorder(|rec| {
+            // A bitmap context draws as it goes: lay the text out now.
+            if rec.immediate {
+                let laid = layout::lay_out(text, attrs, runs, &opts);
+                let (left, top, clip) = placement(rec.xf, rec.clip, place, &laid);
+                emit(&mut rec.ops, &laid, left, top, clip);
+                return;
+            }
             let job = rec.pending.job_for(text, attrs, runs, opts, hash);
             rec.pending.places.push(Deferred { at: rec.ops.len(), job, xf: rec.xf, clip: rec.clip, place });
         }),
@@ -343,8 +350,9 @@ pub(crate) fn attrs_of(dict: Option<&Attributes>) -> Attrs {
         left -= usize::from(value.is_some());
         value
     };
-    let color =
-        |value: Option<Retained<AnyObject>>| value.and_then(|v| v.downcast::<NSColor>().ok()).map(|c| color_of(&c));
+    let color = |value: Option<Retained<AnyObject>>| {
+        value.and_then(|v| v.downcast::<NSColor>().ok()).map(|c| crate::color::resolve(&c))
+    };
     let int = |value: Option<Retained<AnyObject>>| value.and_then(|v| number(&v)).map(|n| n as i64);
     // SAFETY: the keys are constants this crate exports.
     unsafe {
@@ -398,7 +406,7 @@ fn shadow_of(value: &AnyObject) -> Option<Shadow> {
         (offset, blur, color)
     };
     let color = color?.downcast::<NSColor>().ok()?;
-    let color = color_of(&color);
+    let color = crate::color::resolve(&color);
     Some(Shadow { offset: [offset.width as f32, offset.height as f32], blur: blur as f32, color })
 }
 

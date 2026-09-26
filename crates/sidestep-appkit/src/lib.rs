@@ -39,18 +39,34 @@ pub mod drag;
 mod event;
 mod font;
 mod graphics;
+// Drawing and images.
+mod animation;
+mod appearance;
+mod bitmap;
+mod codec;
+mod color;
+mod context;
+mod effect_view;
+mod gradient;
+mod image;
+mod image_rep;
 mod inputcontext;
 mod keybindings;
 mod keycodes;
 mod momentum;
+mod palette;
 mod paragraph;
 mod pasteboard;
 mod pasteboard_item;
 mod pasteboard_types;
+mod path;
 mod protocol;
 mod raster;
 mod screen;
+mod settings;
+mod shadow;
 mod string_drawing;
+mod symbols;
 #[cfg(test)]
 mod test_objects;
 mod text;
@@ -92,7 +108,8 @@ sidestep_runtime::static_class!(pub NSEVENT, NSEVENT_META = "NSEvent", || {
 });
 
 sidestep_runtime::static_class!(pub NSCOLOR, NSCOLOR_META = "NSColor", || {
-    let _ = graphics::NSColorImpl::class();
+    let _ = color::NSColorImpl::class();
+    path::install_affine_drawing();
 });
 
 sidestep_runtime::static_class!(pub NSFONT, NSFONT_META = "NSFont", || {
@@ -118,7 +135,17 @@ sidestep_runtime::static_class!(pub NSTEXTTAB, NSTEXTTAB_META = "NSTextTab", || 
 });
 
 sidestep_runtime::static_class!(pub NSBEZIERPATH, NSBEZIERPATH_META = "NSBezierPath", || {
-    let _ = graphics::NSBezierPathImpl::class();
+    let _ = path::NSBezierPathImpl::class();
+    path::install_affine_drawing();
+});
+
+sidestep_runtime::static_class!(pub NSGRAPHICSCONTEXT, NSGRAPHICSCONTEXT_META = "NSGraphicsContext", || {
+    let _ = context::NSGraphicsContextImpl::class();
+    path::install_affine_drawing();
+});
+
+sidestep_runtime::static_class!(pub NSAPPEARANCE, NSAPPEARANCE_META = "NSAppearance", || {
+    let _ = appearance::NSAppearanceImpl::class();
 });
 
 sidestep_runtime::static_class!(pub NSPASTEBOARD, NSPASTEBOARD_META = "NSPasteboard", || {

@@ -613,11 +613,11 @@ fn top_rounded_rect(w: f32, h: f32, r: f32) -> Option<tiny_skia::Path> {
 fn title_mask(title: &TitleText, scale: f64, glyphs: &mut Glyphs) -> (u32, u32, f64, Vec<u8>) {
     let (w, h) = (px(title.width.ceil() as u32, scale).max(1), px(title.height.ceil() as u32, scale).max(1));
     let mut px_ = vec![0u32; (w * h) as usize];
-    let mut canvas = Canvas { px: &mut px_, width: w, height: h, origin_y: 0.0, scale: scale as f32 };
+    let mut canvas = Canvas::new(&mut px_, w, h, 0.0, scale as f32);
     let all = Rect::new(0.0, 0.0, title.width.ceil(), title.height.ceil());
     raster::paint(&mut canvas, glyphs, &[all], &title.ops);
-    // The title is set in white on black: any channel is the coverage.
-    let mask = px_.iter().map(|p| ((p >> 8) & 0xff) as u8).collect();
+    // The title is set in white on nothing: its alpha is the coverage.
+    let mask = px_.iter().map(|p| raster::channels(*p)[3]).collect();
     (w, h, scale, mask)
 }
 

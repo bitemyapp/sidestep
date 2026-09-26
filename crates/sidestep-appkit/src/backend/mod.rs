@@ -36,13 +36,13 @@ mod seat;
 mod selection;
 mod textinput;
 
-pub(crate) use decor::{HEADER, TITLE_SIZE};
+pub(crate) use decor::{HEADER, TITLE_SIZE, explicit_theme};
 
 /// Milliseconds a run of `f` takes, the median of seven, for the timing
 /// tests (`cargo test --release -p sidestep-appkit timing -- --ignored
 /// --nocapture`).
 #[cfg(test)]
-fn median(mut f: impl FnMut()) -> f64 {
+pub(crate) fn median(mut f: impl FnMut()) -> f64 {
     let mut runs: Vec<f64> = (0..7)
         .map(|_| {
             let start = std::time::Instant::now();
@@ -112,13 +112,8 @@ pub(crate) fn start() -> Backend {
     let (tx, channel) = channel::channel();
     let (to_main, rx) = mpsc::channel();
     // Decorations follow the desktop's light or dark preference, unless
-    // the environment picked one.
-    if decor::explicit_theme().is_none() {
-        let tx = tx.clone();
-        crate::desktop::watch(move |scheme| {
-            let _ = tx.send(ToRender::ColorScheme { dark: scheme == crate::desktop::Scheme::Dark });
-        });
-    }
+    // the environment picked one; the settings thread tells both threads.
+    crate::settings::connect(to_main.clone(), tx.clone());
     std::thread::Builder::new()
         .name("sidestep-render".into())
         .spawn(move || run(channel, to_main))
@@ -203,6 +198,7 @@ fn run(channel: Channel<ToRender>, to_main: mpsc::Sender<FromRender>) {
         windows: HashMap::new(),
         roles: HashMap::new(),
         glyphs: Glyphs::default(),
+        rgba: None,
         to_main,
         // The environment isn't changed: other threads may be reading it.
         startup_token: std::env::var("XDG_ACTIVATION_TOKEN").ok().filter(|t| !t.is_empty()),
@@ -246,6 +242,9 @@ pub(crate) struct State {
     /// What each of our surfaces is, for input.
     roles: HashMap<ObjectId, Role>,
     glyphs: Glyphs,
+    /// Buffers take canvas pixels as they are (XBGR8888), decided at the
+    /// first buffer ([`State::rgba`]).
+    rgba: Option<bool>,
     to_main: mpsc::Sender<FromRender>,
     /// The activation token we were started with, for the first window.
     startup_token: Option<String>,
@@ -393,9 +392,25 @@ impl Drop for Tile {
     }
 }
 
-const BACKGROUND: u32 = 0x00ececec;
+/// What canvases start as, before the first paint: opaque light gray.
+const BACKGROUND: u32 = u32::from_ne_bytes([0xec, 0xec, 0xec, 0xff]);
 
-fn copy_rows(dst: &mut [u32], src: &[u32], width: u32, height: u32, r: &Rect) {
+/// The buffer format for canvas pixels.
+fn format(rgba: bool) -> wl_shm::Format {
+    if rgba { wl_shm::Format::Xbgr8888 } else { wl_shm::Format::Xrgb8888 }
+}
+
+/// Copy canvas pixels into a buffer, swizzling them in the same pass
+/// unless the buffer takes them as they are.
+fn copy_pixels(dst: &mut [u32], src: &[u32], rgba: bool) {
+    if rgba {
+        dst.copy_from_slice(src);
+    } else {
+        dst.iter_mut().zip(src).for_each(|(d, s)| *d = raster::to_xrgb(*s));
+    }
+}
+
+fn copy_rows(dst: &mut [u32], src: &[u32], width: u32, height: u32, r: &Rect, rgba: bool) {
     let r = r.round_out();
     let x0 = r.x0.max(0.0) as usize;
     let y0 = r.y0.max(0.0) as usize;
@@ -404,7 +419,7 @@ fn copy_rows(dst: &mut [u32], src: &[u32], width: u32, height: u32, r: &Rect) {
     let w = width as usize;
     for y in y0..y1.max(y0) {
         if x0 < x1 {
-            dst[y * w + x0..y * w + x1].copy_from_slice(&src[y * w + x0..y * w + x1]);
+            copy_pixels(&mut dst[y * w + x0..y * w + x1], &src[y * w + x0..y * w + x1], rgba);
         }
     }
 }
@@ -540,6 +555,7 @@ impl State {
                     w.set_parent(parent.as_ref());
                 }
             }
+            ToRender::ForgetImages { keys } => raster::images::forget(&keys),
             ToRender::ColorScheme { dark } => {
                 decor::set_dark(dark);
                 let windows: Vec<WindowId> = self.windows.keys().copied().collect();
@@ -848,13 +864,7 @@ impl State {
             if !win.configured {
                 return;
             }
-            let mut canvas = Canvas {
-                px: &mut win.canvas,
-                width: win.px_width,
-                height: win.px_height,
-                origin_y: 0.0,
-                scale: scale as f32,
-            };
+            let mut canvas = Canvas::new(&mut win.canvas, win.px_width, win.px_height, 0.0, scale as f32);
             raster::paint(&mut canvas, &mut self.glyphs, &rects, &ops);
             win.damage.extend(rects.iter().map(|r| to_px(r, scale)));
             return;
@@ -887,24 +897,31 @@ impl State {
                         placed: Rect::default(),
                     }
                 });
-                let mut canvas = Canvas {
-                    px: &mut tile.canvas,
-                    width: tile.px_width,
-                    height: tile.px_height,
-                    origin_y: (index * TILE_HEIGHT) as f32,
-                    scale: scale as f32,
-                };
+                let origin_y = (index * TILE_HEIGHT) as f32;
+                let mut canvas = Canvas::new(&mut tile.canvas, tile.px_width, tile.px_height, origin_y, scale as f32);
                 raster::paint(&mut canvas, &mut self.glyphs, std::slice::from_ref(rect), &ops);
                 tile.dirty = true;
             }
         }
     }
 
+    /// Whether buffers take canvas pixels as they are. Canvases are RGBA
+    /// in memory, which wl_shm calls XBGR8888: shown as they are where the
+    /// compositor takes it, else swizzled to XRGB8888. The formats arrive
+    /// as events after wl_shm is bound, so this is decided when the first
+    /// buffer is made (a window is configured by then, so they're in), and
+    /// kept: every buffer has the same format.
+    fn rgba(&mut self) -> bool {
+        let shm = &self.shm;
+        *self.rgba.get_or_insert_with(|| shm.formats().contains(&wl_shm::Format::Xbgr8888))
+    }
+
     fn present(&mut self, window: WindowId) {
-        let Some(win) = self.windows.get_mut(&window) else { return };
-        if !win.configured {
+        if !self.windows.get(&window).is_some_and(|w| w.configured) {
             return;
         }
+        let rgba = self.rgba();
+        let Some(win) = self.windows.get_mut(&window) else { return };
         win.frame_seq += 1;
         win.frame_signalled = false;
         let seq = win.frame_seq;
@@ -928,11 +945,11 @@ impl State {
                     let (w, h) = (tile.px_width, tile.px_height);
                     let (buffer, bytes) = self
                         .pool
-                        .create_buffer(w as i32, h as i32, w as i32 * 4, wl_shm::Format::Xrgb8888)
+                        .create_buffer(w as i32, h as i32, w as i32 * 4, format(rgba))
                         .expect("sidestep: tile buffer");
                     // The pool rounds slots up to 64 bytes: the buffer is the
                     // start of its slot.
-                    as_pixels(&mut bytes[..(w * h * 4) as usize]).copy_from_slice(&tile.canvas);
+                    copy_pixels(as_pixels(&mut bytes[..(w * h * 4) as usize]), &tile.canvas, rgba);
                     buffer.attach_to(&tile.surface).expect("sidestep: attach tile");
                     tile.surface.damage_buffer(0, 0, w as i32, h as i32);
                     tile.buffer = Some(buffer);
@@ -958,12 +975,7 @@ impl State {
                 None => {
                     let (buffer, _) = self
                         .pool
-                        .create_buffer(
-                            win.px_width as i32,
-                            win.px_height as i32,
-                            win.px_width as i32 * 4,
-                            wl_shm::Format::Xrgb8888,
-                        )
+                        .create_buffer(win.px_width as i32, win.px_height as i32, win.px_width as i32 * 4, format(rgba))
                         .expect("sidestep: window buffer");
                     let full = Rect::new(0.0, 0.0, win.px_width as f32, win.px_height as f32);
                     win.buffers.push(RootBuffer { buffer, stale: vec![full] });
@@ -980,7 +992,7 @@ impl State {
             let stale = std::mem::take(&mut target.stale);
             let pixels = as_pixels(target.buffer.canvas(&mut self.pool).expect("free buffer"));
             for r in stale.iter().chain(&damage) {
-                copy_rows(pixels, &win.canvas, win.px_width, win.px_height, r);
+                copy_rows(pixels, &win.canvas, win.px_width, win.px_height, r, rgba);
             }
             target.buffer.attach_to(&surface).expect("sidestep: attach window buffer");
             for r in &damage {

@@ -148,6 +148,11 @@ fn windows() -> Vec<Retained<NSWindow>> {
     WINDOWS.with(|w| w.borrow().clone())
 }
 
+/// Every window, for an appearance change to reach.
+pub(crate) fn windows_for_appearance() -> Vec<Retained<NSWindow>> {
+    all_windows()
+}
+
 /// The window with this `windowNumber`, on screen or not.
 pub(crate) fn window_by_number(number: isize) -> Option<Retained<NSWindow>> {
     if number <= 0 {
@@ -690,6 +695,24 @@ define_class!(
             discard_events(mask, last);
         }
 
+        // NSAppearanceCustomization.
+
+        #[unsafe(method_id(appearance))]
+        fn appearance(&self) -> Option<Retained<objc2_app_kit::NSAppearance>> {
+            crate::appearance::app_appearance().map(crate::appearance::get)
+        }
+
+        #[unsafe(method(setAppearance:))]
+        fn set_appearance(&self, appearance: Option<&objc2_app_kit::NSAppearance>) {
+            crate::appearance::set_app_appearance(appearance.map(crate::appearance::id_of));
+            crate::appearance::refresh_all();
+        }
+
+        #[unsafe(method_id(effectiveAppearance))]
+        fn effective_appearance(&self) -> Retained<objc2_app_kit::NSAppearance> {
+            crate::appearance::get(crate::appearance::app_effective())
+        }
+
         #[unsafe(method(terminate:))]
         fn terminate(&self, _sender: Option<&AnyObject>) {
             terminate(self);
@@ -806,6 +829,8 @@ fn shared() -> Retained<NSApplication> {
         s.get_or_init(|| {
             let mtm = MainThreadMarker::new().expect("sidestep: NSApplication belongs to the main thread");
             load_shells();
+            // Ask the desktop for its appearance while the program starts.
+            crate::settings::start();
             let this = NSApplicationImpl::alloc(mtm).set_ivars(AppIvars {
                 delegate: RefCell::new(None),
                 policy: Cell::new(NSApplicationActivationPolicy::Regular),
@@ -870,11 +895,14 @@ fn turn(app: &NSApplicationImpl) {
     send_queued();
     crate::pasteboard::offer_changes();
     let deadline = earliest(earliest(next_timer_deadline(), RESIGN_AT.with(Cell::get)), crate::momentum::deadline());
-    let batch = wait(deadline);
+    let batch = wait(earliest(deadline, crate::settings::deadline()));
     take_batch(app, batch);
     crate::momentum::tick(Instant::now());
     fire_due_timers(Instant::now());
+    crate::settings::apply_changes();
     refresh_windows();
+    // After the paints: bitmaps that went away, the render thread forgets.
+    crate::image_rep::send_forgotten();
 }
 
 fn take_batch(app: &NSApplicationImpl, batch: Vec<FromRender>) {
@@ -979,6 +1007,8 @@ fn handle(msg: FromRender) {
                 window::imp(&w).configure(width, height, scale, titlebar, state);
             }
         }
+        // Only to wake the loop, which applies the change.
+        FromRender::Appearance => {}
         FromRender::Frame { window } => {
             if let Some(w) = find_window(window) {
                 window::imp(&w).frame_done();

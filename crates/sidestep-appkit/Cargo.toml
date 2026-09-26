@@ -12,10 +12,15 @@ sidestep-runtime.workspace = true
 sidestep-foundation.workspace = true
 objc2 = { workspace = true, features = ["gnustep-2-1"] }
 block2 = { workspace = true, features = ["gnustep-2-1"] }
-objc2-foundation = { workspace = true, features = ["gnustep-2-1", "NSObject", "NSString", "NSDictionary", "NSGeometry", "NSNotification", "NSTimer", "NSDate", "NSZone", "NSRange", "block2", "NSArray", "NSData", "NSValue"] }
-objc2-app-kit = { workspace = true, features = ["gnustep-2-1", "NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics", "NSColor", "NSFont", "NSFontDescriptor", "NSBezierPath", "NSStringDrawing", "NSAttributedString", "NSEvent", "NSScrollView", "NSClipView", "NSRunningApplication", "objc2-core-foundation", "NSPasteboard", "NSText", "NSCursor", "NSTrackingArea", "NSTextInputContext", "NSParagraphStyle", "NSCell", "NSPasteboardItem", "NSDragging", "NSDraggingItem", "NSScreen", "block2"] }
+objc2-foundation = { workspace = true, features = ["gnustep-2-1", "NSObject", "NSString", "NSDictionary", "NSGeometry", "NSNotification", "NSTimer", "NSDate", "NSZone", "NSRange", "block2", "NSArray", "NSData", "NSValue", "NSAffineTransform", "NSURL", "objc2-core-foundation"] }
+objc2-app-kit = { workspace = true, features = ["gnustep-2-1", "NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics", "NSColor", "NSFont", "NSFontDescriptor", "NSBezierPath", "NSStringDrawing", "NSAttributedString", "NSEvent", "NSScrollView", "NSClipView", "NSRunningApplication", "objc2-core-foundation", "NSPasteboard", "NSText", "NSCursor", "NSTrackingArea", "NSTextInputContext", "NSParagraphStyle", "NSCell", "NSPasteboardItem", "NSDragging", "NSDraggingItem", "NSScreen", "block2", "NSGraphicsContext", "NSImageRep", "NSBitmapImageRep", "NSCustomImageRep", "NSColorSpace", "NSAppearance", "NSAffineTransform", "NSColorList", "NSImage", "NSGradient", "NSShadow", "NSAnimation", "NSAnimationContext", "NSControl", "NSImageView", "NSVisualEffectView"] }
 smithay-client-toolkit = { version = "0.19", default-features = false, features = ["calloop"] }
-tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }
+tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
+# Path geometry for NSBezierPath: bounds, winding, flattening.
+kurbo = { version = "0.13", default-features = false, features = ["std"] }
+# Image files, all in pure Rust: PNG, JPEG (zune-jpeg), GIF, WebP, BMP,
+# TIFF and ICO.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
 # Keymaps and compose sequences, in pure Rust: no libxkbcommon at build or
 # run time.
 kbvm = { version = "0.2", default-features = false, features = ["compose"] }

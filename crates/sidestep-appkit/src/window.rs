@@ -55,18 +55,27 @@ pub(crate) type Gesture = (ScrollPhase, (f64, f64), bool);
 use crate::tracking;
 use crate::views::{self, NSViewImpl};
 
-/// The window background, and what layers are cleared to before drawing.
-const BACKGROUND: [f32; 4] = [0.925, 0.925, 0.925, 1.0];
-
 thread_local!(static AUTOMATIC_TABBING: Cell<bool> = const { Cell::new(true) });
 
-/// What a window's views are drawn over: its background color, if one was
-/// set.
+/// What a window's views are drawn over: its background color (by default
+/// `windowBackgroundColor`) in the window's appearance.
 fn background(window: &NSWindowImpl) -> [f32; 4] {
-    match &window.ivars().settings.borrow().background {
-        Some(c) => [c.redComponent(), c.greenComponent(), c.blueComponent(), c.alphaComponent()].map(|v| v as f32),
-        None => BACKGROUND,
+    let _look = crate::appearance::Drawing::push(crate::appearance::window_effective(window));
+    let set = window.ivars().settings.borrow().background.clone();
+    match set {
+        Some(c) => crate::color::resolve(&c),
+        None => crate::palette::get(crate::palette::System::WindowBackground, crate::appearance::current_look()),
     }
+}
+
+/// Pixels per point on the window's output.
+pub(crate) fn backing_scale(window: &NSWindowImpl) -> f64 {
+    window.ivars().scale.get()
+}
+
+/// The appearance a window set for itself (`NSAppearanceCustomization`).
+pub(crate) fn appearance_slot(window: &NSWindowImpl) -> &Cell<Option<crate::appearance::Id>> {
+    &window.ivars().appearance
 }
 
 /// Height of the title bar Sidestep draws, when it draws one.
@@ -134,6 +143,8 @@ pub(crate) struct WindowIvars {
     /// The window this one belongs over, for the compositor to keep it
     /// there.
     transient: RefCell<Option<Weak<NSWindow>>>,
+    /// Its own appearance, if it set one.
+    appearance: Cell<Option<crate::appearance::Id>>,
 }
 
 /// Settings a window keeps for programs that set them. Only the background
@@ -284,6 +295,7 @@ define_class!(
                 text_input: Cell::new((false, None)),
                 rotating: Cell::new(false),
                 transient: RefCell::new(None),
+                appearance: Cell::new(None),
             });
             // SAFETY: NSResponder's designated initializer.
             let this: Retained<Self> = unsafe { msg_send![super(this), init] };
@@ -1364,6 +1376,36 @@ define_class!(
         fn display(&self) {
             self.ivars().needs_display.set(true);
         }
+
+        // NSAppearanceCustomization.
+
+        #[unsafe(method_id(appearance))]
+        fn appearance(&self) -> Option<Retained<objc2_app_kit::NSAppearance>> {
+            self.ivars().appearance.get().map(crate::appearance::get)
+        }
+
+        #[unsafe(method(setAppearance:))]
+        fn set_appearance(&self, appearance: Option<&objc2_app_kit::NSAppearance>) {
+            self.ivars().appearance.set(appearance.map(crate::appearance::id_of));
+            // Out of the borrow first: views may swap the content view when
+            // told their appearance changed.
+            let content = self.ivars().content.borrow().clone();
+            if let Some(content) = content {
+                crate::appearance::refresh(&content);
+            }
+            self.damage_all();
+        }
+
+        #[unsafe(method_id(effectiveAppearance))]
+        fn effective_appearance(&self) -> Retained<objc2_app_kit::NSAppearance> {
+            crate::appearance::get(crate::appearance::window_effective(self))
+        }
+
+        #[unsafe(method_id(animator))]
+        fn animator(&self) -> Retained<NSWindow> {
+            // Changes apply at once (see `crate::animation`).
+            as_window(self).retain()
+        }
     }
 
     unsafe impl NSObjectProtocol for NSWindowImpl {}
@@ -1668,7 +1710,7 @@ impl NSWindowImpl {
         self.ivars().needs_display.set(true);
     }
 
-    fn damage_all(&self) {
+    pub(crate) fn damage_all(&self) {
         let size = self.ivars().size.get();
         let mut damage = self.ivars().damage.borrow_mut();
         damage.clear();
@@ -2217,6 +2259,10 @@ pub(crate) fn display_if_needed(window: &NSWindowImpl) {
     if !ivars.visible.get() || !ivars.configured.get() || ivars.frame_pending.get() || !ivars.needs_display.get() {
         return;
     }
+    // A first frame waits (briefly) for the desktop's light or dark.
+    if !crate::settings::ready() {
+        return;
+    }
     ivars.needs_display.set(false);
     let id = window.id();
     if ivars.title_dirty.replace(false) {
@@ -2231,8 +2277,10 @@ pub(crate) fn display_if_needed(window: &NSWindowImpl) {
     let damage = ivars.damage.borrow_mut().remove(&ROOT_LAYER).unwrap_or_default();
     let content = ivars.content.borrow().clone();
     let color = background(window);
+    // User space's base is the window's content, origin at the bottom left.
+    let base = Xf { tx: 0.0, a: -1.0, ty: window.content_height() };
     for area in coalesce(damage) {
-        graphics::begin_recording();
+        crate::context::begin_recording(base, ivars.scale.get());
         graphics::push(Op::Fill { rect: area, color });
         if let Some(content) = &content {
             let root = views::imp(content);
@@ -2284,15 +2332,19 @@ fn set_title_text(title: &NSString) -> TitleText {
 
 /// Record `view` and its subviews for `area` of a layer. `xf` maps the view
 /// to the layer; `clip` is where its ancestors let it draw.
-fn record(view: &NSViewImpl, xf: Xf, clip: Rect, area: Rect) {
+pub(crate) fn record(view: &NSViewImpl, xf: Xf, clip: Rect, area: Rect) {
     let visible = clip.intersect(&xf.rect(views::bounds(view)));
     let target = visible.intersect(&area);
     if target.is_empty() {
         return;
     }
-    graphics::set_view(xf, target);
+    // Its opacity, over its subviews too: nothing at 0, a group below 1.
+    let Some(_opacity) = crate::context::opacity(view, target) else { return };
+    // A fresh graphics state and the view's appearance for its drawRect:.
+    let mark = crate::context::begin_view(view, xf, target);
     // SAFETY: drawRect: takes an NSRect.
     unsafe { msg_send![view, drawRect: xf.inverse_rect(target)] }
+    crate::context::end_view(mark);
     if views::is_clip(view) {
         // The document has a layer of its own.
         return;
@@ -2379,7 +2431,7 @@ fn update_scroll_layer(window: &NSWindowImpl, clip: &NSViewImpl) {
 
     let color = background(window);
     for area in areas {
-        graphics::begin_recording();
+        crate::context::begin_recording(doc_xf, ivars.scale.get());
         graphics::push(Op::Fill { rect: area, color });
         record(doc, doc_xf, doc_rect, area);
         let ops = graphics::end_recording();

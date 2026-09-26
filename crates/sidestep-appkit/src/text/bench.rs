@@ -65,7 +65,7 @@ fn record(strings: &[Retained<NSString>], attrs: &NSDictionary<NSString, AnyObje
 }
 
 fn composite(glyphs: &mut Glyphs, px: &mut [u32], ops: &[Op]) {
-    let mut canvas = Canvas { px, width: WIDTH, height: HEIGHT, origin_y: 0.0, scale: 1.0 };
+    let mut canvas = Canvas::new(px, WIDTH, HEIGHT, 0.0, 1.0);
     raster::paint(&mut canvas, glyphs, &[Rect::new(0.0, 0.0, WIDTH as f32, HEIGHT as f32)], ops);
 }
 

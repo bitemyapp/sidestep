@@ -1,0 +1,7 @@
+#!/bin/sh
+# Write the image files conformance/tests/images.rs reads, with the image
+# and png crates (see examples/drawing-gallery/src/bin/make-image-fixtures.rs).
+# Never make fixtures with Apple's tools.
+set -eu
+repo=$(cd "$(dirname "$0")/.." && pwd)
+cargo run -q --manifest-path "$repo/Cargo.toml" -p drawing-gallery --bin make-image-fixtures -- "$repo/conformance/tests/fixtures"

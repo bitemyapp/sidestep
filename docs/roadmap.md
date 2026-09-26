@@ -158,14 +158,41 @@ The platform layer since (`examples/appkit-input` shows it):
 - `NSScreen`: the outputs, their frames, work areas and scales, a window's
   screen, and the delegate calls when they change.
 
+Drawing (`examples/drawing-gallery` shows it, and draws the same
+pictures on macOS for comparison):
+
+- `NSGraphicsContext` with a graphics state (transforms, clips, compositing
+  operations, antialiasing, shadows), bitmap contexts in every layout
+  AppKit draws into (RGBA, gray, RGB padded to four samples, alpha first,
+  16-bit and floating-point samples), and AppKit's drawing functions
+  (`NSRectFill`, `NSFrameRect`, `NSRectClip`, …); `NSAffineTransform`.
+- All of `NSBezierPath`: curves, arcs, rounded rectangles, strokes with
+  caps, joins and dashes, hairlines, winding rules, hit testing, clipping,
+  flattening and reversing, with AppKit's element structure.
+- `NSColor` (components, system and dynamic colors, derived colors) and
+  `NSColorSpace`; `NSAppearance` following the desktop's light, dark and
+  high-contrast settings and accent color, inherited by windows and views.
+- `NSImage`, `NSBitmapImageRep` and `NSCustomImageRep`: pure-Rust codecs
+  for PNG, JPEG, GIF, WebP, BMP, TIFF and ICO, decoding off the main
+  thread, a texture cache with mipmaps, representation choice by device
+  pixels, drawing handlers, `lockFocus`, view snapshots
+  (`cacheDisplayInRect:toBitmapImageRep:`); symbol images drawn by
+  Sidestep.
+- `NSGradient`, `NSShadow`, `NSVisualEffectView` (an opaque material),
+  `alphaValue`, and `NSAnimationContext` (changes apply at once).
+
 Next:
 
 - Input methods: surrounding text (and so deleting around the caret),
   content types from the client.
 - Image cursors; dragging from our windows (drag sources), and `NSImage`
   and `NSColor` on pasteboards.
-  (`-[NSView trackingAreas]` answers once Foundation has `NSArray`.)
-- `NSGraphicsContext`, strokes, curves, images, transforms.
+- Drawing: text under a rotated transform (glyph runs take a translation
+  only), pattern colors (and `patternImage` on threads other than the
+  image's), `-[NSView lockFocus]`, animations over time, blur behind
+  visual effect views (no Wayland protocol yet), and batching a bitmap
+  context's operations instead of rasterizing each at once (layouts other
+  than RGBA are unpacked and packed for each).
 - Scrollers.
 - `NSMenu`, which has no system-wide equivalent on Linux, so it becomes a
   menu bar inside the window.
@@ -217,9 +244,8 @@ relayout of only what an edit touched. See
 
 ## 4. Controls and services
 
-Scroll, split, popup and segmented views; open panels through
-xdg-desktop-portal; appearance (dark mode); accessibility through
-AccessKit.
+Scroll, split, popup and segmented views; image views; open panels through
+xdg-desktop-portal; accessibility through AccessKit.
 
 ## 5. A real app
 
@@ -240,3 +266,11 @@ libobjc2 v2 ABI's `__objc_load` path) the runtime would then need to accept.
 - Keep the fallback declarations crate from [legal.md](legal.md) ready:
   prototype the Cargo mechanics early.
 - CI on Linux x86_64 and aarch64 and on macOS.
+- Ask objc2 to link objc2-core-graphics, -quartz-core, -core-text,
+  -image-io, -core-services and -natural-language to their frameworks
+  only on Apple targets, and to offer the CG-typed AppKit methods
+  (`-[NSGraphicsContext CGContext]`, `-[NSColor CGColor]`,
+  `-[NSView layer]`) elsewhere, so Sidestep can supply CGContext (its
+  graphics state is shaped for a one-to-one mapping) and CALayer. Test the
+  patch with `[patch]` first; sending it upstream needs the maintainer's
+  go-ahead.

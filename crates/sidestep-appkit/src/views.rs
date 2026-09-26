@@ -261,6 +261,9 @@ pub(crate) struct ViewIvars {
     tracking: RefCell<crate::tracking::ViewTracking>,
     /// Made when first asked for, for views that are text input clients.
     input_context: RefCell<Option<Retained<NSTextInputContext>>>,
+    /// Drawing: the view's appearance, and its opacity.
+    appearance: crate::appearance::ViewAppearance,
+    alpha: Cell<f64>,
 }
 
 impl ViewIvars {
@@ -276,6 +279,8 @@ impl ViewIvars {
             is_clip: Cell::new(false),
             tracking: RefCell::default(),
             input_context: RefCell::new(None),
+            appearance: Default::default(),
+            alpha: Cell::new(1.0),
         }
     }
 }
@@ -514,6 +519,84 @@ define_class!(
         #[unsafe(method(resetCursorRects))]
         fn reset_cursor_rects(&self) {}
 
+        // Drawing: appearance, snapshots, opacity (see `crate::context`).
+
+        #[unsafe(method_id(appearance))]
+        fn appearance(&self) -> Option<Retained<objc2_app_kit::NSAppearance>> {
+            self.ivars().appearance.own.get().map(crate::appearance::get)
+        }
+
+        #[unsafe(method(setAppearance:))]
+        fn set_appearance(&self, appearance: Option<&objc2_app_kit::NSAppearance>) {
+            self.ivars().appearance.own.set(appearance.map(crate::appearance::id_of));
+            crate::appearance::refresh(as_view(self));
+        }
+
+        #[unsafe(method_id(effectiveAppearance))]
+        fn effective_appearance(&self) -> Retained<objc2_app_kit::NSAppearance> {
+            crate::appearance::get(crate::appearance::effective(self))
+        }
+
+        #[unsafe(method(viewDidChangeEffectiveAppearance))]
+        fn view_did_change_effective_appearance(&self) {}
+
+        #[unsafe(method(cacheDisplayInRect:toBitmapImageRep:))]
+        fn cache_display_in_rect(&self, rect: NSRect, rep: &objc2_app_kit::NSBitmapImageRep) {
+            crate::context::cache_display(self, rect, rep);
+        }
+
+        #[unsafe(method_id(bitmapImageRepForCachingDisplayInRect:))]
+        fn bitmap_image_rep_for_caching(&self, rect: NSRect) -> Option<Retained<objc2_app_kit::NSBitmapImageRep>> {
+            crate::context::bitmap_for(self, rect)
+        }
+
+        #[unsafe(method(displayRectIgnoringOpacity:inContext:))]
+        fn display_rect_ignoring_opacity(&self, rect: NSRect, context: &objc2_app_kit::NSGraphicsContext) {
+            crate::context::display_in(self, rect, context);
+        }
+
+        #[unsafe(method(needsToDrawRect:))]
+        fn needs_to_draw_rect(&self, rect: NSRect) -> bool {
+            let d = crate::context::dirty();
+            rect.origin.x < d.origin.x + d.size.width
+                && d.origin.x < rect.origin.x + rect.size.width
+                && rect.origin.y < d.origin.y + d.size.height
+                && d.origin.y < rect.origin.y + rect.size.height
+        }
+
+        #[unsafe(method(getRectsBeingDrawn:count:))]
+        fn get_rects_being_drawn(&self, rects: *mut *const NSRect, count: *mut isize) {
+            // SAFETY: each pointer is null or writable; the rectangle lives
+            // in a thread local that outlasts the drawRect: asking.
+            unsafe {
+                if !rects.is_null() {
+                    *rects = crate::context::dirty_ptr();
+                }
+                if !count.is_null() {
+                    *count = 1;
+                }
+            }
+        }
+
+        #[unsafe(method(alphaValue))]
+        fn alpha_value(&self) -> f64 {
+            self.ivars().alpha.get()
+        }
+
+        #[unsafe(method(setAlphaValue:))]
+        fn set_alpha_value(&self, alpha: f64) {
+            // Kept as given, as AppKit keeps it; drawing clamps it.
+            if self.ivars().alpha.replace(alpha) != alpha {
+                invalidate(self, bounds(self));
+            }
+        }
+
+        #[unsafe(method_id(animator))]
+        fn animator(&self) -> Retained<NSView> {
+            // Changes apply at once (see `crate::animation`).
+            as_view(self).retain()
+        }
+
         #[unsafe(method_id(inputContext))]
         fn input_context(&self) -> Option<Retained<NSTextInputContext>> {
             crate::inputcontext::for_view(self)
@@ -596,6 +679,14 @@ pub(crate) fn frame(view: &NSViewImpl) -> NSRect {
 
 pub(crate) fn bounds(view: &NSViewImpl) -> NSRect {
     NSRect::new(view.ivars().bounds_origin.get(), view.ivars().frame.get().size)
+}
+
+pub(crate) fn appearance_slot(view: &NSViewImpl) -> &crate::appearance::ViewAppearance {
+    &view.ivars().appearance
+}
+
+pub(crate) fn alpha_of(view: &NSViewImpl) -> f64 {
+    view.ivars().alpha.get()
 }
 
 pub(crate) fn is_flipped(view: &NSViewImpl) -> bool {
@@ -830,6 +921,7 @@ fn add_subview(this: &NSViewImpl, view: &NSView) {
     unsafe { view.setNextResponder(Some(this)) };
     this.ivars().subviews.borrow_mut().push(view.retain());
     set_window(v, this.ivars().window.get());
+    crate::appearance::refresh(view);
     invalidate(v, bounds(v));
 }
 
@@ -843,6 +935,7 @@ fn remove_from_superview(view: &NSViewImpl) {
     // SAFETY: clearing the link.
     unsafe { this.setNextResponder(None) };
     set_window(view, None);
+    crate::appearance::refresh(&this);
 }
 
 /// Move a view and its subviews into a window, or out of one.

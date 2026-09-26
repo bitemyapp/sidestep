@@ -26,8 +26,8 @@ harness = false
 
 # Input, windows and pasteboards (appkit_input).
 [dev-dependencies]
-objc2-app-kit = { workspace = true, features = ["NSEvent", "NSWindow", "NSGraphics", "NSGraphicsContext", "NSPasteboard", "NSResponder", "NSView", "NSCursor", "NSColor", "NSTrackingArea", "NSTextInputClient", "NSTextInputContext", "NSWindowScripting", "NSApplication", "block2", "objc2-core-foundation"] }
-objc2-foundation = { workspace = true, features = ["NSRange", "NSAttributedString"] }
+objc2-app-kit = { workspace = true, features = ["NSEvent", "NSWindow", "NSGraphics", "NSGraphicsContext", "NSPasteboard", "NSResponder", "NSView", "NSCursor", "NSColor", "NSTrackingArea", "NSTextInputClient", "NSTextInputContext", "NSWindowScripting", "NSApplication", "block2", "objc2-core-foundation", "NSImageRep", "NSBitmapImageRep", "NSColorSpace", "NSBezierPath", "NSAffineTransform", "NSAppearance", "NSImage", "NSGradient", "NSShadow", "NSAnimation", "NSAnimationContext", "NSCustomImageRep", "NSColorList", "NSVisualEffectView", "NSCell", "NSFontDescriptor"] }
+objc2-foundation = { workspace = true, features = ["NSRange", "NSAttributedString", "NSAffineTransform", "NSData", "NSArray", "NSValue"] }
 
 [[test]]
 name = "appkit_input"
@@ -84,4 +84,23 @@ harness = false
 
 [[test]]
 name = "screen"
+harness = false
+
+# Drawing, colors and appearances, images and animation contexts (drawing,
+# color_appearance, images, animation): pixels read back from bitmaps, no
+# window needed.
+[[test]]
+name = "drawing"
+harness = false
+
+[[test]]
+name = "color_appearance"
+harness = false
+
+[[test]]
+name = "images"
+harness = false
+
+[[test]]
+name = "animation"
 harness = false
