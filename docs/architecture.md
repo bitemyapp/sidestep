@@ -112,6 +112,88 @@ unwinds into the Rust caller.
 first, with messages from inside `+initialize` on the same thread allowed
 through.
 
+## Foundation services: the run loop and what feeds it
+
+Every thread has at most one run loop, made on first use. Its state is
+split by who may touch it:
+
+- **Shared** (an `Arc`): the owner's thread id, a wake cell, an inbox, the
+  current mode and the set of common modes. The wake cell is an atomic
+  state beside a mutex and condition variable: a sleeping loop is woken
+  only if it is asleep, and a wake that arrives before the sleep isn't
+  lost. The inbox is a `Mutex<Vec>` swapped out whole; it carries blocks,
+  timers added from other threads, main-queue work and stop requests.
+- **Owner-only** (a thread-local `RefCell`): timers in a `BTreeMap` keyed
+  by due time and sequence, observers sorted by order, signalled sources,
+  queued blocks and the stack of running modes. No borrow is held across a
+  callout; work is copied out first, because any callout may run the loop
+  again.
+
+A pass follows CFRunLoop's documented order: entry, timers, sources,
+blocks, sleep until the next due timer or a wake, exit, with an
+autorelease pool around each pass and observers told at each step. Timers
+keep their phase after a stall and drop missed fires; their fire dates are
+kept on the monotonic clock and converted to `NSDate` time only at the
+edges. The idle main loop wakes for nothing.
+
+Rust code in other crates uses `runloop::main()`/`current()`,
+`add_source` (whose `SourceSignal::signal_and_wake` is `Send + Sync`),
+`add_observer`, `run_mode`, `perform` and `stop`, and
+`notification_center::post`, which does no work when nobody observes the
+name. `fire_due_timers`/`next_timer_deadline` remain for AppKit's current
+event loop until it runs the run loop itself.
+
+Handing work to another thread's loop always goes through its inbox:
+`performSelectorOnMainThread:` (a one-shot source; waiting callers on the
+target thread run inline), `CFRunLoopPerformBlock` with
+`CFRunLoopWakeUp`, the main dispatch queue and
+`NSOperationQueue.mainQueue`.
+
+**libdispatch** is implemented in Rust behind its C ABI, so `dispatch2`
+works unchanged (the linker finds an empty `libdispatch.a` that
+`build.rs` writes). Dispatch objects are Objective-C objects. One global
+pool runs work; a monitor adds a worker when queued work has waited 50 ms,
+up to a cap, and retires idle extras after 5 s. Serial queues drain in
+batches of 64 on their target, concurrent queues honour barriers, and
+`dispatch_sync` runs the block on the calling thread once the queue hands
+it over. One thread serves `dispatch_after` and timer sources; vnode
+sources watch through inotify on one I/O thread.
+
+**NSNotificationCenter** keeps four indexes (name and object, name only,
+object only, neither) over one slab of registrations, each with a
+sequence number. A post collects the matching registrations, releases the
+lock, and calls them in registration order, skipping any removed
+meanwhile; selector observers are weak.
+
+**Value and system classes.** `NSData` has one storage enum (owned,
+borrowed with a deallocator, or growable). `NSURL` keeps its string, base
+and RFC 3986 component ranges, with the resolved form and file-system
+representation cached; the parser is Sidestep's own, with macOS's
+departures from the RFC. File operations (`NSData`, `NSFileManager`,
+`NSURL`) report the Cocoa error codes macOS reports for each operation,
+with the POSIX error underneath. Search-path directories map to the XDG
+base and user directories; trashing follows the freedesktop.org
+specification. `NSBundle.mainBundle` is an `.app` layout, then
+`<exe>/Resources`, then `<exe>/../share/<name>`, then the executable's
+directory. `NSUserDefaults` keeps every domain in memory as property-list
+values, shared by all instances, and a background thread writes changed
+domains to `$XDG_CONFIG_HOME/<domain>/defaults.plist` (atomically, and
+again at exit). Property lists are read with the `plist` crate and
+written as XML by Sidestep, byte for byte as macOS writes them.
+`NSJSONSerialization` has its own reader and writer. `NSDateFormatter`
+is a TR35 pattern engine with English symbols and the en_US style
+patterns; `NSTimeZone` uses jiff over the system's tz database.
+
+**CoreFoundation** functions are toll-free: a `CFStringRef` is an
+`NSString` and so on, so each CF function forwards to the Foundation
+class behind it. `CFGetTypeID` goes by class name, so it needs no link
+reference to classes that may not be built.
+
+Parts that return arrays or numbers (`URLsForDirectory:inDomains:`,
+`queryItems`, `-[NSURL port]`, `CFArray`, `CFNumber`, JSON arrays) build
+with sidestep-foundation's `collections` feature, until Foundation's
+collections land; the rest never needs them.
+
 ## AppKit: a main thread and a render thread
 
 AppKit's contract is single-threaded: events, timers, the responder chain and

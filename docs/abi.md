@@ -21,6 +21,14 @@ untested.
 | Other | `objc_setAssociatedObject`, `objc_getAssociatedObject`, `objc_removeAssociatedObjects`, `objc_sync_enter`, `objc_sync_exit` |
 | Blocks | `_Block_copy`, `_Block_release`, `_Block_object_assign`, `_Block_object_dispose`, `_Block_has_signature`, `_Block_signature`, and the classes `_NSConcreteStackBlock`, `_NSConcreteMallocBlock`, `_NSConcreteGlobalBlock` |
 | Class symbols | `._OBJC_CLASS_<Name>` and `._OBJC_METACLASS_<Name>` for `NSObject` (runtime) and each Foundation class |
+| libdispatch | `dispatch_get_global_queue`, `_dispatch_main_q`, `_dispatch_queue_attr_concurrent`, `dispatch_queue_create(_with_target)`, `dispatch_queue_attr_make_*`, `dispatch_(barrier_)async(_f)`, `dispatch_(barrier_)sync(_f)`, `dispatch_(barrier_)async_and_wait(_f)`, `dispatch_apply(_f)`, `dispatch_after(_f)`, `dispatch_once(_f)`, `dispatch_group_*`, `dispatch_semaphore_*`, `dispatch_source_*` (data add/or/replace, timer, vnode), `dispatch_time`, `dispatch_walltime`, `dispatch_retain`/`release`/`suspend`/`resume`/`activate`, `dispatch_set_context`/`get_context`/`set_finalizer_f`/`set_target_queue`, `dispatch_queue_set_specific`/`get_specific`, `dispatch_assert_queue*`, `dispatch_main` |
+| CoreFoundation | Retain/release/equality (`CFRetain`, `CFRelease`, `CFAutorelease`, `CFEqual`, `CFHash`, `CFGetTypeID`, `CFCopyDescription`, `CFShow`); the run loop (`CFRunLoop*`, `CFRunLoopTimer*`, `CFRunLoopObserver*`, `kCFRunLoopDefaultMode`, `kCFRunLoopCommonModes`); and toll-free `CFString`, `CFData`, `CFDate`, `CFError`, `CFURL`, `CFDictionary`, `CFPreferences`, with `CFArray`, `CFNumber` and mutable dictionaries under the `collections` feature; the `kCFAllocator*` constants and the `kCFType…CallBacks` |
+| Foundation functions | `NSHomeDirectory(ForUser)`, `NSTemporaryDirectory`, `NSUserName`, `NSFullUserName`, `NSOpenStepRootDirectory`, `NSSearchPathForDirectoriesInDomains` (collections), `NSClassFromString`, `NSStringFromClass`, `NSSelectorFromString`, `NSStringFromSelector`, `NSProtocolFromString`, `NSStringFromProtocol`, and the string constants (`NSDefaultRunLoopMode`, error domains and keys, file attribute and URL resource keys, defaults domains, notification names) |
+
+objc2-foundation and dispatch2 link `-ldispatch` on Linux;
+sidestep-foundation's build script writes an empty `libdispatch.a` into
+its output directory so the link succeeds, and the symbols above come from
+Sidestep itself.
 
 The blocks runtime follows Clang's published Block Implementation
 Specification.
@@ -55,6 +63,11 @@ Specification.
 - Not implemented: exceptions (`objc_exception_throw`, objc2's `exception`
   feature), `imp_implementationWithBlock`, properties (`class_addProperty`
   and `property_*`), `+load`.
+- `kCFBooleanTrue`, `kCFBooleanFalse` and `kCFNull` are not exported: they
+  are data symbols holding objects of classes Foundation's collections will
+  own.
+- Protocol objects have a null `isa`, so retaining one (which
+  objc2-foundation's `NSProtocolFromString` wrapper does) crashes.
 - Method caches take a read lock per lookup. Fine for now; a lock-free cache
   comes later, measured against real workloads.
 
@@ -70,3 +83,9 @@ Specification.
   correct for either caller. Direct calls such as
   `s.lengthOfBytesUsingEncoding(NSUTF8StringEncoding)` work in release builds
   but fail the debug check. To be raised with objc2.
+
+- **`NSURL` path helpers.** objc2-foundation compiles `NSURL::from_file_path`,
+  `from_directory_path` and `to_file_path` out under `gnustep-1-7` (which
+  `gnustep-2-1` implies), though Sidestep's `NSURL` supports what they call.
+  Rust code on Linux can use `sidestep_foundation::url::file_url` and
+  `file_path` meanwhile. To be raised with objc2.

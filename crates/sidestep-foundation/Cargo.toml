@@ -11,4 +11,14 @@ license.workspace = true
 sidestep-runtime.workspace = true
 objc2 = { workspace = true, features = ["gnustep-2-1"] }
 block2 = { workspace = true, features = ["gnustep-2-1"] }
-objc2-foundation = { workspace = true, features = ["gnustep-2-1", "NSObject", "NSString", "NSThread", "NSZone", "NSDictionary", "NSTimer", "NSDate", "NSNotification", "block2"] }
+objc2-foundation = { workspace = true, features = ["gnustep-2-1", "NSObject", "NSString", "NSThread", "NSZone", "NSDictionary", "NSTimer", "NSDate", "NSNotification", "block2", "NSObjCRuntime", "NSRunLoop", "NSOperation", "NSData", "NSRange", "NSValue", "NSURL", "NSError", "NSFileManager", "NSPathUtilities", "NSProcessInfo", "NSUUID", "NSBundle", "NSUserDefaults", "NSLock", "NSFormatter", "NSDateFormatter", "NSLocale", "NSTimeZone"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "objc2", "CFRunLoop", "CFDate"] }
+libc = "0.2.177"
+plist = { version = "1.10.1", default-features = false }
+jiff = { version = "0.2.37", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
+
+[features]
+# What needs Foundation's collections (NSArray, NSNumber), which are still
+# being written: URL ports, path components and query items. Turn it on
+# once they land.
+collections = ["objc2-foundation/NSArray", "objc2-foundation/NSNull"]

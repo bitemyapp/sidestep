@@ -13,16 +13,29 @@ message), blocks, strings. Passing on macOS, and on Linux aarch64 and x86_64.
 ## 1. Foundation core
 
 Done so far: constant strings from static memory, an immutable
-`NSDictionary` (faster than Apple's on the same Mac, see `examples/dictbench`), `NSTimer` with blocks, a timer-only `NSRunLoop`, and
-`NSNotification` for delegate callbacks.
+`NSDictionary` (faster than Apple's on the same Mac, see
+`examples/dictbench`), and the system services: `NSRunLoop` and
+CFRunLoop with modes, timers, observers, sources and cross-thread
+handoff; `NSTimer`, `NSDate`, `NSNotification` and
+`NSNotificationCenter`; `NSThread` and the `performSelector…` family;
+libdispatch (queues, groups, semaphores, `after`, timer, data and vnode
+sources) and `NSOperationQueue`; `NSData`, `NSURL`, `NSURLComponents`,
+`NSError`, `NSFileManager` over XDG directories, `NSBundle`,
+`NSProcessInfo`, `NSUUID`, the runtime lookup functions,
+`NSUserDefaults`, property lists, `NSJSONSerialization`, the locks,
+`NSDateFormatter` with `NSLocale` and `NSTimeZone`, and toll-free
+CoreFoundation for strings, data, dates, errors, URLs, dictionaries and
+preferences. `examples/servicebench` measures the run loop and the
+notification center.
 
 - `NSMutableString`; `-description` on NSObject before Foundation's
   `NSString` has loaded.
-- Collections: `NSArray`, `NSMutableArray`, `NSMutableDictionary`, `NSSet`.
-- `NSNumber`, `NSValue`, `NSData`, `NSDate`, `NSError`, `NSURL`,
-  `NSProcessInfo`.
-- `NSNotificationCenter`, the rest of `NSRunLoop`, `NSAutoreleasePool`, and
-  the rest of `NSThread`.
+- Collections: `NSArray`, `NSMutableArray`, `NSMutableDictionary`, `NSSet`,
+  `NSNumber`, `NSValue`; then turn on sidestep-foundation's `collections`
+  feature, which lights up the services' array- and number-returning parts.
+- `NSAutoreleasePool`; `NSCalendar`, `NSDateComponents` and
+  `NSNumberFormatter`; locale data beyond English.
+- `NSOperation` dependencies; `NSStream`; `NSURLSession`.
 - Every static class findable by name, not only after first use.
 - Message forwarding.
 

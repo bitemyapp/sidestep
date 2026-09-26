@@ -1,24 +1,194 @@
-//! `NSTimer` and the run loop that fires timers. Each thread has its own
-//! list of scheduled timers; AppKit's event loop asks for the next deadline
-//! and fires what is due, and `-[NSRunLoop run]` does the same on its own.
+//! `NSTimer`, which is also CoreFoundation's `CFRunLoopTimer`: one object,
+//! toll-free, as on macOS.
+//!
+//! A timer keeps what any thread may ask about in atomics (validity, fire
+//! date, tolerance) and its callout and scheduling behind small locks; the
+//! loop it is scheduled on keeps it in a heap ordered by monotonic due time
+//! (see `runloop::timers`). Fire dates are wall-clock times at the API edge
+//! and `Instant`s inside, converted when they are set.
+//!
+//! The semantics are pinned by `conformance/tests/runloop.rs`: a
+//! non-repeating timer reports an interval of 0 and a repeating one an
+//! interval of at least 0.1 ms; fire dates are clamped to CoreFoundation's
+//! latest date; a repeating timer keeps its phase and drops the fires it
+//! missed; invalidating releases the target and user info at once.
 
-use std::cell::{Cell, RefCell};
+use std::ffi::c_void;
 use std::ptr::NonNull;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use block2::{DynBlock, RcBlock};
-use objc2::rc::{Retained, autoreleasepool};
-use objc2::runtime::{NSObject, NSObjectProtocol};
-use objc2::{DefinedClass, Message, define_class, msg_send};
-use objc2_foundation::{NSString, NSTimeInterval, NSTimer};
+use objc2::rc::{Allocated, Retained};
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, Sel};
+use objc2::{AnyThread, ClassType, DefinedClass, Message, define_class, msg_send};
+use objc2_core_foundation::CFRunLoopTimer;
+use objc2_foundation::{NSDate, NSString, NSTimeInterval, NSTimer};
 
-type TimerBlock = RcBlock<dyn Fn(NonNull<NSTimer>)>;
+use crate::runloop::modes::{Mode, Registration};
+use crate::runloop::{self, core::Shared, timers::TimerKey};
+use crate::thread::lock;
+
+/// CoreFoundation clamps fire dates to this, in seconds since 2001.
+pub(crate) const LATEST_FIRE_DATE: f64 = 4_039_289_856.0;
+
+/// The interval a repeating timer uses when asked for none.
+const SHORTEST_REPEAT: f64 = 0.0001;
+
+/// A CoreFoundation timer callback and its context.
+pub(crate) struct Callback {
+    pub(crate) callout: unsafe extern "C-unwind" fn(*mut CFRunLoopTimer, *mut c_void),
+    pub(crate) info: *mut c_void,
+    pub(crate) retain: Option<unsafe extern "C-unwind" fn(*const c_void) -> *const c_void>,
+    pub(crate) release: Option<unsafe extern "C-unwind" fn(*const c_void)>,
+}
+
+impl Drop for Callback {
+    fn drop(&mut self) {
+        if let Some(release) = self.release {
+            // SAFETY: the context's own release function, called once.
+            unsafe { release(self.info) };
+        }
+    }
+}
+
+impl Callback {
+    /// Call the callout. The timer may be invalidated while it runs (by the
+    /// callout itself, typically), which releases the timer's reference to
+    /// the context; so the callout gets a reference of its own, as on
+    /// macOS, taken with the context's retain function and released after.
+    /// A context without one stays alive through `callback` until then.
+    fn call(callback: std::sync::Arc<Callback>, timer: *mut CFRunLoopTimer) {
+        let Some(retain) = callback.retain else {
+            // SAFETY: the callback's own callout and context, which the Arc
+            // keeps alive until it returns.
+            unsafe { (callback.callout)(timer, callback.info) };
+            return;
+        };
+        // SAFETY: the context's own retain function, on a context the Arc
+        // keeps alive until this reference is taken.
+        let info = unsafe { retain(callback.info) }.cast_mut();
+        let (callout, release) = (callback.callout, callback.release);
+        drop(callback);
+        struct Release(Option<unsafe extern "C-unwind" fn(*const c_void)>, *mut c_void);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                if let Some(release) = self.0 {
+                    // SAFETY: gives back the reference taken above, once.
+                    unsafe { release(self.1) };
+                }
+            }
+        }
+        let _release = Release(release, info);
+        // SAFETY: the callout with the context it was made with, which the
+        // reference taken above keeps alive.
+        unsafe { callout(timer, info) };
+    }
+}
+
+/// What a timer does when it fires.
+pub(crate) enum Action {
+    Block(RcBlock<dyn Fn(NonNull<NSTimer>)>),
+    CfBlock(RcBlock<dyn Fn(*mut CFRunLoopTimer)>),
+    Target {
+        target: Retained<AnyObject>,
+        selector: Sel,
+    },
+    Callback(std::sync::Arc<Callback>),
+    /// A delayed `performSelector:`: target, selector and argument.
+    Perform {
+        target: Retained<AnyObject>,
+        selector: Sel,
+        argument: Option<Retained<AnyObject>>,
+    },
+}
+
+/// A clone of an [`Action`]'s callable, taken so the lock isn't held
+/// during the callout.
+enum Callout {
+    Block(RcBlock<dyn Fn(NonNull<NSTimer>)>),
+    CfBlock(RcBlock<dyn Fn(*mut CFRunLoopTimer)>),
+    Target(Retained<AnyObject>, Sel),
+    Callback(std::sync::Arc<Callback>),
+    Perform(Retained<AnyObject>, Sel, Option<Retained<AnyObject>>),
+}
+
+/// What a timer holds on to until it is invalidated.
+pub(crate) struct Payload {
+    pub(crate) action: Option<Action>,
+    pub(crate) user_info: Option<Retained<AnyObject>>,
+}
+
+/// Where a timer is scheduled. Written by whoever changes the schedule;
+/// the loop's heap follows it on the loop's thread.
+pub(crate) struct Sched {
+    pub(crate) owner: Option<std::sync::Arc<Shared>>,
+    pub(crate) reg: Registration,
+    /// When it next fires, on the monotonic clock.
+    pub(crate) due: Instant,
+    /// Its place in the owner's heap, if it has one.
+    pub(crate) key: Option<TimerKey>,
+    /// Bumped by every change of fire date, so firing can tell whether its
+    /// callout moved the timer.
+    pub(crate) retimed: u64,
+}
 
 pub(crate) struct TimerIvars {
-    interval: Cell<f64>,
-    repeats: Cell<bool>,
-    block: RefCell<Option<TimerBlock>>,
-    next_fire: Cell<Instant>,
+    /// 0 for a timer that fires once.
+    pub(crate) interval: f64,
+    pub(crate) order: isize,
+    valid: AtomicBool,
+    firing: AtomicBool,
+    /// Fire date in seconds since 2001, as f64 bits.
+    fire: AtomicU64,
+    tolerance: AtomicU64,
+    payload: Mutex<Payload>,
+    pub(crate) sched: Mutex<Sched>,
+}
+
+impl TimerIvars {
+    pub(crate) fn new(fire: f64, interval: f64, order: isize, payload: Payload) -> Self {
+        let fire = fire.min(LATEST_FIRE_DATE);
+        TimerIvars {
+            interval,
+            order,
+            valid: AtomicBool::new(true),
+            firing: AtomicBool::new(false),
+            fire: AtomicU64::new(fire.to_bits()),
+            tolerance: AtomicU64::new(0f64.to_bits()),
+            payload: Mutex::new(payload),
+            sched: Mutex::new(Sched {
+                owner: None,
+                reg: Registration::default(),
+                due: due_for(fire),
+                key: None,
+                retimed: 0,
+            }),
+        }
+    }
+}
+
+/// The interval an `NSTimer` keeps: 0 when it doesn't repeat.
+pub(crate) fn ns_interval(interval: f64, repeats: bool) -> f64 {
+    match repeats {
+        false => 0.0,
+        true if interval > 0.0 => interval,
+        true => SHORTEST_REPEAT,
+    }
+}
+
+/// The monotonic time matching wall-clock `fire` (seconds since 2001).
+pub(crate) fn due_for(fire: f64) -> Instant {
+    let now = Instant::now();
+    let ahead = fire - crate::date::now();
+    if ahead.is_nan() || ahead <= 0.0 {
+        // Overdue: as due as now, however long ago it was.
+        return now;
+    }
+    // Clamped fire dates lie at most a few billion seconds ahead, which an
+    // Instant holds; the fallback only guards against a broken clock.
+    now.checked_add(Duration::from_secs_f64(ahead.min(LATEST_FIRE_DATE))).unwrap_or(now)
 }
 
 define_class!(
@@ -28,138 +198,286 @@ define_class!(
     pub(crate) struct NSTimerImpl;
 
     impl NSTimerImpl {
-        #[unsafe(method_id(scheduledTimerWithTimeInterval:repeats:block:))]
-        fn scheduled(interval: NSTimeInterval, repeats: bool, block: &DynBlock<dyn Fn(NonNull<NSTimer>)>) -> Retained<Self> {
-            let timer = new_timer(interval, repeats, block);
-            schedule(&timer);
-            timer
+        #[unsafe(method_id(timerWithTimeInterval:target:selector:userInfo:repeats:))]
+        fn timer_with_target(
+            interval: NSTimeInterval,
+            target: &AnyObject,
+            selector: Sel,
+            user_info: Option<&AnyObject>,
+            repeats: bool,
+        ) -> Retained<Self> {
+            with_target(interval, target, selector, user_info, repeats)
+        }
+
+        #[unsafe(method_id(scheduledTimerWithTimeInterval:target:selector:userInfo:repeats:))]
+        fn scheduled_with_target(
+            interval: NSTimeInterval,
+            target: &AnyObject,
+            selector: Sel,
+            user_info: Option<&AnyObject>,
+            repeats: bool,
+        ) -> Retained<Self> {
+            scheduled(with_target(interval, target, selector, user_info, repeats))
         }
 
         #[unsafe(method_id(timerWithTimeInterval:repeats:block:))]
-        fn unscheduled(interval: NSTimeInterval, repeats: bool, block: &DynBlock<dyn Fn(NonNull<NSTimer>)>) -> Retained<Self> {
-            new_timer(interval, repeats, block)
+        fn timer_with_block(
+            interval: NSTimeInterval,
+            repeats: bool,
+            block: &DynBlock<dyn Fn(NonNull<NSTimer>)>,
+        ) -> Retained<Self> {
+            with_block(interval, repeats, block)
         }
 
-        #[unsafe(method(invalidate))]
-        fn invalidate(&self) {
-            self.ivars().block.replace(None);
+        #[unsafe(method_id(scheduledTimerWithTimeInterval:repeats:block:))]
+        fn scheduled_with_block(
+            interval: NSTimeInterval,
+            repeats: bool,
+            block: &DynBlock<dyn Fn(NonNull<NSTimer>)>,
+        ) -> Retained<Self> {
+            scheduled(with_block(interval, repeats, block))
         }
 
-        #[unsafe(method(isValid))]
-        fn is_valid(&self) -> bool {
-            self.ivars().block.borrow().is_some()
+        #[unsafe(method_id(initWithFireDate:interval:repeats:block:))]
+        fn init_with_block(
+            this: Allocated<Self>,
+            date: &NSDate,
+            interval: NSTimeInterval,
+            repeats: bool,
+            block: &DynBlock<dyn Fn(NonNull<NSTimer>)>,
+        ) -> Retained<Self> {
+            let payload = Payload { action: Some(Action::Block(block.copy())), user_info: None };
+            let fire = date.timeIntervalSinceReferenceDate();
+            let this = this.set_ivars(TimerIvars::new(fire, ns_interval(interval, repeats), 0, payload));
+            // SAFETY: NSObject's designated initializer.
+            unsafe { msg_send![super(this), init] }
+        }
+
+        #[unsafe(method_id(initWithFireDate:interval:target:selector:userInfo:repeats:))]
+        fn init_with_target(
+            this: Allocated<Self>,
+            date: &NSDate,
+            interval: NSTimeInterval,
+            target: &AnyObject,
+            selector: Sel,
+            user_info: Option<&AnyObject>,
+            repeats: bool,
+        ) -> Retained<Self> {
+            let payload = Payload {
+                action: Some(Action::Target { target: target.retain(), selector }),
+                user_info: user_info.map(|u| u.retain()),
+            };
+            let fire = date.timeIntervalSinceReferenceDate();
+            let this = this.set_ivars(TimerIvars::new(fire, ns_interval(interval, repeats), 0, payload));
+            // SAFETY: as above.
+            unsafe { msg_send![super(this), init] }
+        }
+
+        #[unsafe(method(fire))]
+        fn fire(&self) {
+            self.call();
+            if self.ivars().interval == 0.0 {
+                runloop::timers::invalidate(self);
+            }
+        }
+
+        #[unsafe(method_id(fireDate))]
+        fn fire_date(&self) -> Retained<NSDate> {
+            NSDate::dateWithTimeIntervalSinceReferenceDate(self.fire_time())
+        }
+
+        #[unsafe(method(setFireDate:))]
+        fn set_fire_date(&self, date: &NSDate) {
+            runloop::timers::set_fire_date(self, date.timeIntervalSinceReferenceDate());
         }
 
         #[unsafe(method(timeInterval))]
         fn time_interval(&self) -> NSTimeInterval {
-            self.ivars().interval.get()
+            self.ivars().interval
         }
 
-        #[unsafe(method(fire))]
-        fn fire_now(&self) {
-            fire(self);
+        #[unsafe(method(tolerance))]
+        fn tolerance(&self) -> NSTimeInterval {
+            self.tolerance_value()
+        }
+
+        #[unsafe(method(setTolerance:))]
+        fn set_tolerance(&self, tolerance: NSTimeInterval) {
+            self.set_tolerance_value(tolerance);
+        }
+
+        #[unsafe(method(invalidate))]
+        fn invalidate(&self) {
+            runloop::timers::invalidate(self);
+        }
+
+        #[unsafe(method(isValid))]
+        fn is_valid(&self) -> bool {
+            self.valid()
+        }
+
+        #[unsafe(method_id(userInfo))]
+        fn user_info(&self) -> Option<Retained<AnyObject>> {
+            lock(&self.ivars().payload).user_info.clone()
+        }
+
+        #[unsafe(method_id(description))]
+        fn description(&self) -> Retained<NSString> {
+            let text = format!(
+                "<NSTimer: {:p}> fire date: {}, interval: {}, valid: {}",
+                self,
+                self.fire_time(),
+                self.ivars().interval,
+                if self.valid() { "YES" } else { "NO" }
+            );
+            NSString::from_str(&text)
         }
     }
 
     unsafe impl NSObjectProtocol for NSTimerImpl {}
 );
 
-fn new_timer(interval: f64, repeats: bool, block: &DynBlock<dyn Fn(NonNull<NSTimer>)>) -> Retained<NSTimerImpl> {
-    // Foundation substitutes 0.1 ms for non-positive intervals.
-    let interval = if interval > 0.0 { interval } else { 0.0001 };
-    let ivars = TimerIvars {
-        interval: Cell::new(interval),
-        repeats: Cell::new(repeats),
-        block: RefCell::new(Some(block.copy())),
-        next_fire: Cell::new(Instant::now() + Duration::from_secs_f64(interval)),
+fn with_target(
+    interval: f64,
+    target: &AnyObject,
+    selector: Sel,
+    user_info: Option<&AnyObject>,
+    repeats: bool,
+) -> Retained<NSTimerImpl> {
+    let payload = Payload {
+        action: Some(Action::Target { target: target.retain(), selector }),
+        user_info: user_info.map(|u| u.retain()),
     };
-    let this = <NSTimerImpl as objc2::AnyThread>::alloc().set_ivars(ivars);
-    // SAFETY: NSObject's designated initializer.
-    unsafe { msg_send![super(this), init] }
+    NSTimerImpl::make(crate::date::now() + interval.max(0.0), ns_interval(interval, repeats), 0, payload)
 }
 
-fn fire(timer: &NSTimerImpl) {
-    let block = timer.ivars().block.borrow().clone();
-    if let Some(block) = block {
-        block.call((NonNull::from(timer).cast::<NSTimer>(),));
-    }
-    if !timer.ivars().repeats.get() {
-        timer.ivars().block.replace(None);
-    }
+fn with_block(interval: f64, repeats: bool, block: &DynBlock<dyn Fn(NonNull<NSTimer>)>) -> Retained<NSTimerImpl> {
+    let payload = Payload { action: Some(Action::Block(block.copy())), user_info: None };
+    NSTimerImpl::make(crate::date::now() + interval.max(0.0), ns_interval(interval, repeats), 0, payload)
 }
 
-thread_local!(static TIMERS: RefCell<Vec<Retained<NSTimerImpl>>> = const { RefCell::new(Vec::new()) });
-
-fn schedule(timer: &Retained<NSTimerImpl>) {
-    TIMERS.with(|t| t.borrow_mut().push(timer.clone()));
+/// Schedule on the current thread's loop in the default mode.
+fn scheduled(timer: Retained<NSTimerImpl>) -> Retained<NSTimerImpl> {
+    runloop::timers::add(&runloop::core::current_shared(), &timer, Mode::DEFAULT);
+    timer
 }
 
-/// When the next timer on this thread is due, if any.
-pub fn next_timer_deadline() -> Option<Instant> {
-    TIMERS.with(|t| {
-        let mut timers = t.borrow_mut();
-        timers.retain(|timer| timer.ivars().block.borrow().is_some());
-        timers.iter().map(|timer| timer.ivars().next_fire.get()).min()
-    })
-}
-
-/// Fire every timer on this thread that is due at `now`.
-pub fn fire_due_timers(now: Instant) {
-    let due: Vec<Retained<NSTimerImpl>> =
-        TIMERS.with(|t| t.borrow().iter().filter(|timer| timer.ivars().next_fire.get() <= now).cloned().collect());
-    for timer in due {
-        let ivars = timer.ivars();
-        if ivars.repeats.get() {
-            // Skip missed firings rather than bursting to catch up.
-            let interval = Duration::from_secs_f64(ivars.interval.get());
-            let mut next = ivars.next_fire.get() + interval;
-            if next <= now {
-                next = now + interval;
-            }
-            ivars.next_fire.set(next);
-        }
-        autoreleasepool(|_| fire(&timer));
-    }
-}
-
-define_class!(
-    #[unsafe(super(NSObject))]
-    #[name = "NSRunLoop"]
-    pub(crate) struct NSRunLoopImpl;
-
-    impl NSRunLoopImpl {
-        #[unsafe(method_id(currentRunLoop))]
-        fn current() -> Retained<Self> {
-            run_loop()
-        }
-
-        #[unsafe(method_id(mainRunLoop))]
-        fn main() -> Retained<Self> {
-            run_loop()
-        }
-
-        #[unsafe(method(addTimer:forMode:))]
-        fn add_timer(&self, timer: &NSTimerImpl, _mode: &NSString) {
-            schedule(&timer.retain());
-        }
-
-        /// Runs until no timers remain.
-        #[unsafe(method(run))]
-        fn run(&self) {
-            while let Some(deadline) = next_timer_deadline() {
-                std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
-                fire_due_timers(Instant::now());
-            }
-        }
-    }
-
-    unsafe impl NSObjectProtocol for NSRunLoopImpl {}
-);
-
-fn run_loop() -> Retained<NSRunLoopImpl> {
-    thread_local!(static RUN_LOOP: Retained<NSRunLoopImpl> = {
-        let this = <NSRunLoopImpl as objc2::AnyThread>::alloc().set_ivars(());
+impl NSTimerImpl {
+    /// A new timer. Only called from `NSTimer`'s own methods or after
+    /// [`load`], so the class is the one the shell loaded.
+    pub(crate) fn make(fire: f64, interval: f64, order: isize, payload: Payload) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(TimerIvars::new(fire, interval, order, payload));
+        // SAFETY: NSObject's designated initializer.
         unsafe { msg_send![super(this), init] }
-    });
-    RUN_LOOP.with(|r| r.clone())
+    }
+
+    pub(crate) fn valid(&self) -> bool {
+        self.ivars().valid.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn is_firing(&self) -> bool {
+        self.ivars().firing.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn set_firing(&self, firing: bool) {
+        self.ivars().firing.store(firing, Ordering::Relaxed);
+    }
+
+    /// Mark invalid; true if it was valid. The fire date then reads as the
+    /// reference date, as on macOS.
+    pub(crate) fn take_valid(&self) -> bool {
+        let was = self.ivars().valid.swap(false, Ordering::AcqRel);
+        if was {
+            self.ivars().fire.store(0f64.to_bits(), Ordering::Release);
+        }
+        was
+    }
+
+    /// Give up the callout and user info, for the caller to drop outside
+    /// any lock.
+    pub(crate) fn take_payload(&self) -> Payload {
+        let mut payload = lock(&self.ivars().payload);
+        Payload { action: payload.action.take(), user_info: payload.user_info.take() }
+    }
+
+    /// Whether the timer's callout is a delayed perform matching these.
+    /// `argument` of `None` matches any argument.
+    pub(crate) fn is_perform(
+        &self,
+        target: &AnyObject,
+        selector: Option<Sel>,
+        argument: Option<Option<&AnyObject>>,
+    ) -> bool {
+        let payload = lock(&self.ivars().payload);
+        let Some(Action::Perform { target: t, selector: s, argument: a }) = &payload.action else { return false };
+        if !std::ptr::eq(&**t, target) || selector.is_some_and(|sel| sel != *s) {
+            return false;
+        }
+        match argument {
+            None => true,
+            Some(None) => a.is_none(),
+            Some(Some(arg)) => a.as_deref().is_some_and(|a| {
+                // SAFETY: -isEqual: takes an object and returns BOOL.
+                std::ptr::eq(a, arg) || unsafe { msg_send![a, isEqual: arg] }
+            }),
+        }
+    }
+
+    pub(crate) fn fire_time(&self) -> f64 {
+        f64::from_bits(self.ivars().fire.load(Ordering::Acquire))
+    }
+
+    pub(crate) fn set_fire_time(&self, fire: f64) {
+        self.ivars().fire.store(fire.to_bits(), Ordering::Release);
+    }
+
+    pub(crate) fn tolerance_value(&self) -> f64 {
+        f64::from_bits(self.ivars().tolerance.load(Ordering::Relaxed))
+    }
+
+    pub(crate) fn set_tolerance_value(&self, tolerance: f64) {
+        self.ivars().tolerance.store(tolerance.max(0.0).to_bits(), Ordering::Relaxed);
+    }
+
+    pub(crate) fn as_cf(&self) -> *mut CFRunLoopTimer {
+        (self as *const Self).cast_mut().cast()
+    }
+
+    /// Run the callout, without holding any lock while it runs.
+    pub(crate) fn call(&self) {
+        let callout = {
+            let payload = lock(&self.ivars().payload);
+            match &payload.action {
+                None => return,
+                Some(Action::Block(b)) => Callout::Block(b.clone()),
+                Some(Action::CfBlock(b)) => Callout::CfBlock(b.clone()),
+                Some(Action::Target { target, selector }) => Callout::Target(target.clone(), *selector),
+                Some(Action::Callback(c)) => Callout::Callback(c.clone()),
+                Some(Action::Perform { target, selector, argument }) => {
+                    Callout::Perform(target.clone(), *selector, argument.clone())
+                }
+            }
+        };
+        match callout {
+            Callout::Block(block) => block.call((NonNull::from(self).cast::<NSTimer>(),)),
+            Callout::CfBlock(block) => block.call((self.as_cf(),)),
+            Callout::Target(target, selector) => {
+                let timer: &AnyObject = self.as_ref();
+                // SAFETY: a timer's action method takes the timer.
+                unsafe { crate::perform::send_object(&target, selector, Some(timer)) };
+            }
+            Callout::Callback(callback) => Callback::call(callback, self.as_cf()),
+            Callout::Perform(target, selector, argument) => {
+                // SAFETY: a delayed perform's method takes one object.
+                unsafe { crate::perform::send_object(&target, selector, argument.as_deref()) };
+            }
+        }
+    }
+}
+
+/// Make sure the class the `NSTimer` shell names is loaded, so the
+/// `define_class!` type can be used directly.
+pub(crate) fn load() {
+    // SAFETY: +class takes nothing and returns the receiver.
+    let _: *const objc2::runtime::AnyClass = unsafe { msg_send![NSTimer::class(), class] };
 }

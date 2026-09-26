@@ -12,16 +12,42 @@
 
 use objc2::ClassType;
 
+mod base64;
+mod bundle;
+mod cf;
 mod const_string;
+pub mod data;
+mod date;
+mod date_format;
+mod date_formatter;
 mod dictionary;
+mod dispatch;
+mod error;
+mod file_manager;
+mod json;
+mod locale;
+mod lock;
 mod notification;
+pub mod notification_center;
+mod objc_runtime;
+mod operation;
+mod path;
+mod perform;
+mod plist;
+mod process_info;
+pub mod runloop;
 mod string;
 mod thread;
+mod time_zone;
 mod timer;
+pub mod url;
+mod user_defaults;
+mod uuid;
+mod xdg;
 
 pub use const_string::{ConstStr, ConstantString};
 pub use notification::notification;
-pub use timer::{fire_due_timers, next_timer_deadline};
+pub use runloop::{fire_due_timers, next_timer_deadline};
 
 #[doc(hidden)]
 pub mod __private {
@@ -34,6 +60,7 @@ sidestep_runtime::static_class!(pub NSSTRING, NSSTRING_META = "NSString", || {
 
 sidestep_runtime::static_class!(pub NSTHREAD, NSTHREAD_META = "NSThread", || {
     let _ = thread::NSThreadImpl::class();
+    perform::install();
 });
 
 sidestep_runtime::static_class!(pub NSDICTIONARY, NSDICTIONARY_META = "NSDictionary", || {
@@ -42,14 +69,17 @@ sidestep_runtime::static_class!(pub NSDICTIONARY, NSDICTIONARY_META = "NSDiction
 
 sidestep_runtime::static_class!(pub NSTIMER, NSTIMER_META = "NSTimer", || {
     let _ = timer::NSTimerImpl::class();
+    perform::install();
 });
 
 sidestep_runtime::static_class!(pub NSRUNLOOP, NSRUNLOOP_META = "NSRunLoop", || {
-    let _ = timer::NSRunLoopImpl::class();
+    let _ = runloop::nsrunloop::NSRunLoopImpl::class();
+    perform::install();
 });
 
 sidestep_runtime::static_class!(pub NSNOTIFICATION, NSNOTIFICATION_META = "NSNotification", || {
     let _ = notification::NSNotificationImpl::class();
+    perform::install();
 });
 
 sidestep_runtime::static_class!(

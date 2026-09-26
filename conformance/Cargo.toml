@@ -8,11 +8,43 @@ publish = false
 [dependencies]
 objc2.workspace = true
 block2.workspace = true
-objc2-foundation = { workspace = true, features = ["NSString", "NSObject", "NSThread", "NSZone", "NSGeometry", "NSDictionary", "NSEnumerator"] }
+objc2-foundation = { workspace = true, features = ["NSString", "NSObject", "NSThread", "NSZone", "NSGeometry", "NSDictionary", "NSEnumerator", "NSRunLoop", "NSTimer", "NSDate", "NSObjCRuntime", "NSArray", "block2", "objc2-core-foundation", "NSNotification", "NSOperation", "NSData", "NSRange", "NSValue", "NSURL", "NSError", "NSFileManager", "NSPathUtilities", "NSProcessInfo", "NSUUID", "NSBundle", "NSPropertyList", "NSUserDefaults", "NSLock", "NSJSONSerialization", "NSNull", "NSFormatter", "NSDateFormatter", "NSLocale", "NSTimeZone"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "objc2", "block2", "CFRunLoop", "CFDate", "CFString", "CFData", "CFURL", "CFError", "CFPreferences", "CFDictionary", "CFArray", "CFNumber", "CFPropertyList"] }
 objc2-app-kit = { workspace = true, features = ["NSResponder", "NSView", "NSClipView", "NSScrollView"] }
+dispatch2 = "0.3.1"
 sidestep.workspace = true
 
 # AppKit belongs to the main thread, which the test harness doesn't run on.
 [[test]]
 name = "appkit"
 harness = false
+
+# Run loops: the main thread's loop behaves differently from others'.
+[[test]]
+name = "runloop"
+harness = false
+
+# Observers on the main operation queue need the main thread.
+[[test]]
+name = "notifications"
+harness = false
+
+# The first thread start of the process posts a notification.
+[[test]]
+name = "threads"
+harness = false
+
+# The main dispatch queue needs the main thread.
+[[test]]
+name = "dispatch"
+harness = false
+
+# One process's defaults: environment set up first, and a child process.
+[[test]]
+name = "defaults"
+harness = false
+
+# Checks that need Foundation's collections, which Sidestep is still
+# growing, build on Linux only with this feature; on macOS they always run.
+[features]
+collections = []
