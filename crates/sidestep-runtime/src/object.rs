@@ -2,7 +2,7 @@
 //! its reference count; the object pointer itself starts with `isa`, as the
 //! ABI requires.
 
-use std::alloc::{Layout, alloc_zeroed, dealloc};
+use std::alloc::{Layout, alloc, dealloc};
 use std::ffi::{c_char, c_void};
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
@@ -21,7 +21,11 @@ pub(crate) const WEAKLY_REFERENCED: usize = 1 << 1;
 pub(crate) const HAS_ASSOCIATED: usize = 1 << 2;
 /// Statically allocated objects, which are never freed.
 pub(crate) const IMMORTAL: usize = 1 << 3;
-pub(crate) const RC_ONE: usize = 1 << 4;
+/// The object has been locked with `objc_sync_enter`.
+pub(crate) const SYNCHRONIZED: usize = 1 << 4;
+pub(crate) const RC_ONE: usize = 1 << 5;
+/// Side tables that must forget an object when it is freed.
+const IN_SIDE_TABLES: usize = WEAKLY_REFERENCED | HAS_ASSOCIATED | SYNCHRONIZED;
 
 /// Sits immediately before each object.
 #[repr(C)]
@@ -148,30 +152,84 @@ unsafe impl Sync for ObjectRef {}
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn class_createInstance(cls: *const Class, extra_bytes: usize) -> *mut Object {
     // SAFETY: the caller passes a class or null.
-    let Some(cls) = (unsafe { class_ref(cls) }) else {
-        return std::ptr::null_mut();
+    match unsafe { class_ref(cls) } {
+        Some(cls) => create_instance(cls, extra_bytes),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// The allocation for an instance of `cls` with `extra_bytes` more:
+/// `(total size, offset of the object)`, or `None` if it can't be
+/// described.
+///
+/// Each allocation holds the header, then the object: `offset` bytes (at
+/// least the header's 16, and the instance's alignment) followed by the
+/// instance, rounded up to whole words. Allocators hand out 16-byte
+/// multiples anyway, and whole words let `create_instance` zero it with
+/// word stores.
+pub(crate) fn instance_layout(cls: &Class, extra_bytes: usize) -> Option<(usize, usize)> {
+    let offset = cls.instance_align().max(HEADER_SIZE);
+    let size = cls.instance_size().max(size_of::<Object>()).checked_add(extra_bytes)?;
+    let total = offset.checked_add(size.checked_next_multiple_of(size_of::<u64>())?)?;
+    Layout::from_size_align(total, offset).ok()?;
+    u32::try_from(total).ok()?;
+    Some((total, offset))
+}
+
+/// A new instance of `cls`, a loaded class, with its reference count at
+/// one, its instance variables zeroed and `extra_bytes` more zeroed bytes
+/// after them.
+///
+/// The zeroing is done here rather than by `calloc`, which would zero the
+/// header and `isa` only for them to be written again, and word by word,
+/// because a typical instance is a few words and a `memset` call costs
+/// more than the stores. For a plain `NSObject` there is nothing to zero.
+#[inline]
+pub(crate) fn create_instance(cls: &'static Class, extra_bytes: usize) -> *mut Object {
+    // Worked out when the class was registered, which the caller's acquire
+    // load of its flags made visible.
+    let packed = cls.alloc_layout.load(Ordering::Relaxed);
+    let (total, offset) = if packed != 0 && extra_bytes == 0 {
+        ((packed >> 32) as usize, packed as u32 as usize)
+    } else {
+        layout_slow(cls, extra_bytes)
     };
-    let align = cls.instance_align().max(HEADER_SIZE);
-    let size = cls.instance_size().max(size_of::<Object>()) + extra_bytes;
-    let total = align + size;
-    let layout = Layout::from_size_align(total, align).expect("sidestep: instance too large");
+    // SAFETY: `instance_layout` checked that this is a valid layout.
+    let layout = unsafe { Layout::from_size_align_unchecked(total, offset) };
     // SAFETY: non-zero size.
-    let base = unsafe { alloc_zeroed(layout) };
+    let base = unsafe { alloc(layout) };
     if base.is_null() {
         std::alloc::handle_alloc_error(layout);
     }
-    // SAFETY: `align` bytes precede the object and hold its header.
+    // SAFETY: `offset` bytes precede the object and hold its header, and
+    // the rest of the allocation, a whole number of words, is the object.
+    // `offset` is at least 16, so the words are aligned.
     unsafe {
-        let obj = base.add(align).cast::<Object>();
+        let obj = base.add(offset).cast::<Object>();
         let header = obj.cast::<u8>().sub(HEADER_SIZE).cast::<Header>();
-        header.write(Header {
-            rc: AtomicUsize::new(0),
-            total_size: u32::try_from(total).expect("sidestep: instance too large"),
-            base_offset: align as u32,
-        });
-        (*obj).isa.store((cls as *const Class).cast_mut(), Ordering::Release);
+        header.write(Header { rc: AtomicUsize::new(0), total_size: total as u32, base_offset: offset as u32 });
+        // The object is not shared yet: whoever it is handed to gets it
+        // through a synchronizing operation of their own.
+        obj.cast::<*const Class>().write(cls);
+        let words = obj.cast::<u64>();
+        let n = (total - offset) / size_of::<u64>();
+        if n <= 16 {
+            // Volatile only so the compiler keeps the stores rather than
+            // turning the loop back into a `memset` call.
+            for i in 1..n {
+                words.add(i).write_volatile(0);
+            }
+        } else {
+            words.add(1).write_bytes(0, n - 1);
+        }
         obj
     }
+}
+
+#[cold]
+fn layout_slow(cls: &Class, extra_bytes: usize) -> (usize, usize) {
+    instance_layout(cls, extra_bytes)
+        .unwrap_or_else(|| panic!("sidestep: an instance of {:?} is too large to allocate", cls.name()))
 }
 
 #[unsafe(no_mangle)]
@@ -179,28 +237,40 @@ pub unsafe extern "C-unwind" fn object_dispose(obj: *mut Object) -> *mut Object 
     if obj.is_null() {
         return obj;
     }
-    // SAFETY: the caller passes a live object it owns.
+    // SAFETY: the caller passes a live object it owns, so nothing else
+    // touches its header any more.
     let (bits, total, base_offset) = unsafe {
         let h = header(obj);
-        (h.rc.load(Ordering::Acquire), h.total_size as usize, h.base_offset as usize)
+        (h.rc.load(Ordering::Relaxed), h.total_size as usize, h.base_offset as usize)
     };
     if bits & IMMORTAL != 0 {
         return std::ptr::null_mut();
     }
-    if bits & WEAKLY_REFERENCED != 0 {
-        crate::arc::clear_weak(obj);
+    if bits & IN_SIDE_TABLES != 0 {
+        forget(obj, bits);
     }
-    if bits & HAS_ASSOCIATED != 0 {
-        crate::associated::remove_all(obj);
-    }
-    crate::sync::forget(obj);
-    // SAFETY: the allocation was made by class_createInstance with this
+    // SAFETY: the allocation was made by `create_instance` with this
     // layout.
     unsafe {
         let base = obj.cast::<u8>().sub(base_offset);
         dealloc(base, Layout::from_size_align_unchecked(total, base_offset));
     }
     std::ptr::null_mut()
+}
+
+/// Remove an object (or heap block) that is being freed from the side
+/// tables its header bits say it is in.
+#[cold]
+pub(crate) fn forget(obj: *mut Object, bits: usize) {
+    if bits & WEAKLY_REFERENCED != 0 {
+        crate::arc::clear_weak(obj);
+    }
+    if bits & HAS_ASSOCIATED != 0 {
+        crate::associated::remove_all(obj);
+    }
+    if bits & SYNCHRONIZED != 0 {
+        crate::sync::forget(obj);
+    }
 }
 
 #[unsafe(no_mangle)]

@@ -1,12 +1,11 @@
 //! `@synchronized`: a recursive lock per object.
 
-use std::collections::HashMap;
 use std::ffi::c_int;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, LazyLock, Mutex};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Condvar, Mutex};
 
-use crate::object::Object;
-use crate::util::{lock, thread_token};
+use crate::object::{IMMORTAL, Kind, Object, SYNCHRONIZED, header, kind};
+use crate::util::{Sharded, lock, thread_token};
 
 const SUCCESS: c_int = 0;
 const NOT_OWNING_THREAD: c_int = -1;
@@ -18,15 +17,33 @@ struct RecursiveLock {
     released: Condvar,
 }
 
-static LOCKS: LazyLock<Mutex<HashMap<usize, Arc<RecursiveLock>>>> = LazyLock::new(Default::default);
+/// Each object's lock, sharded by address like the other side tables.
+static LOCKS: Sharded<Arc<RecursiveLock>> = Sharded::new();
 
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn objc_sync_enter(obj: *mut Object) -> c_int {
     if obj.is_null() {
         return SUCCESS;
     }
-    USED.store(true, Ordering::Relaxed);
-    let lk = lock(&LOCKS).entry(obj as usize).or_default().clone();
+    // SAFETY: the caller passes a live object.
+    match unsafe { kind(obj) } {
+        Kind::Counted => {
+            // Tells object_dispose to drop the lock with the object. The
+            // bit is set while the caller holds a reference, so the final
+            // release, a later change of the same word, carries it to
+            // object_dispose.
+            // SAFETY: as above.
+            let rc = unsafe { &header(obj).rc };
+            if rc.load(Ordering::Relaxed) & (IMMORTAL | SYNCHRONIZED) == 0 {
+                rc.fetch_or(SYNCHRONIZED, Ordering::Relaxed);
+            }
+        }
+        // The same for a heap block, which `_Block_release` frees.
+        // SAFETY: as above.
+        Kind::Block if unsafe { crate::blocks::is_heap(obj) } => unsafe { crate::blocks::mark(obj, SYNCHRONIZED) },
+        _ => {}
+    }
+    let lk = LOCKS.lock(obj as usize).entry(obj as usize).or_default().clone();
     let me = thread_token();
     let mut state = lock(&lk.state);
     while state.1 > 0 && state.0 != me {
@@ -41,7 +58,7 @@ pub extern "C-unwind" fn objc_sync_exit(obj: *mut Object) -> c_int {
     if obj.is_null() {
         return SUCCESS;
     }
-    let Some(lk) = lock(&LOCKS).get(&(obj as usize)).cloned() else {
+    let Some(lk) = LOCKS.lock(obj as usize).get(&(obj as usize)).cloned() else {
         return NOT_OWNING_THREAD;
     };
     let mut state = lock(&lk.state);
@@ -58,11 +75,5 @@ pub extern "C-unwind" fn objc_sync_exit(obj: *mut Object) -> c_int {
 
 /// Drop the lock of an object being freed.
 pub(crate) fn forget(obj: *mut Object) {
-    if USED.load(Ordering::Relaxed) {
-        lock(&LOCKS).remove(&(obj as usize));
-    }
+    LOCKS.lock(obj as usize).remove(&(obj as usize));
 }
-
-/// Set once any object has been locked, so freeing objects in programs that
-/// never use `@synchronized` skips the table.
-static USED: AtomicBool = AtomicBool::new(false);

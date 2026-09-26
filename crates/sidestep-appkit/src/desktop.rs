@@ -1,0 +1,446 @@
+//! The desktop's light or dark preference, from the settings portal.
+//!
+//! Desktops publish it as `org.freedesktop.appearance` `color-scheme`
+//! through xdg-desktop-portal's `org.freedesktop.portal.Settings` (1: prefer
+//! dark, 2: prefer light, 0: no preference) and signal changes. A thread of
+//! its own asks the session bus once and then waits for changes, so neither
+//! the main thread nor the render thread ever waits for D-Bus. Only the few
+//! messages this needs are spoken, with a minimal client below.
+
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::fs::MetadataExt;
+use std::os::unix::net::UnixStream;
+use std::time::Duration;
+
+const PORTAL: &str = "org.freedesktop.portal.Desktop";
+const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
+const SETTINGS: &str = "org.freedesktop.portal.Settings";
+const NAMESPACE: &str = "org.freedesktop.appearance";
+const KEY: &str = "color-scheme";
+/// How long the first answer may take before the thread gives up.
+const ANSWER_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// A preference, as the portal numbers it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Scheme {
+    NoPreference,
+    Dark,
+    Light,
+}
+
+impl Scheme {
+    fn from_portal(value: u32) -> Scheme {
+        match value {
+            1 => Scheme::Dark,
+            2 => Scheme::Light,
+            _ => Scheme::NoPreference,
+        }
+    }
+}
+
+/// Watch the preference on a thread of its own, calling `changed` with it
+/// once known and at every change. Without a session bus or a portal
+/// nothing is called.
+pub(crate) fn watch(changed: impl Fn(Scheme) + Send + 'static) {
+    let _ = std::thread::Builder::new().name("sidestep-desktop".into()).spawn(move || {
+        let _ = run(&changed);
+    });
+}
+
+fn run(changed: &dyn Fn(Scheme)) -> Option<()> {
+    let mut bus = Bus::connect()?;
+    bus.call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "Hello", "", |_| {})?;
+    let rule = format!(
+        "type='signal',interface='{SETTINGS}',member='SettingChanged',path='{PORTAL_PATH}',arg0='{NAMESPACE}',arg1='{KEY}'"
+    );
+    bus.call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "AddMatch", "s", |w| {
+        w.string(&rule)
+    })?;
+    // ReadOne answers with the value; older portals only have Read, which
+    // wraps it in one more variant.
+    let args = |w: &mut Writer| {
+        w.string(NAMESPACE);
+        w.string(KEY);
+    };
+    let reply = match bus.call(PORTAL, PORTAL_PATH, SETTINGS, "ReadOne", "ss", args) {
+        Some(reply) => Some(reply),
+        None => bus.call(PORTAL, PORTAL_PATH, SETTINGS, "Read", "ss", args),
+    };
+    if let Some(value) = reply.and_then(|m| Reader::new(&m.body, m.big_endian).variant_u32()) {
+        changed(Scheme::from_portal(value));
+    }
+    bus.stream.set_read_timeout(None).ok()?;
+    loop {
+        let message = bus.read()?;
+        if message.kind == SIGNAL && message.member.as_deref() == Some("SettingChanged") {
+            let mut r = Reader::new(&message.body, message.big_endian);
+            if r.string()? == NAMESPACE && r.string()? == KEY {
+                changed(Scheme::from_portal(r.variant_u32()?));
+            }
+        }
+    }
+}
+
+const METHOD_CALL: u8 = 1;
+const METHOD_RETURN: u8 = 2;
+const SIGNAL: u8 = 4;
+
+/// A connection to the session bus.
+struct Bus {
+    stream: UnixStream,
+    reader: BufReader<UnixStream>,
+    serial: u32,
+}
+
+/// A received message: what this client looks at.
+struct Message {
+    kind: u8,
+    big_endian: bool,
+    reply_serial: Option<u32>,
+    member: Option<String>,
+    body: Vec<u8>,
+}
+
+impl Bus {
+    fn connect() -> Option<Bus> {
+        let stream = connect_session_bus()?;
+        stream.set_read_timeout(Some(ANSWER_TIMEOUT)).ok()?;
+        stream.set_write_timeout(Some(ANSWER_TIMEOUT)).ok()?;
+        let mut reader = BufReader::new(stream.try_clone().ok()?);
+        let mut writer = stream.try_clone().ok()?;
+        // The EXTERNAL mechanism: the server checks our uid on the socket.
+        let uid = std::fs::metadata("/proc/self").ok()?.uid();
+        let hex: String = uid.to_string().bytes().map(|b| format!("{b:02x}")).collect();
+        writer.write_all(format!("\0AUTH EXTERNAL {hex}\r\n").as_bytes()).ok()?;
+        let mut line = String::new();
+        reader.read_line(&mut line).ok()?;
+        if !line.starts_with("OK ") {
+            return None;
+        }
+        writer.write_all(b"BEGIN\r\n").ok()?;
+        Some(Bus { stream, reader, serial: 0 })
+    }
+
+    /// Call a method and wait for its reply; None for an error reply.
+    fn call(
+        &mut self,
+        destination: &str,
+        path: &str,
+        interface: &str,
+        member: &str,
+        signature: &str,
+        args: impl FnOnce(&mut Writer),
+    ) -> Option<Message> {
+        self.serial += 1;
+        let serial = self.serial;
+        let bytes = method_call(serial, destination, path, interface, member, signature, args);
+        self.stream.write_all(&bytes).ok()?;
+        loop {
+            let message = self.read()?;
+            if message.reply_serial == Some(serial) {
+                return (message.kind == METHOD_RETURN).then_some(message);
+            }
+        }
+    }
+
+    fn read(&mut self) -> Option<Message> {
+        let mut fixed = [0u8; 16];
+        self.reader.read_exact(&mut fixed).ok()?;
+        let big_endian = match fixed[0] {
+            b'l' => false,
+            b'B' => true,
+            _ => return None,
+        };
+        let word = |at: usize| {
+            let b = [fixed[at], fixed[at + 1], fixed[at + 2], fixed[at + 3]];
+            if big_endian { u32::from_be_bytes(b) } else { u32::from_le_bytes(b) }
+        };
+        let (body_len, fields_len) = (word(4) as usize, word(12) as usize);
+        // Bounded: nothing this client reads is anywhere near this.
+        if body_len > 1 << 20 || fields_len > 1 << 16 {
+            return None;
+        }
+        let mut rest = vec![0u8; align(16 + fields_len, 8) - 16 + body_len];
+        self.reader.read_exact(&mut rest).ok()?;
+        let mut header = fixed.to_vec();
+        header.extend_from_slice(&rest[..fields_len]);
+        let (reply_serial, member) = header_fields(&header, big_endian)?;
+        let body = rest[align(16 + fields_len, 8) - 16..].to_vec();
+        Some(Message { kind: fixed[1], big_endian, reply_serial, member, body })
+    }
+}
+
+/// The session bus's socket, from `DBUS_SESSION_BUS_ADDRESS` or the usual
+/// place in the runtime directory.
+fn connect_session_bus() -> Option<UnixStream> {
+    let address = std::env::var("DBUS_SESSION_BUS_ADDRESS").ok().or_else(|| {
+        let dir = std::env::var("XDG_RUNTIME_DIR").ok()?;
+        Some(format!("unix:path={dir}/bus"))
+    })?;
+    for candidate in address.split(';') {
+        let Some(params) = candidate.strip_prefix("unix:") else { continue };
+        for param in params.split(',') {
+            if let Some(path) = param.strip_prefix("path=") {
+                if let Ok(stream) = UnixStream::connect(unescape(path)) {
+                    return Some(stream);
+                }
+            } else if let Some(name) = param.strip_prefix("abstract=") {
+                use std::os::linux::net::SocketAddrExt;
+                let addr = std::os::unix::net::SocketAddr::from_abstract_name(unescape(name).as_bytes()).ok()?;
+                if let Ok(stream) = UnixStream::connect_addr(&addr) {
+                    return Some(stream);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// D-Bus addresses escape bytes as `%xx`.
+fn unescape(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let Some(b) = bytes
+                .get(i + 1..i + 3)
+                .and_then(|h| std::str::from_utf8(h).ok())
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+        {
+            out.push(b);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn align(n: usize, to: usize) -> usize {
+    n.div_ceil(to) * to
+}
+
+/// Writes little-endian D-Bus values, aligned from the message's start.
+#[derive(Default)]
+struct Writer {
+    buf: Vec<u8>,
+}
+
+impl Writer {
+    fn pad(&mut self, to: usize) {
+        self.buf.resize(align(self.buf.len(), to), 0);
+    }
+
+    fn byte(&mut self, v: u8) {
+        self.buf.push(v);
+    }
+
+    fn u32(&mut self, v: u32) {
+        self.pad(4);
+        self.buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    fn string(&mut self, s: &str) {
+        self.u32(s.len() as u32);
+        self.buf.extend_from_slice(s.as_bytes());
+        self.buf.push(0);
+    }
+
+    fn signature(&mut self, s: &str) {
+        self.byte(s.len() as u8);
+        self.buf.extend_from_slice(s.as_bytes());
+        self.buf.push(0);
+    }
+
+    /// A header field: its code and a variant of type `kind` ('s', 'o',
+    /// 'g').
+    fn field(&mut self, code: u8, kind: char, value: &str) {
+        self.pad(8);
+        self.byte(code);
+        self.signature(&kind.to_string());
+        if kind == 'g' { self.signature(value) } else { self.string(value) }
+    }
+}
+
+fn method_call(
+    serial: u32,
+    destination: &str,
+    path: &str,
+    interface: &str,
+    member: &str,
+    signature: &str,
+    args: impl FnOnce(&mut Writer),
+) -> Vec<u8> {
+    let mut body = Writer::default();
+    args(&mut body);
+    let mut w = Writer::default();
+    w.byte(b'l');
+    w.byte(METHOD_CALL);
+    w.byte(0);
+    w.byte(1);
+    w.u32(body.buf.len() as u32);
+    w.u32(serial);
+    // The header fields, an array of (byte, variant): its length, then
+    // the structs from an 8-byte boundary.
+    w.u32(0);
+    let length_at = w.buf.len() - 4;
+    w.pad(8);
+    let start = w.buf.len();
+    w.field(1, 'o', path);
+    w.field(2, 's', interface);
+    w.field(3, 's', member);
+    w.field(6, 's', destination);
+    if !signature.is_empty() {
+        w.field(8, 'g', signature);
+    }
+    let fields = (w.buf.len() - start) as u32;
+    w.buf[length_at..length_at + 4].copy_from_slice(&fields.to_le_bytes());
+    w.pad(8);
+    w.buf.extend_from_slice(&body.buf);
+    w.buf
+}
+
+/// Reads D-Bus values from a body or header, aligned from its start.
+struct Reader<'a> {
+    buf: &'a [u8],
+    at: usize,
+    big_endian: bool,
+}
+
+impl<'a> Reader<'a> {
+    fn new(buf: &'a [u8], big_endian: bool) -> Self {
+        Reader { buf, at: 0, big_endian }
+    }
+
+    fn pad(&mut self, to: usize) {
+        self.at = align(self.at, to);
+    }
+
+    fn byte(&mut self) -> Option<u8> {
+        let b = *self.buf.get(self.at)?;
+        self.at += 1;
+        Some(b)
+    }
+
+    fn u32(&mut self) -> Option<u32> {
+        self.pad(4);
+        let b: [u8; 4] = self.buf.get(self.at..self.at + 4)?.try_into().ok()?;
+        self.at += 4;
+        Some(if self.big_endian { u32::from_be_bytes(b) } else { u32::from_le_bytes(b) })
+    }
+
+    fn string(&mut self) -> Option<&'a str> {
+        let len = self.u32()? as usize;
+        let s = std::str::from_utf8(self.buf.get(self.at..self.at + len)?).ok()?;
+        self.at += len + 1;
+        Some(s)
+    }
+
+    fn signature(&mut self) -> Option<&'a str> {
+        let len = self.byte()? as usize;
+        let s = std::str::from_utf8(self.buf.get(self.at..self.at + len)?).ok()?;
+        self.at += len + 1;
+        Some(s)
+    }
+
+    /// A variant holding a u32, possibly inside more variants.
+    fn variant_u32(&mut self) -> Option<u32> {
+        match self.signature()? {
+            "u" => self.u32(),
+            "v" => self.variant_u32(),
+            _ => None,
+        }
+    }
+}
+
+/// The reply serial and member among a header's fields.
+fn header_fields(header: &[u8], big_endian: bool) -> Option<(Option<u32>, Option<String>)> {
+    let mut r = Reader::new(header, big_endian);
+    r.at = 12;
+    let len = r.u32()? as usize;
+    r.pad(8);
+    let end = r.at + len;
+    let (mut reply_serial, mut member) = (None, None);
+    while r.at < end {
+        r.pad(8);
+        let code = r.byte()?;
+        let kind = r.signature()?;
+        match (code, kind) {
+            (5, "u") => reply_serial = Some(r.u32()?),
+            (3, "s") => member = Some(r.string()?.to_owned()),
+            (_, "s" | "o") => {
+                r.string()?;
+            }
+            (_, "g") => {
+                r.signature()?;
+            }
+            (_, "u") => {
+                r.u32()?;
+            }
+            _ => return None,
+        }
+    }
+    Some((reply_serial, member))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn method_calls_are_laid_out_as_the_specification_says() {
+        let bytes = method_call(7, "d.x", "/p", "i.x", "M", "s", |w| w.string("ab"));
+        // Fixed part: little-endian, a method call, no flags, version 1,
+        // an 7-byte body (length, "ab", NUL), serial 7.
+        assert_eq!(&bytes[..4], b"l\x01\x00\x01");
+        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 7);
+        assert_eq!(u32::from_le_bytes(bytes[8..12].try_into().unwrap()), 7);
+        let fields = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+        // The path field: code 1, signature "o", then the path.
+        assert_eq!(&bytes[16..24], b"\x01\x01o\x00\x02\x00\x00\x00");
+        assert_eq!(&bytes[24..27], b"/p\x00");
+        // The body starts at the next 8-byte boundary after the fields.
+        let body = align(16 + fields, 8);
+        assert_eq!(bytes.len(), body + 7);
+        assert_eq!(&bytes[body..], b"\x02\x00\x00\x00ab\x00");
+        // And the header reads back.
+        let (reply, member) = header_fields(&bytes[..16 + fields], false).unwrap();
+        assert_eq!((reply, member.as_deref()), (None, Some("M")));
+    }
+
+    #[test]
+    fn variants_read_through_nesting() {
+        // A variant holding a u32 1 (ReadOne's answer).
+        let one = b"\x01u\x00\x00\x01\x00\x00\x00";
+        assert_eq!(Reader::new(one, false).variant_u32(), Some(1));
+        // A variant holding that variant (Read's answer): the inner
+        // signature follows at once, its value aligned from the start.
+        let nested = b"\x01v\x00\x01u\x00\x00\x00\x02\x00\x00\x00";
+        assert_eq!(Reader::new(nested, false).variant_u32(), Some(2));
+        let big = b"\x01u\x00\x00\x00\x00\x00\x01";
+        assert_eq!(Reader::new(big, true).variant_u32(), Some(1));
+        assert_eq!(Reader::new(b"\x01s\x00", false).variant_u32(), None);
+    }
+
+    #[test]
+    fn signals_carry_the_setting() {
+        let mut w = Writer::default();
+        w.string(NAMESPACE);
+        w.string(KEY);
+        w.signature("u");
+        w.u32(2);
+        let mut r = Reader::new(&w.buf, false);
+        assert_eq!(r.string(), Some(NAMESPACE));
+        assert_eq!(r.string(), Some(KEY));
+        assert_eq!(r.variant_u32().map(Scheme::from_portal), Some(Scheme::Light));
+    }
+
+    #[test]
+    fn addresses_unescape() {
+        assert_eq!(unescape("/run/user/1000/bus"), "/run/user/1000/bus");
+        assert_eq!(unescape("/tmp/a%2cb"), "/tmp/a,b");
+        assert_eq!(unescape("50%"), "50%");
+    }
+}

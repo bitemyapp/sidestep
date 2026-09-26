@@ -41,16 +41,17 @@ pub unsafe extern "C" fn class_addIvar(
     }
     // SAFETY: the caller passes C strings.
     let (name, types) = unsafe { (CStr::from_ptr(name), crate::util::cstr_or(types, c"")) };
-    let rt = cls.rt();
-    let mut ivars = rt.ivars.write().unwrap();
+    let mut ivars = cls.rt().ivars.write().unwrap();
     // SAFETY: ivars are never freed.
     if ivars.iter().any(|i| unsafe { i.get() }.name() == name) {
         return NO;
     }
+    // The class is still being built, by this thread; registering it
+    // publishes the layout.
     let align = 1usize << log2_align;
-    let offset = rt.instance_size.load(Ordering::Acquire).next_multiple_of(align);
-    rt.instance_size.store(offset + size, Ordering::Release);
-    rt.instance_align.fetch_max(align, Ordering::AcqRel);
+    let offset = cls.instance_size().next_multiple_of(align);
+    cls.instance_size.store(offset + size, Ordering::Relaxed);
+    cls.instance_align.fetch_max(align, Ordering::Relaxed);
     let ivar: &'static Ivar = Box::leak(Box::new(Ivar {
         name: leak_cstr(name).as_ptr(),
         types: leak_cstr(types).as_ptr(),

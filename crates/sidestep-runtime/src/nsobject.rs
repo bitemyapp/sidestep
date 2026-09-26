@@ -5,13 +5,13 @@
 
 use std::ffi::c_void;
 
-use objc2::runtime::{AnyClass, AnyObject, AnyProtocol, Bool, ClassBuilder, Imp, Sel};
+use objc2::runtime::{AnyClass, AnyObject, AnyProtocol, Bool, ClassBuilder, Imp, NSZone, Sel};
 use objc2::sel;
 
-use crate::class::{Class, lookup_imp};
+use crate::class::{CUSTOM_ALLOC, Class, lookup_imp};
 use crate::message::method_for;
-use crate::object::{Object, class_createInstance, isa, object_dispose};
-use crate::selector;
+use crate::object::{Object, class_createInstance, create_instance, isa, object_dispose};
+use crate::selector::known;
 
 crate::static_class!(pub NSOBJECT_CLASS, NSOBJECT_METACLASS = "NSObject", load);
 
@@ -38,16 +38,24 @@ fn raw(sel: Sel) -> crate::selector::Sel {
     unsafe { std::mem::transmute::<Sel, crate::selector::Sel>(sel) }
 }
 
+/// One of the runtime's built-in selectors as objc2's `Sel`.
+fn builtin(sel: crate::selector::Sel) -> Sel {
+    // SAFETY: same representation; built-in selectors are never null.
+    unsafe { std::mem::transmute::<crate::selector::Sel, Sel>(sel) }
+}
+
 fn bool(b: bool) -> Bool {
     Bool::new(b)
 }
 
 /// Send a message with no arguments and an object result.
+/// Dispatched like any message, so a receiver whose class hasn't been used
+/// yet (the string class `-description` finds by name, say) is loaded and
+/// initialized first.
 unsafe fn send0(receiver: Id, sel: Sel) -> Id {
     // SAFETY: the caller passes a live receiver.
     unsafe {
-        let cls = isa(obj(receiver));
-        let imp = method_for(cls, raw(sel));
+        let imp = crate::message::objc_msg_lookup(obj(receiver), raw(sel)).expect("lookup never fails");
         let imp: unsafe extern "C-unwind" fn(Id, Sel) -> Id = std::mem::transmute(imp);
         imp(receiver, sel)
     }
@@ -146,7 +154,7 @@ extern "C-unwind" fn is_proxy(_: Id, _: Sel) -> Bool {
     bool(false)
 }
 
-extern "C-unwind" fn zone(_: Id, _: Sel) -> *mut c_void {
+extern "C-unwind" fn zone(_: Id, _: Sel) -> *mut NSZone {
     std::ptr::null_mut()
 }
 
@@ -229,26 +237,51 @@ extern "C-unwind" fn forwarding_target(_: Id, _: Sel, _sel: Sel) -> Id {
     std::ptr::null_mut()
 }
 
+/// Whether `imp` is the root class's `forwardingTargetForSelector:`, which
+/// forwards nothing.
+pub(crate) fn is_default_forwarding_target(imp: Imp) -> bool {
+    let default: extern "C-unwind" fn(Id, Sel, Sel) -> Id = forwarding_target;
+    imp as usize == default as usize
+}
+
 // Class methods.
 
 extern "C-unwind" fn initialize(_: &AnyClass, _: Sel) {}
 
+/// `+alloc` is `+allocWithZone:` with no zone, so a class overriding only
+/// the latter still has every allocation go through it.
 unsafe extern "C-unwind" fn alloc(cls: *const AnyClass, _: Sel) -> Id {
+    if as_class(cls).flags() & CUSTOM_ALLOC != 0 {
+        let sel = builtin(known().alloc_with_zone);
+        // SAFETY: +allocWithZone: takes a zone and returns a +1 object.
+        return unsafe {
+            let imp = crate::message::objc_msg_lookup(cls.cast_mut().cast(), raw(sel)).expect("lookup never fails");
+            let imp: unsafe extern "C-unwind" fn(*const AnyClass, Sel, *mut NSZone) -> Id = std::mem::transmute(imp);
+            imp(cls, sel, std::ptr::null_mut())
+        };
+    }
     // SAFETY: the receiver is a class.
     unsafe { class_createInstance(cls.cast(), 0).cast() }
 }
 
-unsafe extern "C-unwind" fn alloc_with_zone(cls: *const AnyClass, _: Sel, _zone: *mut c_void) -> Id {
+unsafe extern "C-unwind" fn alloc_with_zone(cls: *const AnyClass, _: Sel, _zone: *mut NSZone) -> Id {
     // SAFETY: as above.
     unsafe { class_createInstance(cls.cast(), 0).cast() }
 }
 
 unsafe extern "C-unwind" fn new(cls: *const AnyClass, _: Sel) -> Id {
-    // SAFETY: +alloc and -init follow the usual conventions.
-    unsafe {
-        let obj = send0(cls.cast_mut().cast(), sel!(alloc));
-        send0(obj, sel!(init))
-    }
+    let class = as_class(cls);
+    // +alloc without a message, unless the class overrides it. The class
+    // is loaded, since it is being sent a message, and the acquire load of
+    // its flags makes its layout visible to `create_instance`.
+    let obj = if class.flags() & CUSTOM_ALLOC == 0 {
+        create_instance(class, 0).cast()
+    } else {
+        // SAFETY: +alloc takes no arguments and returns a +1 object.
+        unsafe { send0(cls.cast_mut().cast(), builtin(known().alloc)) }
+    };
+    // SAFETY: -init follows the usual conventions.
+    unsafe { send0(obj, builtin(known().init)) }
 }
 
 extern "C-unwind" fn class_self(cls: *const AnyClass, _: Sel) -> *const AnyClass {
@@ -341,13 +374,10 @@ fn load() {
             class_conforms_to_protocol as extern "C-unwind" fn(_, _, _) -> _,
         );
     }
-    let cls = builder.register();
-    // SAFETY: the NSObject protocol is built in.
-    unsafe {
-        crate::protocol::class_addProtocol(
-            (cls as *const AnyClass).cast_mut().cast(),
-            crate::protocol::nsobject_protocol(),
-        )
-    };
-    let _ = selector::known();
+    // Before registering: once registered, other threads use the class
+    // without waiting for this loader.
+    // SAFETY: the NSObject protocol is built in and never freed.
+    let adopted = builder.add_protocol(unsafe { &*crate::protocol::nsobject_protocol().cast::<AnyProtocol>() });
+    debug_assert!(adopted);
+    builder.register();
 }

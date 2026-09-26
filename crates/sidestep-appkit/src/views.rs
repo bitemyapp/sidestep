@@ -12,12 +12,16 @@
 //! superview disagree about flipping.
 
 use std::cell::{Cell, RefCell};
+use std::ffi::c_void;
 use std::ptr::NonNull;
 
 use objc2::rc::{Allocated, Retained};
-use objc2::runtime::{NSObject, NSObjectProtocol};
+use objc2::runtime::{AnyObject, MessageReceiver, NSObject, NSObjectProtocol, Sel};
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send};
-use objc2_app_kit::{NSAutoresizingMaskOptions, NSClipView, NSEvent, NSResponder, NSView, NSWindow};
+use objc2_app_kit::{
+    NSAutoresizingMaskOptions, NSClipView, NSCursor, NSEvent, NSResponder, NSTextInputContext, NSTrackingArea, NSView,
+    NSWindow,
+};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 
 use crate::graphics::Xf;
@@ -130,10 +134,109 @@ define_class!(
         fn key_up(&self, event: &NSEvent) {
             forward(self, |next| next.keyUp(event));
         }
+
+        #[unsafe(method(performKeyEquivalent:))]
+        fn perform_key_equivalent(&self, _event: &NSEvent) -> bool {
+            false
+        }
+
+        #[unsafe(method(flagsChanged:))]
+        fn flags_changed(&self, event: &NSEvent) {
+            forward(self, |next| next.flagsChanged(event));
+        }
+
+        #[unsafe(method(rightMouseDragged:))]
+        fn right_mouse_dragged(&self, event: &NSEvent) {
+            forward(self, |next| next.rightMouseDragged(event));
+        }
+
+        #[unsafe(method(otherMouseDragged:))]
+        fn other_mouse_dragged(&self, event: &NSEvent) {
+            forward(self, |next| next.otherMouseDragged(event));
+        }
+
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, event: &NSEvent) {
+            forward(self, |next| next.mouseEntered(event));
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, event: &NSEvent) {
+            forward(self, |next| next.mouseExited(event));
+        }
+
+        #[unsafe(method(cursorUpdate:))]
+        fn cursor_update(&self, event: &NSEvent) {
+            forward(self, |next| next.cursorUpdate(event));
+        }
+
+        #[unsafe(method(magnifyWithEvent:))]
+        fn magnify_with_event(&self, event: &NSEvent) {
+            forward(self, |next| next.magnifyWithEvent(event));
+        }
+
+        #[unsafe(method(rotateWithEvent:))]
+        fn rotate_with_event(&self, event: &NSEvent) {
+            forward(self, |next| next.rotateWithEvent(event));
+        }
+
+        #[unsafe(method(swipeWithEvent:))]
+        fn swipe_with_event(&self, event: &NSEvent) {
+            forward(self, |next| next.swipeWithEvent(event));
+        }
+
+        #[unsafe(method(smartMagnifyWithEvent:))]
+        fn smart_magnify_with_event(&self, event: &NSEvent) {
+            forward(self, |next| next.smartMagnifyWithEvent(event));
+        }
+
+        #[unsafe(method(interpretKeyEvents:))]
+        fn interpret_key_events(&self, events: &AnyObject) {
+            crate::keybindings::interpret_all(as_responder(self), events);
+        }
+
+        #[unsafe(method(insertText:))]
+        fn insert_text(&self, text: &AnyObject) {
+            // SAFETY: insertText: takes the text.
+            forward(self, |next| unsafe { msg_send![next, insertText: text] });
+        }
+
+        #[unsafe(method(doCommandBySelector:))]
+        fn do_command_by_selector(&self, selector: Sel) {
+            do_command(self, selector);
+        }
+
+        /// Perform `action` here, or ask up the chain.
+        #[unsafe(method(tryToPerform:with:))]
+        fn try_to_perform(&self, action: Sel, object: Option<&AnyObject>) -> bool {
+            crate::app::perform(self, action, object)
+                // SAFETY: tryToPerform:with: takes a selector and an object.
+                || self.ivars().next.get().is_some_and(|n| unsafe { n.as_ref().tryToPerform_with(action, object) })
+        }
     }
 
     unsafe impl NSObjectProtocol for NSResponderImpl {}
 );
+
+fn as_responder(this: &NSResponderImpl) -> &NSResponder {
+    // SAFETY: NSResponder is NSResponderImpl's class.
+    unsafe { &*(this as *const NSResponderImpl).cast::<NSResponder>() }
+}
+
+/// Perform an editing command if this responder has it, else pass it up
+/// the chain.
+fn do_command(this: &NSResponderImpl, selector: Sel) {
+    // SAFETY: respondsToSelector: takes a selector and returns BOOL.
+    let responds: bool = unsafe { msg_send![this, respondsToSelector: selector] };
+    if responds {
+        // SAFETY: editing commands are action methods: they take the sender
+        // (none, as AppKit sends them) and return nothing.
+        unsafe { MessageReceiver::send_message::<_, ()>(this, selector, (None::<&AnyObject>,)) }
+    } else {
+        // SAFETY: doCommandBySelector: takes a selector.
+        forward(this, |next| unsafe { msg_send![next, doCommandBySelector: selector] });
+    }
+}
 
 /// Pass an event a responder doesn't handle up the chain.
 fn forward(this: &NSResponderImpl, send: impl FnOnce(&NSResponder)) {
@@ -155,6 +258,9 @@ pub(crate) struct ViewIvars {
     hidden: Cell<bool>,
     /// An NSClipView: its document is drawn into a layer of its own.
     is_clip: Cell<bool>,
+    tracking: RefCell<crate::tracking::ViewTracking>,
+    /// Made when first asked for, for views that are text input clients.
+    input_context: RefCell<Option<Retained<NSTextInputContext>>>,
 }
 
 impl ViewIvars {
@@ -168,6 +274,8 @@ impl ViewIvars {
             autoresizing: Cell::new(NSAutoresizingMaskOptions::ViewNotSizable),
             hidden: Cell::new(false),
             is_clip: Cell::new(false),
+            tracking: RefCell::default(),
+            input_context: RefCell::new(None),
         }
     }
 }
@@ -248,6 +356,12 @@ define_class!(
             invalidate(self, bounds(self));
             self.ivars().hidden.set(hidden);
             invalidate(self, bounds(self));
+            moved(self);
+        }
+
+        #[unsafe(method(isHiddenOrHasHiddenAncestor))]
+        fn is_hidden_or_has_hidden_ancestor(&self) -> bool {
+            is_hidden_or_has_hidden_ancestor(self)
         }
 
         #[unsafe(method_id(superview))]
@@ -345,6 +459,65 @@ define_class!(
         fn hit_test(&self, point: NSPoint) -> Option<Retained<NSView>> {
             hit_test(self, point)
         }
+
+        #[unsafe(method(performKeyEquivalent:))]
+        fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
+            // Depth first, subviews in order, until one performs it.
+            subviews(self).iter().any(|sub| !is_hidden(imp(sub)) && sub.performKeyEquivalent(event))
+        }
+
+        // Tracking areas and cursor rectangles (see `tracking`).
+
+        #[unsafe(method(addTrackingArea:))]
+        fn add_tracking_area(&self, area: &NSTrackingArea) {
+            crate::tracking::add_area(self, area);
+        }
+
+        #[unsafe(method(removeTrackingArea:))]
+        fn remove_tracking_area(&self, area: &NSTrackingArea) {
+            crate::tracking::remove_area(self, area);
+        }
+
+        #[unsafe(method(updateTrackingAreas))]
+        fn update_tracking_areas(&self) {}
+
+        #[unsafe(method_id(trackingAreas))]
+        fn tracking_areas(&self) -> Retained<AnyObject> {
+            crate::tracking::areas_array(self)
+        }
+
+        #[unsafe(method(addTrackingRect:owner:userData:assumeInside:))]
+        fn add_tracking_rect(&self, rect: NSRect, owner: &AnyObject, data: *mut c_void, inside: bool) -> isize {
+            crate::tracking::add_tracking_rect(self, rect, owner, data, inside)
+        }
+
+        #[unsafe(method(removeTrackingRect:))]
+        fn remove_tracking_rect(&self, tag: isize) {
+            crate::tracking::remove_tracking_rect(self, tag);
+        }
+
+        #[unsafe(method(addCursorRect:cursor:))]
+        fn add_cursor_rect(&self, rect: NSRect, cursor: &NSCursor) {
+            crate::tracking::add_cursor_rect(self, rect, cursor);
+        }
+
+        #[unsafe(method(removeCursorRect:cursor:))]
+        fn remove_cursor_rect(&self, rect: NSRect, cursor: &NSCursor) {
+            crate::tracking::remove_cursor_rect(self, rect, cursor);
+        }
+
+        #[unsafe(method(discardCursorRects))]
+        fn discard_cursor_rects(&self) {
+            crate::tracking::discard_cursor_rects(self);
+        }
+
+        #[unsafe(method(resetCursorRects))]
+        fn reset_cursor_rects(&self) {}
+
+        #[unsafe(method_id(inputContext))]
+        fn input_context(&self) -> Option<Retained<NSTextInputContext>> {
+            crate::inputcontext::for_view(self)
+        }
     }
 
     unsafe impl NSObjectProtocol for NSViewImpl {}
@@ -375,12 +548,46 @@ pub(crate) fn subviews(view: &NSViewImpl) -> Vec<Retained<NSView>> {
     view.ivars().subviews.borrow().clone()
 }
 
+/// The `i`th subview, if there is one.
+pub(crate) fn subview_at(view: &NSViewImpl, i: usize) -> Option<Retained<NSView>> {
+    view.ivars().subviews.borrow().get(i).cloned()
+}
+
+pub(crate) fn superview_of(view: &NSViewImpl) -> Option<&NSViewImpl> {
+    superview(view)
+}
+
 pub(crate) fn is_clip(view: &NSViewImpl) -> bool {
     view.ivars().is_clip.get()
 }
 
 pub(crate) fn is_hidden(view: &NSViewImpl) -> bool {
     view.ivars().hidden.get()
+}
+
+pub(crate) fn is_hidden_or_has_hidden_ancestor(view: &NSViewImpl) -> bool {
+    is_hidden(view) || superview(view).is_some_and(is_hidden_or_has_hidden_ancestor)
+}
+
+/// How many superviews a view has.
+pub(crate) fn depth(view: &NSViewImpl) -> usize {
+    superview(view).map_or(0, |s| 1 + depth(s))
+}
+
+pub(crate) fn tracking(view: &NSViewImpl) -> &RefCell<crate::tracking::ViewTracking> {
+    &view.ivars().tracking
+}
+
+pub(crate) fn input_context(view: &NSViewImpl) -> &RefCell<Option<Retained<NSTextInputContext>>> {
+    &view.ivars().input_context
+}
+
+/// The view moved in its window, or showed or hid: tracking areas and
+/// cursor rectangles are due for an update.
+fn moved(view: &NSViewImpl) {
+    if let Some(window) = window_of(view) {
+        crate::tracking::views_moved(window, view);
+    }
 }
 
 pub(crate) fn frame(view: &NSViewImpl) -> NSRect {
@@ -544,6 +751,7 @@ fn change_frame(view: &NSViewImpl, new: NSRect) {
         window.layers_moved();
     }
     invalidate(view, bounds(view));
+    moved(view);
 }
 
 fn change_bounds_origin(view: &NSViewImpl, origin: NSPoint) {
@@ -556,6 +764,7 @@ fn change_bounds_origin(view: &NSViewImpl, origin: NSPoint) {
         Some(window) if is_clip(view) => window.layers_moved(),
         _ => invalidate(view, bounds(view)),
     }
+    moved(view);
 }
 
 /// Share a change in the superview's size among a view's flexible margins
@@ -641,6 +850,19 @@ pub(crate) fn set_window(view: &NSViewImpl, window: Option<NonNull<NSWindow>>) {
     if view.ivars().window.get() == window {
         return;
     }
+    if let Some(old) = window_of(view) {
+        old.view_left(view);
+    }
+    // A content view leaving its window (or the window going away) keeps
+    // no link to it as its next responder.
+    if let Some(old) = view.ivars().window.get() {
+        // SAFETY: every view is an NSResponderImpl, whose ivars hold the
+        // link.
+        let responder = unsafe { &*(view as *const NSViewImpl).cast::<NSResponderImpl>() };
+        if responder.ivars().next.get() == Some(old.cast::<NSResponder>()) {
+            responder.ivars().next.set(None);
+        }
+    }
     if is_clip(view)
         && let Some(old) = window_of(view)
     {
@@ -651,6 +873,9 @@ pub(crate) fn set_window(view: &NSViewImpl, window: Option<NonNull<NSWindow>>) {
         && let Some(new) = window_of(view)
     {
         new.add_clip(as_view(view));
+    }
+    if let Some(new) = window_of(view) {
+        crate::tracking::view_joined(new, view);
     }
     for sub in subviews(view) {
         set_window(imp(&sub), window);
@@ -865,11 +1090,18 @@ impl NSScrollViewImpl {
     }
 }
 
+/// A line, for wheels, which scroll by lines.
+const LINE_SCROLL: f64 = 16.0;
+
 fn scroll_by_wheel(clip: &NSClipView, event: &NSEvent) {
-    let dy = event.scrollingDeltaY();
+    let (mut dx, mut dy) = (event.scrollingDeltaX(), event.scrollingDeltaY());
+    if !event.hasPreciseScrollingDeltas() {
+        (dx, dy) = (dx * LINE_SCROLL, dy * LINE_SCROLL);
+    }
     let bounds = clip.bounds();
-    // Positive deltas scroll toward the top of the document.
+    // Positive deltas scroll toward the top and the left of the document.
     let y = if clip.isFlipped() { bounds.origin.y - dy } else { bounds.origin.y + dy };
-    let target = clip.constrainBoundsRect(NSRect::new(NSPoint::new(bounds.origin.x, y), bounds.size));
+    let x = bounds.origin.x - dx;
+    let target = clip.constrainBoundsRect(NSRect::new(NSPoint::new(x, y), bounds.size));
     clip.scrollToPoint(target.origin);
 }

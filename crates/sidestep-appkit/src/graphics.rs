@@ -1,17 +1,18 @@
 //! Drawing during `drawRect:`. Nothing here touches pixels: `NSColor`,
-//! `NSBezierPath` and string drawing append [`Op`]s to the recorder of the
-//! view being drawn, in its layer's coordinates, for the render thread.
+//! `NSBezierPath` and string drawing (`string_drawing`) append [`Op`]s to
+//! the recorder of the view being drawn, in its layer's coordinates, for
+//! the render thread.
 
 use std::cell::{Cell, RefCell};
 
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
-use objc2::{AnyThread, ClassType, DefinedClass, define_class, msg_send, sel};
-use objc2_app_kit::{NSColor, NSFont, NSFontAttributeName, NSForegroundColorAttributeName};
-use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString};
+use objc2::runtime::{NSObject, NSObjectProtocol};
+use objc2::{AnyThread, DefinedClass, define_class, msg_send};
+use objc2_app_kit::NSColor;
+use objc2_foundation::{NSPoint, NSRect, NSSize};
 
 use crate::protocol::{Color, Op, Rect};
-use crate::text::fonts;
+pub(crate) use crate::string_drawing::install_string_drawing;
 
 /// Maps a view's coordinates to its layer's: `x' = x + tx`, `y' = a·y + ty`
 /// with `a = ±1` (views may be flipped relative to each other).
@@ -60,6 +61,8 @@ pub(crate) struct Recorder {
     pub clip: Rect,
     fill: Color,
     stroke: Color,
+    /// Text drawn before being laid out, to lay out together at the end.
+    pub pending: crate::string_drawing::Pending,
 }
 
 thread_local!(static CURRENT: RefCell<Option<Recorder>> = const { RefCell::new(None) });
@@ -72,12 +75,19 @@ pub(crate) fn begin_recording() {
             clip: Rect::default(),
             fill: [0.0, 0.0, 0.0, 1.0],
             stroke: [0.0, 0.0, 0.0, 1.0],
+            pending: Default::default(),
         })
     });
 }
 
 pub(crate) fn end_recording() -> Vec<Op> {
-    CURRENT.with(|c| c.borrow_mut().take().map(|r| r.ops).unwrap_or_default())
+    let Some(rec) = CURRENT.with(|c| c.borrow_mut().take()) else { return Vec::new() };
+    crate::string_drawing::finish(rec.ops, rec.pending)
+}
+
+/// Whether a view is being drawn.
+pub(crate) fn recording() -> bool {
+    CURRENT.with(|c| c.borrow().is_some())
 }
 
 /// Position the recorder for the view about to draw.
@@ -93,7 +103,7 @@ pub(crate) fn push(op: Op) {
     with_recorder(|r| r.ops.push(op));
 }
 
-fn with_recorder(f: impl FnOnce(&mut Recorder)) {
+pub(crate) fn with_recorder(f: impl FnOnce(&mut Recorder)) {
     CURRENT.with(|c| {
         if let Some(r) = c.borrow_mut().as_mut() {
             f(r)
@@ -221,75 +231,14 @@ impl NSColorImpl {
 }
 
 fn color(r: f64, g: f64, b: f64, a: f64) -> Retained<NSColorImpl> {
+    crate::load_shell::<objc2_app_kit::NSColor>();
     let this = NSColorImpl::alloc().set_ivars(ColorIvars { rgba: [r, g, b, a] });
     unsafe { msg_send![super(this), init] }
 }
 
-fn color_of(c: &NSColor) -> Color {
+pub(crate) fn color_of(c: &NSColor) -> Color {
     // SAFETY: every NSColor is an instance of NSColorImpl.
     unsafe { &*(c as *const NSColor).cast::<NSColorImpl>() }.color()
-}
-
-// NSFont
-
-pub(crate) struct FontIvars {
-    size: f64,
-    mono: bool,
-}
-
-define_class!(
-    #[unsafe(super(NSObject))]
-    #[name = "NSFont"]
-    #[ivars = FontIvars]
-    pub(crate) struct NSFontImpl;
-
-    impl NSFontImpl {
-        #[unsafe(method_id(systemFontOfSize:))]
-        fn system(size: f64) -> Retained<Self> {
-            font(size, false)
-        }
-
-        #[unsafe(method_id(boldSystemFontOfSize:))]
-        fn bold_system(size: f64) -> Retained<Self> {
-            font(size, false)
-        }
-
-        #[unsafe(method_id(monospacedSystemFontOfSize:weight:))]
-        fn monospaced_system(size: f64, _weight: f64) -> Retained<Self> {
-            font(size, true)
-        }
-
-        #[unsafe(method_id(userFixedPitchFontOfSize:))]
-        fn user_fixed_pitch(size: f64) -> Option<Retained<Self>> {
-            Some(font(size, true))
-        }
-
-        #[unsafe(method_id(fontWithName:size:))]
-        fn with_name(name: &NSString, size: f64) -> Option<Retained<Self>> {
-            let name = name.to_string().to_lowercase();
-            let mono = ["mono", "menlo", "monaco", "courier", "code"].iter().any(|m| name.contains(m));
-            Some(font(size, mono))
-        }
-
-        #[unsafe(method(pointSize))]
-        fn point_size(&self) -> f64 {
-            self.ivars().size
-        }
-    }
-
-    unsafe impl NSObjectProtocol for NSFontImpl {}
-);
-
-fn font(size: f64, mono: bool) -> Retained<NSFontImpl> {
-    let size = if size > 0.0 { size } else { 13.0 };
-    let this = NSFontImpl::alloc().set_ivars(FontIvars { size, mono });
-    unsafe { msg_send![super(this), init] }
-}
-
-fn font_of(f: &NSFont) -> (f32, bool) {
-    // SAFETY: every NSFont is an instance of NSFontImpl.
-    let f = unsafe { &*(f as *const NSFont).cast::<NSFontImpl>() };
-    (f.ivars().size as f32, f.ivars().mono)
 }
 
 // NSBezierPath
@@ -383,6 +332,7 @@ define_class!(
 );
 
 fn path() -> Retained<NSBezierPathImpl> {
+    crate::load_shell::<objc2_app_kit::NSBezierPath>();
     let this = NSBezierPathImpl::alloc().set_ivars(PathIvars { line_width: Cell::new(1.0), ..Default::default() });
     unsafe { msg_send![super(this), init] }
 }
@@ -391,90 +341,4 @@ fn rect_points(r: NSRect) -> Vec<[f64; 2]> {
     let (x0, y0) = (r.origin.x, r.origin.y);
     let (x1, y1) = (x0 + r.size.width, y0 + r.size.height);
     vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
-}
-
-// String drawing: methods AppKit adds to NSString. They're defined on a
-// helper class for their encodings, then copied onto NSString.
-
-type Attributes = NSDictionary<NSString, AnyObject>;
-
-fn attributes(attrs: Option<&Attributes>) -> (f32, bool, Color) {
-    let (mut size, mut mono, mut color) = (12.0, false, [0.0, 0.0, 0.0, 1.0]);
-    if let Some(attrs) = attrs {
-        // SAFETY: the keys are constants this crate exports.
-        let (font_key, color_key) = unsafe { (NSFontAttributeName, NSForegroundColorAttributeName) };
-        if let Some(f) = attrs.objectForKey(font_key).and_then(|o| o.downcast::<NSFont>().ok()) {
-            (size, mono) = font_of(&f);
-        }
-        if let Some(c) = attrs.objectForKey(color_key).and_then(|o| o.downcast::<NSColor>().ok()) {
-            color = color_of(&c);
-        }
-    }
-    (size, mono, color)
-}
-
-fn this_string<T>(this: &T) -> String {
-    // SAFETY: these methods are installed on NSString and only ever run with
-    // a string as the receiver.
-    unsafe { &*(this as *const T).cast::<NSString>() }.to_string()
-}
-
-define_class!(
-    #[unsafe(super(NSObject))]
-    #[name = "_SidestepStringDrawing"]
-    struct StringDrawing;
-
-    impl StringDrawing {
-        #[unsafe(method(drawAtPoint:withAttributes:))]
-        fn draw_at_point(&self, point: NSPoint, attrs: Option<&Attributes>) {
-            draw_string(this_string(self), point, attrs);
-        }
-
-        #[unsafe(method(drawInRect:withAttributes:))]
-        fn draw_in_rect(&self, rect: NSRect, attrs: Option<&Attributes>) {
-            draw_string(this_string(self), rect.origin, attrs);
-        }
-
-        #[unsafe(method(sizeWithAttributes:))]
-        fn size_with_attributes(&self, attrs: Option<&Attributes>) -> NSSize {
-            let (size, mono, _) = attributes(attrs);
-            let text = this_string(self);
-            let (_, line) = fonts().line_metrics(mono, size);
-            NSSize::new(fonts().width(mono, size, &text) as f64, line as f64)
-        }
-    }
-);
-
-fn draw_string(text: String, point: NSPoint, attrs: Option<&Attributes>) {
-    let (size, mono, color) = attributes(attrs);
-    let (ascent, line) = fonts().line_metrics(mono, size);
-    with_recorder(|rec| {
-        // The point is the corner of the text's box nearest the view's
-        // origin: its top in a flipped view, its bottom otherwise.
-        let (x, ya) = rec.xf.point(point.x, point.y);
-        let (_, yb) = rec.xf.point(point.x, point.y + line as f64);
-        let top = ya.min(yb) as f32;
-        rec.ops.push(Op::Text { x: x as f32, baseline: top + ascent, size, mono, text, color, clip: rec.clip });
-    });
-}
-
-/// Copy the string drawing methods onto NSString.
-pub(crate) fn install_string_drawing() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let helper = StringDrawing::class();
-        let target = <NSString as ClassType>::class();
-        for sel in [sel!(drawAtPoint:withAttributes:), sel!(drawInRect:withAttributes:), sel!(sizeWithAttributes:)] {
-            let method = helper.instance_method(sel).expect("helper method");
-            // SAFETY: the implementation treats its receiver as an NSString.
-            unsafe {
-                objc2::ffi::class_addMethod(
-                    (target as *const objc2::runtime::AnyClass).cast_mut(),
-                    sel,
-                    method.implementation(),
-                    objc2::ffi::method_getTypeEncoding(method),
-                );
-            }
-        }
-    });
 }

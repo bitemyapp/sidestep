@@ -19,6 +19,20 @@ mod string;
 mod thread;
 mod timer;
 
+// Collections and values.
+mod array;
+mod deque;
+mod describe;
+mod enumerator;
+mod guarded;
+mod index_set;
+mod null;
+mod number;
+mod set;
+mod table;
+mod util;
+mod value;
+
 pub use const_string::{ConstStr, ConstantString};
 pub use notification::notification;
 pub use timer::{fire_due_timers, next_timer_deadline};
@@ -57,3 +71,49 @@ sidestep_runtime::static_class!(
     CONSTANT_STRING_META = "_SidestepConstantString",
     const_string::load
 );
+
+// Collections and values.
+
+sidestep_runtime::static_class!(pub NSARRAY, NSARRAY_META = "NSArray", || {
+    let _ = array::NSArrayImpl::class();
+});
+
+sidestep_runtime::static_class!(pub NSMUTABLEARRAY, NSMUTABLEARRAY_META = "NSMutableArray", || {
+    let _ = array::NSMutableArrayImpl::class();
+});
+
+sidestep_runtime::static_class!(pub NSMUTABLEDICTIONARY, NSMUTABLEDICTIONARY_META = "NSMutableDictionary", || {
+    let _ = dictionary::NSMutableDictionaryImpl::class();
+});
+
+sidestep_runtime::static_class!(pub NSSET, NSSET_META = "NSSet", || {
+    let _ = set::NSSetImpl::class();
+});
+
+sidestep_runtime::static_class!(pub NSMUTABLESET, NSMUTABLESET_META = "NSMutableSet", || {
+    let _ = set::NSMutableSetImpl::class();
+});
+
+sidestep_runtime::static_class!(pub NSENUMERATOR, NSENUMERATOR_META = "NSEnumerator", || {
+    let _ = enumerator::NSEnumeratorImpl::class();
+});
+
+sidestep_runtime::static_class!(pub NSVALUE, NSVALUE_META = "NSValue", || {
+    let _ = value::NSValueImpl::class();
+});
+
+sidestep_runtime::static_class!(pub NSNUMBER, NSNUMBER_META = "NSNumber", || {
+    let _ = number::NSNumberImpl::class();
+});
+
+sidestep_runtime::static_class!(pub NSNULL, NSNULL_META = "NSNull", || {
+    let _ = null::NSNullImpl::class();
+});
+
+sidestep_runtime::static_class!(pub NSINDEXSET, NSINDEXSET_META = "NSIndexSet", || {
+    let _ = index_set::NSIndexSetImpl::class();
+});
+
+sidestep_runtime::static_class!(pub NSMUTABLEINDEXSET, NSMUTABLEINDEXSET_META = "NSMutableIndexSet", || {
+    let _ = index_set::NSMutableIndexSetImpl::class();
+});

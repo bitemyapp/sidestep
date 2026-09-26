@@ -7,3 +7,9 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends sway grim fonts-dejavu-core \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --create-home compositor
+# Clipboard tools, to test copy and paste between programs under the
+# headless compositor, and a session bus, to test reading desktop settings.
+RUN apt-get update && apt-get install -y --no-install-recommends wl-clipboard dbus-daemon && rm -rf /var/lib/apt/lists/*
+# Text: fonts for shaping, fallback and emoji tests and screenshots (Latin,
+# Arabic, Hebrew and more in noto-core; CJK; color emoji).
+RUN apt-get update && apt-get install -y --no-install-recommends fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji && rm -rf /var/lib/apt/lists/*

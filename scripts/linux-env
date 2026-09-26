@@ -3,7 +3,7 @@
 # `in_container COMMAND...`. Each git worktree gets a target volume of its
 # own, so builds in parallel worktrees don't overwrite each other's output.
 repo=$(cd "$(dirname "$0")/.." && pwd)
-image=${SIDESTEP_LINUX_IMAGE:-sidestep-linux:1.96-trixie}
+image=${SIDESTEP_LINUX_IMAGE:-sidestep-linux:1.96-trixie-4}
 target=sidestep-target
 if [ "$(git -C "$repo" rev-parse --git-dir 2>/dev/null)" != "$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null)" ]; then
   target=sidestep-target-$(basename "$repo" | tr -c 'A-Za-z0-9_.\n-' '-')
@@ -22,5 +22,6 @@ in_container() {
     -e RUST_BACKTRACE="${RUST_BACKTRACE:-0}" \
     -e CARGO_BUILD_JOBS -e RUSTFLAGS \
     -e SCENARIO -e SLICE_QUIT_AFTER -e SHOT -e SHOT_AFTER -e SIZE \
+    -e SCALE -e FLOATING -e THEN -e THEN_AFTER -e SIDESTEP_DECORATIONS -e SIDESTEP_THEME -e SIDESTEP_NO_FRACTIONAL_SCALE \
     "$image" "$@"
 }

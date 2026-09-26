@@ -8,11 +8,33 @@ publish = false
 [dependencies]
 objc2.workspace = true
 block2.workspace = true
-objc2-foundation = { workspace = true, features = ["NSString", "NSObject", "NSThread", "NSZone", "NSGeometry", "NSDictionary", "NSEnumerator"] }
-objc2-app-kit = { workspace = true, features = ["NSResponder", "NSView", "NSClipView", "NSScrollView", "NSEvent"] }
+objc2-foundation = { workspace = true, features = ["NSString", "NSObject", "NSThread", "NSZone", "NSGeometry", "NSDictionary", "NSEnumerator", "NSArray", "NSSet", "NSValue", "NSNull", "NSRange", "NSObjCRuntime", "block2", "NSIndexSet"] }
+objc2-app-kit = { workspace = true, features = ["NSResponder", "NSView", "NSClipView", "NSScrollView", "NSEvent", "NSFont", "NSFontDescriptor", "NSParagraphStyle", "NSText", "NSStringDrawing", "NSAttributedString", "NSColor", "NSCell", "objc2-core-foundation"] }
 sidestep.workspace = true
+
+# Apple raises NSExceptions where Sidestep panics; tests catch them to read
+# the reason.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+objc2 = { workspace = true, features = ["exception"] }
 
 # AppKit belongs to the main thread, which the test harness doesn't run on.
 [[test]]
 name = "appkit"
+harness = false
+
+# Input, windows and pasteboards (appkit_input).
+[dev-dependencies]
+objc2-app-kit = { workspace = true, features = ["NSEvent", "NSWindow", "NSGraphics", "NSGraphicsContext", "NSPasteboard", "NSResponder", "NSView", "NSCursor", "NSColor", "NSTrackingArea", "NSTextInputClient", "NSTextInputContext", "NSWindowScripting", "NSApplication", "block2", "objc2-core-foundation"] }
+objc2-foundation = { workspace = true, features = ["NSRange", "NSAttributedString"] }
+
+[[test]]
+name = "appkit_input"
+harness = false
+
+[[test]]
+name = "appkit_keybindings"
+harness = false
+
+[[test]]
+name = "text"
 harness = false

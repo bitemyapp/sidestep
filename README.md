@@ -11,8 +11,11 @@ objc2 and its framework crates stay unmodified.
 (classes, subclassing, ivars, `super`, reference counting, autorelease pools,
 weak references, protocols, blocks). Foundation has strings, a dictionary,
 timers and threads. AppKit runs a first slice on Wayland: an application,
-windows, views with `drawRect:`, mouse and scroll events, scroll views, and
-fills, paths and text. See the [roadmap](docs/roadmap.md).
+windows (with GNOME-style decorations where the compositor leaves them to
+the program), views with `drawRect:`, keyboard, mouse and scroll events,
+scroll views, fills and paths at any display scale, text with fonts from
+fontconfig, shaping, bidi, fallback and color emoji, and the clipboard for
+strings. See the [roadmap](docs/roadmap.md).
 
 [objc2]: https://github.com/madsmtm/objc2
 
@@ -57,7 +60,9 @@ clicking. `SCENARIO` chooses what it does:
 | `anim` | the page, with a spinner turning at 60 fps in the top right corner |
 | `scroll` | a 2000-line list in an `NSScrollView`, scrolling at 120 px/s |
 
-`SLICE_QUIT_AFTER=<seconds>` makes it quit by itself.
+`SLICE_QUIT_AFTER=<seconds>` makes it quit by itself. `examples/text-demo`
+shows text: weights, kerning and ligatures, CJK, emoji, right-to-left and
+mixed scripts, alignment, wrapping and truncation.
 
 **macOS** runs it on Apple's AppKit:
 
@@ -67,11 +72,11 @@ SCENARIO=scroll cargo run -p appkit-slice
 ```
 
 **Linux** runs the same source on Sidestep. It needs a Wayland session (X11
-isn't supported yet) and a DejaVu or Noto font where distributions usually
-put them. Otherwise, point `SIDESTEP_FONT` and `SIDESTEP_MONO_FONT` at a sans
-and a monospaced `.ttf`. Nothing else is needed:
-no libobjc, no GNUstep, no system libraries beyond the C runtime every Rust
-program links.
+isn't supported yet). Fonts come from the system's fontconfig, loaded when
+the program runs, as every desktop has it; `SIDESTEP_FONT` and
+`SIDESTEP_MONO_FONT` can name a sans and a monospaced font file to use
+instead. Nothing else is needed: no libobjc, no GNUstep, and nothing to
+build against beyond the C runtime every Rust program links.
 
 ```sh
 cargo run --release -p appkit-slice
@@ -91,6 +96,22 @@ open target/anim.png
 ```
 
 The first run builds the container image, which takes a few minutes.
+
+`SCALE=2` (or `1.5`) renders at that output scale, with `SIZE` in pixels
+(`SIDESTEP_NO_FRACTIONAL_SCALE=1` makes a program use integer scales only);
+`FLOATING=1` floats windows as most desktops do; and
+`SIDESTEP_DECORATIONS=client` makes the program draw its own title bar, as
+it does on GNOME (sway draws one otherwise):
+
+```sh
+SIDESTEP_DECORATIONS=client FLOATING=1 SCALE=2 SIZE=2560x1600 SHOT=/work/target/hidpi.png \
+  scripts/linux-run scripts/headless-wayland /target/release/appkit-slice
+```
+
+`examples/appkit-input` prints every key, mouse and window event it gets and
+exercises the clipboard, several windows and child windows, tracking areas,
+cursors, input methods, nested and modal event loops. `THEN` runs a command (an input injector,
+`wl-copy`) while the program runs.
 
 On Linux, drawing is recorded on the main thread and rasterized on a
 separate render thread, and scroll views are tiled onto Wayland subsurfaces;

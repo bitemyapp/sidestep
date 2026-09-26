@@ -12,8 +12,26 @@ sidestep-runtime.workspace = true
 sidestep-foundation.workspace = true
 objc2 = { workspace = true, features = ["gnustep-2-1"] }
 block2 = { workspace = true, features = ["gnustep-2-1"] }
-objc2-foundation = { workspace = true, features = ["gnustep-2-1", "NSObject", "NSString", "NSDictionary", "NSGeometry", "NSNotification", "NSTimer", "NSDate", "NSZone", "block2"] }
-objc2-app-kit = { workspace = true, features = ["gnustep-2-1", "NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics", "NSColor", "NSFont", "NSFontDescriptor", "NSBezierPath", "NSStringDrawing", "NSAttributedString", "NSEvent", "NSScrollView", "NSClipView", "NSRunningApplication", "objc2-core-foundation"] }
+objc2-foundation = { workspace = true, features = ["gnustep-2-1", "NSObject", "NSString", "NSDictionary", "NSGeometry", "NSNotification", "NSTimer", "NSDate", "NSZone", "NSRange", "block2"] }
+objc2-app-kit = { workspace = true, features = ["gnustep-2-1", "NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics", "NSColor", "NSFont", "NSFontDescriptor", "NSBezierPath", "NSStringDrawing", "NSAttributedString", "NSEvent", "NSScrollView", "NSClipView", "NSRunningApplication", "objc2-core-foundation", "NSPasteboard", "NSText", "NSCursor", "NSTrackingArea", "NSTextInputContext", "NSParagraphStyle", "NSCell"] }
 smithay-client-toolkit = { version = "0.19", default-features = false, features = ["calloop"] }
 tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }
-fontdue = "0.9"
+# Keymaps and compose sequences, in pure Rust: no libxkbcommon at build or
+# run time.
+kbvm = { version = "0.2", default-features = false, features = ["compose"] }
+# Themed cursors, for compositors without wp_cursor_shape_v1.
+wayland-cursor = "0.31"
+# Non-blocking clipboard pipes; already built for the Wayland crates.
+rustix = { version = "1", default-features = false, features = ["std"] }
+# Text: parley lays out (bidi, line breaking, shaping with harfrust),
+# fontique finds fonts through the system's fontconfig, loaded at run time
+# with dlopen, and swash rasterizes glyphs. See docs/architecture.md.
+parley = { version = "0.11.1", default-features = false, features = ["std", "system"] }
+fontique = { version = "0.11.1", default-features = false, features = ["std", "system", "fontconfig-dlopen"] }
+skrifa = { version = "0.44", default-features = false, features = ["std"] }
+swash = { version = "0.2.10", default-features = false, features = ["std", "scale", "render"] }
+# Routes ICU's diagnostics (parley's segmenter has no CJK dictionary, and
+# says so on every CJK line in debug builds) to the `log` crate.
+icu_provider = { version = "2.1", default-features = false, features = ["logging"] }
+# Which characters are emoji, to draw them in color (compiled into the binary).
+icu_properties = { version = "2.1", default-features = false, features = ["compiled_data"] }

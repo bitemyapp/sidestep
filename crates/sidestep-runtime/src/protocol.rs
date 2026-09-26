@@ -5,6 +5,7 @@ use std::ffi::{CStr, c_char, c_uint};
 use std::sync::{LazyLock, Mutex, RwLock};
 
 use crate::class::{Class, class_ref};
+use crate::property::{Attribute, Property};
 use crate::selector::Sel;
 use crate::util::{Shared, leak_cstr, lock, malloc_array};
 use crate::{Bool, NO, YES};
@@ -17,11 +18,19 @@ struct MethodDesc {
     instance: bool,
 }
 
+#[derive(Clone, Copy)]
+struct PropertyDesc {
+    property: Shared<Property>,
+    required: bool,
+    instance: bool,
+}
+
 #[derive(Default)]
 struct Inner {
     registered: bool,
     protocols: Vec<Shared<Protocol>>,
     methods: Vec<MethodDesc>,
+    properties: Vec<PropertyDesc>,
 }
 
 // SAFETY: selectors and type strings are immutable and never freed.
@@ -102,6 +111,22 @@ impl Protocol {
     fn name(&self) -> &'static CStr {
         // SAFETY: leaked C string.
         unsafe { CStr::from_ptr(self.name) }
+    }
+
+    fn property(&self, name: &CStr, instance: bool) -> Option<&'static Property> {
+        let (own, parents) = {
+            let inner = lock(&self.inner);
+            let own = inner
+                .properties
+                .iter()
+                // SAFETY: properties are never freed.
+                .map(|d| (unsafe { d.property.get() }, d))
+                .find(|(p, d)| d.required && d.instance == instance && p.name() == name)
+                .map(|(p, _)| p);
+            (own, inner.protocols.clone())
+        };
+        // SAFETY: protocols are never freed.
+        own.or_else(|| parents.iter().find_map(|p| unsafe { p.get() }.property(name, instance)))
     }
 
     fn conforms_to(&self, other: &Protocol) -> bool {
@@ -224,16 +249,67 @@ pub unsafe extern "C" fn protocol_addProtocol(proto: *mut Protocol, addition: *c
     }
 }
 
-/// Properties are accepted and ignored for now.
+/// Recorded only while the protocol is under construction, as on Apple's
+/// runtime.
 #[unsafe(no_mangle)]
-pub extern "C" fn protocol_addProperty(
-    _proto: *mut Protocol,
-    _name: *const c_char,
-    _attributes: *const std::ffi::c_void,
-    _count: c_uint,
-    _is_required: Bool,
-    _is_instance: Bool,
+pub unsafe extern "C" fn protocol_addProperty(
+    proto: *mut Protocol,
+    name: *const c_char,
+    attributes: *const Attribute,
+    count: c_uint,
+    is_required: Bool,
+    is_instance: Bool,
 ) {
+    // SAFETY: the caller passes a protocol or null.
+    let Some(proto) = (unsafe { proto.as_ref() }) else { return };
+    let mut inner = lock(&proto.inner);
+    if inner.registered {
+        return;
+    }
+    // SAFETY: forwarded contract.
+    if let Some(property) = unsafe { Property::new(name, attributes, count) } {
+        inner.properties.push(PropertyDesc {
+            property: Shared(property),
+            required: is_required != NO,
+            instance: is_instance != NO,
+        });
+    }
+}
+
+/// The protocol's own required instance properties.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn protocol_copyPropertyList(
+    proto: *const Protocol,
+    out_len: *mut c_uint,
+) -> *mut *const Property {
+    // SAFETY: the caller passes a protocol or null.
+    let list: Vec<*const Property> = match unsafe { proto.as_ref() } {
+        Some(p) => {
+            lock(&p.inner).properties.iter().filter(|d| d.required && d.instance).map(|d| d.property.0).collect()
+        }
+        None => Vec::new(),
+    };
+    // SAFETY: the caller passes a valid or null pointer.
+    unsafe { malloc_array(&list, out_len) }
+}
+
+/// Searches the protocol and the protocols it adopts. Apple's runtime
+/// reports no optional properties here, and neither does this one.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn protocol_getProperty(
+    proto: *const Protocol,
+    name: *const c_char,
+    is_required: Bool,
+    is_instance: Bool,
+) -> *const Property {
+    // SAFETY: the caller passes a protocol or null, and a C string or null.
+    let (Some(proto), false) = (unsafe { proto.as_ref() }, name.is_null()) else { return std::ptr::null() };
+    if is_required == NO {
+        return std::ptr::null();
+    }
+    // SAFETY: as above.
+    let name = unsafe { CStr::from_ptr(name) };
+    proto.property(name, is_instance != NO).map_or(std::ptr::null(), |p| p as *const Property)
 }
 
 #[unsafe(no_mangle)]

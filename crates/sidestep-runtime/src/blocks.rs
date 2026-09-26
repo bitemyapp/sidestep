@@ -36,7 +36,9 @@ const BYREF_CALLER: c_int = 128;
 struct BlockLayout {
     isa: *const Class,
     flags: AtomicI32,
-    reserved: i32,
+    /// In heap blocks, which the runtime makes: the side tables the block
+    /// is in (see [`mark`]).
+    reserved: AtomicI32,
     invoke: *const c_void,
     descriptor: *const Descriptor,
 }
@@ -122,6 +124,7 @@ pub unsafe extern "C-unwind" fn _Block_copy(block: *const c_void) -> *mut c_void
         let c = &mut *copy.cast::<BlockLayout>();
         c.isa = &_NSConcreteMallocBlock;
         c.flags.store((flags & !REFCOUNT_MASK) | BLOCK_NEEDS_FREE | REFCOUNT_ONE, Ordering::Relaxed);
+        c.reserved.store(0, Ordering::Relaxed);
         if flags & BLOCK_HAS_COPY_DISPOSE != 0 {
             let helper: CopyHelper = std::mem::transmute(descriptor.slot(0));
             helper(copy, block);
@@ -147,8 +150,69 @@ pub unsafe extern "C-unwind" fn _Block_release(block: *const c_void) {
             let helper: DisposeHelper = std::mem::transmute((*b.descriptor).slot(1));
             helper(block);
         }
+        let tables = b.reserved.load(Ordering::Relaxed);
+        if tables != 0 {
+            crate::object::forget(block.cast_mut().cast(), tables as usize);
+        }
         c_free(block.cast_mut());
     }
+}
+
+/// Whether `block` is a heap block: one the runtime frees, and so must
+/// take out of the side tables when it does.
+///
+/// # Safety
+/// `block` must be a live block.
+pub(crate) unsafe fn is_heap(block: *mut Object) -> bool {
+    // SAFETY: guaranteed by the caller.
+    unsafe { layout(block.cast()) }.flags.load(Ordering::Relaxed) & BLOCK_NEEDS_FREE != 0
+}
+
+/// Record that the heap block `block` is in a side table: `table` is the
+/// object header's bit for it (`WEAKLY_REFERENCED`, `HAS_ASSOCIATED`,
+/// `SYNCHRONIZED`), which `_Block_release` hands to `object::forget` when
+/// it frees the block. As with objects, the caller holds a reference, so
+/// the final release comes after.
+///
+/// # Safety
+/// `block` must be a live heap block.
+pub(crate) unsafe fn mark(block: *mut Object, table: usize) {
+    // SAFETY: guaranteed by the caller.
+    let reserved = &unsafe { layout(block.cast()) }.reserved;
+    let bit = table as i32;
+    if reserved.load(Ordering::Relaxed) & bit == 0 {
+        reserved.fetch_or(bit, Ordering::Relaxed);
+    }
+}
+
+/// Retain a heap block unless its last reference is already gone, for weak
+/// loads.
+///
+/// # Safety
+/// `block` must be a heap block whose memory is still allocated.
+pub(crate) unsafe fn try_retain(block: *mut Object) -> bool {
+    // SAFETY: guaranteed by the caller.
+    let flags = &unsafe { layout(block.cast()) }.flags;
+    let mut old = flags.load(Ordering::Relaxed);
+    loop {
+        match old & REFCOUNT_MASK {
+            0 => return false,
+            REFCOUNT_MASK => return true,
+            _ => match flags.compare_exchange_weak(old, old + REFCOUNT_ONE, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return true,
+                Err(actual) => old = actual,
+            },
+        }
+    }
+}
+
+/// Whether a heap block's last reference is gone.
+///
+/// # Safety
+/// As for [`try_retain`].
+pub(crate) unsafe fn is_released(block: *mut Object) -> bool {
+    // SAFETY: guaranteed by the caller.
+    unsafe { layout(block.cast()) }.flags.load(Ordering::Acquire) & REFCOUNT_MASK == 0
 }
 
 /// `-retain` / `objc_retain` on a block: counts heap blocks, leaves stack and
@@ -309,6 +373,10 @@ static MALLOC_BLOCK_META: Class = Class::meta_shell(&_NSConcreteMallocBlock, "__
 pub static _NSConcreteGlobalBlock: Class =
     Class::shell_with_flags(&GLOBAL_BLOCK_META, "__NSGlobalBlock__\0", load_global, BLOCK);
 static GLOBAL_BLOCK_META: Class = Class::meta_shell(&_NSConcreteGlobalBlock, "__NSGlobalBlock__\0");
+
+crate::__linked_class!(_NSConcreteStackBlock);
+crate::__linked_class!(_NSConcreteMallocBlock);
+crate::__linked_class!(_NSConcreteGlobalBlock);
 
 type Id = *mut AnyObject;
 
