@@ -24,6 +24,18 @@
 //! when another client's selection brings something new. An offer that
 //! only repeats the last one (same types, same text) isn't news. A write of
 //! ours is current while the counter hasn't moved since.
+//!
+//! What another client offers is read once per offer: answers are kept
+//! until the next one, so a program reading a list of files item by item
+//! (or twice) makes one read. The drag pasteboard is served the same way
+//! from the drag and drop offer under the pointer ([`Source::Drag`]); a
+//! drag's data is read only when the program asks for it, and each drag
+//! that enters a window is a change.
+//!
+//! Data the program promised (`declareTypes:owner:`, item data providers)
+//! is offered by type; when another client asks for it, the render thread
+//! asks the main thread, which asks the owner (see
+//! `pasteboard::provide_for_render`) and hands the bytes back.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
@@ -43,43 +55,38 @@ pub(crate) const READ_AHEAD_LIMIT: usize = 1 << 20;
 /// The most a read takes: a longer selection reads as nothing.
 pub(crate) const READ_LIMIT: usize = 256 << 20;
 
-/// Types' data by MIME type, as offered to other clients.
+/// Types' data by MIME type, as offered to other clients. `None` is data
+/// the program promised: the main thread makes it when a client asks.
 pub(crate) struct Contents {
-    pub items: Vec<(String, Arc<[u8]>)>,
+    pub items: Vec<(String, Option<Arc<[u8]>>)>,
 }
 
 impl Contents {
-    pub fn data(&self, mime: &str) -> Option<Arc<[u8]>> {
+    /// The data offered as `mime`: `Some(None)` if it's promised.
+    pub fn data(&self, mime: &str) -> Option<Option<Arc<[u8]>>> {
         self.items.iter().find(|(m, _)| m == mime).map(|(_, d)| d.clone())
     }
+}
+
+/// Which offer of another client's a pasteboard reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Source {
+    /// The selection: the general pasteboard.
+    Selection,
+    /// The drag and drop offer under the pointer: the drag pasteboard.
+    Drag,
 }
 
 /// The MIME type that marks a selection as ours, so the render thread
 /// doesn't read back what this process offers.
 pub(crate) fn owner_mime() -> &'static str {
     static MIME: OnceLock<String> = OnceLock::new();
-    MIME.get_or_init(|| format!("application/x-sidestep-owner;pid={}", std::process::id()))
-}
-
-/// The MIME types a pasteboard type is offered and read as, best first.
-pub(crate) fn mime_types(pasteboard_type: &str) -> Vec<String> {
-    let known: &[&str] = match pasteboard_type {
-        "public.utf8-plain-text" => &["text/plain;charset=utf-8", "UTF8_STRING", "text/plain", "STRING", "TEXT"],
-        "public.html" => &["text/html"],
-        "public.rtf" => &["text/rtf", "application/rtf"],
-        "public.png" => &["image/png"],
-        "public.tiff" => &["image/tiff"],
-        "public.file-url" => &["text/uri-list"],
-        "public.url" => &["text/x-moz-url", "text/uri-list"],
-        other if other.contains('/') => return vec![other.to_owned()],
-        _ => &[],
-    };
-    known.iter().map(|m| m.to_string()).collect()
+    MIME.get_or_init(|| format!("{};pid={}", crate::pasteboard_types::OWNER_PREFIX, std::process::id()))
 }
 
 /// The best text type among `mimes`.
 pub(crate) fn text_mime(mimes: &[String]) -> Option<String> {
-    mime_types("public.utf8-plain-text").into_iter().find(|m| mimes.contains(m))
+    crate::pasteboard_types::TEXT_MIMES.iter().find(|m| mimes.iter().any(|o| o == *m)).map(|m| m.to_string())
 }
 
 /// Where the text of another client's selection stands.
@@ -111,9 +118,19 @@ struct Foreign {
     /// The main thread's reads under way, by token, with the answer once
     /// it comes. Answers for tokens not here (their reader gave up) go.
     reads: HashMap<u64, Option<Option<Vec<u8>>>>,
+    /// What reads of this offer brought, by MIME type.
+    cache: Vec<(String, Option<Arc<[u8]>>)>,
+}
+
+impl Foreign {
+    fn new() -> Self {
+        // Until the compositor tells us of a selection, there is no text.
+        Foreign { offer: 0, mimes: Vec::new(), text: Text::Read(None), reads: HashMap::new(), cache: Vec::new() }
+    }
 }
 
 pub(crate) struct Shared {
+    source: Source,
     /// `changeCount`.
     generation: AtomicIsize,
     /// The program has read the general pasteboard: reading ahead is worth
@@ -124,19 +141,33 @@ pub(crate) struct Shared {
     next_token: AtomicU64,
 }
 
+/// The selection's state.
 pub(crate) fn shared() -> &'static Shared {
-    static SHARED: OnceLock<Shared> = OnceLock::new();
-    SHARED.get_or_init(|| Shared {
-        generation: AtomicIsize::new(1),
-        used: AtomicBool::new(false),
-        // Until the compositor tells us of a selection, there is no text.
-        foreign: Mutex::new(Foreign { offer: 0, mimes: Vec::new(), text: Text::Read(None), reads: HashMap::new() }),
-        arrived: Condvar::new(),
-        next_token: AtomicU64::new(1),
-    })
+    shared_for(Source::Selection)
+}
+
+pub(crate) fn shared_for(source: Source) -> &'static Shared {
+    static SELECTION: OnceLock<Shared> = OnceLock::new();
+    static DRAG: OnceLock<Shared> = OnceLock::new();
+    let cell = match source {
+        Source::Selection => &SELECTION,
+        Source::Drag => &DRAG,
+    };
+    cell.get_or_init(|| Shared::new(source))
 }
 
 impl Shared {
+    fn new(source: Source) -> Self {
+        Shared {
+            source,
+            generation: AtomicIsize::new(1),
+            used: AtomicBool::new(false),
+            foreign: Mutex::new(Foreign::new()),
+            arrived: Condvar::new(),
+            next_token: AtomicU64::new(1),
+        }
+    }
+
     pub fn change_count(&self) -> isize {
         self.used.store(true, Ordering::Relaxed);
         self.generation.load(Ordering::Acquire)
@@ -158,6 +189,7 @@ impl Shared {
     pub fn foreign_offered(&self, mimes: Vec<String>, has_text: bool) -> Option<u64> {
         let mut f = self.lock();
         f.offer += 1;
+        f.cache.clear();
         let read_ahead = has_text && self.used.load(Ordering::Relaxed);
         if read_ahead {
             // The generation moves once the text shows whether this is news.
@@ -182,6 +214,19 @@ impl Shared {
         drop(f);
         self.arrived.notify_all();
         read_ahead.then_some(offer)
+    }
+
+    /// A drag entered one of our windows offering `mimes` (or left, with
+    /// none): always a change, as each drag is new.
+    pub fn drag_offered(&self, mimes: Vec<String>) {
+        let mut f = self.lock();
+        f.offer += 1;
+        f.cache.clear();
+        f.text = Text::Unread;
+        f.mimes = mimes;
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        drop(f);
+        self.arrived.notify_all();
     }
 
     /// The text of `offer` was read ahead, or couldn't be.
@@ -261,17 +306,49 @@ impl Shared {
     }
 
     /// Read the foreign selection as `mime`, waiting for [`READ_TIMEOUT`]
-    /// at most.
+    /// at most. Each type is read once per offer.
     pub fn read_foreign(&self, mime: &str) -> Option<Vec<u8>> {
+        self.read_cached(mime).map(|data| data.to_vec())
+    }
+
+    /// As [`read_foreign`](Self::read_foreign), shared.
+    pub fn read_cached(&self, mime: &str) -> Option<Arc<[u8]>> {
+        self.read_offer(mime, None)
+    }
+
+    /// Which offer is current, for data read later to be read from it or
+    /// not at all.
+    pub fn current_offer(&self) -> u64 {
+        self.lock().offer
+    }
+
+    /// Read `mime` from offer `from` (none: the current one), or nothing if
+    /// another offer has come since.
+    pub fn read_offer(&self, mime: &str, from: Option<u64>) -> Option<Arc<[u8]>> {
         self.used.store(true, Ordering::Relaxed);
         let token = self.next_token.fetch_add(1, Ordering::Relaxed);
-        self.lock().reads.insert(token, None);
-        crate::app::send_if_running(ToRender::ReadSelection { mime: mime.to_owned(), token });
+        let offer = {
+            let mut f = self.lock();
+            if from.is_some_and(|o| o != f.offer) {
+                return None;
+            }
+            if let Some((_, data)) = f.cache.iter().find(|(m, _)| m == mime) {
+                return data.clone();
+            }
+            f.reads.insert(token, None);
+            f.offer
+        };
+        let source = self.source;
+        crate::app::send_if_running(ToRender::ReadSelection { mime: mime.to_owned(), token, source });
         let deadline = Instant::now() + READ_TIMEOUT;
         let mut f = self.lock();
         loop {
             if let Some(Some(_)) = f.reads.get(&token) {
-                return f.reads.remove(&token).flatten().flatten();
+                let data: Option<Arc<[u8]>> = f.reads.remove(&token).flatten().flatten().map(Into::into);
+                if f.offer == offer {
+                    f.cache.push((mime.to_owned(), data.clone()));
+                }
+                return data;
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
@@ -289,13 +366,9 @@ mod tests {
     use super::*;
 
     fn fresh() -> Shared {
-        Shared {
-            generation: AtomicIsize::new(1),
-            used: AtomicBool::new(true),
-            foreign: Mutex::new(Foreign { offer: 0, mimes: Vec::new(), text: Text::Read(None), reads: HashMap::new() }),
-            arrived: Condvar::new(),
-            next_token: AtomicU64::new(1),
-        }
+        let s = Shared::new(Source::Selection);
+        s.used.store(true, Ordering::Relaxed);
+        s
     }
 
     fn text() -> Vec<String> {
@@ -334,6 +407,16 @@ mod tests {
         // An answer for an older offer is ignored.
         s.text_arrived(0, ReadAhead::Text(Some("late".into())));
         assert_eq!(s.foreign_text(), None);
+    }
+
+    #[test]
+    fn each_drag_is_a_change() {
+        let s = Shared::new(Source::Drag);
+        let count = s.change_count();
+        s.drag_offered(text());
+        s.drag_offered(text());
+        assert_eq!(s.change_count(), count + 2);
+        assert_eq!(s.foreign_mimes(), text());
     }
 
     #[test]

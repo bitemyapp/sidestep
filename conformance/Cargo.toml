@@ -38,3 +38,17 @@ harness = false
 [[test]]
 name = "text"
 harness = false
+
+# Pasteboards, drag and drop, and screens (pasteboard, drag_defaults,
+# screen). A table of its own, so the features merge with the ones above.
+[target.'cfg(all())'.dev-dependencies]
+objc2-app-kit = { workspace = true, features = ["NSPasteboard", "NSPasteboardItem", "NSDragging", "NSScreen", "NSGraphics"] }
+objc2-foundation = { workspace = true, features = ["NSData", "NSArray"] }
+
+[[test]]
+name = "drag_defaults"
+harness = false
+
+[[test]]
+name = "screen"
+harness = false

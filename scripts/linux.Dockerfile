@@ -13,3 +13,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends wl-clipboard db
 # Text: fonts for shaping, fallback and emoji tests and screenshots (Latin,
 # Arabic, Hebrew and more in noto-core; CJK; color emoji).
 RUN apt-get update && apt-get install -y --no-install-recommends fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji && rm -rf /var/lib/apt/lists/*
+# A virtual keyboard (wtype), so a program under the headless compositor
+# gets keyboard focus and an input serial to set the clipboard with.
+RUN apt-get update && apt-get install -y --no-install-recommends wtype && rm -rf /var/lib/apt/lists/*

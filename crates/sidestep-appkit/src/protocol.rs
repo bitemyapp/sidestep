@@ -256,12 +256,34 @@ pub(crate) enum ToRender {
     SetSelection {
         contents: Option<std::sync::Arc<crate::clipboard::Contents>>,
     },
-    /// Read the system selection as `mime`; the answer arrives in the
-    /// clipboard's shared state under `token`.
+    /// Read the system selection (or the drag and drop offer) as `mime`;
+    /// the answer arrives in the clipboard's shared state under `token`.
     ReadSelection {
         mime: String,
         token: u64,
+        source: crate::clipboard::Source,
     },
+    /// The answer to `FromRender::ProvideSelection` `token`: the promised
+    /// data, or nothing.
+    SelectionData {
+        token: u64,
+        data: Option<std::sync::Arc<[u8]>>,
+    },
+    /// The answer to the latest drag position or source actions: the MIME
+    /// type the destination takes (none: it refuses), and the Wayland
+    /// actions it accepts and prefers.
+    DndStatus {
+        mime: Option<String>,
+        actions: u32,
+        preferred: u32,
+    },
+    /// The drop is over; `performed` if the destination took the data.
+    DndFinish {
+        performed: bool,
+    },
+    /// Publish the outputs for `NSScreen` (sent first, to start the render
+    /// thread, when a program asks for screens before showing a window).
+    PublishOutputs,
     /// Whether the window's first responder takes text from input methods,
     /// and where its caret is, in points from the top left of the content.
     TextInput {
@@ -409,5 +431,41 @@ pub(crate) enum FromRender {
         window: WindowId,
         commit: Option<String>,
         preedit: (String, i32, i32),
+    },
+    /// Another client asked for a type of our selection that the program
+    /// promised: answer `ToRender::SelectionData` under `token`.
+    ProvideSelection {
+        mime: String,
+        token: u64,
+    },
+    /// A drag entered the window's content at `x`, `y` (points from its top
+    /// left), offering `mimes`, the source allowing Wayland `actions`.
+    /// This, `DndMotion` and `DndActions` each get a `ToRender::DndStatus`;
+    /// they and the rest are about the window the drag entered last.
+    DndEnter {
+        window: WindowId,
+        x: f64,
+        y: f64,
+        mimes: Vec<String>,
+        actions: u32,
+    },
+    DndMotion {
+        x: f64,
+        y: f64,
+    },
+    /// The source's allowed actions changed.
+    DndActions {
+        actions: u32,
+    },
+    DndLeave,
+    /// Dropped where the drag last was; answered with `ToRender::DndFinish`.
+    DndDrop,
+    /// The outputs changed; the new ones are published for `NSScreen`.
+    ScreensChanged,
+    /// The outputs the window's surface is on, in the order it entered
+    /// them.
+    WindowOutputs {
+        window: WindowId,
+        outputs: Vec<u32>,
     },
 }

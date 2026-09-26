@@ -761,7 +761,7 @@ define_class!(
 
         #[unsafe(method_id(screen))]
         fn screen(&self) -> Option<Retained<AnyObject>> {
-            None
+            crate::screen::window_screen(self).map(|s| Retained::into_super(Retained::into_super(s)))
         }
 
         #[unsafe(method_id(windowController))]

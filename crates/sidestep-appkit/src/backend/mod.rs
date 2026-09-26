@@ -29,7 +29,9 @@
 //! cover a window's own surface completely.
 
 mod decor;
+mod dnd;
 mod keyboard;
+mod outputs;
 mod seat;
 mod selection;
 mod textinput;
@@ -208,6 +210,7 @@ fn run(channel: Channel<ToRender>, to_main: mpsc::Sender<FromRender>) {
         exit: false,
     };
     seat::bind_existing(&mut state, &globals);
+    outputs::started(&state, &globals);
     while !state.exit {
         if event_loop.dispatch(None, &mut state).is_err() {
             break;
@@ -522,7 +525,11 @@ impl State {
             ToRender::Present { window } => self.present(window),
             ToRender::CloseWindow { window } => self.close_window(window),
             ToRender::SetSelection { contents } => selection::set(self, contents),
-            ToRender::ReadSelection { mime, token } => selection::read(self, mime, token),
+            ToRender::ReadSelection { mime, token, source } => selection::read(self, mime, token, source),
+            ToRender::SelectionData { token, data } => selection::provided(self, token, data),
+            ToRender::DndStatus { mime, actions, preferred } => dnd::status(self, mime, actions, preferred),
+            ToRender::DndFinish { performed } => dnd::finish(self, performed),
+            ToRender::PublishOutputs => outputs::requested(self),
             ToRender::TextInput { window, wanted, caret } => textinput::set_wanted(self, window, wanted, caret),
             ToRender::ResetTextInput { window } => textinput::reset(self, window),
             ToRender::SetParent { window, parent } => {
@@ -660,6 +667,7 @@ impl State {
 
     fn close_window(&mut self, window: WindowId) {
         let Some(win) = self.windows.remove(&window) else { return };
+        outputs::window_closed(window);
         self.roles.retain(|_, role| role.window() != window);
         seat::window_closed(self, window);
         if let Some(f) = &win.fractional {
@@ -1122,8 +1130,24 @@ impl CompositorHandler for State {
     fn transform_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlSurface, _: wl_output::Transform) {}
     // Frame callbacks are requested with a FrameTag instead; see below.
     fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlSurface, _: u32) {}
-    fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlSurface, _: &wl_output::WlOutput) {}
-    fn surface_leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlSurface, _: &wl_output::WlOutput) {}
+    fn surface_enter(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        surface: &WlSurface,
+        output: &wl_output::WlOutput,
+    ) {
+        outputs::surface_moved(self, surface, output, true);
+    }
+    fn surface_leave(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        surface: &WlSurface,
+        output: &wl_output::WlOutput,
+    ) {
+        outputs::surface_moved(self, surface, output, false);
+    }
 }
 
 impl OutputHandler for State {
@@ -1132,11 +1156,15 @@ impl OutputHandler for State {
     }
     fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
         self.outputs_changed();
+        outputs::changed(self);
     }
     fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
         self.outputs_changed();
+        outputs::changed(self);
     }
-    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
+        outputs::changed(self);
+    }
 }
 
 impl WindowHandler for State {
@@ -1186,6 +1214,7 @@ impl WindowHandler for State {
         let width = configure.new_size.0.map_or(win.width, |w| w.get());
         let height = configure.new_size.1.map_or(win.height, |h| h.get().saturating_sub(bar));
         let before = win.configured.then_some((win.width, win.height));
+        outputs::learned(self, id, None, configure.suggested_bounds);
         self.apply_limits(id);
         self.resize(id, width, height);
         // A first configure or a new size has the main thread draw and
@@ -1310,6 +1339,7 @@ impl Dispatch<WpFractionalScaleV1, WindowId> for State {
         if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event {
             // In 120ths.
             state.set_scale(*window, scale as f64 / 120.0);
+            outputs::learned(state, *window, Some(scale as f64 / 120.0), None);
         }
     }
 }

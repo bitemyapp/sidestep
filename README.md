@@ -14,8 +14,8 @@ timers and threads. AppKit runs a first slice on Wayland: an application,
 windows (with GNOME-style decorations where the compositor leaves them to
 the program), views with `drawRect:`, keyboard, mouse and scroll events,
 scroll views, fills and paths at any display scale, text with fonts from
-fontconfig, shaping, bidi, fallback and color emoji, and the clipboard for
-strings. See the [roadmap](docs/roadmap.md).
+fontconfig, shaping, bidi, fallback and color emoji, the clipboard with any
+type, drag and drop into windows, and screens. See the [roadmap](docs/roadmap.md).
 
 [objc2]: https://github.com/madsmtm/objc2
 

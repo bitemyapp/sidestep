@@ -30,9 +30,12 @@ pub(crate) fn load_shell<T: ClassType>() {
 
 mod app;
 mod backend;
+mod category;
 mod clipboard;
 mod cursor;
 mod desktop;
+#[doc(hidden)]
+pub mod drag;
 mod event;
 mod font;
 mod graphics;
@@ -42,8 +45,11 @@ mod keycodes;
 mod momentum;
 mod paragraph;
 mod pasteboard;
+mod pasteboard_item;
+mod pasteboard_types;
 mod protocol;
 mod raster;
+mod screen;
 mod string_drawing;
 #[cfg(test)]
 mod test_objects;
@@ -58,6 +64,7 @@ sidestep_runtime::static_class!(pub NSRESPONDER, NSRESPONDER_META = "NSResponder
 
 sidestep_runtime::static_class!(pub NSVIEW, NSVIEW_META = "NSView", || {
     let _ = views::NSViewImpl::class();
+    drag::install_view_methods();
 });
 
 sidestep_runtime::static_class!(pub NSCLIPVIEW, NSCLIPVIEW_META = "NSClipView", || {
@@ -70,6 +77,12 @@ sidestep_runtime::static_class!(pub NSSCROLLVIEW, NSSCROLLVIEW_META = "NSScrollV
 
 sidestep_runtime::static_class!(pub NSWINDOW, NSWINDOW_META = "NSWindow", || {
     let _ = window::NSWindowImpl::class();
+    drag::install_window_methods();
+    screen::install_window_methods();
+});
+
+sidestep_runtime::static_class!(pub NSSCREEN, NSSCREEN_META = "NSScreen", || {
+    let _ = screen::NSScreenImpl::class();
 });
 
 sidestep_runtime::static_class!(pub NSAPPLICATION, NSAPPLICATION_META = "NSApplication", || {
@@ -115,6 +128,10 @@ sidestep_runtime::static_class!(pub NSBEZIERPATH, NSBEZIERPATH_META = "NSBezierP
 
 sidestep_runtime::static_class!(pub NSPASTEBOARD, NSPASTEBOARD_META = "NSPasteboard", || {
     let _ = pasteboard::NSPasteboardImpl::class();
+});
+
+sidestep_runtime::static_class!(pub NSPASTEBOARDITEM, NSPASTEBOARDITEM_META = "NSPasteboardItem", || {
+    let _ = pasteboard_item::NSPasteboardItemImpl::class();
 });
 
 sidestep_runtime::static_class!(pub NSCURSOR, NSCURSOR_META = "NSCursor", || {

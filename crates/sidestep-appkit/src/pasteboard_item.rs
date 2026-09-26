@@ -1,0 +1,463 @@
+//! `NSPasteboardItem`: one thing on a pasteboard, with a value per type.
+//!
+//! A pasteboard is a list of items. Writing an object makes an item of it
+//! (an `NSPasteboardItem` is written as itself), and the pasteboard's own
+//! `setString:forType:` and the like write to its first item. Items are
+//! live: one written to a pasteboard shows what's written to it later, and
+//! once the pasteboard is cleared it's empty. It stays tied to that
+//! pasteboard, and writing it to another panics, as AppKit raises.
+//!
+//! A value is bytes, a string (kept as the string, its UTF-8 made when
+//! something needs bytes), a property list (kept as the object: Sidestep doesn't
+//! serialize property lists yet), a promise, or data another program
+//! offers. Promises come from `declareTypes:owner:` (the owner is asked
+//! with `pasteboard:provideDataForType:`), from an item's data provider
+//! (`pasteboard:item:provideDataForType:`), and from objects written with
+//! the promised writing option (`pasteboardPropertyListForType:`); each
+//! is asked when the type is first read, with no lock held, so it can
+//! write the value back. Another program's data is read through the
+//! clipboard's transport when first asked for, and kept.
+//!
+//! Items may be used from any thread, as AppKit allows: their values are
+//! behind a mutex, which is never held while other code runs.
+
+use std::ffi::c_void;
+use std::ptr::NonNull;
+use std::sync::{Arc, Mutex, MutexGuard};
+
+use objc2::rc::{Allocated, Retained};
+use objc2::runtime::{AnyClass, AnyObject, NSObject, NSObjectProtocol};
+use objc2::{DefinedClass, Message, define_class, msg_send, sel};
+use objc2_app_kit::{NSPasteboard, NSPasteboardItem};
+use objc2_foundation::{NSArray, NSData, NSString};
+
+use crate::clipboard::{self, Source};
+use crate::pasteboard_types::{self as types, STRING};
+
+/// An object another thread may be handed: an owner or data provider the
+/// program gave (AppKit calls them on whichever thread reads), or a
+/// property list, copied when it was set, so immutable.
+pub(crate) struct Object(pub Retained<AnyObject>);
+
+// SAFETY: see the type's documentation. Property lists are immutable
+// Foundation objects once copied, which Foundation lets threads share;
+// owners and providers are messaged from the reading thread as AppKit
+// messages them.
+unsafe impl Send for Object {}
+// SAFETY: as for Send.
+unsafe impl Sync for Object {}
+
+impl Clone for Object {
+    fn clone(&self) -> Self {
+        Object(self.0.clone())
+    }
+}
+
+/// Who makes a promised value.
+#[derive(Clone)]
+pub(crate) enum Provider {
+    /// Declared with no owner: nothing will come.
+    Nobody,
+    /// A pasteboard owner (`pasteboard:provideDataForType:`).
+    Owner(Object),
+    /// An item's data provider (`pasteboard:item:provideDataForType:`).
+    Item(Object),
+    /// A written object (`pasteboardPropertyListForType:`).
+    Writer(Object),
+}
+
+pub(crate) enum Value {
+    Data(Arc<[u8]>),
+    String(Retained<NSString>),
+    PropertyList(Object),
+    Promised(Provider),
+    /// Another program's, as `mime` from `source`'s `offer` (read as
+    /// nothing once another offer has come).
+    Foreign {
+        mime: Arc<str>,
+        source: Source,
+        offer: u64,
+    },
+}
+
+/// A value as read, with no lock held.
+pub(crate) enum Read {
+    Data(Arc<[u8]>),
+    String(Retained<NSString>),
+    PropertyList(Retained<AnyObject>),
+}
+
+impl Read {
+    /// As bytes: a string's UTF-8; a property list has none.
+    pub(crate) fn bytes(&self) -> Option<Arc<[u8]>> {
+        match self {
+            Read::Data(d) => Some(d.clone()),
+            Read::String(s) => Some(s.to_string().into_bytes().into()),
+            Read::PropertyList(_) => None,
+        }
+    }
+
+    /// As a string: bytes if they're UTF-8.
+    pub(crate) fn string(&self) -> Option<Retained<NSString>> {
+        match self {
+            Read::Data(d) => std::str::from_utf8(d).ok().map(NSString::from_str),
+            Read::String(s) => Some(s.clone()),
+            Read::PropertyList(_) => None,
+        }
+    }
+
+    /// As a property list: a string is one; bytes aren't read as one.
+    pub(crate) fn property_list(&self) -> Option<Retained<AnyObject>> {
+        match self {
+            Read::Data(_) => None,
+            Read::String(s) => Some(Retained::into_super(Retained::into_super(s.clone()))),
+            Read::PropertyList(p) => Some(p.clone()),
+        }
+    }
+}
+
+/// A pasteboard, which is never freed (see `pasteboard`), as items point
+/// back to it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BoardRef(NonNull<NSPasteboard>);
+
+// SAFETY: pasteboards live as long as the program and may be used from any
+// thread.
+unsafe impl Send for BoardRef {}
+// SAFETY: as for Send.
+unsafe impl Sync for BoardRef {}
+
+impl BoardRef {
+    pub(crate) fn new(board: &NSPasteboard) -> Self {
+        BoardRef(NonNull::from(board))
+    }
+
+    pub(crate) fn get(&self) -> &'static NSPasteboard {
+        // SAFETY: pasteboards are never freed.
+        unsafe { self.0.as_ref() }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct State {
+    /// Types and their values, in the order written.
+    pub entries: Vec<(String, Value)>,
+    /// The pasteboard it was written to, which it stays tied to.
+    pub board: Option<BoardRef>,
+}
+
+pub(crate) struct ItemIvars {
+    state: Mutex<State>,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "NSPasteboardItem"]
+    #[ivars = ItemIvars]
+    pub(crate) struct NSPasteboardItemImpl;
+
+    impl NSPasteboardItemImpl {
+        #[unsafe(method_id(init))]
+        fn init(this: Allocated<Self>) -> Retained<Self> {
+            let this = this.set_ivars(ItemIvars { state: Mutex::new(State::default()) });
+            // SAFETY: NSObject's designated initializer.
+            unsafe { msg_send![super(this), init] }
+        }
+
+        #[unsafe(method_id(types))]
+        fn types(&self) -> Retained<NSArray<NSString>> {
+            self.type_list()
+        }
+
+        #[unsafe(method_id(availableTypeFromArray:))]
+        fn available_type_from_array(&self, wanted: &NSArray<NSString>) -> Option<Retained<NSString>> {
+            let state = self.lock();
+            wanted.iter().find(|w| {
+                let kind = types::from_ns(w);
+                state.entries.iter().any(|(k, _)| *k == kind)
+            })
+        }
+
+        #[unsafe(method(setDataProvider:forTypes:))]
+        fn set_data_provider_for_types(&self, provider: &AnyObject, kinds: &NSArray<NSString>) -> bool {
+            let provider = Object(provider.retain());
+            for kind in kinds.iter() {
+                self.set(types::from_ns(&kind), Value::Promised(Provider::Item(provider.clone())));
+            }
+            true
+        }
+
+        #[unsafe(method(setData:forType:))]
+        fn set_data_for_type(&self, data: &NSData, kind: &NSString) -> bool {
+            self.set(types::from_ns(kind), Value::Data(bytes_of(data)));
+            true
+        }
+
+        #[unsafe(method(setString:forType:))]
+        fn set_string_for_type(&self, string: &NSString, kind: &NSString) -> bool {
+            self.set(types::from_ns(kind), string_value(string));
+            true
+        }
+
+        #[unsafe(method(setPropertyList:forType:))]
+        fn set_property_list_for_type(&self, list: &AnyObject, kind: &NSString) -> bool {
+            self.set(types::from_ns(kind), property_list_value(list));
+            true
+        }
+
+        #[unsafe(method_id(dataForType:))]
+        fn data_for_type(&self, kind: &NSString) -> Option<Retained<NSData>> {
+            let bytes = self.read(&types::from_ns(kind)).and_then(|r| r.bytes());
+            bytes.and_then(|b| data_object(&b))
+        }
+
+        #[unsafe(method_id(stringForType:))]
+        fn string_for_type(&self, kind: &NSString) -> Option<Retained<NSString>> {
+            self.read(&types::from_ns(kind)).and_then(|r| r.string())
+        }
+
+        #[unsafe(method_id(propertyListForType:))]
+        fn property_list_for_type(&self, kind: &NSString) -> Option<Retained<AnyObject>> {
+            self.read(&types::from_ns(kind)).and_then(|r| r.property_list())
+        }
+
+        // NSPasteboardWriting: an item writes its own types.
+        #[unsafe(method_id(writableTypesForPasteboard:))]
+        fn writable_types_for_pasteboard(&self, _board: &NSPasteboard) -> Retained<NSArray<NSString>> {
+            self.type_list()
+        }
+
+        #[unsafe(method_id(pasteboardPropertyListForType:))]
+        fn pasteboard_property_list_for_type(&self, kind: &NSString) -> Option<Retained<AnyObject>> {
+            match self.read(&types::from_ns(kind)) {
+                Some(Read::Data(d)) => data_object(&d).map(|d| Retained::into_super(Retained::into_super(d))),
+                other => other.and_then(|r| r.property_list()),
+            }
+        }
+    }
+
+    unsafe impl NSObjectProtocol for NSPasteboardItemImpl {}
+);
+
+/// Any item as the implementation class.
+pub(crate) fn imp(item: &NSPasteboardItem) -> &NSPasteboardItemImpl {
+    // SAFETY: NSPasteboardItem is NSPasteboardItemImpl's class, and
+    // subclasses share its layout.
+    unsafe { &*(item as *const NSPasteboardItem).cast::<NSPasteboardItemImpl>() }
+}
+
+/// A new, empty item.
+pub(crate) fn new_item() -> Retained<NSPasteboardItem> {
+    crate::load_shell::<NSPasteboardItem>();
+    NSPasteboardItem::new()
+}
+
+/// A new item holding `entries`, tied to `board`.
+pub(crate) fn item_with(entries: Vec<(String, Value)>, board: BoardRef) -> Retained<NSPasteboardItem> {
+    let item = new_item();
+    {
+        let mut state = imp(&item).lock();
+        state.entries = entries;
+        state.board = Some(board);
+    }
+    item
+}
+
+impl NSPasteboardItemImpl {
+    fn type_list(&self) -> Retained<NSArray<NSString>> {
+        let kinds: Vec<Retained<NSString>> = self.lock().entries.iter().map(|(k, _)| NSString::from_str(k)).collect();
+        NSArray::from_retained_slice(&kinds)
+    }
+
+    pub(crate) fn lock(&self) -> MutexGuard<'_, State> {
+        self.ivars().state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Set a type's value, keeping its place if it had one, and tell the
+    /// pasteboard it's on.
+    pub(crate) fn set(&self, kind: String, value: Value) {
+        let mut state = self.lock();
+        let old = match state.entries.iter_mut().find(|(k, _)| *k == kind) {
+            Some((_, v)) => Some(std::mem::replace(v, value)),
+            None => {
+                state.entries.push((kind, value));
+                None
+            }
+        };
+        let board = state.board;
+        drop(state);
+        // Released with no lock held: it may be the last reference to an
+        // object whose dealloc runs code.
+        drop(old);
+        if let Some(board) = board {
+            crate::pasteboard::item_changed(board.get());
+        }
+    }
+
+    /// Whether the item has a value (or a promise) for `kind`.
+    pub(crate) fn has(&self, kind: &str) -> bool {
+        self.lock().entries.iter().any(|(k, _)| k == kind)
+    }
+
+    /// The value of `kind`, asking whoever promised it, or reading it from
+    /// the program that offers it, the first time.
+    pub(crate) fn read(&self, kind: &str) -> Option<Read> {
+        let (board, pending) = {
+            let mut state = self.lock();
+            let board = state.board;
+            let (_, value) = state.entries.iter_mut().find(|(k, _)| k == kind)?;
+            match value {
+                Value::Data(d) => return Some(Read::Data(d.clone())),
+                Value::String(s) => return Some(Read::String(s.clone())),
+                Value::PropertyList(p) => return Some(Read::PropertyList(p.0.clone())),
+                Value::Promised(provider) => (board, Pending::Promise(provider.clone())),
+                Value::Foreign { mime, source, offer } => (board, Pending::Foreign(mime.clone(), *source, *offer)),
+            }
+        };
+        match pending {
+            Pending::Promise(provider) => {
+                self.ask(provider, kind, board);
+                // Whatever the provider wrote, if it wrote anything.
+                let state = self.lock();
+                let (_, value) = state.entries.iter().find(|(k, _)| k == kind)?;
+                match value {
+                    Value::Data(d) => Some(Read::Data(d.clone())),
+                    Value::String(s) => Some(Read::String(s.clone())),
+                    Value::PropertyList(p) => Some(Read::PropertyList(p.0.clone())),
+                    _ => None,
+                }
+            }
+            Pending::Foreign(mime, source, offer) => {
+                let shared = clipboard::shared_for(source);
+                let data = if kind == STRING && source == Source::Selection {
+                    // Read ahead when it was offered.
+                    let text = shared.foreign_text().map(|t| Arc::<[u8]>::from(t.into_bytes()));
+                    text.filter(|_| shared.current_offer() == offer)
+                } else {
+                    shared.read_offer(&mime, Some(offer))
+                };
+                let data = data?;
+                let mut state = self.lock();
+                if let Some((_, value @ Value::Foreign { .. })) = state.entries.iter_mut().find(|(k, _)| k == kind) {
+                    *value = Value::Data(data.clone());
+                }
+                Some(Read::Data(data))
+            }
+        }
+    }
+
+    /// Ask `provider` for `kind`, with no lock held; what it gives is
+    /// written to the item.
+    fn ask(&self, provider: Provider, kind: &str, board: Option<BoardRef>) {
+        let kind_ns = NSString::from_str(kind);
+        match provider {
+            Provider::Nobody => {}
+            Provider::Owner(owner) => {
+                let Some(board) = board else { return };
+                // SAFETY: owners implement pasteboard:provideDataForType:,
+                // which takes the pasteboard and the type.
+                let _: () = unsafe { msg_send![&*owner.0, pasteboard: board.get(), provideDataForType: &*kind_ns] };
+            }
+            Provider::Item(provider) => {
+                let board = board.map(|b| b.get());
+                // SAFETY: data providers implement
+                // pasteboard:item:provideDataForType:.
+                let _: () = unsafe {
+                    msg_send![&*provider.0, pasteboard: board, item: as_item(self), provideDataForType: &*kind_ns]
+                };
+            }
+            Provider::Writer(object) => {
+                // SAFETY: pasteboard writers implement
+                // pasteboardPropertyListForType:, returning an object or nil.
+                let list: Option<Retained<AnyObject>> =
+                    unsafe { msg_send![&*object.0, pasteboardPropertyListForType: &*kind_ns] };
+                if let Some(list) = list {
+                    self.set(kind.to_owned(), value_of_property_list(&list));
+                }
+            }
+        }
+    }
+}
+
+enum Pending {
+    Promise(Provider),
+    Foreign(Arc<str>, Source, u64),
+}
+
+pub(crate) fn as_item(item: &NSPasteboardItemImpl) -> &NSPasteboardItem {
+    // SAFETY: as in `imp`.
+    unsafe { &*(item as *const NSPasteboardItemImpl).cast::<NSPasteboardItem>() }
+}
+
+pub(crate) fn string_value(string: &NSString) -> Value {
+    // Strings may be mutable; the item keeps an immutable copy.
+    // SAFETY: -copy returns an immutable string, retained.
+    let copy: Retained<NSString> = unsafe { msg_send![string, copy] };
+    Value::String(copy)
+}
+
+pub(crate) fn property_list_value(list: &AnyObject) -> Value {
+    // SAFETY: property lists are copyable Foundation objects; -copy
+    // returns an immutable one, retained.
+    let copy: Retained<AnyObject> = unsafe { msg_send![list, copy] };
+    Value::PropertyList(Object(copy))
+}
+
+/// What an object returned from `pasteboardPropertyListForType:` becomes:
+/// a string, bytes, or another property list.
+pub(crate) fn value_of_property_list(list: &AnyObject) -> Value {
+    if let Some(string) = list.downcast_ref::<NSString>() {
+        return string_value(string);
+    }
+    if let Some(class) = AnyClass::get(c"NSData")
+        // SAFETY: isKindOfClass: takes a class and returns BOOL.
+        && unsafe { msg_send![list, isKindOfClass: class] }
+    {
+        // SAFETY: the object is an NSData.
+        let data = unsafe { &*(list as *const AnyObject).cast::<NSData>() };
+        return Value::Data(bytes_of(data));
+    }
+    property_list_value(list)
+}
+
+/// An NSData's bytes.
+pub(crate) fn bytes_of(data: &NSData) -> Arc<[u8]> {
+    // SAFETY: -bytes points at -length bytes, alive and unchanged while
+    // the data is (an immutable copy is taken first, so a mutable data
+    // changing later doesn't matter).
+    let copy: Retained<NSData> = unsafe { msg_send![data, copy] };
+    let (ptr, len): (*const c_void, usize) = unsafe { (msg_send![&*copy, bytes], msg_send![&*copy, length]) };
+    if ptr.is_null() || len == 0 {
+        return Arc::from(&[][..]);
+    }
+    // SAFETY: as above.
+    Arc::from(unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len) })
+}
+
+/// Bytes as an NSData, if Foundation has NSData (found by name, so AppKit
+/// links without it).
+pub(crate) fn data_object(bytes: &[u8]) -> Option<Retained<NSData>> {
+    let class = AnyClass::get(c"NSData")?;
+    // SAFETY: dataWithBytes:length: copies `length` bytes from the pointer
+    // and returns a new data object.
+    Some(unsafe { msg_send![class, dataWithBytes: bytes.as_ptr().cast::<c_void>(), length: bytes.len()] })
+}
+
+/// Whether `object`'s class is `name`'s or a subclass of it; false if the
+/// program has no such class.
+pub(crate) fn is_kind_of(object: &AnyObject, name: &std::ffi::CStr) -> bool {
+    let Some(class) = AnyClass::get(name) else { return false };
+    // SAFETY: isKindOfClass: takes a class and returns BOOL.
+    unsafe { msg_send![object, isKindOfClass: class] }
+}
+
+/// Whether `object` responds to `selector`.
+pub(crate) fn responds(object: &AnyObject, selector: objc2::runtime::Sel) -> bool {
+    // SAFETY: respondsToSelector: takes a selector and returns BOOL.
+    unsafe { msg_send![object, respondsToSelector: selector] }
+}
+
+/// The selectors of the pasteboard writing protocol, for `writeObjects:`.
+pub(crate) fn writes_itself(object: &AnyObject) -> bool {
+    responds(object, sel!(writableTypesForPasteboard:)) && responds(object, sel!(pasteboardPropertyListForType:))
+}

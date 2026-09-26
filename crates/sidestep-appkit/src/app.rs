@@ -1044,6 +1044,24 @@ fn handle(msg: FromRender) {
                 crate::inputcontext::apply(window::imp(&w), commit, preedit);
             }
         }
+        // Pasteboards and drag and drop (pasteboard.rs, drag.rs).
+        FromRender::ProvideSelection { mime, token } => crate::pasteboard::provide_for_render(&mime, token),
+        FromRender::DndEnter { window, x, y, mimes, actions } => {
+            if let Some(w) = find_window(window) {
+                crate::drag::enter(&w, x, y, mimes, actions);
+            }
+        }
+        FromRender::DndMotion { x, y } => crate::drag::motion(x, y),
+        FromRender::DndActions { actions } => crate::drag::actions(actions),
+        FromRender::DndLeave => crate::drag::leave(),
+        FromRender::DndDrop => crate::drag::dropped(),
+        // Screens (screen.rs).
+        FromRender::ScreensChanged => crate::screen::changed(MainThreadMarker::new().expect("the main thread")),
+        FromRender::WindowOutputs { window, outputs } => {
+            if let Some(w) = find_window(window) {
+                crate::screen::window_outputs(&w, outputs);
+            }
+        }
     }
 }
 
