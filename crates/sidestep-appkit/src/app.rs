@@ -133,6 +133,7 @@ pub(crate) fn add_window(window: &NSWindow) {
 
 pub(crate) fn remove_window(window: &NSWindow) {
     crate::momentum::window_closed(window);
+    crate::screen::window_closed(window);
     // Dropped outside the borrow: releasing may run arbitrary code.
     let removed: Vec<_> = WINDOWS.with(|w| {
         let mut windows = w.borrow_mut();
@@ -1042,6 +1043,23 @@ fn handle(msg: FromRender) {
         FromRender::TextInput { window, commit, preedit } => {
             if let Some(w) = find_window(window) {
                 crate::inputcontext::apply(window::imp(&w), commit, preedit);
+            }
+        }
+        // Pasteboards and drag and drop (pasteboard.rs, drag.rs).
+        FromRender::ProvideSelection { mime, token } => crate::pasteboard::provide_for_render(&mime, token),
+        FromRender::DndEnter { drag, window, x, y, mimes, actions, urls } => {
+            crate::drag::enter(drag, find_window(window).as_deref(), (x, y), mimes, actions, urls);
+        }
+        FromRender::DndMotion { drag, x, y } => crate::drag::motion(drag, x, y),
+        FromRender::DndActions { drag, actions } => crate::drag::actions(drag, actions),
+        FromRender::DndTick { drag } => crate::drag::tick(drag),
+        FromRender::DndLeave { drag } => crate::drag::leave(drag),
+        FromRender::DndDrop { drag } => crate::drag::dropped(drag),
+        // Screens (screen.rs).
+        FromRender::ScreensChanged => crate::screen::changed(MainThreadMarker::new().expect("the main thread")),
+        FromRender::WindowOutputs { window, outputs } => {
+            if let Some(w) = find_window(window) {
+                crate::screen::window_outputs(&w, outputs);
             }
         }
     }

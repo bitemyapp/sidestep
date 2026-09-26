@@ -122,17 +122,32 @@ The platform layer since (`examples/appkit-input` shows it):
 - Nested event loops (`nextEventMatchingMask:…`, posted events), modal
   loops (`runModalForWindow:`), local event monitors; target/action through
   the responder chain.
-- The general `NSPasteboard` as the Wayland clipboard, for strings (other
-  types wait for `NSData` and `NSArray`), bounded so a client that never
-  answers can't stall the main thread more than once, with the old type
-  names.
+- The general `NSPasteboard` as the Wayland clipboard, bounded so a client
+  that never answers can't stall the main thread more than once a copy:
+  `NSPasteboardItem`s, any type (text, HTML, images, URL lists as an item
+  per file, types of Sidestep's own), the old type names,
+  `declareTypes:owner:` and data providers asked on demand (by other
+  programs too, without a new selection), `writeObjects:` and
+  `readObjectsForClasses:options:` for items, strings, URLs and the
+  program's own classes, type conformance (in `availableTypeFromArray:`
+  too), `canReadObjectForClasses:options:` from the types alone.
+  Pasteboards made by name stay in the process, so they don't pay for a
+  pasteboard server as Apple's do: a copy and paste costs 0.1 µs against
+  100 µs (`conformance/tests/pasteboard.rs` times them).
+- Drag and drop into windows: `registerForDraggedTypes:` (files and links
+  told apart), the destination messages (periodic updates too) on views
+  and windows, safe against nested event loops, the dragging info, its
+  dragging items and the drag pasteboard over wl_data_device.
+- `NSScreen`: the outputs, their frames, work areas and scales, a window's
+  screen, and the delegate calls when they change.
 
 Next:
 
 - Input methods: surrounding text (and so deleting around the caret),
   content types from the client.
-- Image cursors, drag and drop, `NSScreen`. (`-[NSView trackingAreas]`
-  answers once Foundation has `NSArray`.)
+- Image cursors; dragging from our windows (drag sources), and `NSImage`
+  and `NSColor` on pasteboards.
+  (`-[NSView trackingAreas]` answers once Foundation has `NSArray`.)
 - `NSGraphicsContext`, strokes, curves, images, transforms.
 - Scrollers.
 - `NSMenu`, which has no system-wide equivalent on Linux, so it becomes a
@@ -173,9 +188,9 @@ ligatures and tab stops (`NSTextTab`); all attribute name constants. See
 
 ## 4. Controls and services
 
-Scroll, split, popup and segmented views; pasteboard and drag and drop; open
-panels through xdg-desktop-portal; appearance (dark mode); accessibility
-through AccessKit.
+Scroll, split, popup and segmented views; open panels through
+xdg-desktop-portal; appearance (dark mode); accessibility through
+AccessKit.
 
 ## 5. A real app
 

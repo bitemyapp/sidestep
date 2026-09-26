@@ -761,7 +761,7 @@ define_class!(
 
         #[unsafe(method_id(screen))]
         fn screen(&self) -> Option<Retained<AnyObject>> {
-            None
+            crate::screen::window_screen(self).map(|s| Retained::into_super(Retained::into_super(s)))
         }
 
         #[unsafe(method_id(windowController))]
@@ -1020,12 +1020,12 @@ define_class!(
 
         #[unsafe(method(backingScaleFactor))]
         fn backing_scale_factor(&self) -> f64 {
-            self.ivars().scale.get()
+            self.backing_scale()
         }
 
         #[unsafe(method(convertRectToBacking:))]
         fn convert_rect_to_backing(&self, r: NSRect) -> NSRect {
-            let s = self.ivars().scale.get();
+            let s = self.backing_scale();
             NSRect::new(
                 NSPoint::new(r.origin.x * s, r.origin.y * s),
                 NSSize::new(r.size.width * s, r.size.height * s),
@@ -1034,7 +1034,7 @@ define_class!(
 
         #[unsafe(method(convertRectFromBacking:))]
         fn convert_rect_from_backing(&self, r: NSRect) -> NSRect {
-            let s = self.ivars().scale.get();
+            let s = self.backing_scale();
             NSRect::new(
                 NSPoint::new(r.origin.x / s, r.origin.y / s),
                 NSSize::new(r.size.width / s, r.size.height / s),
@@ -1043,13 +1043,13 @@ define_class!(
 
         #[unsafe(method(convertPointToBacking:))]
         fn convert_point_to_backing(&self, p: NSPoint) -> NSPoint {
-            let s = self.ivars().scale.get();
+            let s = self.backing_scale();
             NSPoint::new(p.x * s, p.y * s)
         }
 
         #[unsafe(method(convertPointFromBacking:))]
         fn convert_point_from_backing(&self, p: NSPoint) -> NSPoint {
-            let s = self.ivars().scale.get();
+            let s = self.backing_scale();
             NSPoint::new(p.x / s, p.y / s)
         }
 
@@ -1463,6 +1463,17 @@ impl NSWindowImpl {
 
     pub(crate) fn delegate_object(&self) -> Option<Retained<AnyObject>> {
         self.ivars().delegate.borrow().as_ref().and_then(Weak::load)
+    }
+
+    /// `backingScaleFactor`: the compositor's scale for the window once it
+    /// has said, and before that (a window not yet shown) its screen's, as
+    /// on macOS.
+    fn backing_scale(&self) -> f64 {
+        let ivars = self.ivars();
+        if ivars.configured.get() {
+            return ivars.scale.get();
+        }
+        crate::screen::window_screen(self).map_or(ivars.scale.get(), |s| s.backingScaleFactor())
     }
 
     /// Belong over `parent` (or no window): compositors keep such windows

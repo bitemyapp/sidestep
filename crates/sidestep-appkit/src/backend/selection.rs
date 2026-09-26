@@ -7,19 +7,26 @@
 //! much as each takes per wakeup, so a slow reader never blocks this
 //! thread.
 //!
+//! Types the program promised are offered like the rest; when a client
+//! asks for one, its pipe waits here while the main thread asks the owner
+//! for the data (`FromRender::ProvideSelection`), and is written when the
+//! answer comes (`ToRender::SelectionData`).
+//!
 //! Receiving: when another client's selection arrives, its types, and its
 //! text read ahead through a pipe serviced by the event loop, land in the
 //! shared state `NSPasteboard` reads (see [`crate::clipboard`]). Selections
 //! carrying our marker are our own and aren't read back. A read that takes
 //! too long is abandoned, its pipe closed, so a client that never finishes
-//! doesn't leave pipes behind.
+//! doesn't leave pipes behind. The drag pasteboard reads the offer of the
+//! drag it holds the same way, while that offer is there to read;
+//! [`super::dnd`] follows the drag itself.
 
 use std::io::{ErrorKind, Read, Write};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use smithay_client_toolkit::data_device_manager::data_device::{DataDevice, DataDeviceData, DataDeviceHandler};
-use smithay_client_toolkit::data_device_manager::data_offer::{DataOfferData, DataOfferHandler, DragOffer};
+use smithay_client_toolkit::data_device_manager::data_offer::{DataOfferData, DataOfferHandler, DragOffer, receive};
 use smithay_client_toolkit::data_device_manager::data_source::{CopyPasteSource, DataSourceData, DataSourceHandler};
 use smithay_client_toolkit::data_device_manager::{DataDeviceManagerState, ReadPipe, WritePipe};
 use smithay_client_toolkit::globals::GlobalData;
@@ -35,13 +42,15 @@ use smithay_client_toolkit::reexports::client::protocol::wl_seat::WlSeat;
 use smithay_client_toolkit::reexports::client::protocol::wl_surface::WlSurface;
 use smithay_client_toolkit::reexports::client::{Connection, Dispatch, Proxy, QueueHandle, delegate_dispatch};
 
-use super::State;
+use super::{State, dnd};
 use crate::clipboard::{
-    Contents, READ_AHEAD_LIMIT, READ_LIMIT, READ_TIMEOUT, ReadAhead, owner_mime, shared, text_mime,
+    Contents, READ_AHEAD_LIMIT, READ_LIMIT, READ_TIMEOUT, ReadAhead, Source, owner_mime, shared, shared_for, text_mime,
 };
+use crate::protocol::FromRender;
 
-/// How long a read ahead may take before it's abandoned. Longer than the
-/// main thread waits: text that comes late is still kept for later reads.
+/// How long a read ahead may go without data before it's abandoned. Longer
+/// than the main thread waits: text that comes late is still kept for
+/// later reads.
 const READ_AHEAD_GIVE_UP: Duration = Duration::from_secs(5);
 
 pub(crate) struct Selection {
@@ -53,6 +62,12 @@ pub(crate) struct Selection {
     pending: Option<Option<Arc<Contents>>>,
     /// We cleared the selection; the compositor's word of it is no news.
     cleared_by_us: bool,
+    /// Clients' pipes waiting for data the main thread is making, by the
+    /// token it answers under.
+    promised: std::collections::HashMap<u64, WritePipe>,
+    next_token: u64,
+    /// Drag and drop under way.
+    pub(super) dnd: dnd::Dnd,
 }
 
 impl Selection {
@@ -63,6 +78,9 @@ impl Selection {
             source: None,
             pending: None,
             cleared_by_us: false,
+            promised: std::collections::HashMap::new(),
+            next_token: 1,
+            dnd: dnd::Dnd::default(),
         }
     }
 }
@@ -110,29 +128,70 @@ pub(super) fn set(state: &mut State, contents: Option<Arc<Contents>>) {
     }
 }
 
-/// Read the selection as `mime` for the main thread, answering under
-/// `token`.
-pub(super) fn read(state: &mut State, mime: String, token: u64) {
-    let offer = state
-        .selection
-        .devices
-        .iter()
-        .find_map(|(_, d)| d.data().selection_offer())
-        .filter(|o| o.with_mime_types(|m| m.contains(&mime)));
-    let pipe = offer.and_then(|o| o.receive(mime).ok());
+/// Read the selection (or drag `drag`'s offer) as `mime` for the main
+/// thread, answering under `token`.
+pub(super) fn read(state: &mut State, mime: String, token: u64, source: Source, drag: u64) {
+    let pipe = match source {
+        Source::Selection => state
+            .selection
+            .devices
+            .iter()
+            .filter_map(|(_, d)| d.data().selection_offer())
+            .find(|o| o.with_mime_types(|m| m.contains(&mime)))
+            .and_then(|o| o.receive(mime).ok()),
+        // That drag's offer, not whichever the pointer has now; none once
+        // it's finished or gone.
+        Source::Drag => dnd::offer_of(state, drag, &mime).and_then(|o| receive(&o, mime).ok()),
+    };
+    let shared = shared_for(source);
     let Some(pipe) = pipe else {
-        shared().read_arrived(token, None);
+        shared.read_arrived(token, None);
         return;
     };
-    // The main thread stops waiting after READ_TIMEOUT; a little later the
-    // read is abandoned.
-    read_pipe(state, pipe, READ_LIMIT, READ_TIMEOUT * 2, move |read| {
-        shared().read_arrived(token, if let PipeRead::Done(data) = read { Some(data) } else { None });
+    // The main thread stops waiting after READ_TIMEOUT without data; a
+    // little later the read is abandoned.
+    let progress = move || shared.read_progressed(token);
+    read_pipe(state, pipe, READ_LIMIT, READ_TIMEOUT * 2, progress, move |read| {
+        shared.read_arrived(token, if let PipeRead::Done(data) = read { Some(data) } else { None });
+    });
+}
+
+/// The main thread made promised data for the pipe waiting under `token`.
+pub(super) fn provided(state: &mut State, token: u64, data: Option<Arc<[u8]>>) {
+    let Some(fd) = state.selection.promised.remove(&token) else { return };
+    // Without data the pipe closes here, and the reader gets nothing.
+    if let Some(data) = data {
+        write_pipe(state, fd, data);
+    }
+}
+
+/// Write `data` to a client's pipe from the event loop, as much as it
+/// takes each time it can.
+fn write_pipe(state: &State, fd: WritePipe, data: Arc<[u8]>) {
+    // A pipe that polls writable then takes what it has room for without
+    // blocking.
+    if rustix::io::ioctl_fionbio(&fd, true).is_err() {
+        return;
+    }
+    let mut written = 0;
+    let _ = state.loop_handle.insert_source(fd, move |(), file, _| {
+        loop {
+            if written >= data.len() {
+                return PostAction::Remove;
+            }
+            match (&**file).write(&data[written..]) {
+                Ok(n) => written += n,
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) if e.kind() == ErrorKind::WouldBlock => return PostAction::Continue,
+                // The reader went away.
+                Err(_) => return PostAction::Remove,
+            }
+        }
     });
 }
 
 /// How reading a pipe ended.
-enum PipeRead {
+pub(super) enum PipeRead {
     Done(Vec<u8>),
     /// More than the limit came.
     TooLong,
@@ -141,9 +200,16 @@ enum PipeRead {
 }
 
 /// Read a pipe to its end, `limit` bytes at most, from the event loop, and
-/// hand over what came; after `give_up` the read is abandoned and the pipe
-/// closed.
-fn read_pipe(state: &State, pipe: ReadPipe, limit: usize, give_up: Duration, done: impl FnOnce(PipeRead) + 'static) {
+/// hand over what came, telling `progress` whenever some arrives; after
+/// `give_up` without any, the read is abandoned and the pipe closed.
+pub(super) fn read_pipe(
+    state: &State,
+    pipe: ReadPipe,
+    limit: usize,
+    give_up: Duration,
+    mut progress: impl FnMut() + 'static,
+    done: impl FnOnce(PipeRead) + 'static,
+) {
     // A pipe that polls readable then gives what it has without blocking.
     if rustix::io::ioctl_fionbio(&pipe, true).is_err() {
         done(PipeRead::Failed);
@@ -160,11 +226,15 @@ fn read_pipe(state: &State, pipe: ReadPipe, limit: usize, give_up: Duration, don
     };
     // The timer and the pipe each end the other.
     let timer: std::rc::Rc<std::cell::Cell<Option<RegistrationToken>>> = Default::default();
+    // When data last came.
+    let active = std::rc::Rc::new(std::cell::Cell::new(Instant::now()));
     let mut data = Vec::new();
     let finish_read = finish.clone();
     let timer_of_read = timer.clone();
+    let active_of_read = active.clone();
     let reading = state.loop_handle.insert_source(pipe, move |(), file, state| {
         let mut chunk = [0u8; 65536];
+        let before = data.len();
         let ended = loop {
             match (&**file).read(&mut chunk) {
                 Ok(0) => break Some(PipeRead::Done(std::mem::take(&mut data))),
@@ -175,7 +245,13 @@ fn read_pipe(state: &State, pipe: ReadPipe, limit: usize, give_up: Duration, don
                 Err(_) => break Some(PipeRead::Failed),
             }
         };
-        let Some(read) = ended else { return PostAction::Continue };
+        let Some(read) = ended else {
+            if data.len() > before {
+                active_of_read.set(Instant::now());
+                progress();
+            }
+            return PostAction::Continue;
+        };
         if let Some(t) = timer_of_read.take() {
             state.loop_handle.remove(t);
         }
@@ -187,6 +263,10 @@ fn read_pipe(state: &State, pipe: ReadPipe, limit: usize, give_up: Duration, don
         return;
     };
     let token = state.loop_handle.insert_source(Timer::from_duration(give_up), move |_, _, state| {
+        let idle_until = active.get() + give_up;
+        if Instant::now() < idle_until {
+            return TimeoutAction::ToInstant(idle_until);
+        }
         state.loop_handle.remove(reading);
         finish(PipeRead::Failed);
         TimeoutAction::Drop
@@ -195,10 +275,29 @@ fn read_pipe(state: &State, pipe: ReadPipe, limit: usize, give_up: Duration, don
 }
 
 impl DataDeviceHandler for State {
-    fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice, _: f64, _: f64, _: &WlSurface) {}
-    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
-    fn motion(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice, _: f64, _: f64) {}
-    fn drop_performed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
+    fn enter(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        device: &WlDataDevice,
+        x: f64,
+        y: f64,
+        surface: &WlSurface,
+    ) {
+        dnd::enter(self, device, x, y, surface);
+    }
+
+    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, device: &WlDataDevice) {
+        dnd::leave(self, device);
+    }
+
+    fn motion(&mut self, _: &Connection, _: &QueueHandle<Self>, device: &WlDataDevice, x: f64, y: f64) {
+        dnd::motion(self, device, x, y);
+    }
+
+    fn drop_performed(&mut self, _: &Connection, _: &QueueHandle<Self>, device: &WlDataDevice) {
+        dnd::dropped(self, device);
+    }
 
     fn selection(&mut self, _: &Connection, _: &QueueHandle<Self>, device: &WlDataDevice) {
         let Some(offer) = device.data::<DataDeviceData>().and_then(|d| d.selection_offer()) else { return };
@@ -213,20 +312,32 @@ impl DataDeviceHandler for State {
             shared().text_arrived(read, ReadAhead::Failed);
             return;
         };
-        read_pipe(self, pipe, READ_AHEAD_LIMIT, READ_AHEAD_GIVE_UP, move |outcome| {
-            let outcome = match outcome {
-                PipeRead::Done(data) => ReadAhead::Text(Some(String::from_utf8_lossy(&data).into_owned())),
-                PipeRead::TooLong => ReadAhead::TooLong,
-                PipeRead::Failed => ReadAhead::Failed,
-            };
-            shared().text_arrived(read, outcome);
-        });
+        read_pipe(
+            self,
+            pipe,
+            READ_AHEAD_LIMIT,
+            READ_AHEAD_GIVE_UP,
+            || {},
+            move |outcome| {
+                let outcome = match outcome {
+                    PipeRead::Done(data) => ReadAhead::Text(Some(String::from_utf8_lossy(&data).into_owned())),
+                    PipeRead::TooLong => ReadAhead::TooLong,
+                    PipeRead::Failed => ReadAhead::Failed,
+                };
+                shared().text_arrived(read, outcome);
+            },
+        );
     }
 }
 
 impl DataOfferHandler for State {
-    fn source_actions(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &mut DragOffer, _: DndAction) {}
-    fn selected_action(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &mut DragOffer, _: DndAction) {}
+    fn source_actions(&mut self, _: &Connection, _: &QueueHandle<Self>, offer: &mut DragOffer, actions: DndAction) {
+        dnd::source_actions(self, offer, actions);
+    }
+
+    fn selected_action(&mut self, _: &Connection, _: &QueueHandle<Self>, offer: &mut DragOffer, action: DndAction) {
+        dnd::selected_action(self, offer, action);
+    }
 }
 
 impl DataSourceHandler for State {
@@ -241,28 +352,18 @@ impl DataSourceHandler for State {
         fd: WritePipe,
     ) {
         let data = self.selection.source.as_ref().filter(|(s, _)| s.inner() == source).and_then(|(_, c)| c.data(&mime));
-        // Without data the pipe closes here, and the reader gets nothing.
-        let Some(data) = data else { return };
-        // A pipe that polls writable then takes what it has room for without
-        // blocking.
-        if rustix::io::ioctl_fionbio(&fd, true).is_err() {
-            return;
-        }
-        let mut written = 0;
-        let _ = self.loop_handle.insert_source(fd, move |(), file, _| {
-            loop {
-                if written >= data.len() {
-                    return PostAction::Remove;
-                }
-                match (&**file).write(&data[written..]) {
-                    Ok(n) => written += n,
-                    Err(e) if e.kind() == ErrorKind::Interrupted => {}
-                    Err(e) if e.kind() == ErrorKind::WouldBlock => return PostAction::Continue,
-                    // The reader went away.
-                    Err(_) => return PostAction::Remove,
-                }
+        match data {
+            // Without data the pipe closes here, and the reader gets nothing.
+            None => {}
+            Some(Some(data)) => write_pipe(self, fd, data),
+            // Promised: the main thread makes it.
+            Some(None) => {
+                let token = self.selection.next_token;
+                self.selection.next_token += 1;
+                self.selection.promised.insert(token, fd);
+                self.send(FromRender::ProvideSelection { mime, token });
             }
-        });
+        }
     }
 
     fn cancelled(&mut self, _: &Connection, _: &QueueHandle<Self>, source: &WlDataSource) {

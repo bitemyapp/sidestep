@@ -256,12 +256,40 @@ pub(crate) enum ToRender {
     SetSelection {
         contents: Option<std::sync::Arc<crate::clipboard::Contents>>,
     },
-    /// Read the system selection as `mime`; the answer arrives in the
-    /// clipboard's shared state under `token`.
+    /// Read the system selection (or drag `drag`'s offer) as `mime`; the
+    /// answer arrives in the clipboard's shared state under `token`.
     ReadSelection {
         mime: String,
         token: u64,
+        source: crate::clipboard::Source,
+        drag: u64,
     },
+    /// The answer to `FromRender::ProvideSelection` `token`: the promised
+    /// data, or nothing.
+    SelectionData {
+        token: u64,
+        data: Option<std::sync::Arc<[u8]>>,
+    },
+    /// The answer to drag `drag`'s latest position, tick or source
+    /// actions: the MIME type the destination takes (none: it refuses), the
+    /// Wayland actions it accepts and prefers, and whether it wants
+    /// periodic updates (`FromRender::DndTick`).
+    DndStatus {
+        drag: u64,
+        mime: Option<String>,
+        actions: u32,
+        preferred: u32,
+        periodic: bool,
+    },
+    /// Drag `drag`'s drop is over; `performed` if the destination took the
+    /// data.
+    DndFinish {
+        drag: u64,
+        performed: bool,
+    },
+    /// Publish the outputs for `NSScreen` (sent first, to start the render
+    /// thread, when a program asks for screens before showing a window).
+    PublishOutputs,
     /// Whether the window's first responder takes text from input methods,
     /// and where its caret is, in points from the top left of the content.
     TextInput {
@@ -409,5 +437,56 @@ pub(crate) enum FromRender {
         window: WindowId,
         commit: Option<String>,
         preedit: (String, i32, i32),
+    },
+    /// Another client asked for a type of our selection that the program
+    /// promised: answer `ToRender::SelectionData` under `token`.
+    ProvideSelection {
+        mime: String,
+        token: u64,
+    },
+    /// Drag `drag` (the render thread's name for it, which the answers
+    /// carry) entered the window's content at `x`, `y` (points from its top
+    /// left), offering `mimes`, the source allowing Wayland `actions`, with
+    /// its URL list (`urls`: the MIME type and data) if it offers one. This,
+    /// `DndMotion`, `DndActions` and `DndTick` each get one
+    /// `ToRender::DndStatus`.
+    DndEnter {
+        drag: u64,
+        window: WindowId,
+        x: f64,
+        y: f64,
+        mimes: Vec<String>,
+        actions: u32,
+        urls: Option<(String, std::sync::Arc<[u8]>)>,
+    },
+    DndMotion {
+        drag: u64,
+        x: f64,
+        y: f64,
+    },
+    /// The source's allowed actions changed.
+    DndActions {
+        drag: u64,
+        actions: u32,
+    },
+    /// The drag is still there, wherever it last was: a periodic update,
+    /// answered like a move.
+    DndTick {
+        drag: u64,
+    },
+    DndLeave {
+        drag: u64,
+    },
+    /// Dropped where the drag last was; answered with `ToRender::DndFinish`.
+    DndDrop {
+        drag: u64,
+    },
+    /// The outputs changed; the new ones are published for `NSScreen`.
+    ScreensChanged,
+    /// The outputs the window's surface is on, in the order it entered
+    /// them.
+    WindowOutputs {
+        window: WindowId,
+        outputs: Vec<u32>,
     },
 }

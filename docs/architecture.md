@@ -767,22 +767,146 @@ increments have no Wayland request behind them and are only kept.
 ### The clipboard
 
 The general `NSPasteboard` is the Wayland selection. Writes never wait: the
-main thread keeps what it wrote (each string encoded once) and, once per
-turn of the event loop, has the render thread offer a copy, so a copy that
-writes several types makes one selection; the render thread serves other
-clients' reads through non-blocking pipes from its event loop, with a
-marker type so it never reads its own offer back. Reading can't be
-synchronous on Wayland, so once a program has read the pasteboard, the
-render thread reads another client's text ahead (up to 1 MiB) whenever it
-offers a selection, and `stringForType:` answers from that at once. Text
-still on its way is waited for until 200 ms after the selection came, and
-no longer, so a client that never answers costs one wait; other types, and
-longer text, are read when asked for, waiting 200 ms at most. Reads that
-don't finish are abandoned, their pipes closed. A counter both threads
-share plays `changeCount`; an offer that repeats the last one (compositors
-offer the selection again whenever a window gets the keyboard) isn't a
-change. The old type names (`NSStringPboardType`, …) name the current
-types. Pasteboards made by name live in the process only.
+main thread keeps what it wrote and, once per turn of the event loop, has
+the render thread offer a copy, so a copy that writes several types makes
+one selection; the render thread serves other clients' reads through
+non-blocking pipes from its event loop, with a marker type so it never
+reads its own offer back. Reading can't be synchronous on Wayland, so once
+a program has read the pasteboard, the render thread reads another
+client's text ahead (up to 1 MiB) whenever it offers a selection, and
+`stringForType:` answers from that at once. Text still on its way is
+waited for until 200 ms after the selection came, and no longer, so a
+client that never answers costs one wait; other types, and longer text,
+are read when asked for, as long as data keeps coming and until 200 ms
+pass without any (so a large image streams in whole, 6 MB in about 10
+ms). Each type is read once per change, and a type that didn't come in
+time is remembered as nothing, so a client that never answers costs 200
+ms once, not on every menu validation. A counter both threads share plays
+`changeCount`; an offer that repeats the last one (compositors offer the
+selection again whenever a window gets the keyboard) isn't a change, and
+the items and data read of the one before stay good. Setting the
+selection takes an input event newer than the current selection's, as a
+copy that follows a key press or click has. A promise kept (an owner or
+data provider giving what it promised, for this program or another) is
+no new selection: other clients reading the one offered are answered
+from the main thread, and clipboard managers don't see a copy that
+wasn't. Pasteboards made by name live in the process only;
+`releaseGlobally` lets go of one's contents and name.
+
+A pasteboard holds items (`NSPasteboardItem`), as on macOS: writing an
+object makes an item of it, and the pasteboard's own `setString:forType:`
+and the like write to its first item. Reads take the first item that has
+the type, except text, which is every item's text a line each. Items are
+live (one written to a pasteboard shows later writes, and once the
+pasteboard is cleared it's empty and takes no more writes) and belong to
+one pasteboard for good. `types` lists every item's types, each followed
+by its old name (`NSStringPboardType` after `public.utf8-plain-text`), and
+is made once per change. `NSFilenamesPboardType` and the old URL type are
+property lists made from the items' URLs, and writing paths as
+`NSFilenamesPboardType` writes file URLs. Property lists are kept as
+copies made all the way down, as macOS keeps a snapshot. Types that
+`declareTypes:owner:`, `addTypes:owner:` (which replaces what the types
+held), an item's data provider or an object written with the promised
+option promise are asked for when first read: on the reading thread when
+the program reads them, and on the main thread, as a message from the
+render thread, when another client does. The common types' conformances
+are known (`public.html` is `public.text`, `public.file-url` is
+`public.url`, `public.png` is `public.image`): `availableTypeFromArray:`
+finds, for each type asked for in turn, that type or else the first type
+on the pasteboard that is one of its kinds (an item finds nothing until
+it's on a pasteboard, as on macOS), and
+`canReadItemWithDataConformingToTypes:` uses them too.
+`canReadObjectForClasses:options:`, which programs ask when validating
+Paste and on every drag update, looks at the types only: nothing is read,
+no owner is asked and no object is made. `readObjectsForClasses:options:`
+hands a class of the program's its type as data, unless its
+`readingOptionsForType:pasteboard:` asks for a string or a property list.
+
+Types travel as MIME types (`pasteboard_types.rs` has the table): text as
+`text/plain;charset=utf-8` and its aliases, `public.html` as `text/html`,
+images and PDF as theirs, every item's URL in one `text/uri-list` (and
+file URLs as `x-special/gnome-copied-files`, which file managers read). A
+MIME type is a type of its own, so `image/webp` reads as `image/webp`, and
+other types go as `application/x-sidestep-uti.<type>`, so Sidestep
+programs exchange anything. Another client's URL list becomes an item per
+URL, read (once per copy) the first time the program asks about the
+pasteboard's items or types; a drag's comes with the drag. `NSData` is
+found by name, so AppKit builds before Foundation has it; until then data
+reads as nil.
+
+### Drag and drop
+
+Windows are drag destinations. The render thread turns wl_data_device's
+enter, motion, leave and drop, and the offer's source actions, into
+messages naming the drag; a drag that offers a URL list is told of once
+the list is read (200 ms without data gives up), so the drag pasteboard
+has the URLs from the start and the destination is chosen by what they
+are. The main thread (`drag.rs`) finds the destination, the deepest view
+under the pointer (or one of its superviews) that registered, with
+`registerForDraggedTypes:`, a type the drag pasteboard has as
+`availableTypeFromArray:` finds it (so a view that takes `public.url`
+takes files, and one that takes `public.file-url` doesn't take a link),
+else the window, and sends it `draggingEntered:`, `draggingUpdated:` and
+`draggingExited:` as it changes. Its answer, masked with the source's
+operations, goes back as the offer's accepted MIME type and actions,
+passed on to the compositor only when it changes. The render thread
+sends one position at a time and keeps the latest until the answer comes,
+so a busy main thread sees where the pointer is, not where it was; while
+the drag waits, it asks for an update every 50 ms if the destination
+wants them (a view does unless its `wantsPeriodicDraggingUpdates` says
+NO; a window doesn't unless its delegate says YES), asked once when it
+becomes the destination. The main thread answers every message about a
+drag exactly once, with the drag's name, so answers for a drag that has
+gone are passed over, whatever the order. Destinations may run nested
+event loops (a modal panel in `performDragOperation:`), so every step
+works on its own drag: a drop ends its drag before the destination hears
+of it, and a drag that comes meanwhile is a drag of its own. Crossing
+between a window's surfaces (tiles are subsurfaces, and each brings a new
+offer) is one drag to the destination. A drop sends
+`prepareForDragOperation:`, `performDragOperation:`,
+`concludeDragOperation:` and `draggingEnded:`, and is finished (the source
+told the data was taken) only if the destination performed it.
+smithay-client-toolkit destroys a dropped offer when the next drag
+enters, so a drop still being handled then can't be finished, and its
+source sees it cancelled. The dragging info's `draggingPasteboard` is the
+drag pasteboard, which reads that drag's own offer through the
+clipboard's transport, only when asked, until the drop is finished (then
+there's nothing to read, and reads give nil), and
+`enumerateDraggingItems…` hands out its items as `NSDraggingItem`s of
+the classes asked for. Wayland's copy is Copy and its move Move and
+Generic; Wayland has no link, so a source's operations never include
+Link. NSWindow has every destination method and passes each to its
+delegate. Views and windows get the methods as a category
+(`category.rs`), from their classes' loaders. Drags from our windows
+(sources) aren't there yet.
+
+### Screens
+
+`NSScreen`s are the compositor's outputs. The render thread publishes a
+snapshot of them as they come, change and go, and the main thread makes
+screens of it when a program asks, keeping one object per output. The
+first screen is the output at (0, 0), and frames are placed around it with
+y going up. A program that asks before showing a window starts the render
+thread and waits, once, for the outputs (a round trip or two). Wayland
+doesn't say where windows are, only which outputs they're on: a window's
+`screen` is the one it entered last and is still on, else the main screen
+(the key window's, else the first), and a window the compositor hasn't
+configured yet (not yet shown) has its screen's `backingScaleFactor`, as
+on macOS. wl_output's scale is a whole number;
+an output's mode over its logical size (xdg-output) gives the fractional
+one. What the outputs don't say is learned from windows, and kept while
+the output keeps its scale and size: a window alone on an output gives it
+its fractional scale for certain, and its configure bounds give the work
+area that `visibleFrame` is (panels are taken to be at the top). A change
+of outputs after the first snapshot calls the application delegate's
+`applicationDidChangeScreenParameters:`, whether or not the program has
+asked about screens yet, and a window moving to another output its
+delegate's `windowDidChangeScreen:`; both are posted to the default
+notification center too, once Foundation has one.
+`backingAlignedRect:options:` rounds halfway to the nearest pixel up, as
+macOS does (down on y in a flipped rectangle). The first
+`NSScreen.screens` takes about 0.5 ms before any window (on macOS, about
+36 ms).
 
 ## Text
 
@@ -915,4 +1039,14 @@ runs it under a headless sway and can take a screenshot:
 ```sh
 scripts/linux-cargo build -p appkit-slice
 SCENARIO=scroll SHOT=/work/target/scroll.png scripts/linux-run scripts/headless-wayland /target/debug/appkit-slice
+```
+
+`sidestep-appkit`'s `wayland_system` test checks the clipboard, drag and
+drop and screens against other programs there (`wl-copy`, `wl-paste`, a
+drag source of its own driving a virtual pointer, `swaymsg`, and `wtype`
+for the keyboard focus the clipboard needs); under plain `cargo test` it
+has no display and passes without checking:
+
+```sh
+scripts/linux-run scripts/headless-wayland cargo test -p sidestep-appkit --test wayland_system
 ```
