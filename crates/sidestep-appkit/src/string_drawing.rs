@@ -14,18 +14,34 @@
 //! so installing them is a message to it: the work runs once, under the
 //! runtime's class-loading lock like every class's loader, and never under
 //! a lock of its own that a loader could wait on the other way round.
+//! `NSResponder`'s loader installs them (the application, windows and views
+//! load it first), and so do `NSColor`'s, `NSFont`'s and
+//! `NSParagraphStyle`'s, whichever attributes come first. Measuring before
+//! any AppKit class has loaded (`sizeWithAttributes:` with no attributes,
+//! or only numbers, as a program's first AppKit call) still finds no
+//! method: nothing in AppKit runs before then. The runtime's link-time
+//! categories, once it has them, are the fix: [`load`] is the category's
+//! body, to be registered for `NSString`.
+//!
+//! [`attribute_spans`] turns an attributed string's attribute dictionaries
+//! into the attributes and UTF-16 spans that `text::lines` lays out (and,
+//! through byte runs, that [`draw`] and [`measure`] take), and
+//! [`record_frame`] records laid-out lines for a layout manager.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::ops::Range;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, NSObject};
 use objc2::{ClassType, define_class, msg_send, sel};
+#[allow(deprecated)] // NSObliqueness, which TextKit 2 leaves out and string drawing draws.
 use objc2_app_kit::{
     NSBackgroundColorAttributeName, NSBaselineOffsetAttributeName, NSColor, NSFont, NSFontAttributeName,
-    NSForegroundColorAttributeName, NSKernAttributeName, NSLigatureAttributeName, NSParagraphStyle,
-    NSParagraphStyleAttributeName, NSStrikethroughColorAttributeName, NSStrikethroughStyleAttributeName,
-    NSStringDrawingContext, NSStringDrawingOptions, NSUnderlineColorAttributeName, NSUnderlineStyleAttributeName,
+    NSForegroundColorAttributeName, NSKernAttributeName, NSLigatureAttributeName, NSObliquenessAttributeName,
+    NSParagraphStyle, NSParagraphStyleAttributeName, NSShadowAttributeName, NSStrikethroughColorAttributeName,
+    NSStrikethroughStyleAttributeName, NSStringDrawingContext, NSStringDrawingOptions, NSStrokeColorAttributeName,
+    NSStrokeWidthAttributeName, NSUnderlineColorAttributeName, NSUnderlineStyleAttributeName,
 };
 use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString};
 
@@ -34,7 +50,8 @@ use crate::graphics::{self, Xf, color_of, with_recorder};
 use crate::paragraph::paragraph_of;
 use crate::protocol::{GlyphRun, Op, Rect};
 use crate::text::fonts::{self, Design, FontSpec};
-use crate::text::layout::{self, Attrs, FxBuild, Options, Run, TextFont, TextLayout};
+use crate::text::layout::{self, Attrs, FxBuild, Options, PlacedFill, PlacedRun, Run, Shadow, TextFont, TextLayout};
+use crate::text::lines::{Frame, Line, Span};
 
 type Attributes = NSDictionary<NSString, AnyObject>;
 
@@ -70,11 +87,14 @@ pub(crate) fn draw(text: &str, attrs: &[Attrs], runs: &[Run], place: Place) {
     if !graphics::recording() {
         return;
     }
-    match layout::cached(text, attrs, runs, &opts) {
-        Ok(laid) => with_recorder(|rec| {
-            let (left, top, clip) = placement(rec.xf, rec.clip, place, &laid);
-            emit(&mut rec.ops, &laid, left, top, clip);
-        }),
+    let recorded = layout::with_cached(text, attrs, runs, &opts, |laid| {
+        with_recorder(|rec| {
+            let (left, top, clip) = placement(rec.xf, rec.clip, place, laid);
+            emit(&mut rec.ops, laid, left, top, clip);
+        })
+    });
+    match recorded {
+        Ok(()) => {}
         Err(hash) => with_recorder(|rec| {
             let job = rec.pending.job_for(text, attrs, runs, opts, hash);
             rec.pending.places.push(Deferred { at: rec.ops.len(), job, xf: rec.xf, clip: rec.clip, place });
@@ -213,6 +233,12 @@ fn options(size: NSSize, o: NSStringDrawingOptions) -> Options {
 
 /// Record `laid` with its top left corner at (`left`, `top`) in the layer.
 fn emit(ops: &mut Vec<Op>, laid: &TextLayout, left: f32, top: f32, clip: Rect) {
+    emit_parts(ops, &laid.runs, &laid.fills, left, top, clip);
+}
+
+/// Record glyph runs and fills placed from (`left`, `top`) in the layer:
+/// backgrounds, then glyphs, then decorations.
+fn emit_parts(ops: &mut Vec<Op>, runs: &[PlacedRun], fills: &[PlacedFill], left: f32, top: f32, clip: Rect) {
     if clip.is_empty() {
         return;
     }
@@ -222,11 +248,11 @@ fn emit(ops: &mut Vec<Op>, laid: &TextLayout, left: f32, top: f32, clip: Rect) {
             ops.push(Op::Fill { rect, color });
         }
     };
-    for f in laid.fills.iter().filter(|f| f.background) {
+    for f in fills.iter().filter(|f| f.background) {
         let [x0, y0, x1, y1] = f.rect;
         fill(ops, Rect::new(left + x0, top + y0, left + x1, top + y1), f.color);
     }
-    for run in &laid.runs {
+    for run in runs {
         let (x, y) = (left + run.x, top + run.y);
         // Glyphs reach at most about twice their size from the baseline.
         let reach = run.size * 2.0;
@@ -243,13 +269,75 @@ fn emit(ops: &mut Vec<Op>, laid: &TextLayout, left: f32, top: f32, clip: Rect) {
             clip,
         }));
     }
-    for f in laid.fills.iter().filter(|f| !f.background) {
+    for f in fills.iter().filter(|f| !f.background) {
         // Lines are drawn crisp: whole points, at least one thick.
         let [x0, y0, x1, y1] = f.rect;
         let y = (top + y0).round();
         let thickness = (y1 - y0).round().max(1.0);
         fill(ops, Rect::new(left + x0, y, left + x1, y + thickness), f.color);
     }
+}
+
+// TextKit, which a later workstream builds, records its lines through
+// this; until then only tests do.
+#[cfg_attr(not(test), allow(dead_code))]
+/// Record the lines of `frame` with its top left corner at `origin` in the
+/// view being drawn (the corner at the top of the view as it shows, flipped
+/// or not): what a layout manager draws. The lines in the clip are found by
+/// halving, so a long text records as fast as the part of it in view.
+pub(crate) fn record_frame(frame: &Frame, origin: NSPoint) {
+    with_recorder(|rec| {
+        let (x, y) = rec.xf.point(origin.x, origin.y);
+        let (left, top, clip) = (x as f32, y as f32, rec.clip);
+        let first = frame.paragraphs.partition_point(|p| top + p.bottom() < clip.y0);
+        for para in &frame.paragraphs[first..] {
+            if top + para.top > clip.y1 {
+                break;
+            }
+            record_lines(&mut rec.ops, &para.lines.lines, left, top + para.top, clip);
+        }
+    });
+}
+
+/// Record `lines`, the first's top at `top`: those in the clip.
+#[cfg_attr(not(test), allow(dead_code))]
+fn record_lines(ops: &mut Vec<Op>, lines: &[Line], left: f32, top: f32, clip: Rect) {
+    let first = lines.partition_point(|l| top + l.top + l.height < clip.y0);
+    for line in &lines[first..] {
+        let y = top + line.top;
+        if y > clip.y1 {
+            break;
+        }
+        emit_parts(ops, &line.runs, &line.fills, left, y, clip);
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+/// Attributes and UTF-16 spans of them for text whose attribute
+/// dictionaries cover UTF-16 ranges in order, as an attributed string
+/// enumerates them: what drawing, measuring or laying out an
+/// `NSAttributedString` or a text storage takes. Ranges with the same
+/// dictionary share their attributes.
+pub(crate) fn attribute_spans(ranges: &[(Range<u32>, Option<&Attributes>)]) -> (Vec<Attrs>, Vec<Span>) {
+    let mut attrs: Vec<Attrs> = Vec::new();
+    let mut seen: Vec<*const Attributes> = Vec::new();
+    let mut spans = Vec::with_capacity(ranges.len());
+    for (range, dict) in ranges {
+        let key = dict.map_or(std::ptr::null(), |d| d as *const Attributes);
+        let index = match seen.iter().position(|&k| k == key) {
+            Some(i) => i,
+            None => {
+                seen.push(key);
+                attrs.push(attrs_of(*dict));
+                attrs.len() - 1
+            }
+        };
+        spans.push(Span { start: range.start, end: range.end, attrs: index as u32 });
+    }
+    if attrs.is_empty() {
+        attrs.push(attrs_of(None));
+    }
+    (attrs, spans)
 }
 
 /// The attributes string drawing understands, read from a dictionary.
@@ -289,8 +377,35 @@ pub(crate) fn attrs_of(dict: Option<&Attributes>) -> Attrs {
         attrs.ligatures = int(get(NSLigatureAttributeName)).unwrap_or(1);
         attrs.underline.color = color(get(NSUnderlineColorAttributeName));
         attrs.strikethrough.color = color(get(NSStrikethroughColorAttributeName));
+        attrs.stroke.width = get(NSStrokeWidthAttributeName).and_then(|v| number(&v)).unwrap_or(0.0) as f32;
+        attrs.stroke.color = color(get(NSStrokeColorAttributeName));
+        #[allow(deprecated)]
+        let obliqueness = NSObliquenessAttributeName;
+        attrs.obliqueness = get(obliqueness).and_then(|v| number(&v)).unwrap_or(0.0) as f32;
+        attrs.shadow = get(NSShadowAttributeName).and_then(|v| shadow_of(&v));
     }
     attrs
+}
+
+/// A shadow from an `NSShadowAttributeName` value: anything that answers
+/// `shadowOffset`, `shadowBlurRadius` and `shadowColor` as `NSShadow` does.
+/// A shadow without a color is black at a third of full strength, as
+/// `NSShadow`'s default is.
+fn shadow_of(value: &AnyObject) -> Option<Shadow> {
+    // SAFETY: respondsToSelector: takes a selector and returns BOOL; the
+    // messages are sent only to an object that has them, with NSShadow's
+    // signatures.
+    unsafe {
+        let responds = |sel| -> bool { msg_send![value, respondsToSelector: sel] };
+        if !(responds(sel!(shadowOffset)) && responds(sel!(shadowBlurRadius)) && responds(sel!(shadowColor))) {
+            return None;
+        }
+        let offset: NSSize = msg_send![value, shadowOffset];
+        let blur: f64 = msg_send![value, shadowBlurRadius];
+        let color: Option<Retained<NSColor>> = msg_send![value, shadowColor];
+        let color = color.map_or([0.0, 0.0, 0.0, 1.0 / 3.0], |c| color_of(&c));
+        Some(Shadow { offset: [offset.width as f32, offset.height as f32], blur: blur as f32, color })
+    }
 }
 
 /// Text without a font attribute is drawn in the 12-point interface font.
@@ -652,5 +767,150 @@ mod tests {
             let alone = layout::lay_out(line, &[attrs_of(None)], &whole(line), &Options::UNBOUNDED);
             assert_eq!(*run.glyphs, *alone.runs[0].glyphs, "{line}");
         }
+    }
+
+    // A stand-in for NSShadow, which the drawing workstream is adding:
+    // string drawing reads shadows through these messages.
+    objc2::define_class!(
+        #[unsafe(super(objc2::runtime::NSObject))]
+        #[name = "SidestepTestShadow"]
+        struct TestShadow;
+
+        impl TestShadow {
+            #[unsafe(method(shadowOffset))]
+            fn offset(&self) -> NSSize {
+                NSSize::new(2.0, 3.0)
+            }
+
+            #[unsafe(method(shadowBlurRadius))]
+            fn blur(&self) -> f64 {
+                1.5
+            }
+
+            #[unsafe(method_id(shadowColor))]
+            fn color(&self) -> Option<Retained<NSColor>> {
+                Some(NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.0, 1.0, 0.5))
+            }
+        }
+    );
+
+    #[allow(deprecated)]
+    #[test]
+    fn strokes_slants_and_shadows_are_read_and_drawn() {
+        use objc2::AnyThread;
+        let shadow: Retained<TestShadow> = unsafe { msg_send![TestShadow::alloc(), init] };
+        let (width, oblique, red) =
+            (number(3.0), number(0.25), NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 0.0, 0.0, 1.0));
+        // SAFETY: the keys are constant strings.
+        let keys = unsafe {
+            [NSStrokeWidthAttributeName, NSStrokeColorAttributeName, NSObliquenessAttributeName, NSShadowAttributeName]
+        };
+        let values: [&AnyObject; 4] = [&width, &red, &oblique, &shadow];
+        let attrs = attrs_of(Some(&NSDictionary::from_slices(&keys, &values)));
+        assert_eq!((attrs.stroke.width, attrs.stroke.color), (3.0, Some([1.0, 0.0, 0.0, 1.0])));
+        assert_eq!(attrs.obliqueness, 0.25);
+        assert_eq!(attrs.shadow, Some(Shadow { offset: [2.0, 3.0], blur: 1.5, color: [0.0, 0.0, 1.0, 0.5] }));
+
+        let text = "Outline";
+        let plain = layout::lay_out(text, &[attrs_of(None)], &whole(text), &Options::UNBOUNDED);
+        let laid = layout::lay_out(text, std::slice::from_ref(&attrs), &whole(text), &Options::UNBOUNDED);
+        // The shadow first, moved right and up, in its color; then the
+        // outline alone (a positive width), in the stroke color.
+        assert_eq!(laid.runs.len(), 2);
+        let (shade, outline) = (&laid.runs[0], &laid.runs[1]);
+        assert_eq!(shade.color, [0.0, 0.0, 1.0, 0.5]);
+        assert_eq!((shade.x - outline.x, outline.y - shade.y), (2.0, 3.0));
+        assert_eq!(outline.color, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!((laid.width, laid.height), (plain.width, plain.height), "none of it takes room");
+        let face = crate::text::fonts::face_data(outline.font).unwrap();
+        assert!((face.stroke - 0.03).abs() < 1e-6, "3% of the size ({})", face.stroke);
+        assert!((face.skew - 0.25f32.atan().to_degrees()).abs() < 1e-4);
+        assert_ne!(outline.font, plain.runs[0].font);
+        // A negative width fills and strokes: the plain glyphs in the text's
+        // color, then the outline.
+        let filled = Attrs { stroke: layout::Stroke { width: -3.0, color: None }, shadow: None, ..attrs };
+        let laid = layout::lay_out(text, &[filled], &whole(text), &Options::UNBOUNDED);
+        assert_eq!(laid.runs.len(), 2);
+        assert_eq!((laid.runs[0].color, laid.runs[1].color), ([0.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]));
+        let (fill, stroke) = (
+            crate::text::fonts::face_data(laid.runs[0].font).unwrap(),
+            crate::text::fonts::face_data(laid.runs[1].font).unwrap(),
+        );
+        assert_eq!((fill.stroke, stroke.stroke > 0.0), (0.0, true));
+    }
+
+    #[test]
+    fn underline_patterns_and_words() {
+        let text = "two words";
+        let with = |style: i64| {
+            let mut a = attrs_of(None);
+            a.underline.style = style;
+            layout::lay_out(text, &[a], &whole(text), &Options::UNBOUNDED)
+        };
+        let lines = |l: &TextLayout| l.fills.iter().filter(|f| !f.background).map(|f| f.rect).collect::<Vec<_>>();
+        let solid = lines(&with(1));
+        assert_eq!(solid.len(), 1);
+        let (x0, x1) = (solid[0][0], solid[0][2]);
+        // Dots: many short pieces within the solid line's reach.
+        let dots = lines(&with(1 | 0x100));
+        assert!(dots.len() > 5, "{}", dots.len());
+        assert!(dots.iter().all(|r| r[0] >= x0 - 0.01 && r[2] <= x1 + 0.01 && r[2] - r[0] <= 1.01));
+        let dashes = lines(&with(1 | 0x200));
+        assert!(dashes.len() < dots.len() && dashes.iter().any(|r| r[2] - r[0] > 3.0));
+        // By word: the space between the words is left out.
+        let words = lines(&with(1 | 0x8000));
+        assert_eq!(words.len(), 2);
+        assert!(words[0][2] < words[1][0]);
+        assert!((words[0][0] - x0).abs() < 0.01 && (words[1][2] - x1).abs() < 0.01);
+        // Double lines stay double in pieces.
+        assert_eq!(lines(&with(9 | 0x8000)).len(), 4);
+    }
+
+    #[test]
+    fn frames_record_the_lines_in_view() {
+        use crate::text::lines::{Container, Frame, Styled};
+        let text: String = (0..200).map(|i| format!("line {i} of a text view\n")).collect();
+        let (attrs, spans) = attribute_spans(&[(0..text.encode_utf16().count() as u32, None)]);
+        let frame = Frame::new(
+            Styled { text: &text, attrs: &attrs, spans: &spans },
+            Container { width: 300.0, ..Container::UNBOUNDED },
+        );
+        let line = frame.paragraphs[0].lines.lines[0].clone();
+        assert!(line.ascent > 0.0 && line.descent > 0.0 && line.leading >= 0.0 && line.fills.is_empty());
+        let row = line.height;
+        // Scrolled so that lines 100 to 104 or so are in view.
+        let ops = record_in(Xf::IDENTITY, Rect::new(0.0, 0.0, 800.0, row * 4.5), || {
+            record_frame(&frame, NSPoint::new(10.0, -f64::from(row) * 100.0))
+        });
+        let runs = glyph_runs(&ops);
+        assert!((5..=7).contains(&runs.len()), "only the lines in view ({})", runs.len());
+        let at = |i: usize| frame.lines().nth(i).unwrap();
+        let hundred = at(100);
+        assert_eq!((hundred.paragraph, hundred.index), (100, 0));
+        let expect = &hundred.line.runs[0];
+        assert!(runs.iter().any(|r| r.x == 10.0 + expect.x && Arc::ptr_eq(&r.glyphs, &expect.glyphs)));
+        assert!(!frame.is_empty());
+    }
+
+    #[test]
+    fn attributed_ranges_share_their_attributes() {
+        let red = NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 0.0, 0.0, 1.0);
+        // SAFETY: the key is a constant string.
+        let dict = NSDictionary::from_slices(&[unsafe { NSForegroundColorAttributeName }], &[&*red as &AnyObject]);
+        let (attrs, spans) = attribute_spans(&[(0..3, Some(&dict)), (3..5, None), (5..9, Some(&dict))]);
+        assert_eq!(attrs.len(), 2);
+        assert_eq!(spans.iter().map(|s| s.attrs).collect::<Vec<_>>(), [0, 1, 0]);
+        assert_eq!(attrs[0].color, [1.0, 0.0, 0.0, 1.0]);
+        // As byte runs, for drawing: "é" is two bytes and one UTF-16 unit,
+        // "😀" four bytes and two units. A range ending inside it gives it
+        // to the next.
+        let text = "aé😀bcdef";
+        let runs = crate::text::lines::runs_of(text, &spans);
+        let bounds: Vec<_> = runs.iter().map(|r| (r.start, r.end, r.attrs)).collect();
+        assert_eq!(bounds, [(0, 3, 0), (3, 8, 1), (8, 12, 0)]);
+        let laid = layout::lay_out(text, &attrs, &runs, &Options::UNBOUNDED);
+        assert!(
+            laid.runs.iter().any(|r| r.color == [1.0, 0.0, 0.0, 1.0]) && laid.runs.iter().any(|r| r.color[0] == 0.0)
+        );
     }
 }

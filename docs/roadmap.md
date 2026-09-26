@@ -113,25 +113,35 @@ settings); `NSParagraphStyle` and `NSMutableParagraphStyle`; string
 drawing and measuring (`drawAtPoint:`, `drawInRect:`,
 `drawWithRect:options:`, `sizeWithAttributes:`,
 `boundingRectWithSize:options:`) with fonts, colors, backgrounds,
-paragraph styles, kerning, underlines, strikethroughs, baseline offsets,
-ligatures and tab stops (`NSTextTab`); all attribute name constants. See
+paragraph styles, kerning, underlines and strikethroughs (with dot and
+dash patterns, and by word), baseline offsets, ligatures, strokes,
+obliqueness, shadows (without blur) and tab stops (`NSTextTab`, read back
+with `tabStops`, laid out in the order set as on macOS); all attribute
+name constants. The line layout TextKit will stand on: lines, clusters
+and carets with UTF-16 ranges and bidi levels, a paragraph or a few lines
+at a time on any thread, hit testing, caret and selection geometry, and
+relayout of only what an edit touched. See
 [architecture.md](architecture.md#text).
 
-- `NSAttributedString` drawing and measuring, as an adapter over the
-  layout's attribute runs, once Foundation has the class.
+- `NSAttributedString` drawing and measuring: `string_drawing` turns
+  attribute dictionaries over UTF-16 ranges into the layout's runs
+  (`attribute_spans`, `lines::runs_of`); the category methods wait for
+  Foundation's class.
 - String drawing before any AppKit class has loaded: `NSString` gets its
-  drawing methods when `NSColor`, `NSFont`, `NSParagraphStyle` or a window
-  first loads, so `sizeWithAttributes:nil` as a program's very first AppKit
-  call finds no method. Foundation's `NSString` loader needs a hook that
-  AppKit can register (see the text workstream's notes).
-- Reading tab stops back (`tabStops`, an `NSArray`); descriptors'
-  `fontAttributes` with numbers (`NSNumber`); `NSStringDrawingContext`.
+  drawing methods when `NSResponder` (the application, a window, a view),
+  `NSColor`, `NSFont` or `NSParagraphStyle` first loads, so
+  `sizeWithAttributes:nil` as a program's very first AppKit call finds no
+  method. The runtime's link-time categories will fix it, with
+  `string_drawing::load` as the category.
+- `NSExpansion` (advances scaled before line breaking); shadow blur (a
+  blurred glyph op); tabs in right-to-left paragraphs, measured from the
+  right; descriptors' `fontAttributes` with numbers (`NSNumber`);
+  `NSStringDrawingContext`.
 - The desktop's own interface font where fontconfig's `system-ui` doesn't
   name it (GNOME keeps it in GSettings); dictionary line breaking for Thai,
   Lao, Khmer and Myanmar (parley's `complex-scripts`, several megabytes of
   data).
-- Vertical text, hyphenation, `allowsDefaultTighteningForTruncation`,
-  stroke and shadow attributes.
+- Vertical text, hyphenation, `allowsDefaultTighteningForTruncation`.
 - `NSTextField`, `NSTextView`, and the TextKit 1 subset (`NSLayoutManager`,
   `NSTextStorage`, `NSTextTable`) that real apps lean on.
 

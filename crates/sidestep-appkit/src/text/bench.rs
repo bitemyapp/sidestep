@@ -1,7 +1,8 @@
 //! What a page of text costs to draw: recording the 60 lines of
 //! `examples/appkit-slice` through `drawAtPoint:withAttributes:` on the
 //! main thread, then compositing them on the render thread with the glyph
-//! cache warm and cold. Medians of seven runs; run in release mode:
+//! cache warm and cold; and what TextKit's line layout costs
+//! (`bench_lines`). Medians of seven runs; run in release mode:
 //!
 //! ```sh
 //! scripts/linux-cargo test --release -p sidestep-appkit bench_ -- --ignored --nocapture
@@ -170,4 +171,98 @@ fn bench_opening_fonts() {
     let face =
         crate::text::fonts::resolve(&crate::text::fonts::FontSpec::system(crate::text::fonts::Design::Default, 13.0));
     println!("resolving the system font: {:.2} ms ({})", start.elapsed().as_secs_f64() * 1e3, face.postscript_name);
+}
+
+#[test]
+#[ignore = "a benchmark; run in release mode"]
+fn bench_lines() {
+    // What TextKit asks of the line layout: a document laid out, a key typed
+    // in a paragraph and in a long one, a page of it recorded, and the
+    // geometry a click and a caret need.
+    use crate::string_drawing::record_frame;
+    use crate::text::fonts::{self, Design, FontSpec};
+    use crate::text::layout::{Attrs, TextFont};
+    use crate::text::lines::{Container, Frame, Span, Styled};
+    let face = fonts::resolve(&FontSpec::system(Design::Default, 13.0));
+    let attrs = [Attrs::new(TextFont { face, size: 13.0, tabular_digits: false, features: None })];
+    let words = ["the", "layout", "manager", "lays", "out", "a", "paragraph", "of", "prose", "at", "a", "time"];
+    let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+    let mut sentence = |n: usize| -> String {
+        (0..n)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                words[(seed % words.len() as u64) as usize]
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let units = |t: &str| t.encode_utf16().count() as u32;
+    let container = Container { width: 600.0, ..Container::UNBOUNDED };
+    // 500 paragraphs of about three lines, then one of 100 KB.
+    let short: String = (0..500).map(|_| sentence(40) + "\n").collect();
+    let long = sentence(16_000);
+    let text = format!("{short}{long}");
+    let spans = [Span { start: 0, end: units(&text), attrs: 0 }];
+    let styled = Styled { text: &text, attrs: &attrs, spans: &spans };
+    let whole = median(3, || {
+        black_box(Frame::new(styled, container));
+    }) / 1e3;
+    let frame = Frame::new(styled, container);
+    let lines = frame.lines().count();
+
+    // A key typed in the middle of a short paragraph, and of the long one:
+    // the frame edited, then (to repeat the same edit) edited back.
+    let typing = |at: usize| {
+        let with = format!("{}x{}", &text[..at], &text[at..]);
+        let with_spans = [Span { start: 0, end: units(&with), attrs: 0 }];
+        let at16 = units(&text[..at]);
+        let mut f = frame.clone();
+        median(20, || {
+            f.edit(Styled { text: &with, attrs: &attrs, spans: &with_spans }, at16..at16, 1);
+            f.edit(styled, at16..at16 + 1, 0);
+        }) / 2.0
+    };
+    let in_short = typing(short.len() / 2 + 7);
+    let in_long = typing(short.len() + long.len() / 2);
+
+    // A page of 60 lines recorded, from the middle of the document.
+    let top = frame.lines().nth(lines / 3).map_or(0.0, |l| l.top());
+    let record = median(200, || {
+        graphics::begin_recording();
+        graphics::set_view(Xf::IDENTITY, Rect::new(0.0, 0.0, 800.0, 60.0 * 16.0));
+        record_frame(&frame, NSPoint::new(0.0, -f64::from(top)));
+        black_box(graphics::end_recording());
+    });
+    let ops = {
+        graphics::begin_recording();
+        graphics::set_view(Xf::IDENTITY, Rect::new(0.0, 0.0, 800.0, 60.0 * 16.0));
+        record_frame(&frame, NSPoint::new(0.0, -f64::from(top)));
+        graphics::end_recording().len()
+    };
+
+    // Clicks and carets, spread over the document.
+    let height = frame.height();
+    let clicks = median(20, || {
+        for i in 0..1000 {
+            black_box(frame.index_at((i * 37 % 600) as f32, height * i as f32 / 1000.0));
+        }
+    }) * 1e3
+        / 1000.0;
+    let len = frame.len();
+    let carets = median(20, || {
+        for i in 0..1000u32 {
+            black_box(frame.caret(len / 1000 * i, false));
+        }
+    }) * 1e3
+        / 1000.0;
+
+    println!("{} bytes, {} paragraphs, {lines} lines", text.len(), frame.paragraphs.len());
+    println!("lay out everything                     {whole:>9.2} ms");
+    println!("a key typed in a short paragraph       {in_short:>9.1} µs");
+    println!("a key typed in a 100 KB paragraph      {in_long:>9.1} µs");
+    println!("record a page ({ops} ops)               {record:>9.2} µs");
+    println!("character at a point                   {clicks:>9.1} ns");
+    println!("caret at an index                      {carets:>9.1} ns");
 }

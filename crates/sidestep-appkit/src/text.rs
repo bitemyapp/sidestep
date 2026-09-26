@@ -15,6 +15,8 @@
 //!   `NSFont`, and the registry that names faces across threads.
 //! - [`layout`]: attribute runs and paragraph styles into lines, with
 //!   parley doing bidi, line breaking and shaping.
+//! - [`lines`]: the same lines with their UTF-16 ranges, clusters and
+//!   carets, a paragraph or a few lines at a time, for TextKit.
 //! - [`pool`]: worker threads for laying many lines out at once.
 //! - [`raster`]: the render thread's glyph cache and compositing.
 //!
@@ -26,6 +28,10 @@
 mod bench;
 pub(crate) mod fonts;
 pub(crate) mod layout;
+// TextKit (NSLayoutManager, NSTextView), which a later workstream builds,
+// is what lays text out through this; until then only its tests do.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod lines;
 mod pool;
 mod raster;
 #[cfg(test)]

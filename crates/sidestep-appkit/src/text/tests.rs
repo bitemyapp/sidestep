@@ -2,7 +2,7 @@
 //! Linux system has (the development image has DejaVu and Noto, CJK and
 //! color emoji included). Checks whose fonts are missing are skipped.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use super::fonts::{self, Design, Family, FontSpec};
 use super::layout::{
@@ -30,7 +30,7 @@ fn has_family(part: &str) -> bool {
     super::with_ctx(|ctx| ctx.fcx.collection.family_names().any(|n| n.contains(part)))
 }
 
-fn lay(text: &str, attrs: Attrs, opts: Options) -> Rc<TextLayout> {
+fn lay(text: &str, attrs: Attrs, opts: Options) -> Arc<TextLayout> {
     layout::lay_out(text, &[attrs], &[Run { start: 0, end: text.len(), attrs: 0 }], &opts)
 }
 
@@ -128,7 +128,7 @@ fn ellipsis(a: &Attrs) -> u32 {
     glyphs(&lay("…", a.clone(), Options::UNBOUNDED))[0]
 }
 
-fn truncated(mode: LineBreak, width: f32) -> (Rc<TextLayout>, u32) {
+fn truncated(mode: LineBreak, width: f32) -> (Arc<TextLayout>, u32) {
     let mut a = Attrs::new(sans(13.0));
     a.paragraph.line_break = mode;
     let laid = lay("The quick brown fox jumps over the lazy dog", a.clone(), in_width(width));
@@ -205,9 +205,9 @@ fn layouts_are_cached_and_faces_registered_once() {
     let a = Attrs::new(sans(13.0));
     let first = lay("cached", a.clone(), Options::UNBOUNDED);
     let second = lay("cached", a.clone(), Options::UNBOUNDED);
-    assert!(Rc::ptr_eq(&first, &second));
+    assert!(Arc::ptr_eq(&first, &second));
     let other = lay("cached", a, in_width(10.0));
-    assert!(!Rc::ptr_eq(&first, &other));
+    assert!(!Arc::ptr_eq(&first, &other));
     assert_eq!(first.runs[0].font, lay("other text", Attrs::new(sans(13.0)), Options::UNBOUNDED).runs[0].font);
 }
 
@@ -250,7 +250,7 @@ fn tabs_reach_the_next_stop() {
         Options::UNBOUNDED,
     );
     let x = past.runs.last().map(|r| r.x + r.glyphs.last().unwrap().x).unwrap();
-    assert_eq!(x, 350.0, "past the twelve stops, every defaultTabInterval");
+    assert_eq!(x, 386.0, "past the twelve stops, every defaultTabInterval from the last (as on macOS)");
 }
 
 #[test]
@@ -269,11 +269,12 @@ fn explicit_tab_stops() {
     assert!((centered - (100.0 + w_bbb / 2.0)).abs() < 0.01);
     let left = width("a\tbbb", with(&[tab(100.0, layout::TabKind::Left)], 0.0));
     assert!((left - (100.0 + w_bbb)).abs() < 0.01 && w_a > 0.0);
-    // A decimal tab puts the decimal point on the stop.
+    // A decimal tab centers the decimal point on the stop, as on macOS.
     let decimal = with(&[tab(100.0, layout::TabKind::Decimal)], 0.0);
     let laid = lay("a\t12.5", decimal.clone(), Options::UNBOUNDED);
     let dot = laid.runs.iter().flat_map(|r| r.glyphs.iter().map(move |g| r.x + g.x)).nth(3).unwrap();
-    assert!((dot - 100.0).abs() < 0.01, "{dot}");
+    let point = width(".", a.clone());
+    assert!((dot + point / 2.0 - 100.0).abs() < 0.01, "{dot}");
     assert!((width("a\t125", decimal) - 100.0).abs() < 0.01, "without a point, the end");
     // A tab alone makes a line of the font's height.
     assert_eq!(lay("\t", a.clone(), Options::UNBOUNDED).height, lay("x", a, Options::UNBOUNDED).height);
@@ -483,5 +484,19 @@ fn text_laid_out_twice_is_cached_once() {
     let before = super::with_ctx(|ctx| ctx.layouts.len());
     let laid = layout::lay_out_all(jobs.collect());
     assert_eq!(super::with_ctx(|ctx| ctx.layouts.len()), before + 1);
-    assert!(Rc::ptr_eq(&laid[0], &laid[1]) && Rc::ptr_eq(&laid[1], &laid[2]));
+    assert!(Arc::ptr_eq(&laid[0], &laid[1]) && Arc::ptr_eq(&laid[1], &laid[2]));
+}
+
+#[test]
+fn decorations_run_straight_through_fallback_fonts() {
+    // Hebrew and an emoji come from other faces than the text's; the
+    // underline keeps the text's font's place and thickness through them.
+    let mut a = Attrs::new(sans(20.0));
+    a.underline = Decoration { style: 1, color: None };
+    let laid = lay("Hello שלום 😀 end", a, Options::UNBOUNDED);
+    let mut lines: Vec<[f32; 4]> = laid.fills.iter().filter(|f| !f.background).map(|f| f.rect).collect();
+    assert!(lines.len() >= 3, "a piece per run");
+    assert!(lines.iter().all(|r| (r[1], r[3]) == (lines[0][1], lines[0][3])), "{lines:?}");
+    lines.sort_by(|a, b| a[0].total_cmp(&b[0]));
+    assert!(lines.windows(2).all(|w| (w[1][0] - w[0][2]).abs() < 0.01), "end to end: {lines:?}");
 }

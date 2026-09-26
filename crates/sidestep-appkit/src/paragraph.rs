@@ -5,10 +5,13 @@
 //! The mutable class is a subclass that adds setters over the same storage.
 //! `copy` of a mutable style makes an immutable one, `mutableCopy` of either
 //! a mutable one, and two styles are equal when all their values are.
-//! Values read back exactly as they were set. Tab stops can be set, added
-//! and removed, and compare as `NSTextTab`s do: by location, alignment and
-//! whether they line up decimal points, all exactly. Reading them back as
-//! an array waits for Foundation's `NSArray`.
+//! Values read back exactly as they were set. Tab stops keep the order they
+//! were set in, as AppKit's do (a tab goes to the first stop in the list
+//! beyond it); `addTabStop:` puts a stop before the first one further on,
+//! and `removeTabStop:` takes out the first equal to it. `tabStops` hands
+//! back the `NSTextTab`s given. Stops compare as `NSTextTab`s do: by
+//! location, alignment and whether they line up decimal points, all
+//! exactly.
 
 use std::cell::{OnceCell, Ref, RefCell};
 use std::hash::Hasher;
@@ -29,9 +32,9 @@ use crate::text::layout::{Align, DEFAULT_TABS, Direction, LineBreak, Paragraph, 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Style {
     pub layout: Paragraph,
-    /// The tab stops as set, sorted by location; `None` is the default
-    /// twelve. `layout.tabs` is made from them.
-    stops: Option<Arc<[Stop]>>,
+    /// The tab stops as set, in that order; `None` is the default twelve.
+    /// `layout.tabs` is made from them.
+    stops: Option<Arc<[SetStop]>>,
     hyphenation_factor: f32,
     uses_default_hyphenation: bool,
     tightening_for_truncation: bool,
@@ -58,24 +61,60 @@ impl Default for Style {
 
 impl Style {
     /// The tab stops, the default ones spelled out.
-    fn stops(&self) -> Vec<Stop> {
+    fn stops(&self) -> Vec<SetStop> {
         match &self.stops {
             Some(stops) => stops.to_vec(),
-            None => DEFAULT_TABS.iter().map(|t| Stop::left(f64::from(t.location))).collect(),
+            None => {
+                DEFAULT_TABS.iter().map(|t| SetStop { stop: Stop::left(f64::from(t.location)), tab: None }).collect()
+            }
         }
     }
 
     /// Set the tab stops; `None` restores the default ones.
-    fn set_stops(&mut self, stops: Option<Vec<Stop>>) {
-        let stops = stops.map(|mut stops| {
-            stops.sort_by(|a, b| a.location.total_cmp(&b.location));
-            stops
-        });
+    fn set_stops(&mut self, stops: Option<Vec<SetStop>>) {
         // The default list, spelled out, is the default: it compares equal
         // and needs no allocation.
-        let default = |s: &[Stop]| s.len() == DEFAULT_TABS.len() && s.iter().zip(&DEFAULT_TABS).all(Stop::is_default);
+        let default =
+            |s: &[SetStop]| s.len() == DEFAULT_TABS.len() && s.iter().zip(&DEFAULT_TABS).all(|(s, t)| s.is_default(t));
         self.stops = stops.filter(|s| !default(s)).map(Arc::from);
-        self.layout.tabs = self.stops.as_ref().map(|s| s.iter().map(Stop::tab).collect());
+        self.layout.tabs = self.stops.as_ref().map(|s| s.iter().map(|s| s.stop.tab()).collect());
+    }
+}
+
+/// A tab stop as it was set: its values, and the `NSTextTab` it was given
+/// as, which `tabStops` hands back. Stops compare by their values alone,
+/// without messages.
+#[derive(Clone, Debug)]
+struct SetStop {
+    stop: Stop,
+    tab: Option<Retained<NSTextTab>>,
+}
+
+impl PartialEq for SetStop {
+    fn eq(&self, other: &Self) -> bool {
+        self.stop == other.stop
+    }
+}
+
+impl SetStop {
+    fn of(tab: &NSTextTab) -> SetStop {
+        SetStop { stop: tab_imp(tab).stop(), tab: Some(tab.retain()) }
+    }
+
+    fn is_default(&self, tab: &Tab) -> bool {
+        self.stop == Stop::left(f64::from(tab.location))
+    }
+
+    /// The `NSTextTab` the stop was given as, or a new one.
+    fn text_tab(self) -> Retained<NSTextTab> {
+        self.tab.unwrap_or_else(|| {
+            crate::load_shell::<NSTextTab>();
+            let this = NSTextTabImpl::alloc().set_ivars(TabIvars { stop: self.stop, options: None });
+            // SAFETY: NSObject's designated initializer.
+            let tab: Retained<NSTextTabImpl> = unsafe { msg_send![super(this), init] };
+            // SAFETY: NSTextTabImpl is NSTextTab's implementation.
+            unsafe { Retained::cast_unchecked(tab) }
+        })
     }
 }
 
@@ -91,10 +130,6 @@ struct Stop {
 impl Stop {
     fn left(location: f64) -> Stop {
         Stop { location, alignment: NSTextAlignment::Left, decimal: false }
-    }
-
-    fn is_default((stop, tab): (&Stop, &Tab)) -> bool {
-        *stop == Stop::left(f64::from(tab.location))
     }
 
     /// The stop as layout uses it.
@@ -263,6 +298,14 @@ define_class!(
             self.get().header_level
         }
 
+        #[unsafe(method_id(tabStops))]
+        fn tab_stops(&self) -> Retained<NSArray<NSTextTab>> {
+            // Copied out first: making tabs sends messages.
+            let stops = self.get().stops();
+            let tabs: Vec<Retained<NSTextTab>> = stops.into_iter().map(SetStop::text_tab).collect();
+            NSArray::from_retained_slice(&tabs)
+        }
+
         #[unsafe(method(copyWithZone:))]
         fn copy_with_zone(&self, _zone: *mut NSZone) -> *mut Self {
             // Immutable: a copy is the same style.
@@ -287,8 +330,8 @@ define_class!(
             let style = self.get();
             let mut h = crate::text::layout::Fx::default();
             style.layout.hash_into(&mut h);
-            for stop in style.stops.iter().flat_map(|s| s.iter()) {
-                h.write_usize(stop.hash());
+            for set in style.stops.iter().flat_map(|s| s.iter()) {
+                h.write_usize(set.stop.hash());
             }
             h.finish() as usize
         }
@@ -427,17 +470,19 @@ define_class!(
             // nil restores the default stops; an empty array leaves none.
             let stops = tabs.map(|tabs| {
                 let items = crate::font::array_items(tabs);
-                items.iter().filter_map(|t| t.downcast_ref::<NSTextTab>()).map(|t| tab_imp(t).stop()).collect()
+                items.iter().filter_map(|t| t.downcast_ref::<NSTextTab>()).map(SetStop::of).collect()
             });
             self.update(|s| s.set_stops(stops));
         }
 
         #[unsafe(method(addTabStop:))]
         fn add_tab_stop(&self, tab: &NSTextTab) {
-            let stop = tab_imp(tab).stop();
+            let set = SetStop::of(tab);
             self.update(|s| {
                 let mut stops = s.stops();
-                stops.push(stop);
+                // Before the first stop further on.
+                let at = stops.iter().position(|t| t.stop.location > set.stop.location).unwrap_or(stops.len());
+                stops.insert(at, set);
                 s.set_stops(Some(stops));
             });
         }
@@ -447,8 +492,10 @@ define_class!(
             let stop = tab_imp(tab).stop();
             self.update(|s| {
                 let mut stops = s.stops();
-                stops.retain(|t| *t != stop);
-                s.set_stops(Some(stops));
+                if let Some(at) = stops.iter().position(|t| t.stop == stop) {
+                    stops.remove(at);
+                    s.set_stops(Some(stops));
+                }
             });
         }
 

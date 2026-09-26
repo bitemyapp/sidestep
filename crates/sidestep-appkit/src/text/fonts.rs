@@ -21,7 +21,7 @@ use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
 
 use parley::fontique::{
     Attributes, Blob, Collection, CollectionOptions, FontStyle, FontWeight, FontWidth, GenericFamily, QueryFamily,
-    QueryStatus, SourceCache, Synthesis,
+    QueryStatus, SourceCache,
 };
 use parley::{FontContext, FontData};
 use skrifa::MetadataProvider;
@@ -114,6 +114,9 @@ pub(crate) struct Metrics {
     pub x_height: f32,
     pub underline_position: f32,
     pub underline_thickness: f32,
+    /// Where a strikethrough's top is above the baseline, and how thick.
+    pub strikeout_position: f32,
+    pub strikeout_thickness: f32,
     /// The union of the glyphs' boxes: x0, y0, x1, y1.
     pub bounds: [f32; 4],
     pub italic_angle: f32,
@@ -456,6 +459,8 @@ fn load_face(fcx: &mut FontContext, spec: &FontSpec) -> Face {
             x_height: 0.5,
             underline_position: -0.1,
             underline_thickness: 0.05,
+            strikeout_position: 0.3,
+            strikeout_thickness: 0.05,
             bounds: [0.0, -0.2, 1.0, 0.8],
             max_advance: 1.0,
             ..Metrics::default()
@@ -511,6 +516,9 @@ fn describe(face: &mut Face, data: &[u8], index: u32) {
         x_height: m.x_height.unwrap_or(m.ascent * 0.5) / upem,
         underline_position: m.underline.map_or(-upem / 10.0, |u| u.offset) / upem,
         underline_thickness: m.underline.map_or(upem / 18.0, |u| u.thickness) / upem,
+        // HarfBuzz's defaults, as parley's.
+        strikeout_position: m.strikeout.map_or(m.ascent / 2.0, |s| s.offset) / upem,
+        strikeout_thickness: m.strikeout.map_or(upem / 18.0, |s| s.thickness) / upem,
         bounds: bounds.map(|v| v / upem),
         italic_angle: m.italic_angle,
         max_advance: m.max_width.unwrap_or(bounds[2] - bounds[0]) / upem,
@@ -529,14 +537,28 @@ fn describe(face: &mut Face, data: &[u8], index: u32) {
 }
 
 /// A face as the render thread draws it: the font file, its variation
-/// coordinates, and any bold or oblique that has to be synthesized.
+/// coordinates, and how its glyphs are drawn beyond their outlines.
 #[derive(Clone)]
 pub(crate) struct FaceData {
     pub font: FontData,
     pub coords: Arc<[i16]>,
     pub embolden: bool,
-    /// Degrees to slant by for a synthesized oblique.
+    /// Degrees to slant by: a synthesized oblique and `NSObliqueness`.
     pub skew: f32,
+    /// The width of a stroke along the outlines, as a fraction of the
+    /// size, for `NSStrokeWidth`; 0 fills them.
+    pub stroke: f32,
+}
+
+/// What drawing a face adds to its outlines: bold and slant that are
+/// synthesized, and a stroke along them in place of a fill.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Synth {
+    pub embolden: bool,
+    /// Degrees, right for positive values.
+    pub skew: f32,
+    /// A fraction of the size; 0 fills the glyphs.
+    pub stroke: f32,
 }
 
 #[derive(Default)]
@@ -544,7 +566,7 @@ struct Registry {
     faces: Vec<FaceData>,
     /// Candidates by font file, index and synthesis; coordinates are
     /// compared on lookup.
-    ids: HashMap<(u64, u32, bool, i32), Vec<u32>>,
+    ids: HashMap<(u64, u32, bool, u32, u32), Vec<u32>>,
 }
 
 static REGISTRY: LazyLock<RwLock<Registry>> = LazyLock::new(Default::default);
@@ -552,9 +574,10 @@ static REGISTRY: LazyLock<RwLock<Registry>> = LazyLock::new(Default::default);
 /// The id glyph runs name a face by. Faces are never unregistered: the
 /// shared source cache hands out the same font data for a file as long as
 /// someone holds it, which the registry does, so ids stay few and stable.
-pub(crate) fn register(font: &FontData, coords: &[i16], synthesis: &Synthesis) -> u32 {
-    let skew = synthesis.skew().unwrap_or(0.0);
-    let key = (font.data.id(), font.index, synthesis.embolden(), skew.to_bits() as i32);
+pub(crate) fn register(font: &FontData, coords: &[i16], synth: Synth) -> u32 {
+    // Adding zero makes -0 and 0 one key.
+    let key =
+        (font.data.id(), font.index, synth.embolden, (synth.skew + 0.0).to_bits(), (synth.stroke + 0.0).to_bits());
     let find =
         |reg: &Registry| reg.ids.get(&key)?.iter().copied().find(|&id| *reg.faces[id as usize].coords == *coords);
     if let Some(id) = find(&REGISTRY.read().unwrap_or_else(|e| e.into_inner())) {
@@ -565,7 +588,8 @@ pub(crate) fn register(font: &FontData, coords: &[i16], synthesis: &Synthesis) -
         return id;
     }
     let id = reg.faces.len() as u32;
-    reg.faces.push(FaceData { font: font.clone(), coords: coords.into(), embolden: synthesis.embolden(), skew });
+    let (embolden, skew, stroke) = (synth.embolden, synth.skew, synth.stroke);
+    reg.faces.push(FaceData { font: font.clone(), coords: coords.into(), embolden, skew, stroke });
     reg.ids.entry(key).or_default().push(id);
     id
 }

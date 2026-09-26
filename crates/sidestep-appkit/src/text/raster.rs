@@ -21,7 +21,7 @@ use std::collections::hash_map::Entry;
 use swash::CacheKey;
 use swash::scale::image::{Content, Image as Rendered};
 use swash::scale::{Render, ScaleContext, Scaler, Source, StrikeWith};
-use swash::zeno::{Angle, Format, Transform, Vector};
+use swash::zeno::{Angle, Format, Stroke, Transform, Vector};
 
 use super::fonts::{self, FaceData};
 use super::layout::FxBuild;
@@ -204,6 +204,9 @@ fn render(scaler: &mut Scaler<'_>, face: &FaceData, size: f32, id: u32, offset: 
     if face.skew != 0.0 {
         render.transform(Some(Transform::skew(Angle::from_degrees(face.skew), Angle::ZERO)));
     }
+    if face.stroke > 0.0 {
+        render.style(Stroke::new(face.stroke * size));
+    }
     let rendered = render.render(scaler, u16::try_from(id).ok()?)?;
     convert(rendered)
 }
@@ -327,7 +330,7 @@ mod tests {
         let spec = FontSpec { family: Family::Named(family.into()), ..FontSpec::system(Design::Default, 0.0) };
         let face = resolve(&spec);
         let font = face.font.as_ref().filter(|_| &*face.family == family)?;
-        Some(fonts::register(font, &[], &Default::default()))
+        Some(fonts::register(font, &[], fonts::Synth::default()))
     }
 
     fn face(context: &mut ScaleContext, family: &str) -> Option<Face> {

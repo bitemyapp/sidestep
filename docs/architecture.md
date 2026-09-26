@@ -621,16 +621,59 @@ positions in points. `crates/sidestep-appkit/src/text/` holds the stack.
   `truncatesLastVisibleLine` end the last line kept in an ellipsis whenever
   any text follows it. Emoji are shaped from the color
   emoji family first, as on macOS, where the text's own face might
-  otherwise give them plain glyphs. Tabs go to the paragraph's tab stops
-  (left, right, centered or decimal; by default twelve, 28 points apart),
-  then every
-  `defaultTabInterval`; control characters take no room.
+  otherwise give them plain glyphs. A tab goes to the first of the
+  paragraph's tab stops beyond it, in the order they were set (by default
+  twelve, 28 points apart): text after a left stop starts there, after a
+  right stop ends there, after a centered one centers on it, and after a
+  decimal stop has its decimal point centered on it (a number without one
+  ends there). Past the last stop, stops follow it every
+  `defaultTabInterval`, or a tab takes no room. Control characters take no
+  room. A baseline offset adds its points, unrounded, above or below the
+  line's rounded ascent and descent.
+- **Attributes.** Beyond fonts, colors, backgrounds, kerning, ligatures
+  and baseline offsets: underlines and strikethroughs single, thick or
+  double, solid or dotted and dashed, under whole runs or only under words,
+  placed by the text's own font so that they run straight through
+  fallback faces (emoji, other scripts); `NSStrokeWidth` (outlines alone
+  when positive, outlines over the fill when negative, in
+  `NSStrokeColor`); `NSObliqueness`; and `NSShadow`, drawn as the glyphs
+  offset in the shadow's color underneath, without blur until the
+  rasterizer has a blurred glyph op. Strokes and slants are part of the
+  face a glyph run names (the registry keeps synthesized bold, slant and
+  stroke with the font file), so the render thread draws them with swash
+  and the glyph-run op didn't change. `NSExpansion` isn't drawn: it
+  scales advances, which line breaking would have to know about.
+- **Lines for TextKit.** `text/lines.rs` lays text out as a layout
+  manager needs it, on any thread: the input is the text, attributes and
+  runs of them over UTF-16 units (as `NSString` counts), and the output,
+  plain data behind `Arc`s, is lines with their UTF-16 ranges, baseline,
+  ascent, descent, leading and widths, clusters in visual order with their
+  positions and bidi levels, and glyph runs to record as they are. A
+  paragraph can be laid out from any of its lines and a few lines at a
+  time; a long one is then shaped only in a window of its text as long as
+  those lines need (the last line in the window, which might go on past
+  it, is dropped). Its base direction is found once for the whole
+  paragraph, so a paragraph laid out from one of its lines gets the lines
+  it would have had. A `Frame` stacks a text's paragraphs and answers what
+  a layout manager is asked: the character at a point, the caret at an
+  index (between directions, at the character nearer the paragraph's own
+  direction, with the other edge as a secondary caret, as AppKit's layout
+  manager does), the rectangles of a selection (split where directions
+  mix) and the line fragment of an index. After an edit it lays out again
+  from the line before the edit until a line starts where an old one did,
+  keeps the rest and moves the paragraphs after it; offsets in a line are
+  relative to its paragraph and a cluster's to its line, so moving costs
+  nothing per cluster. A key typed in a 100 KB paragraph costs about
+  0.13 ms, in an ordinary one about 30 µs, and recording a page of
+  laid-out lines half a microsecond (`text/bench.rs`, Linux in a VM on an
+  M-series Mac).
 - **Caches.** Laid-out text is cached per thread by string, attributes and
   options (two generations of 2048 entries or 4 MB), so a view that
-  redraws the same lines records them for about 0.1 µs a line. Glyph runs
+  redraws the same lines records them for about 0.1 µs a line; drawing
+  borrows the cached layout rather than counting a reference. Glyph runs
   keep their glyphs in an `Arc`, so recording a cached line copies no
-  glyphs. Paragraph styles own their tab stops, so nothing outlives the
-  styles and layouts that use them.
+  glyphs, and layouts are `Send` and `Sync`. Paragraph styles own their
+  tab stops, so nothing outlives the styles and layouts that use them.
 - **Parallel layout.** Drawing doesn't need the layout until the pass
   ends, so text drawn without having been measured is set aside, and the
   pass lays it all out at its end on a small pool of worker threads, the
@@ -650,10 +693,16 @@ positions in points. `crates/sidestep-appkit/src/text/` holds the stack.
 - **String drawing methods.** `NSString` gets `drawAtPoint:` and the rest
   as a category would give them: a helper class's methods, copied over by
   the loader of the helper's static shell (`_SidestepStringDrawing`),
-  which the `NSColor`, `NSFont` and `NSParagraphStyle` loaders and the
-  display pass message. The copying runs under the runtime's class-loading
+  which the `NSResponder` (and so the application, window and view),
+  `NSColor`, `NSFont` and `NSParagraphStyle` loaders and the display pass
+  message. The copying runs under the runtime's class-loading
   lock and takes no lock of its own, so loaders on two threads can't wait
-  on each other.
+  on each other. Measuring before any AppKit class has loaded (with no
+  attributes, or only numbers) finds no method, since nothing of AppKit
+  has run; that waits for link-time categories in the runtime, with the
+  helper's loader as the category's body
+  (`conformance/tests/text_first_call.rs` checks it, ignored on Linux
+  until then).
 
 parley was chosen over cosmic-text, the other complete pure-Rust stack.
 parley takes styles as ranges over the text, which is what an attributed

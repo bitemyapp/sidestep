@@ -54,6 +54,9 @@ mod window;
 
 sidestep_runtime::static_class!(pub NSRESPONDER, NSRESPONDER_META = "NSResponder", || {
     let _ = views::NSResponderImpl::class();
+    // The application, windows and views load it first: NSString can
+    // measure and draw from then on (see `string_drawing`).
+    string_drawing::install_string_drawing();
 });
 
 sidestep_runtime::static_class!(pub NSVIEW, NSVIEW_META = "NSView", || {

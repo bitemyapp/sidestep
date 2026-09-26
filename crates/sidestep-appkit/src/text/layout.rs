@@ -10,9 +10,10 @@
 //!   direction, and a separator never reaches the shaper.
 //! - A line is as tall as the ascents plus the descents of its fonts, each
 //!   rounded to a whole point, as AppKit's typesetter does; the fonts'
-//!   leading is added only when the caller asks for it. Then the paragraph
-//!   style's `lineHeightMultiple`, minimum and maximum apply, extra height
-//!   going above the text.
+//!   leading is added only when the caller asks for it. A baseline offset
+//!   adds its points above or below, unrounded. Then the paragraph style's
+//!   `lineHeightMultiple`, minimum and maximum apply, extra height going
+//!   above the text.
 //! - `lineSpacing` goes between lines, `paragraphSpacing` after a paragraph
 //!   and `paragraphSpacingBefore` before one, but nothing above the first
 //!   line or below the last.
@@ -28,12 +29,16 @@
 //! Layouts are cached per thread by text, attributes and options, in two
 //! generations: a hit in the old one moves the entry to the new one, and
 //! when the new one fills up (2048 entries or about 4 MB of text and
-//! glyphs) the old one is dropped.
+//! glyphs) the old one is dropped. Laid-out text is plain data behind an
+//! `Arc`, so any thread may keep and draw it.
+//!
+//! [`segment_lines`] is also the core of `text::lines`, the line, cluster
+//! and caret layout TextKit builds on: asked for them, each line keeps its
+//! clusters in visual order with their byte ranges and positions.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hash, Hasher};
-use std::rc::Rc;
 use std::sync::Arc;
 
 use icu_properties::CodePointSetData;
@@ -68,6 +73,12 @@ pub(crate) enum LineBreak {
     TruncateMiddle,
 }
 
+impl LineBreak {
+    pub fn truncates(self) -> bool {
+        matches!(self, LineBreak::TruncateHead | LineBreak::TruncateTail | LineBreak::TruncateMiddle)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Direction {
     Natural,
@@ -94,9 +105,10 @@ pub(crate) struct Paragraph {
     pub line_height_multiple: f64,
     pub direction: Direction,
     pub default_tab_interval: f64,
-    /// The tab stops, sorted by location; `None` is AppKit's default
-    /// twelve ([`tab_stops`]). A list lives as long as the styles and
-    /// layouts that use it.
+    /// The tab stops in the order they were given; `None` is AppKit's
+    /// default twelve ([`tab_stops`]). A tab goes to the first stop in the
+    /// list beyond it, as in AppKit, so an unsorted list keeps its order.
+    /// A list lives as long as the styles and layouts that use it.
     pub tabs: Option<Arc<[Tab]>>,
 }
 
@@ -209,6 +221,38 @@ pub(crate) struct Decoration {
     pub color: Option<Color>,
 }
 
+/// `NSUnderlineStyle` bits: the line's style in the low byte, the pattern
+/// in the next, and whether to leave out the spaces between words.
+mod underline {
+    pub const DOUBLE: i64 = 0x09;
+    pub const THICK: i64 = 0x02;
+    pub const PATTERN: i64 = 0x0f00;
+    pub const DOT: i64 = 0x0100;
+    pub const DASH: i64 = 0x0200;
+    pub const DASH_DOT: i64 = 0x0300;
+    pub const DASH_DOT_DOT: i64 = 0x0400;
+    pub const BY_WORD: i64 = 0x8000;
+}
+
+/// Outlined glyphs: `NSStrokeWidth`, a percentage of the font size
+/// (positive strokes the outline alone, negative fills it too; 0 is plain
+/// text), and `NSStrokeColor`, the text's own color if none.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Stroke {
+    pub width: f32,
+    pub color: Option<Color>,
+}
+
+/// A shadow cast by text, as `NSShadow` describes one: an offset in points
+/// with y up (AppKit's convention whichever way the view faces), a blur
+/// radius and a color.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Shadow {
+    pub offset: [f32; 2],
+    pub blur: f32,
+    pub color: Color,
+}
+
 /// The attributes of a run of text.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Attrs {
@@ -223,6 +267,11 @@ pub(crate) struct Attrs {
     pub baseline_offset: f32,
     /// 0: none, 1: the default ones, 2: all of them.
     pub ligatures: i64,
+    pub stroke: Stroke,
+    /// `NSObliqueness`: the skew to slant glyphs by (the tangent of the
+    /// angle), right for positive values.
+    pub obliqueness: f32,
+    pub shadow: Option<Shadow>,
     pub paragraph: Paragraph,
 }
 
@@ -237,6 +286,9 @@ impl Attrs {
             kern: None,
             baseline_offset: 0.0,
             ligatures: 1,
+            stroke: Stroke::default(),
+            obliqueness: 0.0,
+            shadow: None,
             paragraph: Paragraph::default(),
         }
     }
@@ -249,6 +301,10 @@ impl Attrs {
         (self.underline.style, color(self.underline.color), self.strikethrough.style, color(self.strikethrough.color))
             .hash(h);
         (self.kern.map(f32::to_bits), self.baseline_offset.to_bits(), self.ligatures).hash(h);
+        // One word for the rarer attributes, which equality compares in
+        // full: this runs for every string drawn.
+        let rare = u64::from(self.stroke.width.to_bits()) | u64::from(self.obliqueness.to_bits()) << 32;
+        h.write_u64(rare ^ u64::from(self.shadow.is_some()));
         self.paragraph.hash_into(h);
     }
 
@@ -274,6 +330,11 @@ impl Attrs {
             features.push(FontFeature::new(Tag::new(b"tnum"), 1));
         }
         features
+    }
+
+    /// Degrees to slant glyphs by for `NSObliqueness`.
+    fn slant(&self) -> f32 {
+        if self.obliqueness == 0.0 { 0.0 } else { self.obliqueness.atan().to_degrees() }
     }
 }
 
@@ -350,11 +411,11 @@ pub(crate) struct TextLayout {
 
 /// Lay `text` out, or find it in this thread's cache. `runs` cover the text
 /// in order and index into `attrs`; there is at least one.
-pub(crate) fn lay_out(text: &str, attrs: &[Attrs], runs: &[Run], opts: &Options) -> Rc<TextLayout> {
+pub(crate) fn lay_out(text: &str, attrs: &[Attrs], runs: &[Run], opts: &Options) -> Arc<TextLayout> {
     match cached(text, attrs, runs, opts) {
         Ok(layout) => layout,
         Err(hash) => super::with_ctx(|ctx| {
-            let layout = Rc::new(compute(ctx, text, attrs, runs, opts));
+            let layout = Arc::new(compute(ctx, text, attrs, runs, opts));
             let entry = Entry { text: text.into(), attrs: attrs.into(), runs: runs.into(), opts: *opts, layout };
             ctx.layouts.insert(hash, entry)
         }),
@@ -363,14 +424,27 @@ pub(crate) fn lay_out(text: &str, attrs: &[Attrs], runs: &[Run], opts: &Options)
 
 /// `text` laid out, if this thread has it cached; if not, the key to lay it
 /// out under (see [`job`]).
-pub(crate) fn cached(text: &str, attrs: &[Attrs], runs: &[Run], opts: &Options) -> Result<Rc<TextLayout>, u64> {
+pub(crate) fn cached(text: &str, attrs: &[Attrs], runs: &[Run], opts: &Options) -> Result<Arc<TextLayout>, u64> {
+    with_cached(text, attrs, runs, opts, |layout| layout.clone())
+}
+
+/// `f` with `text` laid out, if this thread has it cached, which spares
+/// the layout's reference count; if not, the key to lay it out under.
+/// `f` must not lay text out.
+pub(crate) fn with_cached<R>(
+    text: &str,
+    attrs: &[Attrs],
+    runs: &[Run],
+    opts: &Options,
+    f: impl FnOnce(&Arc<TextLayout>) -> R,
+) -> Result<R, u64> {
     let mut h = Fx::default();
     text.hash(&mut h);
     attrs.iter().for_each(|a| a.hash_into(&mut h));
     runs.hash(&mut h);
     opts.hash_into(&mut h);
     let hash = h.finish();
-    super::with_ctx(|ctx| ctx.layouts.get(hash, text, attrs, runs, opts).ok_or(hash))
+    super::with_ctx(|ctx| ctx.layouts.find(hash, text, attrs, runs, opts).map(f).ok_or(hash))
 }
 
 /// Text to lay out later, maybe on another thread.
@@ -396,7 +470,7 @@ impl Job {
 
 /// Lay `jobs` out, sharing the work with other threads when there's
 /// enough of it, and cache them on this thread.
-pub(crate) fn lay_out_all(jobs: Vec<Job>) -> Vec<Rc<TextLayout>> {
+pub(crate) fn lay_out_all(jobs: Vec<Job>) -> Vec<Arc<TextLayout>> {
     // About 60 µs of work: below it, waking helpers costs more than it saves.
     let bytes: usize = jobs.iter().map(|j| j.text.len()).sum();
     let done: Vec<(Job, TextLayout)> = if jobs.len() >= 4 && bytes >= 512 {
@@ -419,7 +493,7 @@ pub(crate) fn lay_out_all(jobs: Vec<Job>) -> Vec<Rc<TextLayout>> {
                     attrs: j.attrs.into(),
                     runs: j.runs.into(),
                     opts: j.opts,
-                    layout: Rc::new(layout),
+                    layout: Arc::new(layout),
                 };
                 ctx.layouts.insert(j.hash, entry)
             })
@@ -467,7 +541,7 @@ pub(crate) struct Entry {
     attrs: Box<[Attrs]>,
     runs: Box<[Run]>,
     opts: Options,
-    layout: Rc<TextLayout>,
+    layout: Arc<TextLayout>,
 }
 
 impl Entry {
@@ -497,26 +571,42 @@ pub(crate) struct Cache {
 }
 
 impl Cache {
-    fn get(&mut self, hash: u64, text: &str, attrs: &[Attrs], runs: &[Run], opts: &Options) -> Option<Rc<TextLayout>> {
-        if let Some(entry) = self.new.get(&hash).and_then(|b| b.iter().find(|e| e.is(text, attrs, runs, opts))) {
-            return Some(entry.layout.clone());
+    fn get(&mut self, hash: u64, text: &str, attrs: &[Attrs], runs: &[Run], opts: &Options) -> Option<Arc<TextLayout>> {
+        self.find(hash, text, attrs, runs, opts).cloned()
+    }
+
+    /// The cached layout, moved to the newer generation if it was in the
+    /// older.
+    fn find(
+        &mut self,
+        hash: u64,
+        text: &str,
+        attrs: &[Attrs],
+        runs: &[Run],
+        opts: &Options,
+    ) -> Option<&Arc<TextLayout>> {
+        let fresh = self.new.get(&hash).and_then(|b| b.iter().position(|e| e.is(text, attrs, runs, opts)));
+        if fresh.is_none() {
+            let bucket = self.old.get_mut(&hash)?;
+            let at = bucket.iter().position(|e| e.is(text, attrs, runs, opts))?;
+            let entry = bucket.swap_remove(at);
+            self.push(hash, entry);
         }
-        let bucket = self.old.get_mut(&hash)?;
-        let at = bucket.iter().position(|e| e.is(text, attrs, runs, opts))?;
-        let entry = bucket.swap_remove(at);
-        Some(self.push(hash, entry))
+        let bucket = self.new.get(&hash)?;
+        let at = fresh.unwrap_or(bucket.len() - 1);
+        bucket.get(at).map(|e| &e.layout)
     }
 
     /// Cache `entry`, unless an equal one is cached already, and return the
     /// layout the cache keeps.
-    fn insert(&mut self, hash: u64, entry: Entry) -> Rc<TextLayout> {
+    fn insert(&mut self, hash: u64, entry: Entry) -> Arc<TextLayout> {
         match self.get(hash, &entry.text, &entry.attrs, &entry.runs, &entry.opts) {
             Some(layout) => layout,
             None => self.push(hash, entry),
         }
     }
 
-    fn push(&mut self, hash: u64, entry: Entry) -> Rc<TextLayout> {
+    fn push(&mut self, hash: u64, entry: Entry) -> Arc<TextLayout> {
         if self.len >= GENERATION || self.bytes >= GENERATION_BYTES {
             self.old = std::mem::take(&mut self.new);
             (self.len, self.bytes) = (0, 0);
@@ -570,7 +660,7 @@ fn segments(text: &str) -> Vec<Segment> {
 /// and ranges are asked for in order, so `from` remembers where to look:
 /// the runs before it end before `start`. That keeps text with many runs
 /// and many paragraphs linear.
-fn runs_in(runs: &[Run], from: &mut usize, start: usize, end: usize) -> Vec<Run> {
+pub(crate) fn runs_in(runs: &[Run], from: &mut usize, start: usize, end: usize) -> Vec<Run> {
     while *from + 1 < runs.len() && runs[*from].end <= start {
         *from += 1;
     }
@@ -597,19 +687,53 @@ fn runs_in(runs: &[Run], from: &mut usize, start: usize, end: usize) -> Vec<Run>
     out
 }
 
+/// A cluster of a laid-out line: a byte range of the segment's text, where
+/// it is and how wide, and which way it runs. A tab's cluster reaches to
+/// where the text after it starts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ByteCluster {
+    pub start: usize,
+    pub end: usize,
+    /// The left edge, from the container's left.
+    pub x: f32,
+    pub advance: f32,
+    pub rtl: bool,
+}
+
 /// A line of a segment, relative to its own top left corner.
-struct Line {
-    height: f32,
-    descent: f32,
+// Only `text::lines` reads some fields, and only its tests use it yet.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct LaidLine {
+    pub height: f32,
+    /// How far the baseline is above the line's bottom: the fonts'
+    /// descent, rounded, plus any lowering.
+    pub descent: f32,
+    /// The fonts' ascent above the baseline, rounded, plus any raising;
+    /// the line's height may add to it.
+    pub ascent: f32,
+    pub leading: f32,
     /// How far the text reaches, trailing whitespace included and the
     /// alignment's offset left out, as AppKit measures a line.
-    right: f32,
+    pub right: f32,
     /// The line's head indent.
-    indent: f32,
-    runs: Vec<PlacedRun>,
-    fills: Vec<PlacedFill>,
-    /// Where the line's text starts in the segment.
-    text_start: usize,
+    pub indent: f32,
+    /// Where the line's content starts, from the container's left: the
+    /// indent and the alignment's offset.
+    pub x: f32,
+    /// The content's advance, trailing whitespace included, and that of
+    /// the trailing whitespace.
+    pub advance: f32,
+    pub trailing: f32,
+    pub runs: Vec<PlacedRun>,
+    pub fills: Vec<PlacedFill>,
+    /// Where the line's text starts and ends in the segment.
+    pub text_start: usize,
+    pub text_end: usize,
+    /// The line's clusters in visual order, left to right, when asked for.
+    pub clusters: Vec<ByteCluster>,
+    /// For a truncated line, the bytes of the segment its ellipsis stands
+    /// for.
+    pub elided: Option<(usize, usize)>,
 }
 
 /// A line placed in the layout, for truncating it later.
@@ -638,7 +762,8 @@ pub(crate) fn compute(ctx: &mut Ctx, text: &str, attrs: &[Attrs], runs: &[Run], 
         let seg_runs = runs_in(runs, &mut cursor, seg.start, seg.end);
         let para = &attrs[seg_runs[0].attrs as usize].paragraph;
         let seg_text = &text[seg.start..seg.end];
-        let lines = segment_lines(ctx, seg_text, attrs, &seg_runs, para, seg.first_in_paragraph, opts, None);
+        let req = Req::lines(seg.first_in_paragraph, para.direction);
+        let lines = segment_lines(ctx, seg_text, attrs, &seg_runs, para, req, opts);
         for (i, line) in lines.into_iter().enumerate() {
             let mut top = bottom;
             if let Some(prev) = previous {
@@ -687,8 +812,9 @@ pub(crate) fn compute(ctx: &mut Ctx, text: &str, attrs: &[Attrs], runs: &[Run], 
         let mut from = p.cursor;
         let rest_runs = runs_in(runs, &mut from, start, seg.end);
         let para = &attrs[rest_runs[0].attrs as usize].paragraph;
-        let lines =
-            segment_lines(ctx, &text[start..seg.end], attrs, &rest_runs, para, p.first_in_paragraph, opts, Some(more));
+        let req =
+            Req { tail: Some((LineBreak::TruncateTail, more)), ..Req::lines(p.first_in_paragraph, para.direction) };
+        let lines = segment_lines(ctx, &text[start..seg.end], attrs, &rest_runs, para, req, opts);
         if let Some(line) = lines.into_iter().next() {
             out.runs.truncate(p.runs);
             out.fills.truncate(p.fills);
@@ -702,7 +828,7 @@ pub(crate) fn compute(ctx: &mut Ctx, text: &str, attrs: &[Attrs], runs: &[Run], 
     out
 }
 
-fn place(out: &mut TextLayout, line: Line, top: f32) {
+fn place(out: &mut TextLayout, line: LaidLine, top: f32) {
     out.runs.extend(line.runs.into_iter().map(|r| PlacedRun { y: r.y + top, ..r }));
     out.fills.extend(line.fills.into_iter().map(|mut f| {
         f.rect[1] += top;
@@ -711,33 +837,52 @@ fn place(out: &mut TextLayout, line: Line, top: f32) {
     }));
 }
 
-/// The lines of one segment. `tail` truncates it to one line with an
-/// ellipsis at the end, whatever the paragraph style says: if the text
-/// doesn't fit, or always if `tail` is `Some(true)`.
-#[allow(clippy::too_many_arguments)]
-fn segment_lines(
+/// How [`segment_lines`] lays a segment out.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Req {
+    /// The segment starts a paragraph, so its first line takes the first
+    /// line's indent.
+    pub first_in_paragraph: bool,
+    /// Truncate to one line with an ellipsis, as the mode says, whatever
+    /// the paragraph style says: if the text doesn't fit, or, for the tail
+    /// mode, always when the flag says something cut off follows.
+    pub tail: Option<(LineBreak, bool)>,
+    /// The base direction: the paragraph style's, or one the caller found
+    /// for the whole paragraph.
+    pub direction: Direction,
+    /// Record each line's clusters.
+    pub clusters: bool,
+}
+
+impl Req {
+    pub fn lines(first_in_paragraph: bool, direction: Direction) -> Req {
+        Req { first_in_paragraph, tail: None, direction, clusters: false }
+    }
+}
+
+/// The lines of one segment, as `req` asks.
+pub(crate) fn segment_lines(
     ctx: &mut Ctx,
     text: &str,
     attrs: &[Attrs],
     runs: &[Run],
     para: &Paragraph,
-    first_in_paragraph: bool,
+    req: Req,
     opts: &Options,
-    tail: Option<bool>,
-) -> Vec<Line> {
+) -> Vec<LaidLine> {
     let tail_indent = para.tail_indent as f32;
     let right = if tail_indent > 0.0 { tail_indent.min(opts.width) } else { opts.width + tail_indent };
-    let first_indent = if first_in_paragraph { para.first_line_head_indent } else { para.head_indent }.max(0.0) as f32;
+    let first_indent =
+        if req.first_in_paragraph { para.first_line_head_indent } else { para.head_indent }.max(0.0) as f32;
     let rest_indent = para.head_indent.max(0.0) as f32;
-    let more = tail == Some(true);
+    let more = matches!(req.tail, Some((LineBreak::TruncateTail, true)));
     if text.is_empty() && !more {
         return vec![empty_line(&attrs[runs[0].attrs as usize], para, opts)];
     }
-    let mode = if tail.is_some() { LineBreak::TruncateTail } else { para.line_break };
-    let wraps = opts.all_lines && tail.is_none() && matches!(mode, LineBreak::WordWrap | LineBreak::CharWrap);
-    let truncates = matches!(mode, LineBreak::TruncateHead | LineBreak::TruncateTail | LineBreak::TruncateMiddle)
-        && right.is_finite();
-    let settings = Settings { mode, wraps, direction: para.direction };
+    let mode = req.tail.map_or(para.line_break, |(mode, _)| mode);
+    let wraps = opts.all_lines && req.tail.is_none() && matches!(mode, LineBreak::WordWrap | LineBreak::CharWrap);
+    let truncates = mode.truncates() && right.is_finite();
+    let settings = Settings { mode, wraps, direction: req.direction };
 
     let (mut layout, shift) = build(ctx, text, attrs, runs, &settings);
     break_and_tab(&mut layout, text, shift, para, right, first_indent, rest_indent);
@@ -745,20 +890,27 @@ fn segment_lines(
     if more || (truncates && content_width(&layout) > avail + 0.01) {
         let clusters = clusters(&layout, shift);
         for extra in 0..4 {
-            let (short, short_runs) = elide(ctx, text, attrs, runs, &clusters, avail, mode, extra, &settings);
+            let (short, short_runs, cut) = elide(ctx, text, attrs, runs, &clusters, avail, mode, extra, &settings);
             let (mut short_layout, short_shift) = build(ctx, &short, attrs, &short_runs, &settings);
             break_and_tab(&mut short_layout, &short, short_shift, para, right, first_indent, rest_indent);
             if content_width(&short_layout) <= avail + 0.01 || extra == 3 {
                 short_layout.align(alignment(para.alignment), AlignmentOptions::default());
-                let mut lines = extract(&short_layout, short_shift, attrs, runs[0].attrs, para, opts);
-                // Where the lines start refers to the original text.
-                lines.iter_mut().for_each(|l| l.text_start = 0);
+                let mut lines = extract(&short_layout, short_shift, attrs, runs[0].attrs, para, opts, req.clusters);
+                // Positions in the text refer to the original text.
+                for line in &mut lines {
+                    line.text_start = cut.original(line.text_start);
+                    line.text_end = cut.original(line.text_end);
+                    for c in &mut line.clusters {
+                        (c.start, c.end) = cut.cluster(c.start, c.end);
+                    }
+                    line.elided = Some((cut.head, cut.tail_from));
+                }
                 return lines;
             }
         }
     }
     layout.align(alignment(para.alignment), AlignmentOptions::default());
-    let mut lines = extract(&layout, shift, attrs, runs[0].attrs, para, opts);
+    let mut lines = extract(&layout, shift, attrs, runs[0].attrs, para, opts, req.clusters);
     ctx.scratch = layout;
     // AppKit counts indents in the width only of text that wraps, and no
     // line reaches past the tail indent. Justified lines, all but the
@@ -1010,8 +1162,10 @@ fn text_style<'a>(
 
 /// Break lines, then size the tab boxes one after the other: each reaches
 /// from where it lands to where the text after it lines up on the next tab
-/// stop, which moves what follows. Past the last stop, tabs go every
-/// `defaultTabInterval`, or nowhere if that is 0, as in AppKit.
+/// stop, which moves what follows. The next stop is the first in the list
+/// beyond the tab; past the last, stops follow it every
+/// `defaultTabInterval`, or there are none if that is 0 and the tab takes
+/// no room, as in AppKit.
 fn break_and_tab(
     layout: &mut Layout<Brush>,
     text: &str,
@@ -1036,20 +1190,23 @@ fn break_and_tab(
             // stop, or centers on it.
             Some(Tab { location, kind: TabKind::Right }) => (location - end).max(0.0),
             Some(Tab { location, kind: TabKind::Center }) => (location - (x + end) / 2.0).max(0.0),
-            // The decimal point goes on the stop; without one, the end.
+            // The decimal point centers on the stop; without one, the end
+            // of the text goes there.
             Some(Tab { location, kind: TabKind::Decimal }) => {
                 let segment = &text[at + 1..tabs.get(id as usize + 1).copied().unwrap_or(text.len())];
                 match segment.find('.') {
                     Some(dot) => {
                         let (from, to) = (at + 1 + shift, at + 1 + dot + shift);
-                        (location - x - advance_between(layout, from, to)).max(0.0)
+                        let point = advance_between(layout, to, to + 1);
+                        (location - x - advance_between(layout, from, to) - point / 2.0).max(0.0)
                     }
                     None => (location - end).max(0.0),
                 }
             }
             None if para.default_tab_interval > 0.0 => {
                 let interval = para.default_tab_interval as f32;
-                ((x / interval).floor() + 1.0) * interval - x
+                let last = stops.last().map_or(0.0, |t| t.location).min(x);
+                last + (((x + 0.001 - last) / interval).floor().max(0.0) + 1.0) * interval - x
             }
             None => 0.0,
         };
@@ -1139,9 +1296,41 @@ fn clusters(layout: &Layout<Brush>, shift: usize) -> Vec<(usize, usize, f32)> {
     out
 }
 
+/// How a truncated line's text was cut: `text[..head]`, an ellipsis, then
+/// `text[tail_from..]`.
+#[derive(Clone, Copy, Debug)]
+struct Cut {
+    head: usize,
+    tail_from: usize,
+}
+
+impl Cut {
+    /// Where a byte of the shortened text was in the original.
+    fn original(&self, at: usize) -> usize {
+        let dots = self.head + '…'.len_utf8();
+        if at <= self.head {
+            at
+        } else if at < dots {
+            self.tail_from
+        } else {
+            at - dots + self.tail_from
+        }
+    }
+
+    /// A cluster's range in the original: the ellipsis's covers what it
+    /// stands for.
+    fn cluster(&self, start: usize, end: usize) -> (usize, usize) {
+        if start == self.head && end == self.head + '…'.len_utf8() {
+            (self.head, self.tail_from)
+        } else {
+            (self.original(start), self.original(end))
+        }
+    }
+}
+
 /// `text` with what doesn't fit in `avail` replaced by an ellipsis, as the
 /// truncating `mode` asks, giving up `extra` more clusters than the
-/// measurement says.
+/// measurement says; its runs, and how it was cut.
 #[allow(clippy::too_many_arguments)]
 fn elide(
     ctx: &mut Ctx,
@@ -1153,7 +1342,7 @@ fn elide(
     mode: LineBreak,
     extra: usize,
     settings: &Settings,
-) -> (String, Vec<Run>) {
+) -> (String, Vec<Run>, Cut) {
     let attrs_at =
         |byte: usize| runs.iter().find(|r| r.start <= byte && byte < r.end).map_or(runs[0].attrs, |r| r.attrs);
     let ellipsis_width = |ctx: &mut Ctx, index: u32| {
@@ -1240,21 +1429,38 @@ fn elide(
             out.push(Run { start, end: r.end - tail_from + dots.end, attrs: r.attrs });
         }
     }
-    (short, out)
+    (short, out, Cut { head: kept_head.len(), tail_from })
 }
 
 /// A line with nothing on it, as tall as its font makes it.
-fn empty_line(attrs: &Attrs, para: &Paragraph, opts: &Options) -> Line {
+fn empty_line(attrs: &Attrs, para: &Paragraph, opts: &Options) -> LaidLine {
     let m = &attrs.font.face.metrics;
     let size = attrs.font.size;
-    let (height, descent) = line_height(m.ascent * size, -m.descent * size, m.leading * size, para, opts);
-    Line { height, descent, right: 0.0, indent: 0.0, runs: Vec::new(), fills: Vec::new(), text_start: 0 }
+    let (ascent, descent) = ((m.ascent * size).round(), (-m.descent * size).round());
+    let leading = m.leading * size;
+    let height = line_height(ascent, descent, leading, para, opts);
+    LaidLine {
+        height,
+        descent,
+        ascent,
+        leading,
+        right: 0.0,
+        indent: 0.0,
+        x: 0.0,
+        advance: 0.0,
+        trailing: 0.0,
+        runs: Vec::new(),
+        fills: Vec::new(),
+        text_start: 0,
+        text_end: 0,
+        clusters: Vec::new(),
+        elided: None,
+    }
 }
 
-/// A line's height and its descent below the baseline, from its fonts'
-/// largest ascent, descent and leading.
-fn line_height(ascent: f32, descent: f32, leading: f32, para: &Paragraph, opts: &Options) -> (f32, f32) {
-    let (ascent, descent) = (ascent.round(), descent.round());
+/// A line's height from its largest ascent and descent, rounded, and its
+/// fonts' largest leading.
+fn line_height(ascent: f32, descent: f32, leading: f32, para: &Paragraph, opts: &Options) -> f32 {
     let mut height = ascent + descent + if opts.font_leading { leading.max(0.0) } else { 0.0 };
     if para.line_height_multiple > 0.0 {
         height *= para.line_height_multiple as f32;
@@ -1265,22 +1471,24 @@ fn line_height(ascent: f32, descent: f32, leading: f32, para: &Paragraph, opts: 
     if para.max_line_height > 0.0 {
         height = height.min(para.max_line_height as f32);
     }
-    (height, descent)
+    height
 }
 
 /// A glyph run found on a line, before the line's height is known.
 struct Pending {
     font: u32,
+    /// The face drawn with its outlines stroked, for `NSStrokeWidth`.
+    stroked: Option<u32>,
     size: f32,
     x: f32,
     advance: f32,
     attrs: u32,
-    metrics: parley::RunMetrics,
     glyphs: Arc<[Glyph]>,
 }
 
 /// The lines of a broken and aligned layout. `base` names the attributes
-/// whose font sizes a line with no glyphs.
+/// whose font sizes a line with no glyphs; `clusters` asks for each line's
+/// clusters.
 fn extract(
     layout: &Layout<Brush>,
     shift: usize,
@@ -1288,63 +1496,99 @@ fn extract(
     base: u32,
     para: &Paragraph,
     opts: &Options,
-) -> Vec<Line> {
+    clusters: bool,
+) -> Vec<LaidLine> {
     let mut lines = Vec::with_capacity(layout.len());
     let mut pending: Vec<Pending> = Vec::new();
     for line in layout.lines() {
         let m = line.metrics();
         let (mut ascent, mut descent, mut leading) = (0.0f32, 0.0f32, 0.0f32);
         pending.clear();
+        let mut by_word = false;
+        // Where each glyph run starts among its parley run's glyphs, to
+        // leave out the direction mark's: (the run, glyphs before).
+        let mut from = (usize::MAX, 0);
         for item in line.items() {
             let PositionedLayoutItem::GlyphRun(glyph_run) = item else { continue };
             let run = glyph_run.run();
+            let first = if from.0 == run.index() { from.1 } else { 0 };
+            if shift > 0 {
+                from = (run.index(), first + glyph_run.glyphs().count());
+            }
             if run.font_size() <= HIDDEN_SIZE {
                 continue;
             }
+            let mark = if shift > 0 && run.text_range().start < shift { mark_glyphs(run, shift) } else { 0..0 };
             let index = glyph_run.style().brush.0;
             let a = &attrs[index as usize];
             let rm = *run.metrics();
-            // Raised text makes room above, lowered text below.
-            ascent = ascent.max(rm.ascent + a.baseline_offset.max(0.0));
-            descent = descent.max(rm.descent - a.baseline_offset.min(0.0));
+            // Raised text makes room above, lowered text below: whole
+            // points of the font's, and the offset as it is.
+            ascent = ascent.max(rm.ascent.round() + a.baseline_offset.max(0.0));
+            descent = descent.max(rm.descent.round() - a.baseline_offset.min(0.0));
             leading = leading.max(rm.leading);
+            by_word |= (a.underline.style | a.strikethrough.style) & underline::BY_WORD != 0;
             let mut pen = 0.0;
             let glyphs: Arc<[Glyph]> = glyph_run
                 .glyphs()
-                .map(|g| {
+                .enumerate()
+                .filter_map(|(i, g)| {
                     let glyph = Glyph { id: g.id, x: pen + g.x, y: g.y };
                     pen += g.advance;
-                    glyph
+                    (!mark.contains(&(first + i))).then_some(glyph)
                 })
                 .collect();
+            let synthesis = run.synthesis();
+            let skew = synthesis.skew().unwrap_or(0.0) + a.slant();
+            let face = |stroke: f32| {
+                fonts::register(
+                    run.font(),
+                    run.normalized_coords(),
+                    fonts::Synth { embolden: synthesis.embolden(), skew, stroke },
+                )
+            };
             pending.push(Pending {
-                font: fonts::register(run.font(), run.normalized_coords(), &run.synthesis()),
+                font: face(0.0),
+                stroked: (a.stroke.width != 0.0).then(|| face(a.stroke.width.abs() / 100.0)),
                 size: run.font_size(),
                 x: glyph_run.offset(),
                 advance: glyph_run.advance(),
                 attrs: index,
-                metrics: rm,
                 glyphs,
             });
         }
         if pending.is_empty() {
             let a = &attrs[base as usize];
             let fm = &a.font.face.metrics;
-            ascent = fm.ascent * a.font.size;
-            descent = -fm.descent * a.font.size;
+            ascent = (fm.ascent * a.font.size).round();
+            descent = (-fm.descent * a.font.size).round();
             leading = fm.leading * a.font.size;
         }
-        let (height, desc) = line_height(ascent, descent, leading, para, opts);
-        let baseline = height - desc;
-        let mut out = Line {
+        let height = line_height(ascent, descent, leading, para, opts);
+        let baseline = height - descent;
+        let mut out = LaidLine {
             height,
-            descent: desc,
+            descent,
+            ascent,
+            leading,
             right: m.advance,
             indent: m.inline_min_coord,
+            x: m.inline_min_coord + m.offset,
+            advance: m.advance,
+            trailing: m.trailing_whitespace,
             runs: Vec::new(),
             fills: Vec::new(),
             text_start: line.text_range().start.saturating_sub(shift),
+            text_end: line.text_range().end.saturating_sub(shift),
+            clusters: Vec::new(),
+            elided: None,
         };
+        if clusters {
+            out.clusters = line_clusters(layout, &line, shift);
+        }
+        // The spaces between words, which by-word decorations skip.
+        let spaces = if by_word { spaces(&line) } else { Vec::new() };
+        let mut shadows = Vec::new();
         for p in pending.drain(..) {
             let a = &attrs[p.attrs as usize];
             let y = baseline - a.baseline_offset;
@@ -1355,33 +1599,206 @@ fn extract(
                     background: true,
                 });
             }
+            // Where the lines go comes from the text's own font, not a
+            // fallback's, so that they run straight through emoji and
+            // other scripts.
+            let (fm, size) = (&a.font.face.metrics, a.font.size);
             for (decoration, offset, size) in [
-                (a.underline, p.metrics.underline_offset, p.metrics.underline_size),
-                (a.strikethrough, p.metrics.strikethrough_offset, p.metrics.strikethrough_size),
+                (a.underline, fm.underline_position * size, fm.underline_thickness * size),
+                (a.strikethrough, fm.strikeout_position * size, fm.strikeout_thickness * size),
             ] {
-                decorate(&mut out.fills, decoration, a.color, p.x, p.advance, y - offset, size);
+                decorate(&mut out.fills, decoration, a.color, p.x, p.advance, y - offset, size, &spaces);
             }
-            if !p.glyphs.is_empty() {
-                out.runs.push(PlacedRun { font: p.font, size: p.size, x: p.x, y, glyphs: p.glyphs, color: a.color });
+            if p.glyphs.is_empty() {
+                continue;
             }
+            let run =
+                |font: u32, color: Color| PlacedRun { font, size: p.size, x: p.x, y, glyphs: p.glyphs.clone(), color };
+            let stroke_color = a.stroke.color.unwrap_or(a.color);
+            // Text drawn first, in the shadow's color and offset (y up, as
+            // AppKit gives it). Its blur needs a blurred glyph op from the
+            // rasterizer, which it hasn't yet: the shadow is sharp.
+            if let Some(shadow) = a.shadow {
+                for font in [(a.stroke.width <= 0.0).then_some(p.font), p.stroked].into_iter().flatten() {
+                    shadows.push(PlacedRun {
+                        x: p.x + shadow.offset[0],
+                        y: y - shadow.offset[1],
+                        ..run(font, shadow.color)
+                    });
+                }
+            }
+            // A positive stroke width outlines the glyphs; a negative one
+            // fills them and outlines them too.
+            if a.stroke.width <= 0.0 {
+                out.runs.push(run(p.font, a.color));
+            }
+            if let Some(stroked) = p.stroked {
+                out.runs.push(run(stroked, stroke_color));
+            }
+        }
+        if !shadows.is_empty() {
+            shadows.append(&mut out.runs);
+            out.runs = shadows;
         }
         lines.push(out);
     }
     lines
 }
 
-/// Add the rectangles of an underline or strikethrough whose top is at `y`.
-fn decorate(fills: &mut Vec<PlacedFill>, d: Decoration, text: Color, x: f32, width: f32, y: f32, size: f32) {
+/// Which of `run`'s glyphs, in visual order, draw the direction mark that
+/// the text was given in front (its first `shift` bytes): an invisible
+/// glyph, but one that a line laid out from anywhere else wouldn't have.
+fn mark_glyphs(run: &parley::Run<'_, Brush>, shift: usize) -> std::ops::Range<usize> {
+    let mut at = 0;
+    for cluster in run.visual_clusters() {
+        let count = cluster.glyphs().count();
+        if cluster.text_range().start < shift {
+            return at..at + count;
+        }
+        at += count;
+    }
+    0..0
+}
+
+/// The clusters of `line` in visual order, left to right, placed from the
+/// container's left. The box after a tab widens the tab's cluster.
+fn line_clusters(layout: &Layout<Brush>, line: &parley::Line<'_, Brush>, shift: usize) -> Vec<ByteCluster> {
+    let m = line.metrics();
+    // Tab boxes on the line: where each is, how wide, and its tab's byte.
+    let boxes: Vec<(f32, f32, usize)> = if layout.inline_boxes().is_empty() {
+        Vec::new()
+    } else {
+        line.items()
+            .filter_map(|item| match item {
+                PositionedLayoutItem::InlineBox(b) => {
+                    let index = layout.inline_boxes().iter().find(|ib| ib.id == b.id)?.index;
+                    Some((b.x, b.width, index.checked_sub(1 + shift)?))
+                }
+                PositionedLayoutItem::GlyphRun(_) => None,
+            })
+            .collect()
+    };
+    let mut out = Vec::with_capacity(line.text_range().len());
+    let mut pen = m.inline_min_coord + m.offset;
+    let mut next_box = 0;
+    for run in line.runs() {
+        // Boxes take their room between runs.
+        while let Some(&(x, width, _)) = boxes.get(next_box)
+            && x <= pen + 0.01
+        {
+            pen += width;
+            next_box += 1;
+        }
+        let rtl = run.is_rtl();
+        for cluster in run.visual_clusters() {
+            let range = cluster.text_range();
+            let advance = cluster.advance();
+            if range.start >= shift {
+                out.push(ByteCluster { start: range.start - shift, end: range.end - shift, x: pen, advance, rtl });
+            }
+            pen += advance;
+        }
+    }
+    // Each box widens its tab's cluster where they touch: the box follows
+    // the tab on the right, or on the left in right-to-left text.
+    for &(x, width, tab) in &boxes {
+        let Some(c) = out.iter_mut().find(|c| c.start == tab) else { continue };
+        if (c.x + c.advance - x).abs() < 0.01 {
+            c.advance += width;
+        } else if (x + width - c.x).abs() < 0.01 {
+            c.x = x;
+            c.advance += width;
+        }
+    }
+    out
+}
+
+/// Where the spaces of `line` are, as (x0, x1).
+fn spaces(line: &parley::Line<'_, Brush>) -> Vec<(f32, f32)> {
+    let m = line.metrics();
+    let mut pen = m.inline_min_coord + m.offset;
+    let mut out: Vec<(f32, f32)> = Vec::new();
+    for run in line.runs() {
+        for cluster in run.visual_clusters() {
+            let advance = cluster.advance();
+            if cluster.is_space_or_nbsp() {
+                match out.last_mut() {
+                    Some(last) if (last.1 - pen).abs() < 0.01 => last.1 = pen + advance,
+                    _ => out.push((pen, pen + advance)),
+                }
+            }
+            pen += advance;
+        }
+    }
+    out
+}
+
+/// Add the rectangles of an underline or strikethrough whose top is at `y`,
+/// under `x..x + width`, leaving out `spaces` if the style says by word.
+#[allow(clippy::too_many_arguments)]
+fn decorate(
+    fills: &mut Vec<PlacedFill>,
+    d: Decoration,
+    text: Color,
+    x: f32,
+    width: f32,
+    y: f32,
+    size: f32,
+    spaces: &[(f32, f32)],
+) {
     // The low byte is the line's style: single, thick or double.
     let style = d.style & 0xff;
     if style == 0 || width <= 0.0 {
         return;
     }
     let color = d.color.unwrap_or(text);
-    let thickness = size.max(0.5) * if style & 0x0f == 0x02 { 2.0 } else { 1.0 };
-    let rect = |y: f32| PlacedFill { rect: [x, y, x + width, y + thickness], color, background: false };
-    fills.push(rect(y));
-    if style & 0x0f == 0x09 {
-        fills.push(rect(y + 2.0 * thickness.max(1.0)));
+    let thickness = size.max(0.5) * if style & 0x0f == underline::THICK { 2.0 } else { 1.0 };
+    let double = style & 0x0f == underline::DOUBLE;
+    // Dots and dashes in units of the line's thickness, a point at least,
+    // measured from the container's left so that runs continue each other.
+    let unit = thickness.max(1.0);
+    let pattern: &[f32] = match d.style & underline::PATTERN {
+        underline::DOT => &[1.0, 1.0],
+        underline::DASH => &[4.0, 2.0],
+        underline::DASH_DOT => &[4.0, 2.0, 1.0, 2.0],
+        underline::DASH_DOT_DOT => &[4.0, 2.0, 1.0, 2.0, 1.0, 2.0],
+        _ => &[],
+    };
+    let mut rect = |x0: f32, x1: f32| {
+        if x1 - x0 <= 0.01 {
+            return;
+        }
+        fills.push(PlacedFill { rect: [x0, y, x1, y + thickness], color, background: false });
+        if double {
+            let y = y + 2.0 * thickness.max(1.0);
+            fills.push(PlacedFill { rect: [x0, y, x1, y + thickness], color, background: false });
+        }
+    };
+    let mut dashes = |x0: f32, x1: f32| {
+        if pattern.is_empty() {
+            return rect(x0, x1);
+        }
+        let period: f32 = pattern.iter().sum::<f32>() * unit;
+        let mut at = (x0 / period).floor() * period;
+        while at < x1 {
+            let mut on = at;
+            for (i, &len) in pattern.iter().enumerate() {
+                let end = on + len * unit;
+                if i % 2 == 0 {
+                    rect(on.max(x0), end.min(x1));
+                }
+                on = end;
+            }
+            at += period;
+        }
+    };
+    if d.style & underline::BY_WORD == 0 {
+        return dashes(x, x + width);
     }
+    let mut at = x;
+    for &(s0, s1) in spaces.iter().filter(|s| s.1 > x && s.0 < x + width) {
+        dashes(at, s0.max(at));
+        at = at.max(s1);
+    }
+    dashes(at, x + width);
 }
