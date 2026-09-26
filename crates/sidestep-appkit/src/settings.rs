@@ -71,7 +71,6 @@ fn set_interface(f: impl FnOnce(&mut Interface)) -> bool {
 }
 
 struct Wake {
-    main: std::sync::mpsc::Sender<crate::protocol::FromRender>,
     render: smithay_client_toolkit::reexports::calloop::channel::Sender<crate::protocol::ToRender>,
 }
 
@@ -148,25 +147,23 @@ pub(crate) fn start() {
 /// settings changed.
 fn notify(dark: bool) {
     CHANGED.store(true, Ordering::Release);
-    if let Some(wake) = WAKE.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-        if crate::backend::explicit_theme().is_none() {
-            let _ = wake.render.send(crate::protocol::ToRender::ColorScheme { dark });
-        }
-        let _ = wake.main.send(crate::protocol::FromRender::Appearance);
+    if let Some(wake) = WAKE.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+        && crate::backend::explicit_theme().is_none()
+    {
+        let _ = wake.render.send(crate::protocol::ToRender::ColorScheme { dark });
     }
+    // The main thread applies it on its run loop, in whatever mode it runs.
+    sidestep_foundation::runloop::main().perform(&[sidestep_foundation::runloop::Mode::COMMON], apply_changes);
 }
 
 /// The render thread started: from now on, changes reach it and wake the
 /// main thread. Tells it the current preference at once.
-pub(crate) fn connect(
-    main: std::sync::mpsc::Sender<crate::protocol::FromRender>,
-    render: smithay_client_toolkit::reexports::calloop::channel::Sender<crate::protocol::ToRender>,
-) {
+pub(crate) fn connect(render: smithay_client_toolkit::reexports::calloop::channel::Sender<crate::protocol::ToRender>) {
     start();
     if crate::appearance::system_known() && crate::backend::explicit_theme().is_none() {
         let _ = render.send(crate::protocol::ToRender::ColorScheme { dark: crate::appearance::system().look().dark() });
     }
-    *WAKE.lock().unwrap_or_else(|e| e.into_inner()) = Some(Wake { main, render });
+    *WAKE.lock().unwrap_or_else(|e| e.into_inner()) = Some(Wake { render });
 }
 
 /// Whether a first frame may show: the desktop answered, or waiting

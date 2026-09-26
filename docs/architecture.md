@@ -497,8 +497,7 @@ Rust code in other crates uses `runloop::main()`/`current()`,
 `add_source` (whose `SourceSignal::signal_and_wake` is `Send + Sync`),
 `add_observer`, `run_mode`, `perform` and `stop`, and
 `notification_center::post`, which does no work when nobody observes the
-name. `fire_due_timers`/`next_timer_deadline` remain for AppKit's current
-event loop until it runs the run loop itself.
+name. AppKit's event loop is built on them (see "Events and the run loop").
 
 Handing work to another thread's loop always goes through its inbox:
 `performSelectorOnMainThread:` (queued for the loop's one perform
@@ -590,18 +589,14 @@ everything that touches pixels or the display server to a render thread.
   Scrolling moves tiles and changes crops. A tile is drawn and uploaded when
   it comes within a tile of the viewport or its content changes, and dropped
   when it is two tiles away.
-- **Nested and modal loops.** `nextEventMatchingMask:untilDate:inMode:dequeue:`
-  (a view following a drag) handles the render thread's messages as the
-  main loop does and displays windows, but the events input makes wait in
-  a queue: it returns the first one its mask takes, and the main loop sends
-  the rest when control comes back. Timers fire only in the default mode.
-  Drags are typed from the buttons input says are held, so a loop that
-  takes the mouse-up leaves nothing stuck. `postEvent:atStart:` and
-  `discardEventsMatchingMask:beforeEvent:` work on the same queue.
-  `runModalForWindow:` runs the main loop with input for other windows
-  dropped, and asks for the keyboard back (xdg-activation) if the
-  compositor gives it to another of the program's windows; `stopModal`,
-  `stopModalWithCode:` and `abortModal` end it.
+- **Nested and modal loops.** Every loop is the main thread's run loop,
+  run in a mode (see "Events and the run loop" below): the main loop in
+  the default mode, `nextEventMatchingMask:untilDate:inMode:dequeue:` (a
+  view following a drag) in the mode it is given, a modal loop in
+  `NSModalPanelRunLoopMode`. Drags are typed from the buttons input says
+  are held, so a loop that takes the mouse-up leaves nothing stuck.
+  `runModalForWindow:` asks for the keyboard back (xdg-activation) if the
+  compositor gives it to another of the program's windows.
 
 This design keeps GPU wake-ups and uploads proportional to what changed,
 which is what dominates power on a mostly idle desktop. A GPU rasterizer can
@@ -758,6 +753,189 @@ Wayland shows a client no other program's input.
   and 4.6 ms.
 
 [kbvm]: https://github.com/mahkoh/kbvm
+
+### Events and the run loop
+
+AppKit runs on Foundation's run loop (`event_loop.rs`); it adds no loop
+of its own. When `NSApplication` is made (or the render thread started),
+it adds `NSModalPanelRunLoopMode` and `NSEventTrackingRunLoopMode` to the
+main loop's common modes and registers two things there:
+
+- **The event source.** The render thread's sender to the main thread
+  signals it and wakes the loop after every message; when the render
+  thread stops, its sender going away wakes the loop to see the channel
+  closed. Performing the source moves the messages into an inbox and
+  handles them oldest first: configures, frames, focus and close requests
+  act at once, input becomes `NSEvent`s in the application's queue, behind
+  anything waiting there (posted events included). Only AppKit's loops
+  take events from the queue, as on macOS: the main loop and modal loops
+  send them through `-[NSApplication sendEvent:]` when their run returns,
+  a nested `nextEventMatchingMask:…` takes the ones it asked for. A
+  program running the loop itself (`runMode:beforeDate:` while it waits
+  for something, even inside an event handler) leaves them queued, so no
+  handler is entered from inside another. (Tracking areas' callouts are
+  the exception: they are made as the move is handled.) The inbox is
+  shared by every drain, so a loop nested inside an event handler carries
+  on with the messages that came with the event it is handling (a mouse-up
+  that arrived with its mouse-down reaches the drag loop the down
+  started). Moves followed by another move of the same window are
+  coalesced, and key repeats followed by a newer key message are dropped.
+- **The display pass**, an observer before the loop sleeps and when a run
+  ends, at order 2 000 000 (after programs' own before-waiting
+  observers): each window displays if the render thread showed its last
+  frame, tracking areas look again at views that moved, and pasteboard
+  changes are offered. Registered in the common modes, it runs in modal,
+  tracking and terminate-later loops too.
+
+A loop asked to look for events in a mode outside the common modes (a
+program's own tracking mode) gets the event source and the display pass
+added to that mode the first time, as a CoreFoundation source can be in
+several modes (`RunLoop::add_source_mode`); the program's common-mode
+timers don't join it.
+
+`-[NSApplication run]` calls `finishLaunching`, posts that launching
+finished (as macOS does, at the first look for events after
+`finishLaunching`), then runs the default mode until `stop:`; a modal loop
+runs `NSModalPanelRunLoopMode` until the session is decided; each returns
+to its caller after every batch of input to send what waits. Whatever
+ends a loop (`stop:`, `stopModal…`, `replyToApplicationShouldTerminate:`)
+also stops the run loop's innermost run, so a timer's callout ends it
+without waiting for input. So timers and sources fire in exactly the
+modes they were added to: a tracking loop fires tracking-mode and
+common-mode timers, not default-mode ones. AppKit's own deadlines
+(touchpad momentum when no frames come, the pause before deciding the
+application lost focus) share one common-mode timer, moved only when a
+deadline comes sooner; an idle program sleeps with nothing armed and
+allocates nothing per turn. `+sharedApplication` is added to the class by
+hand (a `define_class!` class method can't see its receiver), so sent to
+a subclass it makes an instance of the subclass, whose `sendEvent:` then
+sees every event.
+
+**Notifications and delegates** (`notifications.rs`). Every window,
+application and view notification name is exported with macOS's value.
+As on macOS, a delegate hears through the default notification center:
+`setDelegate:` asks the delegate once which notification methods it has
+and registers it for those, with the window or application as the
+object, so telling the delegate is a post and the delegate hears among
+the other observers in registration order. A post costs one atomic load
+while the center has no registrations at all; once it has any (a
+delegate is enough), a window or application post takes the center's
+lock and looks the name up before building anything, which only an
+observed name does. Views, which post on every frame change, remember
+whether anyone observes the frame and bounds names until the center's
+registrations change (a generation count the center keeps), so an
+unobserved frame change costs no lock. A
+window's frame notifications follow macOS: a new size posts
+`NSWindowDidResizeNotification` only, a move alone
+`NSWindowDidMoveNotification`; the compositor's resizing state becomes
+live resize notifications and `inLiveResize`, a new scale
+`NSWindowDidChangeBackingPropertiesNotification` with the old scale in
+its user info. `close` posts that the window will close, orders it out
+and, for a window released when closed (the default), gives its own
+reference to the autorelease pool, as AppKit does; closing it again does
+nothing until it is shown again. Whether to quit after
+the last window closed is asked after the event being handled, not
+inside `close`. `terminate:` asks `applicationShouldTerminate:`; a later
+answer runs the loop in `NSModalPanelRunLoopMode` until
+`replyToApplicationShouldTerminate:`.
+
+**Responders and keys.** Keys go to the key window (none: dropped); a
+Command key is a key equivalent first, the key window's views' and then
+the main menu's once there is one. A key no responder takes reaches the
+window's `keyDown:`, which offers it to its views as a key equivalent and
+then moves through the key view loop for Tab and Shift-Tab (`keyloop.rs`,
+whose links are weak both ways) or sends `cancelOperation:` up the chain
+for Escape, as Command-period does before anything else; other keys go on
+up the chain (to a window controller). A responder at the end of a chain
+hears `noResponderFor:`. An action sent to no target goes to the first
+that has it among the key window's responder chain and delegate, then
+the main window's when that isn't the key window (a panel is key over a
+document), then the application and its delegate. The render thread tags the
+press that gave its window the keyboard (compositors hand over the
+keyboard before the click arrives, so the window is key by then); that
+first click reaches a view only if it `acceptsFirstMouse:`. A left press
+on a window that moves by its background, in a view that lets it
+(`mouseDownCanMoveWindow`: views that aren't opaque), moves the window
+through the compositor instead.
+
+**Sheets and modal sessions** (`modal.rs`). Sheets are window-modal and
+asynchronous: attached one at a time (others wait their turn), each ended
+by `endSheet:returnCode:`, which calls its handler, posts that it ended,
+clears the sheet's parent and attaches the next. While a sheet is
+attached the parent refuses mouse input and the sheet is key in its place
+(the compositor's keyboard stays on the parent's toplevel). On screen a
+sheet is part of its parent: a desynchronized subsurface of the parent's
+surface with its own canvas, buffers and frame callbacks, placed
+top-centre under the title bar and kept there when the parent resizes,
+above the parent's scroll tiles (`backend/sheet.rs` keeps that stacking
+in one place). Its position is the parent's state: a parent's resize
+leaves it to the parent's own present at the new size, so a configure
+never makes an extra commit, and a sheet made or resized commits the
+parent only if the parent shows its current size. A sheet of a window
+that isn't on screen shows as a window of its own, and is the parent's
+sheet to the program all the same. A modal session is
+the modal loop a pass at a time. `NSPanel` floats over the main window
+(Wayland has no levels), hides when the application stops being active
+(only while another window stays up, as a desktop without a dock couldn't
+bring the program back otherwise), may work when modal, and may become
+key only when a view needs it to.
+
+**Tooltips** (`tooltip.rs`) are tracking areas of their views, as on
+macOS, with one private owner. After the pointer rests for
+`NSInitialToolTipDelay` (1000 ms unless the defaults say otherwise; read
+once, and again after the defaults change), a borderless window opens as
+an ungrabbed popup below the pointer, drawn with the text engine in the
+tooltip font; leaving, a click or a key take it down. Moving starts the
+wait over: a move only notes its time, and the one timer all waits share,
+firing early, is set again for the rest. Each view keeps its own
+tooltips' tags, so setting a tooltip costs what that view has; a view
+going away takes its tooltips with it. Controls with a tooltip per part
+use `tooltip::add_text_rect`.
+
+**Controllers** (`controllers.rs`), without nibs, which Linux doesn't
+have. A view controller loads its view when first asked (`loadView`, a
+plain view unless overridden, then `viewDidLoad`) and sits in the
+responder chain between the view and the view's superview, as on macOS:
+the view's `controller` link (in `responder.rs`) names it, and setting
+the view's next responder sets the controller's. A window controller
+holding a window is its next responder and keeps it (not released when
+closed); `setWindowController:` alone chains nothing. No link retains,
+and each is cleared before what it names goes: a view going away clears
+its subviews' links to it (as `-[NSView dealloc]` does), a controller
+letting go of its view or window clears theirs, and a controller given a
+view another has takes that one's place in the chain. A window takes the
+size of its content view controller's view. Periodic events
+(`startPeriodicEventsAfterDelay:withPeriod:`) come from a common-mode
+timer that posts one only when none is waiting.
+
+**Frame autosave.** A window with an autosave name saves its frame in the
+user defaults whenever it moves or resizes, under macOS's key
+(`NSWindow Frame <name>`) and in its form (the numbers, whole ones
+without decimals); Sidestep writes the frame without a screen, since it
+doesn't know where windows are. A live resize saves once, when it ends,
+and a frame already saved (or just read) isn't written again. Taking a
+saved frame asks the compositor for its size and keeps its origin as the
+one `frame` reports. A name another live window holds can't be taken.
+
+**Testing without a display.** `SIDESTEP_BACKEND=null` (or
+`sidestep_appkit::testing::use_null_backend`) starts a render thread that
+answers as a compositor would, at once and always the same way, draws
+nothing, and writes down what it was asked; the `testing` module plays
+the compositor's part for input, adding messages to the main thread's
+inbox, and runs the loop until everything was answered and handled.
+`crates/sidestep-appkit/tests/linux_events.rs` uses it.
+`examples/eventbench` measures the machinery: on the same M-series Mac
+(Sidestep under Linux in a VM), an unobserved view frame change costs
+about 77 ns against about 910 ns in AppKit, sending a key through a
+window to its first responder 14 ns against 170 ns, and an idle pass of
+the run loop 174 ns against 650 ns. Taking a posted event back in a
+tracking loop costs 48 ns against 33 µs, but that is the queue's fast
+path (the event is there, so Sidestep runs no loop, while AppKit's call
+runs its loop each time). The path each move of a drag takes, a render
+thread message found by the event source in a run of the loop, made an
+event and returned by `nextEventMatchingMask:` in the tracking mode, costs
+about 310 ns (Linux only: it is measured through the null render
+thread).
 
 ### Windows and decorations
 

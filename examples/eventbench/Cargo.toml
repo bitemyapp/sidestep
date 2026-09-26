@@ -1,0 +1,17 @@
+[package]
+name = "eventbench"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+objc2.workspace = true
+block2.workspace = true
+objc2-foundation = { workspace = true, features = ["NSString", "NSObject", "NSGeometry", "NSNotification", "NSDate", "NSRunLoop", "NSOperation", "block2"] }
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics", "NSEvent", "NSRunningApplication", "NSGraphicsContext", "objc2-core-foundation"] }
+sidestep.workspace = true
+
+# On Linux, input through a tracking loop comes from the null render
+# thread (sidestep_appkit::testing), as no compositor is there.
+[target.'cfg(not(target_vendor = "apple"))'.dependencies]
+sidestep-appkit.workspace = true

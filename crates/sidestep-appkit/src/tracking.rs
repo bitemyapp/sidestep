@@ -152,6 +152,11 @@ pub(crate) struct ViewTracking {
 }
 
 impl ViewTracking {
+    /// The view's tracking areas.
+    pub(crate) fn areas(&self) -> &[Retained<NSTrackingArea>] {
+        &self.areas
+    }
+
     fn is_empty(&self) -> bool {
         self.areas.is_empty() && self.cursor_rects.is_empty()
     }

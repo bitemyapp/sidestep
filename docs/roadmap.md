@@ -179,8 +179,38 @@ pictures on macOS for comparison):
 - `NSGradient`, `NSShadow`, `NSVisualEffectView` (an opaque material),
   `alphaValue`, and `NSAnimationContext` (changes apply at once).
 
+Events and window behaviour since (`examples/appkit-events` shows sheets,
+modal windows and tooltips; `examples/eventbench` measures):
+
+- AppKit runs on Foundation's run loop: the render thread's messages are a
+  source and the display pass an observer in the common modes, which
+  include `NSModalPanelRunLoopMode` and `NSEventTrackingRunLoopMode` (and in
+  any other mode a loop looks for events in); every loop runs in its mode,
+  so timers fire where they were added, and only AppKit's loops take
+  events, so a program running the loop itself enters no handler.
+- Window and application notifications with every name exported, and
+  delegates that hear through the notification center; close,
+  `releasedWhenClosed`, moves, resizes, live resizes, backing scale;
+  launching, `terminate:` with now, cancel and later answers, the question
+  after the last window closes; view frame and bounds notifications.
+- Keys to the key window, the window's Tab, Shift-Tab and Escape, the key
+  view loop (links, valid key views, selection, recalculation),
+  `noResponderFor:`, first mouse, moving windows by their background,
+  `+sharedApplication` for subclasses.
+- Sheets (attached inside their parent as subsurfaces), modal sessions,
+  `NSPanel`, tooltips, frame autosave, `NSViewController` and
+  `NSWindowController` (without nibs), periodic events.
+- A render thread without a display (`SIDESTEP_BACKEND=null`) and a testing
+  module that plays the compositor for input.
+
 Next:
 
+- Popups of sheets (menus, tooltips over a sheet); `windowWillResize:toSize:`
+  during a live resize; `NSApplicationWillUpdateNotification` and
+  `DidUpdate`; content under a client-side title bar
+  (`NSWindowStyleMaskFullSizeContentView`, a transparent title bar); view
+  controllers' appearance callbacks; tracking areas' callouts through the
+  event queue.
 - Input methods: surrounding text (and so deleting around the caret),
   content types from the client.
 - Image cursors; dragging from our windows (drag sources), and `NSImage`

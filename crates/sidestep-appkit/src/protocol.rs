@@ -334,6 +334,8 @@ pub(crate) struct WindowState {
     /// The compositor isn't showing the window (hidden behind others,
     /// minimized, on another workspace).
     pub suspended: bool,
+    /// The user is resizing the window (a live resize).
+    pub resizing: bool,
 }
 
 /// Keyboard modifiers, as `NSEventModifierFlags` bits.
@@ -391,6 +393,9 @@ pub(crate) enum ToRender {
         limits: SizeLimits,
         /// Open as a popup (xdg_popup) instead of a toplevel.
         popup: Option<PopupPlacement>,
+        /// Open as a sheet of this window: part of it, a subsurface placed
+        /// top-centre under its title bar (see `backend::sheet`).
+        sheet_of: Option<WindowId>,
     },
     /// A new title, with its text set in the title bar's font as drawing
     /// ops (top-left origin, `width` by `height` points) for client-side
@@ -587,6 +592,10 @@ pub(crate) enum FromRender {
         /// 1 for a single click, 2 for a double click, and so on.
         clicks: u32,
         modifiers: Modifiers,
+        /// A press on a window that got the keyboard since its previous
+        /// pointer event: the click that activated it (AppKit's first
+        /// mouse).
+        activating: bool,
     },
     Motion {
         window: WindowId,
@@ -693,7 +702,4 @@ pub(crate) enum FromRender {
         window: WindowId,
         outputs: Vec<u32>,
     },
-    /// The desktop's appearance changed (from the settings thread, which
-    /// sends this only to wake the main thread; `settings` has the rest).
-    Appearance,
 }

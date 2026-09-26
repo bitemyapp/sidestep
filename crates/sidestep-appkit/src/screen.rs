@@ -35,13 +35,12 @@ use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, Sel};
-use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
+use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{NSApplication, NSScreen, NSWindow};
 use objc2_foundation::{NSArray, NSDictionary, NSEdgeInsets, NSNumber, NSPoint, NSRect, NSSize, NSString, NSValue};
 use sidestep_foundation::notification_center::post;
 
-use crate::pasteboard_item::responds;
 use crate::protocol::{ToRender, WindowId};
 use crate::window::{self, NSWindowImpl};
 
@@ -411,7 +410,7 @@ pub(crate) fn window_outputs(window: &NSWindow, outputs: Vec<u32>) {
     let last = outputs.last().copied();
     let before = WINDOW_OUTPUTS.with(|w| w.borrow_mut().insert(id, outputs)).and_then(|o| o.last().copied());
     if before.is_some() && before != last {
-        tell_window(window, sel!(windowDidChangeScreen:), "NSWindowDidChangeScreenNotification");
+        tell_window(window, "NSWindowDidChangeScreenNotification");
     }
 }
 
@@ -437,28 +436,15 @@ pub(crate) fn changed(mtm: MainThreadMarker) {
         return;
     }
     let app = NSApplication::sharedApplication(mtm);
+    // The application's delegate hears of it as an observer.
     let name = NSString::from_str("NSApplicationDidChangeScreenParametersNotification");
-    let note = sidestep_foundation::notification(&name, Some(app.as_ref()));
-    if let Some(delegate) = app.delegate() {
-        let delegate: &AnyObject = delegate.as_ref();
-        if responds(delegate, sel!(applicationDidChangeScreenParameters:)) {
-            // SAFETY: the delegate method takes the notification.
-            let _: () = unsafe { msg_send![delegate, applicationDidChangeScreenParameters: &*note] };
-        }
-    }
     post(&name, Some(app.as_ref()), None);
 }
 
-fn tell_window(window: &NSWindow, selector: Sel, name: &str) {
-    let name = NSString::from_str(name);
-    if let Some(delegate) = window::imp(window).delegate_object()
-        && responds(&delegate, selector)
-    {
-        let note = sidestep_foundation::notification(&name, Some(window.as_ref()));
-        // SAFETY: window delegate notifications take the notification.
-        unsafe { objc2::runtime::MessageReceiver::send_message::<_, ()>(&*delegate, selector, (&*note,)) };
-    }
-    post(&name, Some(window.as_ref()), None);
+fn tell_window(window: &NSWindow, name: &str) {
+    // The window's delegate hears of it as an observer (setDelegate:
+    // registers it for the notifications it implements).
+    post(&NSString::from_str(name), Some(window.as_ref()), None);
 }
 
 define_class!(
@@ -492,7 +478,6 @@ sidestep_foundation::constant_string!(NSDeviceColorSpaceName = "NSDeviceColorSpa
 sidestep_foundation::constant_string!(NSDeviceBitsPerSample = "NSDeviceBitsPerSample");
 sidestep_foundation::constant_string!(NSDeviceResolution = "NSDeviceResolution");
 sidestep_foundation::constant_string!(NSDeviceSize = "NSDeviceSize");
-sidestep_foundation::constant_string!(NSWindowDidChangeScreenNotification = "NSWindowDidChangeScreenNotification");
 // Posted when a screen's color space changes, which Wayland doesn't say.
 sidestep_foundation::constant_string!(
     NSScreenColorSpaceDidChangeNotification = "NSScreenColorSpaceDidChangeNotification"

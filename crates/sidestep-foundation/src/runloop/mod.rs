@@ -152,6 +152,11 @@ impl RunLoop {
         self::core::on_owner(&self.0, move || with_state(|s| s.add_common_mode(mode)));
     }
 
+    /// Whether `mode` is one of the loop's common modes.
+    pub fn is_common_mode(&self, mode: Mode) -> bool {
+        mode == Mode::COMMON || crate::thread::lock(&self.0.common).contains(mode)
+    }
+
     /// Run the loop in `mode` until `limit` (`None`: until it finishes or
     /// is stopped; a limit already past: one pass without sleeping). With
     /// `return_after_source`, return after performing a source. A mode
@@ -205,6 +210,21 @@ impl RunLoop {
         });
         SourceSignal { flag, shared: self.0.clone() }
     }
+
+    /// Add a source made with [`add_source`](Self::add_source) to `mode`
+    /// as well, as `CFRunLoopAddSource` with another mode does: one signal
+    /// then serves every mode it is in.
+    pub fn add_source_mode(&self, signal: &SourceSignal, mode: Mode) {
+        self.assert_current("adding a source");
+        with_state(|s| {
+            let (sources, common) = (&mut s.sources, &s.common);
+            if let Some(entry) = sources.iter_mut().find(|e| Arc::ptr_eq(&e.flag, &signal.flag)) {
+                entry.reg.add(mode, common);
+                let modes = entry.reg.modes.clone();
+                s.known.extend(&modes);
+            }
+        });
+    }
 }
 
 fn lock_insert(shared: &Shared, mode: Mode) -> bool {
@@ -241,26 +261,4 @@ impl SourceSignal {
         self.flag.valid.store(false, Ordering::Release);
         self.shared.wake.wake();
     }
-}
-
-/// When the next timer on this thread's loop is due in the default mode;
-/// now if work is waiting there. For event loops that sleep elsewhere and
-/// fire timers with [`fire_due_timers`].
-pub fn next_timer_deadline() -> Option<Instant> {
-    let now = Instant::now();
-    let shared = self::core::current_shared();
-    self::core::drain_inbox(&shared);
-    with_state(|s| {
-        if s.has_blocks_for(Mode::DEFAULT) {
-            return Some(now);
-        }
-        s.next_due(Mode::DEFAULT).map(|(key, _)| key.0)
-    })
-}
-
-/// One pass of this thread's loop in the default mode, without sleeping:
-/// fires the timers due, runs queued blocks and, on the main thread, the
-/// main dispatch queue.
-pub fn fire_due_timers(_now: Instant) {
-    self::core::run(Mode::DEFAULT, Some(Instant::now()), false);
 }

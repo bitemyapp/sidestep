@@ -31,9 +31,11 @@
 mod decor;
 mod dnd;
 mod keyboard;
+pub(crate) mod null;
 mod outputs;
 mod seat;
 mod selection;
+mod sheet;
 mod textinput;
 
 pub(crate) use decor::{HEADER, TITLE_SIZE, explicit_theme};
@@ -96,11 +98,13 @@ use smithay_client_toolkit::{
     delegate_subcompositor, delegate_xdg_popup, delegate_xdg_shell, delegate_xdg_window, registry_handlers,
 };
 
+use crate::event_loop::MainSender;
 use crate::protocol::{
     Cursor, FromRender, LayerId, Op, PopupPlacement, ROOT_LAYER, Rect, SizeLimits, Style, TILE_HEIGHT, TitleText,
     ToRender, WindowId, WindowRequest, WindowState,
 };
 use crate::raster::{self, Canvas, Glyphs};
+use sidestep_foundation::runloop::SourceSignal;
 
 /// The main thread's end of the render thread.
 pub(crate) struct Backend {
@@ -108,12 +112,18 @@ pub(crate) struct Backend {
     pub rx: mpsc::Receiver<FromRender>,
 }
 
-pub(crate) fn start() -> Backend {
+/// Start the render thread; `wake` is the main loop's event source, which
+/// each message to the main thread signals.
+pub(crate) fn start(wake: SourceSignal) -> Backend {
+    if null::chosen() {
+        return null::start(wake);
+    }
     let (tx, channel) = channel::channel();
     let (to_main, rx) = mpsc::channel();
+    let to_main = MainSender::new(to_main, wake);
     // Decorations follow the desktop's light or dark preference, unless
     // the environment picked one; the settings thread tells both threads.
-    crate::settings::connect(to_main.clone(), tx.clone());
+    crate::settings::connect(tx.clone());
     std::thread::Builder::new()
         .name("sidestep-render".into())
         .spawn(move || run(channel, to_main))
@@ -148,7 +158,7 @@ pub(crate) fn force_client_decorations() -> bool {
     *FORCE.get_or_init(|| std::env::var("SIDESTEP_DECORATIONS").is_ok_and(|v| v == "client"))
 }
 
-fn run(channel: Channel<ToRender>, to_main: mpsc::Sender<FromRender>) {
+fn run(channel: Channel<ToRender>, to_main: MainSender) {
     keyboard::load_compose_table_early();
     let conn =
         Connection::connect_to_env().expect("sidestep: can't reach a Wayland compositor (is WAYLAND_DISPLAY set?)");
@@ -245,7 +255,7 @@ pub(crate) struct State {
     /// Buffers take canvas pixels as they are (XBGR8888), decided at the
     /// first buffer ([`State::rgba`]).
     rgba: Option<bool>,
-    to_main: mpsc::Sender<FromRender>,
+    to_main: MainSender,
     /// The activation token we were started with, for the first window.
     startup_token: Option<String>,
     /// An input region with nothing in it, made the first time a window
@@ -276,6 +286,8 @@ impl Role {
 enum Shell {
     Toplevel(Window),
     Popup(Popup),
+    /// Part of another window (see `sheet`).
+    Sheet(sheet::Sheet),
 }
 
 pub(crate) struct Win {
@@ -327,13 +339,14 @@ impl Win {
         match &self.shell {
             Shell::Toplevel(w) => w.wl_surface(),
             Shell::Popup(p) => p.wl_surface(),
+            Shell::Sheet(s) => s.surface(),
         }
     }
 
     fn toplevel(&self) -> Option<&Window> {
         match &self.shell {
             Shell::Toplevel(w) => Some(w),
-            Shell::Popup(_) => None,
+            Shell::Popup(_) | Shell::Sheet(_) => None,
         }
     }
 
@@ -460,7 +473,7 @@ fn frame_info(win: &Win) -> decor::FrameInfo<'_> {
         height: win.height,
         scale: win.scale,
         // Suspension changes nothing drawn.
-        state: WindowState { suspended: false, ..win.state },
+        state: WindowState { suspended: false, resizing: false, ..win.state },
         style: win.style,
         title: &win.title,
     }
@@ -480,8 +493,8 @@ impl State {
 
     fn handle(&mut self, msg: ToRender) {
         match msg {
-            ToRender::CreateWindow { window, width, height, title, style, limits, popup } => {
-                self.create_window(window, width, height, title, style, limits, popup)
+            ToRender::CreateWindow { window, width, height, title, style, limits, popup, sheet_of } => {
+                self.create_window(window, width, height, title, style, limits, popup, sheet_of)
             }
             ToRender::SetTitle { window, title, text } => {
                 let Some(win) = self.windows.get_mut(&window) else { return };
@@ -579,17 +592,31 @@ impl State {
         style: Style,
         limits: SizeLimits,
         popup: Option<PopupPlacement>,
+        sheet_of: Option<WindowId>,
     ) {
-        let surface = self.compositor.create_surface(&self.qh);
-        let shell = match popup {
-            Some(placement) => {
+        let mut scale = self.initial_scale();
+        let sheet = match sheet_of {
+            Some(parent) => {
+                let Some(sheet) = sheet::create(self, parent) else { return };
+                scale = self.windows.get(&parent).map_or(scale, |p| p.scale);
+                Some(sheet)
+            }
+            None => None,
+        };
+        let surface = match &sheet {
+            Some(sheet) => sheet.surface().clone(),
+            None => self.compositor.create_surface(&self.qh),
+        };
+        let shell = match (popup, sheet) {
+            (_, Some(sheet)) => Shell::Sheet(sheet),
+            (Some(placement), None) => {
                 let Some(popup) = self.create_popup(&surface, width, height, placement) else {
                     surface.destroy();
                     return;
                 };
                 Shell::Popup(popup)
             }
-            None => {
+            (None, None) => {
                 let decorations = if !style.titled || force_client_decorations() {
                     WindowDecorations::ClientOnly
                 } else {
@@ -618,7 +645,7 @@ impl State {
                 fractional,
                 width,
                 height,
-                scale: self.initial_scale(),
+                scale,
                 px_width: 0,
                 px_height: 0,
                 configured: false,
@@ -646,6 +673,12 @@ impl State {
         );
         self.apply_limits(window);
         self.apply_input(window);
+        if sheet_of.is_some() {
+            // No compositor configures a subsurface: it is ready now.
+            self.resize(window, width, height);
+            sheet::place(self, window);
+            sheet::commit_parent(self, window);
+        }
     }
 
     /// An xdg_popup below `placement.anchor` in its parent, grabbing input
@@ -672,6 +705,8 @@ impl State {
         let parent_xdg = match &parent.shell {
             Shell::Toplevel(w) => w.xdg_surface().clone(),
             Shell::Popup(p) => p.xdg_surface().clone(),
+            // Popups of sheets aren't placed yet.
+            Shell::Sheet(_) => return None,
         };
         let popup = Popup::from_surface(Some(&parent_xdg), &positioner, &self.qh, surface.clone(), &self.xdg).ok()?;
         if placement.grab
@@ -726,6 +761,12 @@ impl State {
         }
         let latest = self.seats.latest_serial();
         let Some(win) = self.windows.get_mut(&window) else { return };
+        if let (Shell::Sheet(_), WindowRequest::Resize(width, height)) = (&win.shell, request) {
+            self.resize(window, width, height);
+            sheet::place(self, window);
+            sheet::commit_parent(self, window);
+            return;
+        }
         let Some(w) = win.toplevel() else { return };
         match request {
             WindowRequest::Move => {
@@ -757,6 +798,8 @@ impl State {
     /// Ask for keyboard focus with xdg-activation, as the result of the
     /// latest input event.
     fn activate(&mut self, window: WindowId) {
+        // A sheet's keyboard is its parent's.
+        let window = sheet::toplevel_of(self, window);
         let (Some(activation), Some(win)) = (&self.activation, self.windows.get(&window)) else { return };
         // Compositors give tokens to the surface with the keyboard: ask with
         // ours if one has it, else with the window itself.
@@ -778,7 +821,8 @@ impl State {
         let Some(win) = self.windows.get_mut(&window) else { return };
         let (width, height) = (width.max(1), height.max(1));
         let (pw, ph) = (px(width, win.scale), px(height, win.scale));
-        if !win.configured || pw != win.px_width || ph != win.px_height || width != win.width || height != win.height {
+        let resized = width != win.width || height != win.height;
+        if !win.configured || pw != win.px_width || ph != win.px_height || resized {
             win.configured = true;
             win.width = width;
             win.height = height;
@@ -789,6 +833,9 @@ impl State {
             win.damage.clear();
         }
         self.report(window);
+        if resized {
+            sheet::parent_resized(self, window);
+        }
     }
 
     /// Tell the main thread the window's size, scale and state if they
@@ -871,6 +918,8 @@ impl State {
         }
         let parent = win.surface().clone();
         let passthrough = win.passthrough;
+        let sheets = sheet::surfaces_over(self, window);
+        let Some(win) = self.windows.get_mut(&window) else { return };
         let Some(scroll) = win.layers.get_mut(&layer) else { return };
         let (tile_w, tile_h) = (px(scroll.doc_width, scale), px(TILE_HEIGHT, scale));
         for rect in &rects {
@@ -879,6 +928,7 @@ impl State {
             for index in first..=last {
                 let tile = scroll.tiles.entry(index).or_insert_with(|| {
                     let (subsurface, surface) = self.subcompositor.create_subsurface(parent.clone(), &self.qh);
+                    sheet::keep_below(&subsurface, &sheets);
                     let viewport = self.viewporter.get().expect("viewporter").get_viewport(&surface, &self.qh, ());
                     self.roles.insert(surface.id(), Role::Tile(window, layer, index));
                     if passthrough {
@@ -1021,6 +1071,7 @@ impl State {
                     w.xdg_surface().set_window_geometry(geometry.0, geometry.1, geometry.2, geometry.3)
                 }
                 Shell::Popup(p) => p.xdg_surface().set_window_geometry(0, 0, geometry.2, geometry.3),
+                Shell::Sheet(_) => {}
             }
         }
         let Some(mut decor) = win.decor.take() else { return };
@@ -1210,11 +1261,17 @@ impl WindowHandler for State {
                 || configure.is_tiled_top()
                 || configure.is_tiled_bottom(),
             suspended: configure.state.contains(smithay_client_toolkit::reexports::csd_frame::WindowState::SUSPENDED),
+            resizing: configure.state.contains(smithay_client_toolkit::reexports::csd_frame::WindowState::RESIZING),
         };
         win.client_side = configure.decoration_mode == DecorationMode::Client;
         if !keyboard && win.state.activated != was_active {
             // No keyboard, so no keyboard focus: activation stands for it.
             let focused = win.state.activated;
+            if focused {
+                self.seats.focus_gained(id);
+            } else {
+                self.seats.focus_lost(id);
+            }
             self.send(FromRender::Focus { window: id, focused });
         }
         self.update_decorations(id);

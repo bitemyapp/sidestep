@@ -67,6 +67,9 @@ pub(crate) struct Seats {
     /// next moves.
     hidden: Option<bool>,
     gestures: Option<ZwpPointerGesturesV1>,
+    /// Windows that got the keyboard since their last pointer event: a
+    /// press on one is the click that activated it (AppKit's first mouse).
+    activated: Vec<WindowId>,
 }
 
 struct Seat {
@@ -161,7 +164,29 @@ impl Seats {
             latest: None,
             hidden: None,
             gestures: globals.bind::<ZwpPointerGesturesV1, _, _>(qh, 1..=3, ()).ok(),
+            activated: Vec::new(),
         }
+    }
+
+    /// `window` got the keyboard: its next press is an activating one,
+    /// unless another pointer event comes first.
+    pub(crate) fn focus_gained(&mut self, window: WindowId) {
+        if !self.activated.contains(&window) {
+            self.activated.push(window);
+        }
+    }
+
+    /// `window` lost the keyboard, or closed: a press on it later is no
+    /// longer the one the keyboard came with.
+    pub(crate) fn focus_lost(&mut self, window: WindowId) {
+        self.activated.retain(|&w| w != window);
+    }
+
+    /// A pointer event reached `window`: whether it got the keyboard since
+    /// the one before.
+    fn pointer_event(&mut self, window: WindowId) -> bool {
+        let at = self.activated.iter().position(|&w| w == window);
+        at.map(|i| self.activated.swap_remove(i)).is_some()
     }
 
     pub fn latest_serial(&self) -> Option<(WlSeat, u32)> {
@@ -401,6 +426,9 @@ impl Dispatch<WlPointer, u32> for State {
                 let Some(p) = pointer_of(state, name) else { return };
                 (p.x, p.y) = (surface_x, surface_y);
                 settle(state, name);
+                if let Some(window) = pointer_of(state, name).and_then(|p| p.inside) {
+                    state.seats.pointer_event(window);
+                }
                 moved(state, name);
             }
             wl_pointer::Event::Button { serial, time, button: code, state: WEnum::Value(pressed) } => {
@@ -545,7 +573,11 @@ fn pressed_or_released(state: &mut State, name: u32, serial: u32, time: u32, cod
         Role::Decor(window, part) => {
             decor::pointer_button(state, window, part, (x, y), code, pressed, clicks, &wl_seat, serial);
         }
-        _ => state.send(FromRender::Button { window, x, y, button: button(code), pressed, clicks, modifiers: flags }),
+        _ => {
+            let activating = state.seats.pointer_event(window) && pressed;
+            let button = button(code);
+            state.send(FromRender::Button { window, x, y, button, pressed, clicks, modifiers: flags, activating });
+        }
     }
 }
 
@@ -791,6 +823,7 @@ pub(super) fn scale_changed(state: &mut State, window: WindowId) {
 
 /// Forget a window that closed.
 pub(super) fn window_closed(state: &mut State, window: WindowId) {
+    state.seats.focus_lost(window);
     for seat in &mut state.seats.list {
         if let Some(p) = &mut seat.pointer {
             if p.focus.as_ref().is_some_and(|(_, r)| r.window() == window) {
@@ -910,6 +943,7 @@ impl Dispatch<WlKeyboard, u32> for State {
                 if let Some(k) = keyboard_of(state, name) {
                     k.focus = Some(window);
                 }
+                state.seats.focus_gained(window);
                 state.send(FromRender::Focus { window, focused: true });
                 selection::focus_changed(state);
             }
@@ -918,6 +952,7 @@ impl Dispatch<WlKeyboard, u32> for State {
                 let Some(k) = keyboard_of(state, name) else { return };
                 k.compose.reset();
                 if let Some(window) = k.focus.take() {
+                    state.seats.focus_lost(window);
                     state.send(FromRender::Focus { window, focused: false });
                 }
             }

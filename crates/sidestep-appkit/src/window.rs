@@ -31,19 +31,19 @@ use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use objc2::rc::{Allocated, Retained, Weak};
-use objc2::runtime::{AnyObject, MessageReceiver, NSObjectProtocol, Sel};
-use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
+use objc2::runtime::{AnyObject, NSObjectProtocol};
+use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
     NSBackingStoreType, NSClipView, NSColor, NSCursor, NSEvent, NSEventMask, NSEventPhase, NSEventType, NSFont,
-    NSFontAttributeName, NSForegroundColorAttributeName, NSResponder, NSStringDrawing, NSView, NSWindow,
-    NSWindowAnimationBehavior, NSWindowButton, NSWindowCollectionBehavior, NSWindowOcclusionState,
+    NSFontAttributeName, NSForegroundColorAttributeName, NSResponder, NSSelectionDirection, NSStringDrawing, NSView,
+    NSWindow, NSWindowAnimationBehavior, NSWindowButton, NSWindowCollectionBehavior, NSWindowOcclusionState,
     NSWindowOrderingMode, NSWindowSharingType, NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility,
 };
 use objc2_foundation::{NSCopying, NSDictionary, NSPoint, NSRect, NSSize, NSString};
-use sidestep_foundation::notification;
 
 use crate::app;
 use crate::graphics::{self, Xf};
+use crate::notifications::name;
 use crate::protocol::{
     Button, Cursor, LayerId, Modifiers, Op, PopupPlacement, ROOT_LAYER, Rect, ScrollPhase, SizeLimits, Style,
     TILE_HEIGHT, TitleText, ToRender, WindowId, WindowRequest, WindowState,
@@ -145,6 +145,8 @@ pub(crate) struct WindowIvars {
     transient: RefCell<Option<Weak<NSWindow>>>,
     /// Its own appearance, if it set one.
     appearance: Cell<Option<crate::appearance::Id>>,
+    /// Delegate, notification and window behaviour state (`window_events`).
+    events: crate::window_events::WindowEvents,
 }
 
 /// Settings a window keeps for programs that set them. Only the background
@@ -296,9 +298,11 @@ define_class!(
                 rotating: Cell::new(false),
                 transient: RefCell::new(None),
                 appearance: Cell::new(None),
+                events: Default::default(),
             });
             // SAFETY: NSResponder's designated initializer.
             let this: Retained<Self> = unsafe { msg_send![super(this), init] };
+            crate::window_events::made(&this);
             app::window_made(as_window(&this));
             this
         }
@@ -428,20 +432,39 @@ define_class!(
             self.ivars().settings.borrow().autosave_name.clone()
         }
 
+        // Frame autosave (see `window_events`).
+
+        /// NO, changing nothing, for a name another window holds.
         #[unsafe(method(setFrameAutosaveName:))]
         fn set_frame_autosave_name(&self, name: &NSString) -> bool {
-            self.ivars().settings.borrow_mut().autosave_name = name.copy();
-            true
+            let free = crate::window_events::claim_autosave_name(self, name);
+            if free {
+                let old = std::mem::replace(&mut self.ivars().settings.borrow_mut().autosave_name, name.copy());
+                drop(old);
+                crate::window_events::autosave_named(self, name);
+            }
+            free
         }
 
         #[unsafe(method(setFrameUsingName:))]
-        fn set_frame_using_name(&self, _name: &NSString) -> bool {
-            // Nothing is saved: Wayland places windows itself.
-            false
+        fn set_frame_using_name(&self, name: &NSString) -> bool {
+            crate::window_events::restore_frame(self, name)
+        }
+
+        #[unsafe(method(setFrameUsingName:force:))]
+        fn set_frame_using_name_force(&self, name: &NSString, _force: bool) -> bool {
+            crate::window_events::restore_frame(self, name)
         }
 
         #[unsafe(method(saveFrameUsingName:))]
-        fn save_frame_using_name(&self, _name: &NSString) {}
+        fn save_frame_using_name(&self, name: &NSString) {
+            crate::window_events::save_frame(self, name);
+        }
+
+        #[unsafe(method(removeFrameUsingName:))]
+        fn remove_frame_using_name(name: &NSString) {
+            crate::window_events::remove_frame(name);
+        }
 
         #[unsafe(method_id(initialFirstResponder))]
         fn initial_first_responder(&self) -> Option<Retained<NSView>> {
@@ -561,7 +584,7 @@ define_class!(
 
         #[unsafe(method(inLiveResize))]
         fn in_live_resize(&self) -> bool {
-            false
+            crate::window_events::in_live_resize(self)
         }
 
         #[unsafe(method(animationBehavior))]
@@ -776,24 +799,74 @@ define_class!(
             crate::screen::window_screen(self).map(|s| Retained::into_super(Retained::into_super(s)))
         }
 
+        // Controllers (see `controllers`).
+
         #[unsafe(method_id(windowController))]
-        fn window_controller(&self) -> Option<Retained<AnyObject>> {
-            None
+        fn window_controller(&self) -> Option<Retained<objc2_app_kit::NSWindowController>> {
+            crate::window_events::window_controller(self)
         }
+
+        #[unsafe(method(setWindowController:))]
+        fn set_window_controller(&self, controller: Option<&objc2_app_kit::NSWindowController>) {
+            crate::window_events::set_window_controller(self, controller);
+        }
+
+        #[unsafe(method_id(contentViewController))]
+        fn content_view_controller(&self) -> Option<Retained<objc2_app_kit::NSViewController>> {
+            crate::window_events::content_view_controller(self)
+        }
+
+        #[unsafe(method(setContentViewController:))]
+        fn set_content_view_controller(&self, controller: Option<&objc2_app_kit::NSViewController>) {
+            crate::window_events::set_content_view_controller(self, controller);
+        }
+
+        #[unsafe(method_id(windowWithContentViewController:))]
+        fn window_with_content_view_controller(controller: &objc2_app_kit::NSViewController) -> Retained<NSWindow> {
+            crate::controllers::window_with_content_view_controller(controller)
+        }
+
+        // Sheets (see `modal`).
 
         #[unsafe(method_id(attachedSheet))]
         fn attached_sheet(&self) -> Option<Retained<NSWindow>> {
-            None
+            crate::window_events::attached_sheet(self)
         }
 
         #[unsafe(method_id(sheetParent))]
         fn sheet_parent(&self) -> Option<Retained<NSWindow>> {
-            None
+            crate::window_events::sheet_parent(self)
         }
 
         #[unsafe(method(isSheet))]
         fn is_sheet(&self) -> bool {
-            false
+            crate::window_events::is_sheet(self)
+        }
+
+        #[unsafe(method_id(sheets))]
+        fn sheets(&self) -> Retained<AnyObject> {
+            app::array_of(&crate::window_events::sheets(self))
+        }
+
+        #[unsafe(method(beginSheet:completionHandler:))]
+        fn begin_sheet(&self, sheet: &NSWindow, handler: Option<&block2::DynBlock<dyn Fn(isize)>>) {
+            crate::modal::begin_sheet(as_window(self), sheet, handler.map(|h| h.copy()));
+        }
+
+        /// Sidestep shows one sheet at a time, critical or not.
+        #[unsafe(method(beginCriticalSheet:completionHandler:))]
+        fn begin_critical_sheet(&self, sheet: &NSWindow, handler: Option<&block2::DynBlock<dyn Fn(isize)>>) {
+            crate::modal::begin_sheet(as_window(self), sheet, handler.map(|h| h.copy()));
+        }
+
+        #[unsafe(method(endSheet:))]
+        fn end_sheet(&self, sheet: &NSWindow) {
+            crate::modal::end_sheet(as_window(self), sheet, objc2_app_kit::NSModalResponseStop);
+        }
+
+        #[unsafe(method(endSheet:returnCode:))]
+        fn end_sheet_return_code(&self, sheet: &NSWindow, code: isize) {
+            crate::modal::end_sheet(as_window(self), sheet, code);
         }
 
         /// Dragging from a mouse-down in the content moves the window, as
@@ -805,7 +878,7 @@ define_class!(
 
         #[unsafe(method_id(nextEventMatchingMask:))]
         fn next_event_matching_mask(&self, mask: NSEventMask) -> Option<Retained<NSEvent>> {
-            app::next_event(mask, None, true, false)
+            crate::event_loop::next_event(mask, None, true, crate::event_loop::tracking_mode())
         }
 
         #[unsafe(method_id(nextEventMatchingMask:untilDate:inMode:dequeue:))]
@@ -816,7 +889,8 @@ define_class!(
             mode: &NSString,
             dequeue: bool,
         ) -> Option<Retained<NSEvent>> {
-            app::next_event(mask, app::deadline(until), dequeue, app::default_mode(mode))
+            let mode = sidestep_foundation::runloop::Mode::from_ns(mode);
+            crate::event_loop::next_event(mask, app::deadline(until), dequeue, mode)
         }
 
         #[unsafe(method(postEvent:atStart:))]
@@ -841,8 +915,9 @@ define_class!(
 
         #[unsafe(method(setFrameTopLeftPoint:))]
         fn set_frame_top_left_point(&self, point: NSPoint) {
-            let height = as_window(self).frame().size.height;
-            self.ivars().origin.set(NSPoint::new(point.x, point.y - height));
+            let before = as_window(self).frame();
+            self.ivars().origin.set(NSPoint::new(point.x, point.y - before.size.height));
+            crate::window_events::frame_changed(self, before, as_window(self).frame());
         }
 
         #[unsafe(method(cascadeTopLeftFromPoint:))]
@@ -929,7 +1004,10 @@ define_class!(
 
         #[unsafe(method(setDelegate:))]
         fn set_delegate(&self, delegate: Option<&AnyObject>) {
-            self.ivars().delegate.replace(delegate.map(Weak::new));
+            let old = self.delegate_object();
+            let gone = self.ivars().delegate.replace(delegate.map(Weak::new));
+            drop(gone);
+            crate::window_events::delegate_changed(self, old.as_deref(), delegate);
         }
 
         #[unsafe(method(windowNumber))]
@@ -969,19 +1047,25 @@ define_class!(
 
         #[unsafe(method(setContentSize:))]
         fn set_content_size(&self, size: NSSize) {
+            let before = as_window(self).frame();
             self.resize_to(size);
+            crate::window_events::frame_changed(self, before, as_window(self).frame());
         }
 
         #[unsafe(method(setFrame:display:))]
         fn set_frame_display(&self, frame: NSRect, _display: bool) {
+            let before = as_window(self).frame();
             let content = grow(frame, -self.titlebar());
             self.ivars().origin.set(content.origin);
             self.resize_to(content.size);
+            crate::window_events::frame_changed(self, before, as_window(self).frame());
         }
 
         #[unsafe(method(setFrameOrigin:))]
         fn set_frame_origin(&self, origin: NSPoint) {
+            let before = as_window(self).frame();
             self.ivars().origin.set(origin);
+            crate::window_events::frame_changed(self, before, as_window(self).frame());
         }
 
         #[unsafe(method(minSize))]
@@ -1147,24 +1231,18 @@ define_class!(
             order_out(self);
         }
 
-        /// The delegate hears of it even for a window that isn't on screen,
+        /// Observers hear of it even for a window that isn't on screen,
         /// which a program may close to tear it down.
         #[unsafe(method(close))]
         fn close(&self) {
-            notify(self, sel!(windowWillClose:), "NSWindowWillCloseNotification");
-            if self.ivars().visible.get() {
-                order_out(self);
-                app::window_closed();
-            }
+            crate::window_events::close(self);
         }
 
         /// The close button's click (and the compositor's close request,
         /// its equivalent): nothing for a window without a close button.
         #[unsafe(method(performClose:))]
         fn perform_close(&self, _sender: Option<&AnyObject>) {
-            if self.ivars().style.get().contains(NSWindowStyleMask::Closable) && should_close(self) {
-                as_window(self).close();
-            }
+            crate::window_events::perform_close(self);
         }
 
         /// Only a window on screen can be miniaturized.
@@ -1173,10 +1251,10 @@ define_class!(
             if !self.ivars().visible.get() || self.ivars().miniaturized.get() {
                 return;
             }
-            notify(self, sel!(windowWillMiniaturize:), "NSWindowWillMiniaturizeNotification");
+            notify(self, name!(NSWindowWillMiniaturizeNotification));
             self.request(WindowRequest::Minimize);
             self.ivars().miniaturized.set(true);
-            notify(self, sel!(windowDidMiniaturize:), "NSWindowDidMiniaturizeNotification");
+            notify(self, name!(NSWindowDidMiniaturizeNotification));
         }
 
         #[unsafe(method(performMiniaturize:))]
@@ -1284,9 +1362,12 @@ define_class!(
             self.ivars().style.get().contains(NSWindowStyleMask::Titled)
         }
 
+        /// Sheets never become main: their parent stays main.
         #[unsafe(method(canBecomeMainWindow))]
         fn can_become_main_window(&self) -> bool {
-            self.ivars().visible.get() && self.ivars().style.get().contains(NSWindowStyleMask::Titled)
+            self.ivars().visible.get()
+                && self.ivars().style.get().contains(NSWindowStyleMask::Titled)
+                && !crate::window_events::is_attached(self)
         }
 
         #[unsafe(method(makeKeyWindow))]
@@ -1303,22 +1384,22 @@ define_class!(
 
         #[unsafe(method(becomeKeyWindow))]
         fn become_key_window(&self) {
-            notify(self, sel!(windowDidBecomeKey:), "NSWindowDidBecomeKeyNotification");
+            notify(self, name!(NSWindowDidBecomeKeyNotification));
         }
 
         #[unsafe(method(resignKeyWindow))]
         fn resign_key_window(&self) {
-            notify(self, sel!(windowDidResignKey:), "NSWindowDidResignKeyNotification");
+            notify(self, name!(NSWindowDidResignKeyNotification));
         }
 
         #[unsafe(method(becomeMainWindow))]
         fn become_main_window(&self) {
-            notify(self, sel!(windowDidBecomeMain:), "NSWindowDidBecomeMainNotification");
+            notify(self, name!(NSWindowDidBecomeMainNotification));
         }
 
         #[unsafe(method(resignMainWindow))]
         fn resign_main_window(&self) {
-            notify(self, sel!(windowDidResignMain:), "NSWindowDidResignMainNotification");
+            notify(self, name!(NSWindowDidResignMainNotification));
         }
 
         #[unsafe(method(isReleasedWhenClosed))]
@@ -1328,8 +1409,6 @@ define_class!(
 
         #[unsafe(method(setReleasedWhenClosed:))]
         fn set_released_when_closed(&self, flag: bool) {
-            // Only recorded: a window is never released on its own, which
-            // at worst leaks one the program forgot.
             self.ivars().released_when_closed.set(flag);
         }
 
@@ -1364,6 +1443,43 @@ define_class!(
         #[unsafe(method(sendEvent:))]
         fn send_event(&self, event: &NSEvent) {
             send_event(self, event);
+        }
+
+        /// The end of the responder chain for keys: Tab, Shift-Tab and
+        /// Escape (see `keyloop`).
+        #[unsafe(method(keyDown:))]
+        fn key_down(&self, event: &NSEvent) {
+            crate::keyloop::window_key_down(self, event);
+        }
+
+        #[unsafe(method(selectNextKeyView:))]
+        fn select_next_key_view(&self, _sender: Option<&AnyObject>) {
+            crate::keyloop::select_next(self, true);
+        }
+
+        #[unsafe(method(selectPreviousKeyView:))]
+        fn select_previous_key_view(&self, _sender: Option<&AnyObject>) {
+            crate::keyloop::select_next(self, false);
+        }
+
+        #[unsafe(method(selectKeyViewFollowingView:))]
+        fn select_key_view_following_view(&self, view: &NSView) {
+            crate::keyloop::select_around(self, view, true);
+        }
+
+        #[unsafe(method(selectKeyViewPrecedingView:))]
+        fn select_key_view_preceding_view(&self, view: &NSView) {
+            crate::keyloop::select_around(self, view, false);
+        }
+
+        #[unsafe(method(keyViewSelectionDirection))]
+        fn key_view_selection_direction(&self) -> NSSelectionDirection {
+            crate::keyloop::direction(self)
+        }
+
+        #[unsafe(method(recalculateKeyViewLoop))]
+        fn recalculate_key_view_loop(&self) {
+            crate::keyloop::recalculate(self);
         }
 
         #[unsafe(method(performKeyEquivalent:))]
@@ -1413,6 +1529,7 @@ define_class!(
 
 impl Drop for WindowIvars {
     fn drop(&mut self) {
+        crate::window_events::gone(&self.events, self.delegate.get_mut().as_ref());
         if let Some(content) = self.content.get_mut().take() {
             // Also clears the view's link to the window as its next
             // responder.
@@ -1463,35 +1580,30 @@ fn limit(size: NSSize) -> (u32, u32) {
     (side(size.width), side(size.height))
 }
 
-/// Tell the delegate, if it listens, with a notification from the window.
-fn notify(window: &NSWindowImpl, selector: Sel, name: &str) {
-    let Some(delegate) = window.delegate_object() else { return };
-    // SAFETY: respondsToSelector: takes a selector and returns BOOL.
-    let responds: bool = unsafe { msg_send![&*delegate, respondsToSelector: selector] };
-    if !responds {
-        return;
-    }
-    let note = notification(&NSString::from_str(name), Some(window));
-    // SAFETY: NSWindowDelegate's notification methods take the notification
-    // and return nothing.
-    unsafe { MessageReceiver::send_message::<_, ()>(&*delegate, selector, (&*note,)) }
-}
-
-/// Ask the delegate, then the window itself, whether to close.
-fn should_close(window: &NSWindowImpl) -> bool {
-    let this = as_window(window);
-    let delegate = window.delegate_object();
-    let asked: &AnyObject = match &delegate {
-        Some(d) => d,
-        None => this,
-    };
-    // SAFETY: respondsToSelector: takes a selector and returns BOOL.
-    let responds: bool = unsafe { msg_send![asked, respondsToSelector: sel!(windowShouldClose:)] };
-    // SAFETY: windowShouldClose: takes the window and returns BOOL.
-    !responds || unsafe { msg_send![asked, windowShouldClose: this] }
+/// Post a notification from the window; its delegate is among the
+/// observers (see `notifications`).
+fn notify(window: &NSWindowImpl, name: &NSString) {
+    crate::notifications::post(name, window.as_object());
 }
 
 impl NSWindowImpl {
+    /// This area's state for `window_events`, and what it reads.
+    pub(crate) fn events(&self) -> &crate::window_events::WindowEvents {
+        &self.ivars().events
+    }
+
+    pub(crate) fn as_object(&self) -> &AnyObject {
+        self
+    }
+
+    pub(crate) fn style(&self) -> NSWindowStyleMask {
+        self.ivars().style.get()
+    }
+
+    pub(crate) fn released_when_closed(&self) -> bool {
+        self.ivars().released_when_closed.get()
+    }
+
     /// What the render thread calls the window in its current (or next)
     /// showing.
     pub(crate) fn id(&self) -> WindowId {
@@ -1620,7 +1732,7 @@ impl NSWindowImpl {
 
     fn deminiaturized(&self) {
         if self.ivars().miniaturized.replace(false) {
-            notify(self, sel!(windowDidDeminiaturize:), "NSWindowDidDeminiaturizeNotification");
+            notify(self, name!(NSWindowDidDeminiaturizeNotification));
         }
     }
 
@@ -1725,12 +1837,17 @@ impl NSWindowImpl {
         let first = !ivars.configured.replace(true);
         let size = NSSize::new(width as f64, height as f64);
         let resized = ivars.size.replace(size) != size;
-        let rescaled = ivars.scale.replace(scale) != scale;
+        let before_scale = ivars.scale.replace(scale);
+        let rescaled = before_scale != scale;
         let titlebar = titlebar as f64;
         if ivars.titlebar.replace(Some(titlebar)) != Some(titlebar) && titlebar > 0.0 {
             ivars.title_dirty.set(true);
         }
         let before = ivars.state.replace(state);
+        let old_scale = if rescaled { Some(before_scale) } else { None };
+        if state.resizing && !before.resizing {
+            crate::window_events::resizing(self, true);
+        }
         if resized || first {
             let content = ivars.content.borrow().clone();
             if let Some(content) = content {
@@ -1749,24 +1866,28 @@ impl NSWindowImpl {
             self.damage_all();
         }
         if resized && !first {
-            notify(self, sel!(windowDidResize:), "NSWindowDidResizeNotification");
+            crate::window_events::resized_by_compositor(self);
         }
-        if rescaled && !first {
-            notify(self, sel!(windowDidChangeBackingProperties:), "NSWindowDidChangeBackingPropertiesNotification");
+        if let Some(old) = old_scale.filter(|_| !first) {
+            crate::window_events::scale_changed(self, old);
         }
         if state.fullscreen != before.fullscreen {
-            let (selector, name) = if state.fullscreen {
-                (sel!(windowDidEnterFullScreen:), "NSWindowDidEnterFullScreenNotification")
+            let (will, name) = if state.fullscreen {
+                (name!(NSWindowWillEnterFullScreenNotification), name!(NSWindowDidEnterFullScreenNotification))
             } else {
-                (sel!(windowDidExitFullScreen:), "NSWindowDidExitFullScreenNotification")
+                (name!(NSWindowWillExitFullScreenNotification), name!(NSWindowDidExitFullScreenNotification))
             };
-            notify(self, selector, name);
+            notify(self, will);
+            notify(self, name);
         }
         if state.suspended != before.suspended {
-            notify(self, sel!(windowDidChangeOcclusionState:), "NSWindowDidChangeOcclusionStateNotification");
+            notify(self, name!(NSWindowDidChangeOcclusionStateNotification));
         }
         if state.activated {
             self.deminiaturized();
+        }
+        if !state.resizing && before.resizing {
+            crate::window_events::resizing(self, false);
         }
     }
 
@@ -1814,8 +1935,19 @@ impl NSWindowImpl {
         NSPoint::new(x, self.content_height() - y)
     }
 
-    /// A button pressed or released at `x`, `y` (points from the top left).
-    pub(crate) fn button(&self, button: Button, pressed: bool, x: f64, y: f64, clicks: u32, modifiers: Modifiers) {
+    /// A button pressed or released at `x`, `y` (points from the top left);
+    /// `activating`: the press gave the window the keyboard.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn button(
+        &self,
+        button: Button,
+        pressed: bool,
+        x: f64,
+        y: f64,
+        clicks: u32,
+        modifiers: Modifiers,
+        activating: bool,
+    ) {
         let (number, kind) = match (button, pressed) {
             (Button::Left, true) => (0, NSEventType::LeftMouseDown),
             (Button::Left, false) => (0, NSEventType::LeftMouseUp),
@@ -1831,6 +1963,9 @@ impl NSWindowImpl {
         let location = self.location(x, y);
         self.pointer_at(location);
         let event = crate::event::mouse_event(kind, location, as_window(self), number, clicks as isize, modifiers);
+        if activating {
+            crate::event::mark_activating(&event);
+        }
         app::dispatch(&event);
         if !pressed {
             // What changed during a drag shows once it ends.
@@ -1978,6 +2113,8 @@ fn order_front(window: &NSWindowImpl) {
     if ivars.visible.get() {
         return;
     }
+    crate::panel::showing(as_window(window));
+    crate::window_events::showing(window);
     ivars.visible.set(true);
     ivars.title_dirty.set(true);
     // The render thread's new window knows nothing of input methods yet.
@@ -1991,6 +2128,7 @@ fn order_front(window: &NSWindowImpl) {
     static NEXT_SHOWING: AtomicU32 = AtomicU32::new(1);
     ivars.showing.set(NEXT_SHOWING.fetch_add(1, Ordering::Relaxed));
     app::add_window(as_window(window));
+    let sheet_of = crate::window_events::attached_to(window).map(|p| imp(&p).id());
     app::send(ToRender::CreateWindow {
         window: window.id(),
         width: size.width.round().max(1.0) as u32,
@@ -1998,7 +2136,8 @@ fn order_front(window: &NSWindowImpl) {
         title: ivars.title.borrow().to_string(),
         style: window.render_style(),
         limits: window.limits(),
-        popup: ivars.popup.get(),
+        popup: if sheet_of.is_some() { None } else { ivars.popup.get() },
+        sheet_of,
     });
     let cursor = app::cursor();
     if cursor != Cursor::Default {
@@ -2028,10 +2167,12 @@ fn order_out(window: &NSWindowImpl) {
     if !ivars.visible.get() {
         return;
     }
-    // Children go first: a popup can't outlive its parent.
+    // Children go first: a popup can't outlive its parent, nor a sheet or a
+    // tooltip.
+    crate::tooltip::window_leaving(as_window(window));
     let children = ivars.children.borrow().clone();
-    for child in children {
-        order_out(imp(&child));
+    for child in children.iter().chain(&crate::window_events::attached_sheet(window)) {
+        order_out(imp(child));
     }
     app::window_hidden(as_window(window));
     ivars.visible.set(false);
@@ -2111,9 +2252,7 @@ fn child_placement(window: &NSWindowImpl) -> Option<PopupPlacement> {
 /// `anchor`, a rectangle in `parent`'s window coordinates, and taking the
 /// pointer and keyboard grab if `grab` (as menus do; tooltips don't). The
 /// compositor keeps it on screen and dismisses it when the user clicks
-/// elsewhere, which orders it out. The infrastructure for menus and
-/// tooltips; nothing uses it yet.
-#[allow(dead_code)]
+/// elsewhere, which orders it out. Tooltips use it, and menus will.
 pub(crate) fn show_as_popup(window: &NSWindow, parent: &NSWindow, anchor: NSRect, grab: bool) {
     let (w, parent) = (imp(window), imp(parent));
     let h = parent.content_height();
@@ -2173,13 +2312,23 @@ fn first_responder(window: &NSWindowImpl) -> Retained<NSResponder> {
 
 fn send_event(window: &NSWindowImpl, event: &NSEvent) {
     let kind = event.r#type();
+    if crate::window_events::blocked_by_sheet(window, kind) {
+        return;
+    }
     match kind {
+        // Command-period cancels, whatever has the keyboard.
+        NSEventType::KeyDown if crate::window_events::is_cancel(event) => crate::keyloop::cancel(window),
         NSEventType::KeyDown => first_responder(window).keyDown(event),
         NSEventType::KeyUp => first_responder(window).keyUp(event),
         NSEventType::FlagsChanged => first_responder(window).flagsChanged(event),
         NSEventType::LeftMouseDown | NSEventType::RightMouseDown | NSEventType::OtherMouseDown => {
             let content = window.ivars().content.borrow().clone();
             let Some(view) = content.and_then(|c| c.hitTest(event.locationInWindow())) else { return };
+            // A click that only activates the window, or moves it.
+            if !crate::window_events::mouse_down_reaches(window, &view, event) {
+                return;
+            }
+            crate::panel::clicked(as_window(window), &view);
             if view.acceptsFirstResponder() {
                 as_window(window).makeFirstResponder(Some(&view));
             }

@@ -79,7 +79,6 @@ mod affine;
 
 pub use const_string::{ConstStr, ConstantString};
 pub use notification::notification;
-pub use runloop::{fire_due_timers, next_timer_deadline};
 
 #[doc(hidden)]
 pub use attributed::{RunRef, with_runs};

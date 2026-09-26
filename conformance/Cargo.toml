@@ -26,7 +26,7 @@ harness = false
 
 # Input, windows and pasteboards (appkit_input).
 [dev-dependencies]
-objc2-app-kit = { workspace = true, features = ["NSEvent", "NSWindow", "NSGraphics", "NSGraphicsContext", "NSPasteboard", "NSResponder", "NSView", "NSCursor", "NSColor", "NSTrackingArea", "NSTextInputClient", "NSTextInputContext", "NSWindowScripting", "NSApplication", "block2", "objc2-core-foundation", "NSImageRep", "NSBitmapImageRep", "NSColorSpace", "NSBezierPath", "NSAffineTransform", "NSAppearance", "NSImage", "NSGradient", "NSShadow", "NSAnimation", "NSAnimationContext", "NSCustomImageRep", "NSColorList", "NSVisualEffectView", "NSCell", "NSFontDescriptor"] }
+objc2-app-kit = { workspace = true, features = ["NSEvent", "NSWindow", "NSGraphics", "NSGraphicsContext", "NSPasteboard", "NSResponder", "NSView", "NSCursor", "NSColor", "NSTrackingArea", "NSTextInputClient", "NSTextInputContext", "NSWindowScripting", "NSApplication", "block2", "objc2-core-foundation", "NSImageRep", "NSBitmapImageRep", "NSColorSpace", "NSBezierPath", "NSAffineTransform", "NSAppearance", "NSImage", "NSGradient", "NSShadow", "NSAnimation", "NSAnimationContext", "NSCustomImageRep", "NSColorList", "NSVisualEffectView", "NSCell", "NSFontDescriptor", "NSRunningApplication", "NSPanel", "NSViewController", "NSWindowController", "NSStoryboard", "NSNib"] }
 objc2-foundation = { workspace = true, features = ["NSRange", "NSAttributedString", "NSAffineTransform", "NSData", "NSArray", "NSValue"] }
 
 [[test]]
@@ -35,6 +35,16 @@ harness = false
 
 [[test]]
 name = "appkit_keybindings"
+harness = false
+
+# The event loop, notifications and window behaviour (appkit_events), and
+# the same with windows on screen, opt-in (appkit_windows).
+[[test]]
+name = "appkit_events"
+harness = false
+
+[[test]]
+name = "appkit_windows"
 harness = false
 
 [[test]]

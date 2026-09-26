@@ -1,39 +1,41 @@
-//! `NSApplication` and the main thread's event loop.
-//!
-//! The loop sleeps until the render thread sends something or the next
-//! timer is due, handles what arrived, fires due timers, then gives each
-//! window a display pass. Nothing on this thread waits for rendering.
+//! `NSApplication`: its windows, the key and main window, the event queue
+//! and modal loops. The loops themselves run on the main thread's run loop
+//! (see `event_loop`); nothing on this thread waits for rendering.
 //!
 //! Input becomes `NSEvent`s sent through `-[NSApplication sendEvent:]`, which
-//! programs may override, to the event's window, after the local event
-//! monitors. Keys go to the key window: the window with the keyboard, if it
-//! can become key; one that can't (a borderless window) leaves the key
-//! window as it was, and its keys go there, as on macOS. The application is
-//! active while it has a key window.
+//! programs may override (`+sharedApplication` sent to a subclass makes an
+//! instance of it), after the local event monitors: keys to the key window,
+//! the rest to the event's window. The key window is the window with the
+//! keyboard, if it can become key (or its sheet); one that can't (a
+//! borderless window) leaves the key window as it was, and its keys go
+//! there, as on macOS. The application is active while it has a key window,
+//! and posts its notifications (and so tells its delegate) as that changes.
 //!
-//! A nested loop (`nextEventMatchingMask:untilDate:inMode:dequeue:`, as a
-//! view tracking a drag runs) handles the render thread's messages the same
-//! way, but the events input makes wait in a queue: the loop takes the ones
-//! it asked for and the main loop sends the rest when it gets back. A modal
-//! loop (`runModalForWindow:`) is the main loop with input for other windows
-//! dropped.
+//! Input and posted events wait in one queue, in order, for AppKit's loops
+//! (see `event_loop`): the main loop and modal loops send them, and a
+//! nested loop (`nextEventMatchingMask:untilDate:inMode:dequeue:`, as a
+//! view tracking a drag runs) takes the ones it asked for, leaving the rest
+//! for the loop outside. A modal loop (`runModalForWindow:`) runs in
+//! `NSModalPanelRunLoopMode` with input for other windows dropped.
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::VecDeque;
-use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
 
-use objc2::rc::{Retained, Weak, autoreleasepool};
-use objc2::runtime::{AnyObject, NSObjectProtocol, Sel};
+use objc2::rc::{Allocated, Retained, Weak};
+use objc2::runtime::{AnyClass, AnyObject, NSObjectProtocol, Sel};
 use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSEvent, NSEventMask, NSEventModifierFlags, NSEventType,
-    NSModalResponse, NSModalResponseAbort, NSModalResponseStop, NSRequestUserAttentionType, NSResponder, NSWindow,
+    NSModalResponse, NSModalResponseAbort, NSModalResponseStop, NSModalSession, NSRequestUserAttentionType,
+    NSResponder, NSWindow,
 };
 use objc2_foundation::NSString;
-use sidestep_foundation::{fire_due_timers, next_timer_deadline, notification};
+use sidestep_foundation::runloop::Mode;
 
 use crate::backend::{self, Backend};
+use crate::event_loop;
+use crate::notifications::{Owner, name};
 use crate::protocol::{Cursor, FromRender, ToRender, WindowRequest};
 use crate::{event, window};
 
@@ -59,12 +61,6 @@ thread_local! {
     /// Events waiting to be sent or taken: made while a nested loop looked
     /// for others, or posted.
     static QUEUE: RefCell<VecDeque<Retained<NSEvent>>> = const { RefCell::new(VecDeque::new()) };
-    /// Nested loops looking for events; while there are any, input is
-    /// queued rather than sent.
-    static PUMPING: Cell<u32> = const { Cell::new(0) };
-    /// Modal loops, innermost last: the window and, once it's decided, the
-    /// response.
-    static MODALS: RefCell<Vec<(Retained<NSWindow>, Option<NSModalResponse>)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Show `cursor` over every window's content, now and in windows shown
@@ -89,12 +85,19 @@ pub(crate) fn is_active() -> bool {
 pub(crate) fn send(msg: ToRender) {
     BACKEND.with(|b| {
         let backend = b.get_or_init(|| {
-            let backend = backend::start();
+            let backend = backend::start(event_loop::install());
             let _ = ANY_THREAD.set(backend.tx.clone());
             backend
         });
+        backend::null::sending();
         let _ = backend.tx.send(msg);
     });
+}
+
+/// Call `f` with the render thread's channel to the main thread, if the
+/// render thread has started.
+pub(crate) fn with_receiver<R>(f: impl FnOnce(&std::sync::mpsc::Receiver<FromRender>) -> R) -> Option<R> {
+    BACKEND.with(|b| b.get().map(|backend| f(&backend.rx)))
 }
 
 /// The render thread's inbox, for threads other than the main one.
@@ -106,6 +109,7 @@ static ANY_THREAD: std::sync::OnceLock<smithay_client_toolkit::reexports::calloo
 /// window there's no Wayland focus to act with.
 pub(crate) fn send_if_running(msg: ToRender) {
     if let Some(tx) = ANY_THREAD.get() {
+        backend::null::sending();
         let _ = tx.send(msg);
     }
 }
@@ -153,6 +157,11 @@ pub(crate) fn windows_for_appearance() -> Vec<Retained<NSWindow>> {
     all_windows()
 }
 
+/// The `i`th window on screen, if there are that many.
+fn window_at(i: usize) -> Option<Retained<NSWindow>> {
+    WINDOWS.with(|w| w.borrow().get(i).cloned())
+}
+
 /// The window with this `windowNumber`, on screen or not.
 pub(crate) fn window_by_number(number: isize) -> Option<Retained<NSWindow>> {
     if number <= 0 {
@@ -166,7 +175,7 @@ pub(crate) fn key_window() -> Option<Retained<NSWindow>> {
     WINDOWS.with(|w| w.borrow().iter().find(|w| window::imp(w).is_key()).cloned())
 }
 
-fn main_window() -> Option<Retained<NSWindow>> {
+pub(crate) fn main_window() -> Option<Retained<NSWindow>> {
     WINDOWS.with(|w| w.borrow().iter().find(|w| window::imp(w).is_main()).cloned())
 }
 
@@ -203,8 +212,14 @@ fn focus_moved(window: Option<&NSWindow>) {
     }
 }
 
+/// Make `window` the key window (and main, if it can be), as focus moving
+/// inside one toplevel does: to a sheet and back.
+pub(crate) fn make_key(window: &NSWindow) {
+    focus_moved(Some(window));
+}
+
 /// The window with the keyboard got it or lost it.
-fn keyboard_focus(id: u32, focused: bool) {
+pub(crate) fn keyboard_focus(id: u32, focused: bool) {
     if !focused {
         // Whether another window of ours gets it is settled once the batch
         // is handled (see `settle_focus`).
@@ -215,13 +230,18 @@ fn keyboard_focus(id: u32, focused: bool) {
     }
     FOCUSED.with(|f| f.set(Some(id)));
     let Some(w) = find_window(id) else { return };
-    if w.canBecomeKeyWindow() {
+    // A window with a sheet gives the keyboard to the sheet.
+    let w = crate::window_events::deepest_sheet(&w);
+    if w.canBecomeKeyWindow() && crate::panel::takes_key_on_focus(&w) {
         focus_moved(Some(&w));
     }
     // The compositor gave another window the keyboard during a modal
-    // session: ask for it back.
-    if let Some(modal) = modal_window()
-        && !within(&w, &modal)
+    // session: ask for it back, unless that window works when modal (a
+    // panel the modal window uses), as the modal filter lets its input
+    // through.
+    if let Some(modal) = crate::modal::modal_window()
+        && !crate::modal::within(&w, &modal)
+        && !w.worksWhenModal()
     {
         modal.makeKeyAndOrderFront(None);
     }
@@ -229,7 +249,7 @@ fn keyboard_focus(id: u32, focused: bool) {
 
 /// After a batch of input: without a window of ours holding the keyboard,
 /// there's no key window.
-fn settle_focus() {
+pub(crate) fn settle_focus() {
     let held = FOCUSED.with(Cell::get).and_then(find_window);
     if held.is_none() {
         focus_moved(None);
@@ -248,18 +268,24 @@ pub(crate) fn window_hidden(window: &NSWindow) {
     w.set_main(false);
 }
 
-/// Send an event through `-[NSApplication sendEvent:]`, or queue it for
-/// the nested loop that's looking for events.
+/// Queue an event input made, for the AppKit loop running to send through
+/// `-[NSApplication sendEvent:]` or take.
 pub(crate) fn dispatch(event: &NSEvent) {
-    if PUMPING.with(Cell::get) > 0 {
-        QUEUE.with(|q| q.borrow_mut().push_back(event.retain()));
-    } else {
-        send_now(event);
-    }
+    QUEUE.with(|q| q.borrow_mut().push_back(event.retain()));
+    event_loop::queued();
+}
+
+pub(crate) fn has_queued() -> bool {
+    QUEUE.with(|q| !q.borrow().is_empty())
+}
+
+/// Whether an event `mask` matches waits in the queue.
+pub(crate) fn has_queued_matching(mask: NSEventMask) -> bool {
+    QUEUE.with(|q| q.borrow().iter().any(|e| matches(mask, e)))
 }
 
 fn send_now(event: &NSEvent) {
-    if !allowed_by_modal(event) {
+    if !crate::modal::allows(event) {
         return;
     }
     let previous = CURRENT_EVENT.with(|c| c.replace(Some(event.retain())));
@@ -269,44 +295,8 @@ fn send_now(event: &NSEvent) {
     drop(done);
 }
 
-/// During a modal loop, input goes only to the modal window and the
-/// windows it holds.
-fn allowed_by_modal(event: &NSEvent) -> bool {
-    let Some(modal) = MODALS.with(|m| m.borrow().last().map(|(w, _)| w.clone())) else { return true };
-    let input = matches!(
-        event.r#type(),
-        NSEventType::KeyDown
-            | NSEventType::KeyUp
-            | NSEventType::FlagsChanged
-            | NSEventType::LeftMouseDown
-            | NSEventType::LeftMouseUp
-            | NSEventType::RightMouseDown
-            | NSEventType::RightMouseUp
-            | NSEventType::OtherMouseDown
-            | NSEventType::OtherMouseUp
-            | NSEventType::LeftMouseDragged
-            | NSEventType::RightMouseDragged
-            | NSEventType::OtherMouseDragged
-            | NSEventType::MouseMoved
-            | NSEventType::ScrollWheel
-    );
-    !input || event.window(MainThreadMarker::from(&*modal)).is_some_and(|w| within(&w, &modal))
-}
-
-/// `window` is `modal` or a window it holds.
-fn within(window: &NSWindow, modal: &NSWindow) -> bool {
-    let mut window = Some(window.retain());
-    while let Some(w) = window {
-        if std::ptr::eq(&*w, modal) {
-            return true;
-        }
-        window = w.parentWindow();
-    }
-    false
-}
-
 /// Send the events nested loops left, in order.
-fn send_queued() {
+pub(crate) fn send_queued() {
     while let Some(event) = QUEUE.with(|q| q.borrow_mut().pop_front()) {
         send_now(&event);
     }
@@ -317,6 +307,8 @@ pub(crate) fn post_event(event: &NSEvent, at_start: bool) {
         let mut q = q.borrow_mut();
         if at_start { q.push_front(event.retain()) } else { q.push_back(event.retain()) }
     });
+    // Sent by the AppKit loop running now, or taken by a nested one.
+    event_loop::queued();
 }
 
 /// Drop queued events `mask` matches, up to `last` if given.
@@ -337,105 +329,19 @@ fn matches(mask: NSEventMask, event: &NSEvent) -> bool {
     kind < 64 && mask.0 & (1 << kind) != 0
 }
 
-/// Take (or look at) the first queued event `mask` matches, handling the
-/// render thread's messages until one comes or `deadline` passes (None:
-/// never). Events it doesn't want wait for the main loop. Timers fire only
-/// when `timers` is set, as in the default run loop mode.
-pub(crate) fn next_event(
-    mask: NSEventMask,
-    deadline: Option<Instant>,
-    dequeue: bool,
-    timers: bool,
-) -> Option<Retained<NSEvent>> {
-    let app = shared();
-    let app = app_impl(&app);
-    let mut looked = false;
-    loop {
-        let found = QUEUE.with(|q| {
-            let mut q = q.borrow_mut();
-            let at = q.iter().position(|e| matches(mask, e))?;
-            if dequeue { q.remove(at) } else { q.get(at).cloned() }
-        });
-        if let Some(event) = found {
-            if dequeue {
-                let previous = CURRENT_EVENT.with(|c| c.replace(Some(event.clone())));
-                drop(previous);
-            }
-            return Some(event);
-        }
-        let now = Instant::now();
-        let expired = deadline.is_some_and(|d| d <= now);
-        if expired && looked {
-            return None;
-        }
-        let until = if expired {
-            Some(now)
-        } else {
-            let timer = if timers { next_timer_deadline() } else { None };
-            earliest(earliest(deadline, timer), RESIGN_AT.with(Cell::get))
-        };
-        struct Pumping;
-        impl Drop for Pumping {
-            fn drop(&mut self) {
-                PUMPING.with(|p| p.set(p.get() - 1));
-            }
-        }
-        PUMPING.with(|p| p.set(p.get() + 1));
-        let pumping = Pumping;
-        crate::pasteboard::offer_changes();
-        take_batch(app, wait(until));
-        if timers {
-            fire_due_timers(Instant::now());
-        }
-        refresh_windows();
-        drop(pumping);
-        looked = true;
+/// Take (or look at) the first queued event `mask` matches; taking it makes
+/// it the current event.
+pub(crate) fn take_queued(mask: NSEventMask, dequeue: bool) -> Option<Retained<NSEvent>> {
+    let found = QUEUE.with(|q| {
+        let mut q = q.borrow_mut();
+        let at = q.iter().position(|e| matches(mask, e))?;
+        if dequeue { q.remove(at) } else { q.get(at).cloned() }
+    })?;
+    if dequeue {
+        let previous = CURRENT_EVENT.with(|c| c.replace(Some(found.clone())));
+        drop(previous);
     }
-}
-
-fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
-    match (a, b) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
-    }
-}
-
-/// Run the main loop for `window` alone until the modal session ends.
-fn run_modal(app: &NSApplicationImpl, window: &NSWindow) -> NSModalResponse {
-    MODALS.with(|m| m.borrow_mut().push((window.retain(), None)));
-    // Over the window the session came from, where compositors center it.
-    let modal = window::imp(window);
-    let lent = modal.transient().is_none();
-    if lent && let Some(key) = key_window().filter(|k| !std::ptr::eq(&**k, window)) {
-        modal.set_transient(Some(&key));
-    }
-    window.makeKeyAndOrderFront(None);
-    let response = loop {
-        let decided = MODALS.with(|m| m.borrow().last().and_then(|(_, r)| *r));
-        if let Some(response) = decided {
-            break response;
-        }
-        autoreleasepool(|_| turn(app));
-    };
-    let ended = MODALS.with(|m| m.borrow_mut().pop());
-    drop(ended);
-    if lent {
-        modal.set_transient(None);
-    }
-    response
-}
-
-/// End the innermost modal loop with `response`.
-fn stop_modal(response: NSModalResponse) {
-    MODALS.with(|m| {
-        if let Some((_, decided)) = m.borrow_mut().last_mut() {
-            decided.get_or_insert(response);
-        }
-    });
-}
-
-fn modal_window() -> Option<Retained<NSWindow>> {
-    MODALS.with(|m| m.borrow().last().map(|(w, _)| w.clone()))
+    Some(found)
 }
 
 /// Make sure the classes this crate instantiates directly are loaded from
@@ -450,10 +356,18 @@ pub(crate) fn load_shells() {
 }
 
 pub(crate) struct AppIvars {
-    delegate: RefCell<Option<Retained<AnyObject>>>,
+    /// Weak, as AppKit's is.
+    delegate: RefCell<Option<Weak<AnyObject>>>,
+    /// The notifications the delegate is registered for.
+    registered: crate::notifications::Registered,
     policy: Cell<NSApplicationActivationPolicy>,
     running: Cell<bool>,
     hidden: Cell<bool>,
+    /// `finishLaunching` ran, and the first look for events is yet to post
+    /// that launching finished.
+    launching: Cell<bool>,
+    /// The menu whose key equivalents come after the key window's.
+    main_menu: RefCell<Option<Retained<AnyObject>>>,
 }
 
 define_class!(
@@ -464,19 +378,49 @@ define_class!(
     pub(crate) struct NSApplicationImpl;
 
     impl NSApplicationImpl {
-        #[unsafe(method_id(sharedApplication))]
-        fn shared_application() -> Retained<NSApplication> {
-            shared()
+        /// Made by `+sharedApplication` (see `load`), as the class it was
+        /// sent to.
+        #[unsafe(method_id(init))]
+        fn init(this: Allocated<Self>) -> Retained<Self> {
+            let this = this.set_ivars(AppIvars {
+                delegate: RefCell::new(None),
+                registered: Default::default(),
+                policy: Cell::new(NSApplicationActivationPolicy::Regular),
+                running: Cell::new(false),
+                hidden: Cell::new(false),
+                launching: Cell::new(false),
+                main_menu: RefCell::new(None),
+            });
+            // SAFETY: NSResponder's designated initializer.
+            unsafe { msg_send![super(this), init] }
+        }
+
+        /// Kept for the key equivalent phase of `sendEvent:`; showing it is
+        /// the menus' business.
+        #[unsafe(method_id(mainMenu))]
+        fn main_menu(&self) -> Option<Retained<AnyObject>> {
+            self.ivars().main_menu.borrow().clone()
+        }
+
+        #[unsafe(method(setMainMenu:))]
+        fn set_main_menu(&self, menu: Option<&AnyObject>) {
+            let old = self.ivars().main_menu.replace(menu.map(|m| m.retain()));
+            drop(old);
         }
 
         #[unsafe(method_id(delegate))]
         fn delegate(&self) -> Option<Retained<AnyObject>> {
-            self.ivars().delegate.borrow().clone()
+            self.delegate_object()
         }
 
         #[unsafe(method(setDelegate:))]
         fn set_delegate(&self, delegate: Option<&AnyObject>) {
-            self.ivars().delegate.replace(delegate.map(|d| d.retain()));
+            let old = self.delegate_object();
+            let gone = self.ivars().delegate.replace(delegate.map(Weak::new));
+            drop(gone);
+            let this: &AnyObject = self;
+            let registered = &self.ivars().registered;
+            crate::notifications::set_delegate(Owner::Application, this, registered, old.as_deref(), delegate);
         }
 
         #[unsafe(method(activationPolicy))]
@@ -511,12 +455,20 @@ define_class!(
             // Local monitors see it first, and may change or swallow it.
             let Some(event) = event::monitor(event) else { return };
             let event = &*event;
-            let Some(window) = event.window(mtm) else { return };
-            // Command-key presses are key equivalents first: a view that
-            // performs one consumes the key.
-            let equivalent = event.r#type() == NSEventType::KeyDown
-                && event.modifierFlags().contains(NSEventModifierFlags::Command);
-            if !(equivalent && window.performKeyEquivalent(event)) {
+            // Keys go to the key window, if there is one, as on macOS.
+            let kind = event.r#type();
+            if is_press(kind) {
+                crate::tooltip::input();
+            }
+            let keys = matches!(kind, NSEventType::KeyDown | NSEventType::KeyUp | NSEventType::FlagsChanged);
+            let window = if keys { key_window() } else { event.window(mtm) };
+            let Some(window) = window else { return };
+            // Command-key presses are key equivalents first, the key window's
+            // views' and then the main menu's: one that performs it
+            // consumes the key.
+            let equivalent =
+                kind == NSEventType::KeyDown && event.modifierFlags().contains(NSEventModifierFlags::Command);
+            if !(equivalent && (window.performKeyEquivalent(event) || menu_key_equivalent(self, event))) {
                 window.sendEvent(event);
             }
         }
@@ -541,9 +493,12 @@ define_class!(
             self.ivars().running.get()
         }
 
+        /// Posts that launching will finish; that it did is posted when the
+        /// program first looks for events, as on macOS.
         #[unsafe(method(finishLaunching))]
         fn finish_launching(&self) {
-            tell_delegate(self, Launch::Will);
+            self.ivars().launching.set(true);
+            tell(self, name!(NSApplicationWillFinishLaunchingNotification));
         }
 
         #[unsafe(method(run))]
@@ -554,10 +509,10 @@ define_class!(
         /// Inside a modal loop, ends that loop instead.
         #[unsafe(method(stop:))]
         fn stop(&self, _sender: Option<&AnyObject>) {
-            if modal_window().is_some() {
-                stop_modal(NSModalResponseStop);
-            } else {
-                self.ivars().running.set(false);
+            if crate::modal::modal_window().is_some() {
+                crate::modal::stop_modal(NSModalResponseStop);
+            } else if self.ivars().running.replace(false) {
+                event_loop::stop_innermost();
             }
         }
 
@@ -584,7 +539,7 @@ define_class!(
         /// The application, then its delegate.
         #[unsafe(method(tryToPerform:with:))]
         fn try_to_perform(&self, action: Sel, object: Option<&AnyObject>) -> bool {
-            let delegate = self.ivars().delegate.borrow().clone();
+            let delegate = self.delegate_object();
             let this: &AnyObject = self;
             [Some(this.retain()), delegate].into_iter().flatten().any(|o| perform(&o, action, object))
         }
@@ -606,11 +561,11 @@ define_class!(
             if self.ivars().hidden.replace(true) {
                 return;
             }
-            tell(self, sel!(applicationWillHide:), "NSApplicationWillHideNotification");
+            tell(self, name!(NSApplicationWillHideNotification));
             for window in windows() {
                 send(ToRender::Request { window: window::imp(&window).id(), request: WindowRequest::Minimize });
             }
-            tell(self, sel!(applicationDidHide:), "NSApplicationDidHideNotification");
+            tell(self, name!(NSApplicationDidHideNotification));
         }
 
         #[unsafe(method(unhide:))]
@@ -651,27 +606,42 @@ define_class!(
 
         #[unsafe(method(runModalForWindow:))]
         fn run_modal_for_window(&self, window: &NSWindow) -> NSModalResponse {
-            run_modal(self, window)
+            crate::modal::run_modal(window)
         }
 
         #[unsafe(method(stopModal))]
         fn stop_modal(&self) {
-            stop_modal(NSModalResponseStop);
+            crate::modal::stop_modal(NSModalResponseStop);
         }
 
         #[unsafe(method(stopModalWithCode:))]
         fn stop_modal_with_code(&self, code: NSModalResponse) {
-            stop_modal(code);
+            crate::modal::stop_modal(code);
         }
 
         #[unsafe(method(abortModal))]
         fn abort_modal(&self) {
-            stop_modal(NSModalResponseAbort);
+            crate::modal::stop_modal(NSModalResponseAbort);
+        }
+
+        #[unsafe(method(beginModalSessionForWindow:))]
+        fn begin_modal_session_for_window(&self, window: &NSWindow) -> NSModalSession {
+            crate::modal::begin_session(window)
+        }
+
+        #[unsafe(method(runModalSession:))]
+        fn run_modal_session(&self, session: NSModalSession) -> NSModalResponse {
+            crate::modal::run_session(session)
+        }
+
+        #[unsafe(method(endModalSession:))]
+        fn end_modal_session(&self, session: NSModalSession) {
+            crate::modal::end_session(session);
         }
 
         #[unsafe(method_id(modalWindow))]
         fn modal_window(&self) -> Option<Retained<NSWindow>> {
-            modal_window()
+            crate::modal::modal_window()
         }
 
         #[unsafe(method_id(nextEventMatchingMask:untilDate:inMode:dequeue:))]
@@ -682,7 +652,7 @@ define_class!(
             mode: &NSString,
             dequeue: bool,
         ) -> Option<Retained<NSEvent>> {
-            next_event(mask, deadline(until), dequeue, default_mode(mode))
+            event_loop::next_event(mask, deadline(until), dequeue, Mode::from_ns(mode))
         }
 
         #[unsafe(method(postEvent:atStart:))]
@@ -715,12 +685,61 @@ define_class!(
 
         #[unsafe(method(terminate:))]
         fn terminate(&self, _sender: Option<&AnyObject>) {
-            terminate(self);
+            crate::modal::terminate(self);
+        }
+
+        #[unsafe(method(replyToApplicationShouldTerminate:))]
+        fn reply_to_application_should_terminate(&self, terminate: bool) {
+            crate::modal::reply_to_terminate(terminate);
         }
     }
 
     unsafe impl NSObjectProtocol for NSApplicationImpl {}
 );
+
+/// A click or a key going down.
+fn is_press(kind: NSEventType) -> bool {
+    matches!(
+        kind,
+        NSEventType::KeyDown | NSEventType::LeftMouseDown | NSEventType::RightMouseDown | NSEventType::OtherMouseDown
+    )
+}
+
+/// The main menu's turn at a key equivalent, once there is a main menu.
+fn menu_key_equivalent(app: &NSApplicationImpl, event: &NSEvent) -> bool {
+    let this: &AnyObject = app;
+    // SAFETY: mainMenu takes nothing and returns a menu or nil.
+    let menu: Option<Retained<AnyObject>> = unsafe { msg_send![this, mainMenu] };
+    // SAFETY: performKeyEquivalent: takes an event and returns BOOL.
+    menu.is_some_and(|m| {
+        responds(&m, sel!(performKeyEquivalent:)) && unsafe { msg_send![&*m, performKeyEquivalent: event] }
+    })
+}
+
+/// Give `NSApplication` its `+sharedApplication`: a method taking the class
+/// it was sent to, so a subclass's makes an instance of that subclass. A
+/// `define_class!` class method doesn't see its receiver, so it is added by
+/// hand when the class loads.
+pub(crate) fn load() {
+    let class = NSApplicationImpl::class();
+    /// `+sharedApplication`.
+    unsafe extern "C-unwind" fn shared_application(class: &AnyClass, _cmd: Sel) -> *mut NSApplication {
+        // The application lives as long as the program, so a reference that
+        // isn't counted stays good.
+        Retained::as_ptr(&shared_as(class)).cast_mut()
+    }
+    // SAFETY: the implementation takes the receiver and selector and
+    // returns an object, as the type encoding says; it is added to the
+    // metaclass, so it is a class method.
+    let added = unsafe {
+        let imp: objc2::runtime::Imp = std::mem::transmute(
+            shared_application as unsafe extern "C-unwind" fn(&AnyClass, Sel) -> *mut NSApplication,
+        );
+        let meta = (class.metaclass() as *const AnyClass).cast_mut();
+        objc2::ffi::class_addMethod(meta, sel!(sharedApplication), imp, c"@@:".as_ptr())
+    };
+    assert!(added.as_bool(), "sidestep: +[NSApplication sharedApplication] was already defined");
+}
 
 /// When a nested loop given `date` stops waiting: at once for none, never
 /// for a date too far off to matter.
@@ -730,13 +749,6 @@ pub(crate) fn deadline(date: Option<&AnyObject>) -> Option<Instant> {
     // SAFETY: NSDate's timeIntervalSinceNow returns seconds.
     let seconds: f64 = unsafe { msg_send![date, timeIntervalSinceNow] };
     if seconds.is_nan() || seconds > 1e8 { None } else { Some(now + Duration::from_secs_f64(seconds.max(0.0))) }
-}
-
-/// Timers fire in nested loops run in the default mode (or the common
-/// modes), not in the tracking or modal-panel modes.
-pub(crate) fn default_mode(mode: &NSString) -> bool {
-    let mode = mode.to_string();
-    mode == "kCFRunLoopDefaultMode" || mode == "kCFRunLoopCommonModes"
 }
 
 /// Objects as an `NSArray`, which Foundation provides when it has one.
@@ -751,32 +763,41 @@ pub(crate) fn array_of<T: objc2::Message>(objects: &[Retained<T>]) -> Retained<A
 }
 
 /// Whom an action goes to: `target` if it has the action, else, for no
-/// target, the first in the key window's responder chain (ending with the
-/// window and its delegate), the application and its delegate that has it.
+/// target, the first that has it among the key window's responder chain
+/// (the window and its controller at its end) and the window's delegate,
+/// then the same of the main window when it isn't the key window (a panel
+/// is key over a document window), then the application and its delegate.
 fn target_for_action(app: &NSApplicationImpl, action: Sel, target: Option<&AnyObject>) -> Option<Retained<AnyObject>> {
     if let Some(target) = target {
         return responds(target, action).then(|| target.retain());
     }
-    if let Some(window) = key_window() {
-        let mut responder = window.firstResponder();
-        while let Some(r) = responder {
-            if responds(&r, action) {
-                return Some(Retained::into_super(Retained::into_super(r)));
-            }
-            // SAFETY: nextResponder returns a responder or nil.
-            responder = unsafe { r.nextResponder() };
-        }
-        if let Some(delegate) = window::imp(&window).delegate_object()
-            && responds(&delegate, action)
-        {
-            return Some(delegate);
-        }
+    let key = key_window();
+    if let Some(found) = key.as_deref().and_then(|w| target_in_window(w, action)) {
+        return Some(found);
+    }
+    let main = main_window().filter(|m| key.as_deref().is_none_or(|k| !std::ptr::eq(k, &**m)));
+    if let Some(found) = main.as_deref().and_then(|w| target_in_window(w, action)) {
+        return Some(found);
     }
     let this: &AnyObject = app;
     if responds(this, action) {
         return Some(this.retain());
     }
-    app.ivars().delegate.borrow().clone().filter(|d| responds(d, action))
+    app.delegate_object().filter(|d| responds(d, action))
+}
+
+/// The first in `window`'s responder chain that has `action`, else the
+/// window's delegate if it has it.
+fn target_in_window(window: &NSWindow, action: Sel) -> Option<Retained<AnyObject>> {
+    let mut responder = window.firstResponder();
+    while let Some(r) = responder {
+        if responds(&r, action) {
+            return Some(Retained::into_super(Retained::into_super(r)));
+        }
+        // SAFETY: nextResponder returns a responder or nil.
+        responder = unsafe { r.nextResponder() };
+    }
+    window::imp(window).delegate_object().filter(|d| responds(d, action))
 }
 
 fn send_action(app: &NSApplicationImpl, action: Sel, target: Option<&AnyObject>, sender: Option<&AnyObject>) -> bool {
@@ -805,76 +826,67 @@ fn unhide(app: &NSApplicationImpl, activating: bool) {
     if !app.ivars().hidden.replace(false) {
         return;
     }
-    tell(app, sel!(applicationWillUnhide:), "NSApplicationWillUnhideNotification");
+    tell(app, name!(NSApplicationWillUnhideNotification));
     if activating {
         activate();
     }
-    tell(app, sel!(applicationDidUnhide:), "NSApplicationDidUnhideNotification");
+    tell(app, name!(NSApplicationDidUnhideNotification));
 }
 
-/// Tell the delegate, if it listens, with a notification from the
-/// application.
-fn tell(app: &NSApplicationImpl, selector: Sel, name: &str) {
-    let Some(delegate) = app.ivars().delegate.borrow().clone() else { return };
-    if !responds(&delegate, selector) {
-        return;
+/// Post a notification from the application; its delegate is among the
+/// observers (see `notifications`).
+pub(crate) fn tell(app: &NSApplicationImpl, name: &NSString) {
+    crate::notifications::post(name, app);
+}
+
+impl NSApplicationImpl {
+    pub(crate) fn delegate_object(&self) -> Option<Retained<AnyObject>> {
+        self.ivars().delegate.borrow().as_ref().and_then(Weak::load)
     }
-    let note = notification(&NSString::from_str(name), Some(app));
-    // SAFETY: application delegate notifications take the notification.
-    unsafe { objc2::runtime::MessageReceiver::send_message::<_, ()>(&*delegate, selector, (&*note,)) };
+}
+
+/// The first look for events after `finishLaunching`: launching finished.
+pub(crate) fn launched() {
+    let Some(app) = SHARED.with(|s| s.get().cloned()) else { return };
+    let app = app_impl(&app);
+    if app.ivars().launching.replace(false) {
+        tell(app, name!(NSApplicationDidFinishLaunchingNotification));
+    }
 }
 
 fn shared() -> Retained<NSApplication> {
-    SHARED.with(|s| {
-        s.get_or_init(|| {
-            let mtm = MainThreadMarker::new().expect("sidestep: NSApplication belongs to the main thread");
-            load_shells();
-            // Ask the desktop for its appearance while the program starts.
-            crate::settings::start();
-            let this = NSApplicationImpl::alloc(mtm).set_ivars(AppIvars {
-                delegate: RefCell::new(None),
-                policy: Cell::new(NSApplicationActivationPolicy::Regular),
-                running: Cell::new(false),
-                hidden: Cell::new(false),
-            });
-            // SAFETY: NSResponder's designated initializer.
-            let app: Retained<NSApplicationImpl> = unsafe { msg_send![super(this), init] };
-            // SAFETY: NSApplicationImpl is the class NSApplication names.
-            unsafe { Retained::cast_unchecked(app) }
-        })
-        .clone()
-    })
+    if let Some(app) = SHARED.with(|s| s.get().cloned()) {
+        return app;
+    }
+    crate::load_shell::<NSApplication>();
+    shared_as(NSApplication::class())
+}
+
+/// The application, made as an instance of `class` (NSApplication or a
+/// subclass) by the first call.
+fn shared_as(class: &AnyClass) -> Retained<NSApplication> {
+    if let Some(app) = SHARED.with(|s| s.get().cloned()) {
+        return app;
+    }
+    MainThreadMarker::new().expect("sidestep: NSApplication belongs to the main thread");
+    load_shells();
+    event_loop::install();
+    // Ask the desktop for its appearance while the program starts.
+    crate::settings::start();
+    // SAFETY: alloc and init make an instance of the class, an
+    // NSApplication; its initializer (NSApplicationImpl's, inherited or
+    // called by the subclass's) sets up the ivars.
+    let app: Retained<NSApplication> = unsafe {
+        let allocated: Allocated<AnyObject> = msg_send![class, alloc];
+        let made: Option<Retained<AnyObject>> = msg_send![allocated, init];
+        Retained::cast_unchecked(made.expect("sidestep: NSApplication's initializer returned nil"))
+    };
+    SHARED.with(|s| s.get_or_init(|| app).clone())
 }
 
 fn app_impl(app: &NSApplication) -> &NSApplicationImpl {
     // SAFETY: NSApplication is NSApplicationImpl's class.
     unsafe { &*(app as *const NSApplication).cast::<NSApplicationImpl>() }
-}
-
-enum Launch {
-    Will,
-    Did,
-}
-
-fn tell_delegate(app: &NSApplicationImpl, when: Launch) {
-    let Some(delegate) = app.ivars().delegate.borrow().clone() else { return };
-    let (sel, name) = match when {
-        Launch::Will => (sel!(applicationWillFinishLaunching:), "NSApplicationWillFinishLaunchingNotification"),
-        Launch::Did => (sel!(applicationDidFinishLaunching:), "NSApplicationDidFinishLaunchingNotification"),
-    };
-    // SAFETY: respondsToSelector: takes a selector and returns BOOL.
-    let responds: bool = unsafe { msg_send![&*delegate, respondsToSelector: sel] };
-    if !responds {
-        return;
-    }
-    let note = notification(&NSString::from_str(name), Some(app));
-    // SAFETY: both delegate methods take the notification.
-    unsafe {
-        match when {
-            Launch::Will => msg_send![&*delegate, applicationWillFinishLaunching: &*note],
-            Launch::Did => msg_send![&*delegate, applicationDidFinishLaunching: &*note],
-        }
-    }
 }
 
 fn run(app: &NSApplicationImpl) {
@@ -883,112 +895,32 @@ fn run(app: &NSApplicationImpl) {
     }
     // SAFETY: finishLaunching takes nothing.
     let _: () = unsafe { msg_send![app, finishLaunching] };
-    tell_delegate(app, Launch::Did);
-    while app.ivars().running.get() {
-        autoreleasepool(|_| turn(app));
-    }
+    launched();
+    event_loop::run_while(Mode::DEFAULT, &|| app.ivars().running.get());
 }
 
-/// One turn of the loop: send what nested loops left, wait, handle input,
-/// fire timers, display.
-fn turn(app: &NSApplicationImpl) {
-    send_queued();
-    crate::pasteboard::offer_changes();
-    let deadline = earliest(earliest(next_timer_deadline(), RESIGN_AT.with(Cell::get)), crate::momentum::deadline());
-    let batch = wait(earliest(deadline, crate::settings::deadline()));
-    take_batch(app, batch);
-    crate::momentum::tick(Instant::now());
-    fire_due_timers(Instant::now());
-    crate::settings::apply_changes();
-    refresh_windows();
-    // After the paints: bitmaps that went away, the render thread forgets.
-    crate::image_rep::send_forgotten();
-}
-
-fn take_batch(app: &NSApplicationImpl, batch: Vec<FromRender>) {
-    let resign_due = RESIGN_AT.with(Cell::get).is_some_and(|t| t <= Instant::now());
-    if !batch.is_empty() || resign_due {
-        // Where each window's last key message is: repeats before another
-        // key message (a newer repeat, or the release) are dropped, so keys
-        // held while the main thread was busy don't pile up and go on
-        // acting after they're released.
-        let mut last_keys: Vec<(u32, usize)> = Vec::new();
-        for (i, msg) in batch.iter().enumerate() {
-            if let FromRender::Key { window, .. } = msg {
-                match last_keys.iter_mut().find(|(w, _)| w == window) {
-                    Some(last) => last.1 = i,
-                    None => last_keys.push((*window, i)),
-                }
-            }
-        }
-        let mut batch = batch.into_iter().enumerate().peekable();
-        while let Some((i, msg)) = batch.next() {
-            // Moves that another move of the same window follows are
-            // coalesced, as AppKit coalesces mouse events: a busy main
-            // thread catches up instead of falling behind.
-            if let (FromRender::Motion { window, .. }, Some((_, FromRender::Motion { window: next, .. }))) =
-                (&msg, batch.peek())
-                && window == next
-            {
-                continue;
-            }
-            if let FromRender::Key { window, key } = &msg
-                && key.repeat
-                && last_keys.iter().any(|(w, last)| w == window && *last > i)
-            {
-                continue;
-            }
-            handle(msg);
-        }
-        settle_focus();
-        update_active(app);
-    }
-}
-
-fn refresh_windows() {
-    for window in windows() {
-        // Views that moved this turn may have moved under the pointer.
+/// Give each window on screen its display pass, after having its tracking
+/// areas look again at views that moved under the pointer.
+pub(crate) fn refresh_windows() {
+    // By index, not over a copy of the list: a display may show or hide
+    // windows, and the pass allocates nothing when there is nothing to do.
+    let mut i = 0;
+    while let Some(window) = window_at(i) {
         crate::tracking::refresh(window::imp(&window));
         window::display_if_needed(window::imp(&window));
+        i += 1;
     }
-}
-
-/// Wait for the render thread until `deadline` (None: as long as it takes).
-fn wait(deadline: Option<Instant>) -> Vec<FromRender> {
-    let timeout = deadline.map(|d| d.saturating_duration_since(Instant::now()));
-    BACKEND.with(|b| {
-        let Some(backend) = b.get() else {
-            // Nothing on screen yet: only timers can happen.
-            match timeout {
-                Some(t) => std::thread::sleep(t),
-                None => std::thread::park(),
-            }
-            return Vec::new();
-        };
-        let first = match timeout {
-            Some(t) => backend.rx.recv_timeout(t),
-            None => backend.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
-        };
-        match first {
-            Ok(msg) => std::iter::once(msg).chain(backend.rx.try_iter()).collect(),
-            Err(RecvTimeoutError::Timeout) => Vec::new(),
-            Err(RecvTimeoutError::Disconnected) => {
-                eprintln!("sidestep: the render thread stopped");
-                std::process::exit(1);
-            }
-        }
-    })
 }
 
 /// The window on screen the render thread calls `id`; none for messages
 /// about an earlier showing.
-fn find_window(id: u32) -> Option<Retained<NSWindow>> {
+pub(crate) fn find_window(id: u32) -> Option<Retained<NSWindow>> {
     WINDOWS.with(|w| w.borrow().iter().find(|w| window::imp(w).id() == id).cloned())
 }
 
 /// Where keys typed with the keyboard on window `id` go: the key window,
 /// which is that window unless it can't become key.
-fn keys_window(id: u32) -> Option<Retained<NSWindow>> {
+pub(crate) fn keys_window(id: u32) -> Option<Retained<NSWindow>> {
     key_window().or_else(|| find_window(id).filter(|w| w.canBecomeKeyWindow()))
 }
 
@@ -1000,103 +932,22 @@ fn activate() {
     }
 }
 
-fn handle(msg: FromRender) {
-    match msg {
-        FromRender::Configure { window, width, height, scale, titlebar, state } => {
-            if let Some(w) = find_window(window) {
-                window::imp(&w).configure(width, height, scale, titlebar, state);
-            }
-        }
-        // Only to wake the loop, which applies the change.
-        FromRender::Appearance => {}
-        FromRender::Frame { window } => {
-            if let Some(w) = find_window(window) {
-                window::imp(&w).frame_done();
-                crate::momentum::frame(&w);
-            }
-        }
-        FromRender::Focus { window, focused } => keyboard_focus(window, focused),
-        FromRender::Key { window, key } => {
-            let Some(w) = keys_window(window) else { return };
-            let event = event::key_event(&w, key);
-            dispatch(&event);
-            // Typing moves the caret an input method places its window by.
-            crate::inputcontext::update(window::imp(&w));
-        }
-        FromRender::Modifiers { window, modifiers, code } => {
-            event::set_current_flags(modifiers);
-            let Some(w) = keys_window(window) else { return };
-            let event = event::flags_changed_event(&w, modifiers, code);
-            dispatch(&event);
-        }
-        FromRender::Enter { window, x, y } => {
-            if let Some(w) = find_window(window) {
-                window::imp(&w).motion(x, y, event::current_flags());
-            }
-        }
-        FromRender::Leave { window } => {
-            if let Some(w) = find_window(window) {
-                window::imp(&w).pointer_left();
-            }
-        }
-        FromRender::Button { window, x, y, button, pressed, clicks, modifiers } => {
-            if let Some(w) = find_window(window) {
-                window::imp(&w).button(button, pressed, x, y, clicks, modifiers);
-            }
-        }
-        FromRender::Motion { window, x, y, modifiers } => {
-            if let Some(w) = find_window(window) {
-                window::imp(&w).motion(x, y, modifiers);
-            }
-        }
-        FromRender::Scroll { window, x, y, dx, dy, wheel, modifiers, phase, velocity, inverted } => {
-            if let Some(w) = find_window(window) {
-                window::imp(&w).scroll((x, y), (dx, dy), wheel, modifiers, (phase, velocity, inverted));
-            }
-        }
-        FromRender::Pinch { window, x, y, phase, magnification, rotation, modifiers } => {
-            if let Some(w) = find_window(window) {
-                window::imp(&w).pinch((x, y), phase, magnification, rotation, modifiers);
-            }
-        }
-        FromRender::CloseRequested { window } => {
-            if let Some(w) = find_window(window) {
-                w.performClose(None);
-            }
-        }
-        FromRender::PopupDone { window } => {
-            if let Some(w) = find_window(window) {
-                w.orderOut(None);
-            }
-        }
-        FromRender::TextInput { window, commit, preedit } => {
-            if let Some(w) = find_window(window) {
-                crate::inputcontext::apply(window::imp(&w), commit, preedit);
-            }
-        }
-        // Pasteboards and drag and drop (pasteboard.rs, drag.rs).
-        FromRender::ProvideSelection { mime, token } => crate::pasteboard::provide_for_render(&mime, token),
-        FromRender::DndEnter { drag, window, x, y, mimes, actions, urls } => {
-            crate::drag::enter(drag, find_window(window).as_deref(), (x, y), mimes, actions, urls);
-        }
-        FromRender::DndMotion { drag, x, y } => crate::drag::motion(drag, x, y),
-        FromRender::DndActions { drag, actions } => crate::drag::actions(drag, actions),
-        FromRender::DndTick { drag } => crate::drag::tick(drag),
-        FromRender::DndLeave { drag } => crate::drag::leave(drag),
-        FromRender::DndDrop { drag } => crate::drag::dropped(drag),
-        // Screens (screen.rs).
-        FromRender::ScreensChanged => crate::screen::changed(MainThreadMarker::new().expect("the main thread")),
-        FromRender::WindowOutputs { window, outputs } => {
-            if let Some(w) = find_window(window) {
-                crate::screen::window_outputs(&w, outputs);
-            }
-        }
+/// When to decide whether the application went inactive, if a window of
+/// ours lost the keyboard and none has it back yet.
+pub(crate) fn resign_deadline() -> Option<Instant> {
+    RESIGN_AT.with(Cell::get)
+}
+
+/// The pause after losing the keyboard is over: decide.
+pub(crate) fn resign_if_due() {
+    if RESIGN_AT.with(Cell::get).is_some_and(|t| t <= Instant::now()) {
+        update_active();
     }
 }
 
 /// After a batch of input: tell the delegate if the application became
 /// active (a window of ours got the keyboard) or stopped being active.
-fn update_active(app: &NSApplicationImpl) {
+pub(crate) fn update_active() {
     let active = key_window().is_some();
     if ACTIVE.with(Cell::get) == active {
         RESIGN_AT.with(|r| r.set(None));
@@ -1116,54 +967,36 @@ fn update_active(app: &NSApplicationImpl) {
         }
     }
     RESIGN_AT.with(|r| r.set(None));
-    ACTIVE.with(|a| a.set(active));
-    let Some(delegate) = app.ivars().delegate.borrow().clone() else { return };
-    let (sel, name) = if active {
-        (sel!(applicationDidBecomeActive:), "NSApplicationDidBecomeActiveNotification")
+    let app = shared();
+    let app = app_impl(&app);
+    let (will, did) = if active {
+        (name!(NSApplicationWillBecomeActiveNotification), name!(NSApplicationDidBecomeActiveNotification))
     } else {
-        (sel!(applicationDidResignActive:), "NSApplicationDidResignActiveNotification")
+        (name!(NSApplicationWillResignActiveNotification), name!(NSApplicationDidResignActiveNotification))
     };
-    // SAFETY: respondsToSelector: takes a selector and returns BOOL.
-    let responds: bool = unsafe { msg_send![&*delegate, respondsToSelector: sel] };
-    if !responds {
-        return;
-    }
-    let note = notification(&NSString::from_str(name), Some(app));
-    // SAFETY: both delegate methods take the notification.
-    unsafe {
-        if active {
-            msg_send![&*delegate, applicationDidBecomeActive: &*note]
-        } else {
-            msg_send![&*delegate, applicationDidResignActive: &*note]
-        }
-    }
+    tell(app, will);
+    ACTIVE.with(|a| a.set(active));
+    crate::panel::activity_changed(active, &windows());
+    tell(app, did);
 }
 
-/// After a window closes: quit if it was the last and the delegate says so.
+/// A window on screen closed. Once the event being handled is done, if no
+/// window is left on screen, the delegate is asked whether to quit.
 pub(crate) fn window_closed() {
+    sidestep_foundation::runloop::main().perform(&[Mode::DEFAULT], last_window_check);
+}
+
+fn last_window_check() {
     if !windows().is_empty() {
         return;
     }
     let app = shared();
-    let Some(delegate) = app_impl(&app).ivars().delegate.borrow().clone() else { return };
+    let Some(delegate) = app_impl(&app).delegate_object() else { return };
     let sel = sel!(applicationShouldTerminateAfterLastWindowClosed:);
-    // SAFETY: respondsToSelector: takes a selector and returns BOOL.
-    let responds: bool = unsafe { msg_send![&*delegate, respondsToSelector: sel] };
     // SAFETY: the delegate method takes the application and returns BOOL.
-    if responds && unsafe { msg_send![&*delegate, applicationShouldTerminateAfterLastWindowClosed: &*app] } {
+    if responds(&delegate, sel)
+        && unsafe { msg_send![&*delegate, applicationShouldTerminateAfterLastWindowClosed: &*app] }
+    {
         app.terminate(None);
     }
-}
-
-fn terminate(app: &NSApplicationImpl) {
-    if let Some(delegate) = app.ivars().delegate.borrow().clone() {
-        // SAFETY: respondsToSelector: takes a selector and returns BOOL.
-        let responds: bool = unsafe { msg_send![&*delegate, respondsToSelector: sel!(applicationWillTerminate:)] };
-        if responds {
-            let note = notification(&NSString::from_str("NSApplicationWillTerminateNotification"), Some(app));
-            // SAFETY: the delegate method takes the notification.
-            let _: () = unsafe { msg_send![&*delegate, applicationWillTerminate: &*note] };
-        }
-    }
-    std::process::exit(0);
 }

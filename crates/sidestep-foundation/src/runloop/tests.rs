@@ -167,26 +167,24 @@ fn an_idle_loop_sleeps() {
 }
 
 #[test]
-fn shims_for_event_loops_that_sleep_elsewhere() {
-    use objc2_foundation::NSTimer;
-    let fired = Rc::new(Cell::new(0));
-    let f = fired.clone();
-    let block = block2::RcBlock::new(move |_: std::ptr::NonNull<NSTimer>| f.set(f.get() + 1));
-    let timer = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.02, true, &block) };
-    let deadline = super::next_timer_deadline().unwrap();
-    let ahead = deadline.saturating_duration_since(Instant::now());
-    // At most the interval ahead (a slow machine may already be past it).
-    assert!(ahead <= Duration::from_millis(20), "{ahead:?}");
-    if ahead > Duration::from_millis(5) {
-        super::fire_due_timers(Instant::now());
-        assert_eq!(fired.get(), 0);
-    }
-    std::thread::sleep(ahead);
-    super::fire_due_timers(Instant::now());
-    assert_eq!(fired.get(), 1);
-    current().perform(&[Mode::DEFAULT], || {});
-    assert!(super::next_timer_deadline().unwrap() <= Instant::now());
-    super::fire_due_timers(Instant::now());
-    timer.invalidate();
-    assert!(super::next_timer_deadline().is_none());
+fn a_source_in_more_modes_than_one() {
+    let here = current();
+    let performed = Rc::new(Cell::new(0));
+    let p = performed.clone();
+    let source = here.add_source(&[Mode::DEFAULT], 0, move || p.set(p.get() + 1));
+    let other = Mode::named("SidestepTestOtherMode");
+    // Not in the other mode yet: it has nothing, so a run there ends at once.
+    assert!(!here.is_common_mode(other) && here.is_common_mode(Mode::DEFAULT));
+    source.signal();
+    assert_eq!(here.run_mode(other, soon(1000), true), RunResult::Finished);
+    assert_eq!(performed.get(), 0);
+    // Added to it, the same signal performs it there, and still in the
+    // default mode.
+    here.add_source_mode(&source, other);
+    assert_eq!(here.run_mode(other, soon(1000), true), RunResult::HandledSource);
+    assert_eq!(performed.get(), 1);
+    source.signal();
+    assert_eq!(here.run_mode(Mode::DEFAULT, soon(1000), true), RunResult::HandledSource);
+    assert_eq!(performed.get(), 2);
+    source.invalidate();
 }
