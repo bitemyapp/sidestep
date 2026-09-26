@@ -93,12 +93,12 @@ sidestep_runtime::static_class!(pub NSEVENT, NSEVENT_META = "NSEvent", || {
 
 sidestep_runtime::static_class!(pub NSCOLOR, NSCOLOR_META = "NSColor", || {
     let _ = graphics::NSColorImpl::class();
-    string_drawing::install_string_drawing();
 });
 
 sidestep_runtime::static_class!(pub NSFONT, NSFONT_META = "NSFont", || {
     let _ = font::NSFontImpl::class();
-    string_drawing::install_string_drawing();
+    // Text follows soon after; open the system's fonts in the meantime.
+    text::fonts::prewarm();
 });
 
 sidestep_runtime::static_class!(pub NSFONTDESCRIPTOR, NSFONTDESCRIPTOR_META = "NSFontDescriptor", || {
@@ -107,7 +107,6 @@ sidestep_runtime::static_class!(pub NSFONTDESCRIPTOR, NSFONTDESCRIPTOR_META = "N
 
 sidestep_runtime::static_class!(pub NSPARAGRAPHSTYLE, NSPARAGRAPHSTYLE_META = "NSParagraphStyle", || {
     let _ = paragraph::NSParagraphStyleImpl::class();
-    string_drawing::install_string_drawing();
 });
 
 sidestep_runtime::static_class!(pub NSMUTABLEPARAGRAPHSTYLE, NSMUTABLEPARAGRAPHSTYLE_META = "NSMutableParagraphStyle", || {
@@ -185,14 +184,6 @@ sidestep_foundation::constant_string!(NSPostScriptPboardType = "NeXT Encapsulate
 sidestep_foundation::constant_string!(NSVCardPboardType = "Apple VCard pasteboard type");
 sidestep_foundation::constant_string!(NSInkTextPboardType = "Apple InkText pasteboard type");
 sidestep_foundation::constant_string!(NSFilesPromisePboardType = "Apple files promise pasteboard type");
-
-// A helper whose loader gives NSString its drawing methods (see
-// `string_drawing`).
-sidestep_runtime::static_class!(
-    pub(crate) STRING_DRAWING,
-    STRING_DRAWING_META = "_SidestepStringDrawing",
-    string_drawing::load
-);
 
 // Attribute names for attributed strings and string drawing, with the
 // values macOS gives them (conformance/tests/text.rs compares).

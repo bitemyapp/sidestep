@@ -62,7 +62,10 @@ clicking. `SCENARIO` chooses what it does:
 
 `SLICE_QUIT_AFTER=<seconds>` makes it quit by itself. `examples/text-demo`
 shows text: weights, kerning and ligatures, CJK, emoji, right-to-left and
-mixed scripts, alignment, wrapping and truncation.
+mixed scripts, alignment, wrapping and truncation; with
+`SCENARIO=attributes`, underline styles, strikethrough, outlined and
+slanted text, baseline offsets, tab stops and wrapped mixed-direction
+paragraphs.
 
 **macOS** runs it on Apple's AppKit:
 

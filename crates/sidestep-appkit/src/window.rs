@@ -2218,7 +2218,6 @@ pub(crate) fn display_if_needed(window: &NSWindowImpl) {
         return;
     }
     ivars.needs_display.set(false);
-    graphics::install_string_drawing();
     let id = window.id();
     if ivars.title_dirty.replace(false) {
         send_title(window);

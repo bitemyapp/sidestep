@@ -12,7 +12,6 @@ use objc2_app_kit::NSColor;
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 
 use crate::protocol::{Color, Op, Rect};
-pub(crate) use crate::string_drawing::install_string_drawing;
 
 /// Maps a view's coordinates to its layer's: `x' = x + tx`, `y' = a·y + ty`
 /// with `a = ±1` (views may be flipped relative to each other).

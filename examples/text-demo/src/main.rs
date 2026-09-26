@@ -4,6 +4,10 @@
 //! AppKit, on Linux on Sidestep, which makes it the reference for comparing
 //! the two by eye.
 //!
+//! SCENARIO=attributes shows a second page: underline styles and patterns,
+//! strikethrough, outlined and slanted text, baseline offsets, kerning, tab
+//! stops of every kind, and paragraphs mixing directions.
+//!
 //! SLICE_QUIT_AFTER: seconds until the app terminates itself.
 
 use std::cell::OnceCell;
@@ -21,8 +25,15 @@ use objc2_app_kit::{
     NSMutableParagraphStyle, NSParagraphStyleAttributeName, NSResponder, NSStringDrawing, NSTextAlignment, NSTextTab,
     NSTextTabType, NSView, NSWindow, NSWindowStyleMask,
 };
+#[allow(deprecated)] // NSObliqueness, which TextKit 2 leaves out and string drawing draws.
+use objc2_app_kit::{
+    NSBaselineOffsetAttributeName, NSKernAttributeName, NSObliquenessAttributeName, NSStrikethroughStyleAttributeName,
+    NSStrokeColorAttributeName, NSStrokeWidthAttributeName, NSUnderlineColorAttributeName,
+    NSUnderlineStyleAttributeName,
+};
 use objc2_foundation::{
-    NSDictionary, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimer, ns_string,
+    NSArray, NSDictionary, NSNotification, NSNumber, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+    NSTimer, ns_string,
 };
 
 // Links Sidestep's runtime and frameworks on Linux; empty on macOS.
@@ -221,6 +232,119 @@ fn draw_page() {
     );
 }
 
+/// A font and color with more attributes, as (key, value) pairs.
+fn with(font: &NSFont, color: &NSColor, more: &[(&NSString, &AnyObject)]) -> Attributes {
+    // SAFETY: the keys are constant strings.
+    let mut keys = unsafe { vec![NSFontAttributeName, NSForegroundColorAttributeName] };
+    let mut values: Vec<&AnyObject> = vec![font, color];
+    for &(key, value) in more {
+        keys.push(key);
+        values.push(value);
+    }
+    NSDictionary::from_slices(&keys, &values)
+}
+
+fn number(value: f64) -> Retained<NSNumber> {
+    NSNumber::new_f64(value)
+}
+
+#[allow(deprecated)]
+fn draw_attributes_page() {
+    let ink = ink();
+    let (left, right) = (24.0, 660.0);
+    let font = NSFont::systemFontOfSize(17.0);
+    let body = attrs(&font, &ink);
+    let plain = |more: &[(&NSString, &AnyObject)]| with(&font, &ink, more);
+    put("Attributes", left, 16.0, &attrs(&NSFont::boldSystemFontOfSize(28.0), &ink));
+
+    // SAFETY: the keys are constant strings, the values numbers and colors.
+    let (underline, strike, stroke, stroke_color, oblique, baseline, kern, underline_color) = unsafe {
+        (
+            NSUnderlineStyleAttributeName,
+            NSStrikethroughStyleAttributeName,
+            NSStrokeWidthAttributeName,
+            NSStrokeColorAttributeName,
+            NSObliquenessAttributeName,
+            NSBaselineOffsetAttributeName,
+            NSKernAttributeName,
+            NSUnderlineColorAttributeName,
+        )
+    };
+    let red = NSColor::colorWithSRGBRed_green_blue_alpha(0.85, 0.2, 0.2, 1.0);
+    let blue = NSColor::colorWithSRGBRed_green_blue_alpha(0.2, 0.35, 0.85, 1.0);
+
+    label("Underlines: single, thick, double; dotted, dashed, dash-dot, dash-dot-dot; by word", left, 62.0);
+    let mut x = left;
+    for style in [0x01, 0x02, 0x09] {
+        x = put("Underlined", x, 78.0, &plain(&[(underline, &number(f64::from(style)))])) + 16.0;
+    }
+    let mut x = left;
+    for pattern in [0x100, 0x200, 0x300, 0x400] {
+        let styled = plain(&[(underline, &number(f64::from(0x01 | pattern))), (underline_color, &blue)]);
+        x = put("Patterned", x, 106.0, &styled) + 16.0;
+    }
+    put("only under the words", x, 106.0, &plain(&[(underline, &number(f64::from(0x01 | 0x8000)))]));
+
+    label("Strikethrough, single and thick", left, 142.0);
+    let x = put("Struck through", left, 158.0, &plain(&[(strike, &number(1.0))])) + 16.0;
+    put("and thick", x, 158.0, &plain(&[(strike, &number(2.0))]));
+
+    label("Outlined (stroke 3), filled and outlined in red (stroke -3), slanted (obliqueness 0.25)", left, 194.0);
+    let big = NSFont::boldSystemFontOfSize(30.0);
+    let x = put("Outline", left, 210.0, &with(&big, &ink, &[(stroke, &number(3.0))])) + 20.0;
+    let x = put("Filled", x, 210.0, &with(&big, &ink, &[(stroke, &number(-3.0)), (stroke_color, &red)])) + 20.0;
+    put("Slanted", x, 210.0, &with(&big, &ink, &[(oblique, &number(0.25))]));
+
+    label("Baseline offsets and kerning", left, 262.0);
+    let x = put("H", left, 290.0, &body);
+    let x = put("2", x, 290.0, &plain(&[(baseline, &number(-4.0))]));
+    let x = put("O and x", x, 290.0, &body);
+    let x = put("2", x, 290.0, &plain(&[(baseline, &number(7.0))]));
+    let x = put(";  ", x, 290.0, &body);
+    let x = put("tracked out", x, 290.0, &plain(&[(kern, &number(4.0))])) + 12.0;
+    put("AVATAR (kerning off)", x, 290.0, &plain(&[(kern, &number(0.0))]));
+
+    label("Tab stops: left 20, center 150, right 260, decimal 340; then every 60 from the last", left, 338.0);
+    let tab = |kind, location| NSTextTab::initWithType_location(NSTextTab::alloc(), kind, location);
+    let tabs = NSMutableParagraphStyle::new();
+    tabs.setTabStops(Some(&NSArray::from_retained_slice(&[
+        tab(NSTextTabType::LeftTabStopType, 20.0),
+        tab(NSTextTabType::CenterTabStopType, 150.0),
+        tab(NSTextTabType::RightTabStopType, 260.0),
+        tab(NSTextTabType::DecimalTabStopType, 340.0),
+    ])));
+    tabs.setDefaultTabInterval(60.0);
+    let table = "\tItem\tCentered\tRight\tPrice\n\tApples\tred\t3\t1.25\n\tPears\tgreen and ripe\t12\t10.5\n\
+                 \tFigs\tpurple\t144\t0.125\n\tTotal\t\t159\t11.875\tthen\tevery\t60";
+    let columns = rect(left, 354.0, 600.0, 110.0);
+    NSColor::colorWithSRGBRed_green_blue_alpha(0.93, 0.92, 0.96, 1.0).setFill();
+    NSBezierPath::fillRect(columns);
+    NSColor::colorWithSRGBRed_green_blue_alpha(0.8, 0.5, 0.5, 1.0).setFill();
+    for stop in [20.0, 150.0, 260.0, 340.0, 400.0, 460.0, 520.0] {
+        NSBezierPath::fillRect(rect(left + stop, 354.0, 1.0, 110.0));
+    }
+    let table_attrs = attrs_with_style(&NSFont::systemFontOfSize(15.0), &ink, &tabs);
+    // SAFETY: the dictionary holds valid attributes.
+    unsafe { NSString::from_str(table).drawInRect_withAttributes(columns, Some(&table_attrs)) };
+
+    label("Mixed directions, wrapped, in both paragraph directions", left, 488.0);
+    let mixed = "The word שלום means peace; مرحبا بالعالم means hello world, and 123 stays in order. \
+                 עברית עם English באמצע ומספרים 42 ו-7.";
+    let wrapped = attrs(&NSFont::systemFontOfSize(16.0), &ink);
+    boxed(mixed, rect(left, 504.0, 290.0, 130.0), &wrapped);
+    let rtl = NSMutableParagraphStyle::new();
+    rtl.setBaseWritingDirection(objc2_app_kit::NSWritingDirection::RightToLeft);
+    boxed(
+        mixed,
+        rect(left + 310.0, 504.0, 290.0, 130.0),
+        &attrs_with_style(&NSFont::systemFontOfSize(16.0), &ink, &rtl),
+    );
+
+    label("Decorations on mixed text, and on emoji", right, 62.0);
+    let decorated = plain(&[(underline, &number(1.0)), (strike, &number(1.0)), (underline_color, &red)]);
+    boxed("Hello שלום مرحبا 😀 🎉", rect(right, 78.0, 300.0, 30.0), &decorated);
+}
+
 define_class!(
     #[unsafe(super(NSView, NSResponder, NSObject))]
     #[thread_kind = MainThreadOnly]
@@ -237,7 +361,11 @@ define_class!(
         fn draw_rect(&self, dirty: NSRect) {
             NSColor::colorWithSRGBRed_green_blue_alpha(0.99, 0.99, 0.985, 1.0).setFill();
             NSBezierPath::fillRect(dirty);
-            draw_page();
+            if std::env::var("SCENARIO").as_deref() == Ok("attributes") {
+                draw_attributes_page();
+            } else {
+                draw_page();
+            }
         }
     }
 );

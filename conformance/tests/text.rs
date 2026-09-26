@@ -10,7 +10,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol};
 use objc2::{AnyThread, ClassType, msg_send};
 use objc2_app_kit::*;
-use objc2_foundation::{NSDictionary, NSRect, NSSize, NSString, ns_string};
+use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSRect, NSSize, NSString, ns_string};
 
 use sidestep as _;
 
@@ -733,6 +733,193 @@ fn tab_stops() {
     assert!(close(size("a\tbbb", &attrs_with_style(&font, &bare)).width, 100.0 + bbb / 2.0, 0.01));
 }
 
+/// Tab stops keep the order they were set in: a tab goes to the first stop
+/// in the list beyond it, `addTabStop:` puts a stop after the last one at
+/// or before it (first if there is none), `removeTabStop:` takes out one
+/// equal to it, and `tabStops` reads them back.
+fn tab_stop_lists() {
+    let locations = |style: &NSParagraphStyle| style.tabStops().iter().map(|t| t.location()).collect::<Vec<_>>();
+    let default = NSParagraphStyle::defaultParagraphStyle();
+    assert_eq!(locations(&default), (1..=12).map(|i| 28.0 * f64::from(i)).collect::<Vec<_>>());
+    assert!(default.tabStops().iter().all(|t| t.tabStopType() == NSTextTabType::LeftTabStopType));
+    let tab = |kind, location| NSTextTab::initWithType_location(NSTextTab::alloc(), kind, location);
+    let (decimal, right) = (tab(NSTextTabType::DecimalTabStopType, 50.0), tab(NSTextTabType::RightTabStopType, 20.0));
+    let s = style(|s| s.setTabStops(Some(&NSArray::from_retained_slice(&[decimal.clone(), right.clone()]))));
+    assert_eq!(locations(&s), [50.0, 20.0], "as set, not sorted");
+    let back = s.tabStops();
+    assert!(back.objectAtIndex(0).isEqual(Some(&decimal)) && back.objectAtIndex(1).isEqual(Some(&right)));
+    assert_eq!(back.objectAtIndex(0).tabStopType(), NSTextTabType::DecimalTabStopType);
+    s.addTabStop(&tab(NSTextTabType::LeftTabStopType, 10.0));
+    s.addTabStop(&tab(NSTextTabType::LeftTabStopType, 10.0));
+    assert_eq!(locations(&s), [10.0, 10.0, 50.0, 20.0]);
+    s.removeTabStop(&tab(NSTextTabType::LeftTabStopType, 10.0));
+    assert_eq!(locations(&s), [10.0, 50.0, 20.0], "one of the two");
+    let copy: Retained<NSParagraphStyle> = unsafe { msg_send![&*s, copy] };
+    assert_eq!(locations(&copy), [10.0, 50.0, 20.0]);
+    s.setTabStops(Some(&NSArray::new()));
+    assert_eq!(s.tabStops().count(), 0);
+    s.setTabStops(None);
+    assert_eq!(s.tabStops().count(), 12);
+
+    // Laid out in list order: [45, 15] sends a tab from "a" to 45.
+    let font = helvetica(12.0);
+    let x = size("x", &attrs(&font)).width;
+    let listed = style(|s| {
+        s.setTabStops(Some(&NSArray::from_retained_slice(&[
+            tab(NSTextTabType::LeftTabStopType, 45.0),
+            tab(NSTextTabType::LeftTabStopType, 15.0),
+        ])))
+    });
+    assert!(close(size("a\tx", &attrs_with_style(&font, &listed)).width, 45.0 + x, 0.01));
+
+    // Added to an unsorted list: after the last stop at or before it.
+    let set = |locations: &[f64]| {
+        let tabs: Vec<_> = locations.iter().map(|&l| tab(NSTextTabType::LeftTabStopType, l)).collect();
+        style(|s| s.setTabStops(Some(&NSArray::from_retained_slice(&tabs))))
+    };
+    for (list, add, expect) in [
+        (&[50.0, 20.0][..], 30.0, &[50.0, 20.0, 30.0][..]),
+        (&[50.0, 20.0], 20.0, &[50.0, 20.0, 20.0]),
+        (&[50.0, 20.0, 60.0], 40.0, &[50.0, 20.0, 40.0, 60.0]),
+        (&[10.0, 50.0, 20.0], 15.0, &[10.0, 15.0, 50.0, 20.0]),
+        (&[10.0, 50.0, 20.0], 5.0, &[5.0, 10.0, 50.0, 20.0]),
+    ] {
+        let s = set(list);
+        s.addTabStop(&tab(NSTextTabType::LeftTabStopType, add));
+        assert_eq!(locations(&s), expect, "{list:?} and {add}");
+    }
+    // So [50, 20] and 30 still sends a tab from "a" to 50.
+    let added = set(&[50.0, 20.0]);
+    added.addTabStop(&tab(NSTextTabType::LeftTabStopType, 30.0));
+    assert!(close(size("a\tx", &attrs_with_style(&font, &added)).width, 50.0 + x, 0.01));
+}
+
+/// Where tabs put text: a decimal tab centers the decimal point on the stop
+/// (or ends a number without one there); past the last stop, stops go on
+/// every `defaultTabInterval` from it; a right tab with no room left takes
+/// none.
+fn tab_layout() {
+    let font = helvetica(12.0);
+    let plain = attrs(&font);
+    let tab = |kind, location| NSTextTab::initWithType_location(NSTextTab::alloc(), kind, location);
+    let one = |t: Retained<NSTextTab>| style(|s| s.setTabStops(Some(&NSArray::from_retained_slice(&[t]))));
+    let decimal = attrs_with_style(&font, &one(tab(NSTextTabType::DecimalTabStopType, 100.0)));
+    let point = size(".", &plain).width;
+    let after = size(".5", &plain).width - point / 2.0;
+    assert!(close(size("a\t12.5", &decimal).width, 100.0 + after, 0.1), "{}", size("a\t12.5", &decimal).width);
+    assert!(close(size("a\t125", &decimal).width, 100.0, 0.01));
+    assert!(close(size("a\tabc", &decimal).width, 100.0, 0.01));
+
+    let x = size("x", &plain).width;
+    let interval = style(|s| s.setDefaultTabInterval(50.0));
+    let tabs = "\t".repeat(13) + "x";
+    assert!(close(size(&tabs, &attrs_with_style(&font, &interval)).width, 336.0 + 50.0 + x, 0.01));
+    let after_ten = style(|s| {
+        s.setTabStops(Some(&NSArray::from_retained_slice(&[tab(NSTextTabType::LeftTabStopType, 10.0)])));
+        s.setDefaultTabInterval(30.0);
+    });
+    assert!(size("abcdef", &plain).width > 10.0 && size("abcdef", &plain).width < 40.0);
+    assert!(close(size("abcdef\tx", &attrs_with_style(&font, &after_ten)).width, 40.0 + x, 0.01));
+
+    let right = attrs_with_style(&font, &one(tab(NSTextTabType::RightTabStopType, 30.0)));
+    assert!(close(size("a\tlong text here", &right).width, size("along text here", &plain).width, 0.01));
+}
+
+/// Numeric attributes as NSNumbers: kerning after every character (0 turns
+/// the font's off), a baseline offset adding its points, unrounded, above
+/// or below; ligatures, underlines, strikethroughs, strokes and slants
+/// taking no room.
+#[allow(deprecated)]
+fn numeric_attributes() {
+    let font = helvetica(12.0);
+    let plain = attrs(&font);
+    let with = |key: &NSString, value: f64| {
+        // SAFETY: the key is a constant string, the value a number.
+        let font_key = unsafe { NSFontAttributeName };
+        NSDictionary::from_slices(&[font_key, key], &[&*font as &AnyObject, &*NSNumber::new_f64(value)])
+    };
+    // SAFETY: the statics are constant strings.
+    unsafe {
+        let abc = size("abc", &plain).width;
+        assert!(close(size("abc", &with(NSKernAttributeName, 2.0)).width, abc + 6.0, 0.01));
+        assert!(close(size("abc", &with(NSKernAttributeName, -1.0)).width, abc - 3.0, 0.01));
+        let big = attrs(&helvetica(24.0));
+        let apart = size("A", &big).width + size("V", &big).width;
+        let kern_off = NSDictionary::from_slices(
+            &[NSFontAttributeName, NSKernAttributeName],
+            &[&*helvetica(24.0) as &AnyObject, &*NSNumber::new_f64(0.0)],
+        );
+        assert!(size("AV", &big).width < apart);
+        assert!(close(size("AV", &kern_off).width, apart, 0.01), "NSKern 0 turns kerning off");
+
+        let x = size("x", &plain);
+        let single = bounds("x", 0.0, 0.0, NSStringDrawingOptions(0), &plain);
+        for (offset, grows) in [(5.0, 5.0), (-5.0, 5.0), (0.5, 0.5)] {
+            let a = with(NSBaselineOffsetAttributeName, offset);
+            assert_eq!(size("x", &a), NSSize::new(x.width, x.height + grows), "{offset}");
+            // On a baseline, raised text keeps the line's descent; lowered
+            // text takes it further down.
+            let on_baseline = bounds("x", 0.0, 0.0, NSStringDrawingOptions(0), &a);
+            let lower = if offset < 0.0 { -offset } else { 0.0 };
+            assert_eq!(on_baseline.origin.y, single.origin.y - lower, "{offset}");
+        }
+
+        let text = "office AVA fjord";
+        let base = size(text, &plain);
+        for (key, value) in [
+            (NSLigatureAttributeName, 0.0),
+            (NSLigatureAttributeName, 1.0),
+            (NSUnderlineStyleAttributeName, 1.0),
+            (NSUnderlineStyleAttributeName, 9.0 + 512.0),
+            (NSUnderlineStyleAttributeName, 1.0 + 256.0 + 32768.0),
+            (NSStrikethroughStyleAttributeName, 2.0),
+            (NSStrokeWidthAttributeName, 3.0),
+            (NSStrokeWidthAttributeName, -3.0),
+            (NSObliquenessAttributeName, 0.3),
+        ] {
+            let measured = size(text, &with(key, value));
+            if key == NSLigatureAttributeName {
+                // Whether ligatures change widths depends on the font.
+                assert!(measured.width > 0.0 && measured.height == base.height);
+            } else {
+                assert_eq!(measured, base, "{key} {value}");
+            }
+        }
+    }
+}
+
+/// U+2028 and U+0085 (NEL) end lines within a paragraph: neither adds
+/// paragraph spacing, as "\n" and U+2029 do between paragraphs.
+fn line_separators() {
+    let font = helvetica(12.0);
+    let spaced = attrs_with_style(
+        &font,
+        &style(|s| {
+            s.setParagraphSpacing(10.0);
+            s.setFirstLineHeadIndent(20.0);
+        }),
+    );
+    let measure = |text: &str| bounds(text, 0.0, 0.0, lines(), &spaced).size;
+    let within = measure("a\u{2028}b");
+    assert_eq!(measure("a\u{85}b"), within);
+    for text in ["a\nb", "a\u{2029}b"] {
+        assert_eq!(measure(text).height, within.height + 10.0, "{text:?}");
+    }
+}
+
+/// Spaces at the end of wrapped text hang past the width rather than
+/// taking a line of their own, and the width is the container's.
+fn trailing_spaces_hang() {
+    let font = helvetica(12.0);
+    let a = attrs(&font);
+    let line = size("x", &a).height;
+    let width = size("hello world", &a).width + 0.5;
+    for (text, lines_) in [("hello world ", 1.0), ("hello world   ", 1.0), ("hello world \nx", 2.0)] {
+        let r = bounds(text, width, 0.0, lines(), &a);
+        assert_eq!((r.size.width, r.size.height), (width, lines_ * line), "{text:?}");
+    }
+}
+
 type Test = (&'static str, fn());
 
 fn main() {
@@ -756,6 +943,11 @@ fn main() {
         ("indents", indents),
         ("bounds_and_alignment", bounds_and_alignment),
         ("tab_stops", tab_stops),
+        ("tab_stop_lists", tab_stop_lists),
+        ("tab_layout", tab_layout),
+        ("numeric_attributes", numeric_attributes),
+        ("line_separators", line_separators),
+        ("trailing_spaces_hang", trailing_spaces_hang),
     ];
     for (name, test) in tests {
         objc2::rc::autoreleasepool(|_| test());

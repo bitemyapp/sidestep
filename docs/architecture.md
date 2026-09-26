@@ -961,16 +961,85 @@ positions in points. `crates/sidestep-appkit/src/text/` holds the stack.
   `truncatesLastVisibleLine` end the last line kept in an ellipsis whenever
   any text follows it. Emoji are shaped from the color
   emoji family first, as on macOS, where the text's own face might
-  otherwise give them plain glyphs. Tabs go to the paragraph's tab stops
-  (left, right, centered or decimal; by default twelve, 28 points apart),
-  then every
-  `defaultTabInterval`; control characters take no room.
+  otherwise give them plain glyphs. A tab goes to the first of the
+  paragraph's tab stops beyond it, in the order they were set (by default
+  twelve, 28 points apart): text after a left stop starts there, after a
+  right stop ends there, after a centered one centers on it, and after a
+  decimal stop has its decimal point centered on it (a number without one
+  ends there). Past the last stop, stops follow it every
+  `defaultTabInterval`, or a tab takes no room. Control characters take no
+  room. A baseline offset adds its points, unrounded, above or below the
+  line's rounded ascent and descent. U+2028 and NEL end lines within a
+  paragraph (no paragraph spacing, as AppKit measures NEL), and a
+  paragraph cut by them keeps one base direction. Spaces at the end of
+  wrapped text hang past the width: parley hangs only the first and
+  starts a line after it, so a text ending in more spaces than fit is
+  broken again with room for them on the line before. parley shapes at
+  most 4 KiB as one run, cut after whitespace: it counts a cluster's
+  place in its run in 16 bits, and walks a run's glyphs from its start
+  for each change of style in it.
+- **Attributes.** Beyond fonts, colors, backgrounds, kerning, ligatures
+  and baseline offsets: underlines and strikethroughs single, thick or
+  double, solid or dotted and dashed, under whole runs or only under words,
+  placed by the text's own font so that they run straight through
+  fallback faces (emoji, other scripts); `NSStrokeWidth` (outlines alone
+  when positive, outlines over the fill when negative, in
+  `NSStrokeColor`); `NSObliqueness`; and `NSShadow` (any object whose
+  `shadowOffset`, `shadowBlurRadius` and `shadowColor` have its
+  signatures, checked before they are sent), drawn as the glyphs offset
+  in the shadow's color underneath, without blur until the rasterizer has
+  a blurred glyph op; a shadow whose color is nil draws nothing, as in
+  AppKit. Strokes and slants are part of the face a glyph run names (the
+  registry keeps synthesized bold, slant and stroke with the font file,
+  slants in tenths of a degree and strokes in thousandths of the size, so
+  a font has a bounded number of faces however an app varies them), so the
+  render thread draws them with swash and the glyph-run op didn't
+  change. `NSExpansion` isn't drawn: it
+  scales advances, which line breaking would have to know about.
+- **Lines for TextKit.** `text/lines.rs` lays text out as a layout
+  manager needs it, on any thread: the input is the text, attributes and
+  runs of them over UTF-16 units (as `NSString` counts), and the output,
+  plain data behind `Arc`s, is lines with their UTF-16 ranges, baseline,
+  ascent, descent, leading and widths, clusters in visual order with
+  their positions and directions, and glyph runs to record as they are.
+  A paragraph can be laid out from any of its lines and a few lines at a
+  time; a long one is then shaped only in a window of its text as long as
+  those lines need (the last line in the window, which might go on past
+  it, is dropped), and only the attribute runs in the window are looked
+  at. Its base direction is found once for the whole paragraph, and text
+  laid out from inside a paragraph starts with an invisible mark standing
+  for the last strong character before it, which the bidi algorithm
+  resolves numbers, neutrals and brackets at its start by, so a paragraph
+  laid out from one of its lines gets the lines it would have had. A
+  `Frame` stacks a text's paragraphs and answers what a layout manager is
+  asked: the character at a point (the spacing before a paragraph is its
+  own, as in AppKit), the caret at an index (where directions meet, at
+  the side running the paragraph's way, with the other edge as a
+  secondary caret, as AppKit's layout manager does), the rectangles of a
+  selection (split where directions mix) and the line fragment of an
+  index. After an edit it lays out again from the line before the edit
+  (or further back, past lines ending inside a word too long for a line
+  or holding nothing strong) until a line starts where an old one did,
+  after the same strong character, and keeps the rest; an edit that makes
+  or joins paragraphs keeps the old lines on both sides the same way. In a
+  paragraph that mixes directions and has brackets or explicit directions,
+  which the bidi algorithm resolves across any distance, an edit that
+  takes text out lays the paragraph out whole. Offsets in a line are
+  relative to its paragraph and a cluster's to its line, and lines share
+  their clusters and glyphs, so moving or copying them costs nothing per
+  cluster. In a 78 KB paragraph 600 points wide, a key typed costs about
+  0.08 ms (0.12 ms with an attribute run a word, 0.09 ms while a snapshot
+  shares the frame), Return 1.8 ms, and laying out 20 lines from its
+  middle 0.28 ms; a key typed in an ordinary paragraph costs about 25 µs,
+  and recording a page of laid-out lines under a microsecond
+  (`text/bench.rs`, Linux in a VM on an M-series Mac).
 - **Caches.** Laid-out text is cached per thread by string, attributes and
   options (two generations of 2048 entries or 4 MB), so a view that
-  redraws the same lines records them for about 0.1 µs a line. Glyph runs
+  redraws the same lines records them for about 0.1 µs a line; drawing
+  borrows the cached layout rather than counting a reference. Glyph runs
   keep their glyphs in an `Arc`, so recording a cached line copies no
-  glyphs. Paragraph styles own their tab stops, so nothing outlives the
-  styles and layouts that use them.
+  glyphs, and layouts are `Send` and `Sync`. Paragraph styles own their
+  tab stops, so nothing outlives the styles and layouts that use them.
 - **Parallel layout.** Drawing doesn't need the layout until the pass
   ends, so text drawn without having been measured is set aside, and the
   pass lays it all out at its end on a small pool of worker threads, the
@@ -988,12 +1057,10 @@ positions in points. `crates/sidestep-appkit/src/text/` holds the stack.
   generations (24 MB in all, masks counted a byte a pixel), so the images
   a frame uses survive a turnover.
 - **String drawing methods.** `NSString` gets `drawAtPoint:` and the rest
-  as a category would give them: a helper class's methods, copied over by
-  the loader of the helper's static shell (`_SidestepStringDrawing`),
-  which the `NSColor`, `NSFont` and `NSParagraphStyle` loaders and the
-  display pass message. The copying runs under the runtime's class-loading
-  lock and takes no lock of its own, so loaders on two threads can't wait
-  on each other.
+  from a link-time category (`NSStringDrawing`, the methods of a helper
+  class), which the runtime attaches when `NSString` registers. So a
+  program may measure or draw a string as its very first AppKit call
+  (`conformance/tests/text_first_call.rs`).
 
 parley was chosen over cosmic-text, the other complete pure-Rust stack.
 parley takes styles as ranges over the text, which is what an attributed

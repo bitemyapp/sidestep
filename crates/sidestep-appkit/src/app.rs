@@ -35,7 +35,7 @@ use sidestep_foundation::{fire_due_timers, next_timer_deadline, notification};
 
 use crate::backend::{self, Backend};
 use crate::protocol::{Cursor, FromRender, ToRender, WindowRequest};
-use crate::{event, graphics, window};
+use crate::{event, window};
 
 thread_local! {
     static BACKEND: OnceCell<Backend> = const { OnceCell::new() };
@@ -442,7 +442,6 @@ pub(crate) fn load_shells() {
     }
     // SAFETY: +class takes nothing and returns the receiver.
     let _: &objc2::runtime::AnyClass = unsafe { msg_send![NSEvent::class(), class] };
-    graphics::install_string_drawing();
 }
 
 pub(crate) struct AppIvars {

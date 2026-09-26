@@ -7,6 +7,6 @@ publish = false
 [dependencies]
 objc2.workspace = true
 block2.workspace = true
-objc2-foundation = { workspace = true, features = ["NSString", "NSObject", "NSThread", "NSTimer", "NSDate", "NSDictionary", "NSGeometry", "NSNotification", "NSZone", "block2"] }
+objc2-foundation = { workspace = true, features = ["NSString", "NSObject", "NSThread", "NSTimer", "NSDate", "NSDictionary", "NSGeometry", "NSNotification", "NSZone", "NSArray", "NSValue", "block2"] }
 objc2-app-kit = { workspace = true, features = ["NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics", "NSColor", "NSFont", "NSFontDescriptor", "NSBezierPath", "NSStringDrawing", "NSAttributedString", "NSParagraphStyle", "NSText", "NSRunningApplication", "objc2-core-foundation"] }
 sidestep.workspace = true

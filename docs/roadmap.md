@@ -164,25 +164,37 @@ settings); `NSParagraphStyle` and `NSMutableParagraphStyle`; string
 drawing and measuring (`drawAtPoint:`, `drawInRect:`,
 `drawWithRect:options:`, `sizeWithAttributes:`,
 `boundingRectWithSize:options:`) with fonts, colors, backgrounds,
-paragraph styles, kerning, underlines, strikethroughs, baseline offsets,
-ligatures and tab stops (`NSTextTab`); all attribute name constants. See
+paragraph styles, kerning, underlines and strikethroughs (with dot and
+dash patterns, and by word), baseline offsets, ligatures, strokes,
+obliqueness, shadows (without blur) and tab stops (`NSTextTab`, read back
+with `tabStops`, laid out in the order set as on macOS); all attribute
+name constants. The line layout TextKit will stand on: lines, clusters
+and carets with UTF-16 ranges and directions, a paragraph or a few lines
+at a time on any thread, hit testing, caret and selection geometry, and
+relayout of only what an edit touched. See
 [architecture.md](architecture.md#text).
 
-- `NSAttributedString` drawing and measuring, as an adapter over the
-  layout's attribute runs, once Foundation has the class.
-- String drawing before any AppKit class has loaded: `NSString` gets its
-  drawing methods when `NSColor`, `NSFont`, `NSParagraphStyle` or a window
-  first loads, so `sizeWithAttributes:nil` as a program's very first AppKit
-  call finds no method. Foundation's `NSString` loader needs a hook that
-  AppKit can register (see the text workstream's notes).
-- Reading tab stops back (`tabStops`, an `NSArray`); descriptors'
-  `fontAttributes` with numbers (`NSNumber`); `NSStringDrawingContext`.
+- `NSAttributedString` drawing and measuring: `string_drawing` turns
+  attribute dictionaries over UTF-16 ranges into the layout's runs
+  (`attribute_spans`, `lines::runs_of`); the category methods wait for
+  Foundation's class.
+- `NSExpansion` (advances scaled before line breaking); shadow blur (a
+  blurred glyph op); tabs in right-to-left paragraphs, measured from the
+  right; descriptors' `fontAttributes` with numbers (`NSNumber`);
+  `NSStringDrawingContext`.
+- Bidi: clusters give their direction, not the bidi level, for numbers in
+  right-to-left text of a left-to-right paragraph (level 2, shown as 0:
+  parley keeps levels to itself); explicit embeddings and isolates open
+  where a paragraph is laid out from a line aren't carried into it;
+  deleting in a paragraph that mixes directions and has brackets lays it
+  out whole (tracking bracket pairs across the edit would keep more).
+- Two spaces where a line wraps: parley hangs the first and starts the
+  next line with the second, where AppKit hangs both.
 - The desktop's own interface font where fontconfig's `system-ui` doesn't
   name it (GNOME keeps it in GSettings); dictionary line breaking for Thai,
   Lao, Khmer and Myanmar (parley's `complex-scripts`, several megabytes of
   data).
-- Vertical text, hyphenation, `allowsDefaultTighteningForTruncation`,
-  stroke and shadow attributes.
+- Vertical text, hyphenation, `allowsDefaultTighteningForTruncation`.
 - `NSTextField`, `NSTextView`, and the TextKit 1 subset (`NSLayoutManager`,
   `NSTextStorage`, `NSTextTable`) that real apps lean on.
 
