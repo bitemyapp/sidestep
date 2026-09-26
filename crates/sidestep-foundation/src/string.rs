@@ -72,10 +72,11 @@ fn decode(bytes: &[u8], encoding: u32) -> Option<String> {
                     _ => big_endian = cfg!(target_endian = "big"),
                 }
             }
-            let units = bytes.chunks_exact(2).map(|c| {
-                let pair = [c[0], c[1]];
-                if big_endian { u16::from_be_bytes(pair) } else { u16::from_le_bytes(pair) }
-            });
+            let units = bytes
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&pair| if big_endian { u16::from_be_bytes(pair) } else { u16::from_le_bytes(pair) });
             char::decode_utf16(units).collect::<Result<String, _>>().ok()
         }
         _ => None,
