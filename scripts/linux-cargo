@@ -3,15 +3,5 @@
 # The image comes from scripts/linux.Dockerfile and is built on first use.
 # Registry and target directories live in named volumes so rebuilds are fast.
 set -eu
-repo=$(cd "$(dirname "$0")/.." && pwd)
-image=${SIDESTEP_LINUX_IMAGE:-sidestep-linux:1.96-trixie}
-if ! docker image inspect "$image" >/dev/null 2>&1; then
-  docker build -q -t "$image" -f "$repo/scripts/linux.Dockerfile" "$repo/scripts" >&2
-fi
-exec docker run --rm ${SIDESTEP_DOCKER_FLAGS:-} \
-  -v "$repo":/work -w /work \
-  -v sidestep-cargo-registry:/usr/local/cargo/registry \
-  -v sidestep-cargo-git:/usr/local/cargo/git \
-  -v sidestep-target:/target -e CARGO_TARGET_DIR=/target \
-  -e RUST_BACKTRACE="${RUST_BACKTRACE:-0}" \
-  "$image" cargo "$@"
+. "$(dirname "$0")/linux-env"
+in_container cargo "$@"

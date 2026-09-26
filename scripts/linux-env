@@ -1,0 +1,26 @@
+# Sourced by linux-cargo and linux-run. Sets the image and the named volumes
+# the container keeps the registry and build output in, and defines
+# `in_container COMMAND...`. Each git worktree gets a target volume of its
+# own, so builds in parallel worktrees don't overwrite each other's output.
+repo=$(cd "$(dirname "$0")/.." && pwd)
+image=${SIDESTEP_LINUX_IMAGE:-sidestep-linux:1.96-trixie}
+target=sidestep-target
+if [ "$(git -C "$repo" rev-parse --git-dir 2>/dev/null)" != "$(git -C "$repo" rev-parse --git-common-dir 2>/dev/null)" ]; then
+  target=sidestep-target-$(basename "$repo" | tr -c 'A-Za-z0-9_.\n-' '-')
+fi
+if ! docker image inspect "$image" >/dev/null 2>&1; then
+  docker build -q -t "$image" -f "$repo/scripts/linux.Dockerfile" "$repo/scripts" >&2
+fi
+
+in_container() {
+  # shellcheck disable=SC2086
+  exec docker run --rm ${SIDESTEP_DOCKER_FLAGS:-} \
+    -v "$repo":/work -w /work \
+    -v sidestep-cargo-registry:/usr/local/cargo/registry \
+    -v sidestep-cargo-git:/usr/local/cargo/git \
+    -v "$target":/target -e CARGO_TARGET_DIR=/target \
+    -e RUST_BACKTRACE="${RUST_BACKTRACE:-0}" \
+    -e CARGO_BUILD_JOBS -e RUSTFLAGS \
+    -e SCENARIO -e SLICE_QUIT_AFTER -e SHOT -e SHOT_AFTER -e SIZE \
+    "$image" "$@"
+}
