@@ -167,7 +167,16 @@ fn objc_msg_send_hits_the_cache() {
     ) = unsafe {
         let stret: unsafe extern "C-unwind" fn() = ffi::objc_msgSend_stret;
         let fpret: unsafe extern "C-unwind" fn() = ffi::objc_msgSend_fpret;
-        (std::mem::transmute(stret), std::mem::transmute(fpret))
+        (
+            std::mem::transmute::<
+                unsafe extern "C-unwind" fn(),
+                unsafe extern "C-unwind" fn(*mut AnyObject, Sel, i64) -> Wide,
+            >(stret),
+            std::mem::transmute::<
+                unsafe extern "C-unwind" fn(),
+                unsafe extern "C-unwind" fn(*mut AnyObject, Sel, f64) -> f64,
+            >(fpret),
+        )
     };
     #[cfg(not(target_arch = "x86_64"))]
     let wide: unsafe extern "C-unwind" fn(*mut AnyObject, Sel, i64) -> Wide = msg_send_fn();
