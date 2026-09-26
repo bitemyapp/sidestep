@@ -86,26 +86,40 @@ impl<'a> Probe<'a> {
     }
 
     fn matches<V>(&self, entry: &Entry<V>) -> bool {
-        match self.matches_quietly(entry) {
-            Some(verdict) => verdict,
-            // SAFETY: -isEqual: takes an object and returns BOOL.
-            None => unsafe { objc2::msg_send![&*entry.key, isEqual: self.key] },
-        }
+        self.matches_key(entry.hash, &entry.key)
     }
 
     /// Whether `entry`'s key matches, if that can be told without sending
     /// a message.
     #[inline]
     fn matches_quietly<V>(&self, entry: &Entry<V>) -> Option<bool> {
-        if entry.hash != self.hash {
+        self.matches_key_quietly(entry.hash, &entry.key)
+    }
+
+    /// Whether a key stored with `hash` matches, asking it `-isEqual:`
+    /// when that can't be told otherwise.
+    #[inline]
+    pub(crate) fn matches_key(&self, hash: NSUInteger, key: &AnyObject) -> bool {
+        match self.matches_key_quietly(hash, key) {
+            Some(verdict) => verdict,
+            // SAFETY: -isEqual: takes an object and returns BOOL.
+            None => unsafe { objc2::msg_send![key, isEqual: self.key] },
+        }
+    }
+
+    /// Whether a key stored with `hash` matches, if that can be told
+    /// without sending a message.
+    #[inline]
+    pub(crate) fn matches_key_quietly(&self, hash: NSUInteger, key: &AnyObject) -> Option<bool> {
+        if hash != self.hash {
             return Some(false);
         }
-        if ptr::eq(&*entry.key, self.key) {
+        if ptr::eq(key, self.key) {
             return Some(true);
         }
         match self.fast {
-            Fast::Text(text) => fast_parts(&entry.key).map(|(other, _)| text == other),
-            Fast::Number(n) => fast_value(&entry.key).map(|other| n.equals(&other)),
+            Fast::Text(text) => fast_parts(key).map(|(other, _)| text == other),
+            Fast::Number(n) => fast_value(key).map(|other| n.equals(&other)),
             Fast::Other => None,
         }
     }

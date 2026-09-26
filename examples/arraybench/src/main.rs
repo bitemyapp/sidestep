@@ -1,4 +1,6 @@
-//! `NSArray`, `NSMutableArray`, `NSSet` and `NSNumber` costs, in
+//! `NSArray`, `NSMutableArray`, `NSSet`, `NSNumber` and the other
+//! collections' (`NSOrderedSet`, sort descriptors, `NSHashTable`,
+//! `NSMapTable`, `NSCountedSet`, `NSPointerArray`, `NSCache`) costs, in
 //! nanoseconds per operation (per element for whole-array loops). Run in
 //! release mode on macOS (Apple's Foundation) and on Linux (Sidestep's) to
 //! compare: `cargo run --release -p arraybench`.
@@ -16,8 +18,9 @@ use block2::RcBlock;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::{AnyObject, Bool};
 use objc2_foundation::{
-    NSArray, NSComparisonResult, NSEnumerationOptions, NSIndexSet, NSMutableArray, NSMutableDictionary,
-    NSMutableIndexSet, NSMutableSet, NSNumber, NSRange, NSSet, NSString, NSValue,
+    NSArray, NSCache, NSComparisonResult, NSCountedSet, NSDictionary, NSEnumerationOptions, NSHashTable, NSIndexSet,
+    NSMapTable, NSMutableArray, NSMutableDictionary, NSMutableIndexSet, NSMutableOrderedSet, NSMutableSet, NSNumber,
+    NSOrderedSet, NSPointerArray, NSRange, NSSet, NSSortDescriptor, NSString, NSValue,
 };
 
 use sidestep as _;
@@ -208,6 +211,8 @@ fn main() {
         black_box(black_box(&by_value).objectForKey(&probes[i % 64]));
     });
 
+    others();
+
     println!("NSNumber");
     bench("  numberWithInteger: small + release", 10_000_000, 1, |i| {
         black_box(NSNumber::new_isize(black_box((i % 100) as isize)));
@@ -231,5 +236,136 @@ fn main() {
     });
     bench("  hash", 20_000_000, 1, |_| {
         black_box(objc2::runtime::NSObjectProtocol::hash(black_box(&*a)));
+    });
+}
+
+/// The collections of the follow-on: ordered sets, sort descriptors, hash
+/// and map tables, counted sets, pointer arrays and caches.
+fn others() {
+    let n = 1024;
+    let items: Vec<Retained<NSString>> = (0..n).map(text).collect();
+    let equal: Vec<Retained<NSString>> = (0..n).map(text).collect();
+    let array = NSArray::from_retained_slice(&items);
+    println!("NSOrderedSet, {n} elements");
+    bench("  orderedSetWithArray:", 2_000, 1, |_| {
+        black_box(NSOrderedSet::orderedSetWithArray(black_box(&array)));
+    });
+    let ordered = NSOrderedSet::orderedSetWithArray(&array);
+    bench("  indexOfObject:, equal string", 5_000_000, 1, |i| {
+        black_box(black_box(&ordered).indexOfObject(&equal[i % n]));
+    });
+    bench("  containsObject:, equal string", 5_000_000, 1, |i| {
+        black_box(black_box(&ordered).containsObject(&equal[i % n]));
+    });
+    bench("  objectAtIndex:", 20_000_000, 1, |i| {
+        black_box(black_box(&ordered).objectAtIndex(i % n));
+    });
+    let block = RcBlock::new(|obj: NonNull<NSString>, _i: usize, _stop: NonNull<Bool>| {
+        black_box(obj);
+    });
+    bench("  enumerateObjectsUsingBlock:, per element", 4_000, n, |_| {
+        black_box(&ordered).enumerateObjectsUsingBlock(&block);
+    });
+    let mutable = NSMutableOrderedSet::orderedSetWithArray(&array);
+    let extra = text(99_999);
+    bench("  mutable: addObject: + removeObject: (at the end)", 5_000_000, 1, |_| {
+        mutable.addObject(&extra);
+        mutable.removeObject(&extra);
+    });
+    bench("  mutable: indexOfObject:, equal string", 5_000_000, 1, |i| {
+        black_box(black_box(&mutable).indexOfObject(&equal[i % n]));
+    });
+
+    println!("NSSortDescriptor, {n} elements");
+    let unsorted: Vec<Retained<NSNumber>> =
+        (0..n).map(|i| NSNumber::new_i64(((i * 7919) % n) as i64 + 1_000_000)).collect();
+    let unsorted = NSArray::from_retained_slice(&unsorted);
+    let by_value = NSArray::from_retained_slice(&[NSSortDescriptor::sortDescriptorWithKey_ascending(None, true)]);
+    bench("  numbers by value, per element", 2_000, n, |_| {
+        black_box(black_box(&unsorted).sortedArrayUsingDescriptors(&by_value));
+    });
+    let key = NSString::from_str("value");
+    let records: Vec<Retained<NSDictionary<NSString, NSNumber>>> =
+        unsorted.iter().map(|v| NSDictionary::from_retained_objects(&[&*key], &[v])).collect();
+    let records = NSArray::from_retained_slice(&records);
+    let by_key = NSArray::from_retained_slice(&[NSSortDescriptor::sortDescriptorWithKey_ascending(Some(&key), true)]);
+    bench("  dictionaries by key, per element", 1_000, n, |_| {
+        black_box(black_box(&records).sortedArrayUsingDescriptors(&by_key));
+    });
+
+    println!("NSHashTable and NSMapTable, 64 members");
+    let members: Vec<Retained<NSString>> = (0..64).map(text).collect();
+    let probes: Vec<Retained<NSString>> = (0..64).map(text).collect();
+    let weak = NSHashTable::<NSString>::weakObjectsHashTable();
+    for m in &members {
+        weak.addObject(Some(m));
+    }
+    bench("  weak: containsObject:, equal string", 5_000_000, 1, |i| {
+        black_box(black_box(&weak).containsObject(Some(&probes[i % 64])));
+    });
+    bench("  weak: count", 2_000_000, 1, |_| {
+        black_box(black_box(&weak).count());
+    });
+    bench("  weak: addObject: + removeObject:", 2_000_000, 1, |_| {
+        weak.addObject(Some(&extra));
+        weak.removeObject(Some(&extra));
+    });
+    let strong =
+        NSHashTable::<NSString>::hashTableWithOptions(objc2_foundation::NSPointerFunctionsOptions::StrongMemory);
+    for m in &members {
+        strong.addObject(Some(m));
+    }
+    bench("  strong: containsObject:, equal string", 5_000_000, 1, |i| {
+        black_box(black_box(&strong).containsObject(Some(&probes[i % 64])));
+    });
+    let map = NSMapTable::<NSString, NSString>::strongToStrongObjectsMapTable();
+    let weak_keys = NSMapTable::<NSString, NSString>::weakToStrongObjectsMapTable();
+    for m in &members {
+        map.setObject_forKey(Some(m), Some(m));
+        weak_keys.setObject_forKey(Some(m), Some(m));
+    }
+    bench("  map strong-strong: objectForKey:", 5_000_000, 1, |i| {
+        black_box(black_box(&map).objectForKey(Some(&probes[i % 64])));
+    });
+    bench("  map weak-strong: objectForKey:", 5_000_000, 1, |i| {
+        black_box(black_box(&weak_keys).objectForKey(Some(&probes[i % 64])));
+    });
+    bench("  map strong-strong: setObject:forKey: + remove", 2_000_000, 1, |_| {
+        map.setObject_forKey(Some(&extra), Some(&extra));
+        map.removeObjectForKey(Some(&extra));
+    });
+
+    println!("NSCountedSet, NSPointerArray, NSCache");
+    let counted = NSCountedSet::<NSString>::new();
+    for m in &members {
+        counted.addObject(m);
+    }
+    bench("  counted: addObject: + removeObject:", 5_000_000, 1, |i| {
+        let m = &probes[i % 64];
+        counted.addObject(m);
+        counted.removeObject(m);
+    });
+    bench("  counted: countForObject:", 5_000_000, 1, |i| {
+        black_box(black_box(&counted).countForObject(&probes[i % 64]));
+    });
+    let pointers = NSPointerArray::weakObjectsPointerArray();
+    for m in &members {
+        unsafe { pointers.addPointer(Retained::as_ptr(m).cast_mut().cast()) };
+    }
+    bench("  weak pointer array: pointerAtIndex:", 5_000_000, 1, |i| {
+        black_box(black_box(&pointers).pointerAtIndex(i % 64));
+    });
+    let cache: Retained<NSCache<NSString, NSString>> = unsafe { NSCache::new() };
+    for m in &members {
+        unsafe { cache.setObject_forKey(m, m) };
+    }
+    bench("  cache: objectForKey:, hit", 5_000_000, 1, |i| {
+        black_box(unsafe { black_box(&cache).objectForKey(&probes[i % 64]) });
+    });
+    unsafe { cache.setCountLimit(64) };
+    let fresh: Vec<Retained<NSString>> = (1000..1128).map(text).collect();
+    bench("  cache: setObject:forKey:, evicting", 2_000_000, 1, |i| {
+        let m = &fresh[i % 128];
+        unsafe { cache.setObject_forKey(m, m) };
     });
 }

@@ -36,12 +36,26 @@ methods get the rest. Faster than Apple's on the same Mac in nearly every
 operation `examples/arraybench` and `dictbench` measure; creating a small
 `NSNumber` is the exception (Apple's are tagged pointers).
 
+Then `NSOrderedSet` and `NSMutableOrderedSet` (with the live `-array` and
+`-set` views), `NSSortDescriptor` and sorting arrays, sets and ordered sets
+by descriptors (key paths through `-valueForKey:` where objects answer it,
+else their getters), `NSHashTable`, `NSMapTable` and `NSPointerArray` with
+strong, weak and unretained members and object, address and integer
+personalities (weak members disappear when their objects deallocate),
+`NSPointerFunctions` options, `NSCountedSet`, and a thread-safe `NSCache`
+with count and cost limits, least-recently-used eviction and its delegate.
+Faster than Apple's in every operation `arraybench` measures for them
+except a weak table's `-count`, which Sidestep keeps exact.
+
 - `NSMutableString`; `-description` on NSObject before Foundation's
   `NSString` has loaded.
-- Collections: `NSOrderedSet`, `NSCountedSet`, `NSHashTable`, `NSMapTable`,
-  key-value coding on collections, `NSCoding`; `-[NSString compare:]`,
-  which sorting strings by selector needs; class factory methods
-  (`+array`, `+dictionary`) that return the receiving subclass.
+- Collections: key-value coding on collections (beyond `NSDictionary`'s
+  `-valueForKey:`), `NSCoding`; `-[NSString compare:]`, which sorting
+  strings by selector or descriptor needs; class factory methods (`+array`,
+  `+dictionary`) that return the receiving subclass; the C functions of
+  `NSHashTable` and `NSMapTable` (`NSHashGet`, `NSMapInsert`, …), custom
+  `NSPointerFunctions` functions, and C-string and struct personalities;
+  `NSDiscardableContent` in `NSCache`; ordered collection differences.
 - `NSData`, `NSDate`, `NSError`, `NSURL`, `NSProcessInfo`.
 - `NSNotificationCenter`, the rest of `NSRunLoop`, `NSAutoreleasePool`, and
   the rest of `NSThread`.

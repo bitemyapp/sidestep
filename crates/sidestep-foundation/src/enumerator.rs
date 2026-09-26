@@ -35,7 +35,7 @@ use objc2::{AnyThread, DefinedClass, define_class, msg_send};
 use objc2_foundation::{NSArray, NSEnumerator, NSFastEnumerationState, NSUInteger};
 
 use crate::util::{self, is_exactly};
-use crate::{array, dictionary, set};
+use crate::{array, dictionary, ordered_set, set};
 
 /// The mutation count of a collection that never changes.
 static IMMUTABLE: c_ulong = 0;
@@ -147,6 +147,30 @@ pub(crate) enum Source {
     Keys(Retained<AnyObject>),
     Values(Retained<AnyObject>),
     Members(Retained<AnyObject>),
+    /// An ordered set from its start, walked as an array is; the count is
+    /// the set's when the enumerator was made.
+    Ordered(Retained<AnyObject>, usize),
+    /// An ordered set from its end.
+    ReverseOrdered(Retained<AnyObject>, usize),
+    /// A snapshot (an array) of a collection's objects, which keeps them
+    /// alive, failing as Foundation's enumerators do if the collection
+    /// changes before the snapshot is spent: hash and map tables, whose
+    /// weak members could otherwise die under the enumerator.
+    Snapshot {
+        items: Retained<AnyObject>,
+        owner: Retained<AnyObject>,
+        mutations: *mut c_ulong,
+        start: c_ulong,
+    },
+}
+
+impl Source {
+    /// A snapshot of `owner`'s objects, watching its count of changes.
+    pub(crate) fn snapshot(items: Retained<NSArray>, owner: Retained<AnyObject>, mutations: *mut c_ulong) -> Source {
+        // SAFETY: the count lives as long as `owner`, which is alive.
+        let start = unsafe { *mutations };
+        Source::Snapshot { items: util::upcast(items), owner, mutations, start }
+    }
 }
 
 /// How many entries of a dictionary or set an enumerator retains at once.
@@ -201,6 +225,33 @@ impl EnumeratorIvars {
                         util::index_out_of_bounds(name, "objectAtIndex:", at, now)
                     }
                 }
+            }
+            Source::Ordered(s, count) => {
+                let obj = if i < *count { ordered_set::element_at(s, i) } else { None };
+                if obj.is_none() {
+                    // Spent for good, even if the set grows again.
+                    self.taken.set(*count);
+                }
+                obj
+            }
+            Source::ReverseOrdered(s, count) => {
+                let at = count.checked_sub(i + 1)?;
+                match ordered_set::element_at(s, at) {
+                    Some(obj) => Some(obj),
+                    None => {
+                        let (name, now) = (ordered_set::enumerator_name(s), ordered_set::count_of(s));
+                        util::index_beyond(name, "objectAtIndex:", at, now, "ordered set")
+                    }
+                }
+            }
+            Source::Snapshot { items, owner, mutations, start } => {
+                let obj = array::element_at(items, i);
+                // SAFETY: the count lives as long as `owner`, which the
+                // enumerator keeps.
+                if obj.is_some() && unsafe { **mutations } != *start {
+                    util::mutated_while_reading(&owner.class().name().to_string_lossy(), &**owner);
+                }
+                obj
             }
             Source::Keys(c) => return self.next_hashed(c, |c, i| dictionary::entry_at(c, i).map(|(k, _)| k)),
             Source::Values(c) => return self.next_hashed(c, |c, i| dictionary::entry_at(c, i).map(|(_, v)| v)),
@@ -261,15 +312,23 @@ impl EnumeratorIvars {
     fn mutations(&self) -> *mut c_ulong {
         match &self.source {
             // Arrays may change during a loop over their enumerators.
-            Source::Nothing | Source::Array(..) | Source::ReverseArray(..) => immutable_mutations(),
+            Source::Nothing
+            | Source::Array(..)
+            | Source::ReverseArray(..)
+            | Source::Ordered(..)
+            | Source::ReverseOrdered(..) => immutable_mutations(),
             Source::Keys(d) | Source::Values(d) => dictionary::mutations(d),
             Source::Members(s) => set::mutations(s),
+            Source::Snapshot { mutations, .. } => *mutations,
         }
     }
 
     /// Whether fast enumeration should hand out one element at a time.
     fn singly(&self) -> bool {
-        matches!(self.source, Source::Array(..) | Source::ReverseArray(..))
+        matches!(
+            self.source,
+            Source::Array(..) | Source::ReverseArray(..) | Source::Ordered(..) | Source::ReverseOrdered(..)
+        )
     }
 }
 

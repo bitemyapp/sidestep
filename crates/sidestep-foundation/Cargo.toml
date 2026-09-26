@@ -11,6 +11,8 @@ license.workspace = true
 sidestep-runtime.workspace = true
 objc2 = { workspace = true, features = ["gnustep-2-1"] }
 block2 = { workspace = true, features = ["gnustep-2-1"] }
-objc2-foundation = { workspace = true, features = ["gnustep-2-1", "NSObject", "NSString", "NSThread", "NSZone", "NSDictionary", "NSTimer", "NSDate", "NSNotification", "block2", "NSArray", "NSSet", "NSEnumerator", "NSValue", "NSNull", "NSRange", "NSObjCRuntime", "NSGeometry", "objc2-core-foundation", "NSIndexSet"] }
+objc2-foundation = { workspace = true, features = ["gnustep-2-1", "NSObject", "NSString", "NSThread", "NSZone", "NSDictionary", "NSTimer", "NSDate", "NSNotification", "block2", "NSArray", "NSSet", "NSEnumerator", "NSValue", "NSNull", "NSRange", "NSObjCRuntime", "NSGeometry", "objc2-core-foundation", "NSIndexSet",
+    # Collections follow-on.
+    "NSOrderedSet", "NSSortDescriptor", "NSHashTable", "NSMapTable", "NSPointerFunctions", "NSPointerArray", "NSCache"] }
 # Canonical decomposition, for sorting strings as Foundation compares them.
 unicode-normalization = "0.1.25"

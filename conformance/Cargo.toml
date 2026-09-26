@@ -8,7 +8,9 @@ publish = false
 [dependencies]
 objc2.workspace = true
 block2.workspace = true
-objc2-foundation = { workspace = true, features = ["NSString", "NSObject", "NSThread", "NSZone", "NSGeometry", "NSDictionary", "NSEnumerator", "NSArray", "NSSet", "NSValue", "NSNull", "NSRange", "NSObjCRuntime", "block2", "NSIndexSet"] }
+objc2-foundation = { workspace = true, features = ["NSString", "NSObject", "NSThread", "NSZone", "NSGeometry", "NSDictionary", "NSEnumerator", "NSArray", "NSSet", "NSValue", "NSNull", "NSRange", "NSObjCRuntime", "block2", "NSIndexSet",
+    # Collections follow-on.
+    "NSOrderedSet", "NSSortDescriptor", "NSHashTable", "NSMapTable", "NSPointerFunctions", "NSPointerArray", "NSCache", "NSKeyValueCoding"] }
 objc2-app-kit = { workspace = true, features = ["NSResponder", "NSView", "NSClipView", "NSScrollView", "NSEvent", "NSFont", "NSFontDescriptor", "NSParagraphStyle", "NSText", "NSStringDrawing", "NSAttributedString", "NSColor", "NSCell", "objc2-core-foundation"] }
 sidestep.workspace = true
 

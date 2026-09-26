@@ -144,8 +144,16 @@ pub(crate) fn description(obj: &AnyObject) -> String {
 #[cold]
 #[track_caller]
 pub(crate) fn index_out_of_bounds(receiver: &str, method: &str, index: usize, count: usize) -> ! {
+    index_beyond(receiver, method, index, count, "array")
+}
+
+/// Fail as `index_out_of_bounds` does, naming what an empty receiver is
+/// ("array", "ordered set").
+#[cold]
+#[track_caller]
+pub(crate) fn index_beyond(receiver: &str, method: &str, index: usize, count: usize, noun: &str) -> ! {
     if count == 0 {
-        panic!("*** -[{receiver} {method}]: index {index} beyond bounds for empty array");
+        panic!("*** -[{receiver} {method}]: index {index} beyond bounds for empty {noun}");
     }
     panic!("*** -[{receiver} {method}]: index {index} beyond bounds [0 .. {}]", count - 1);
 }
@@ -155,8 +163,15 @@ pub(crate) fn index_out_of_bounds(receiver: &str, method: &str, index: usize, co
 #[cold]
 #[track_caller]
 pub(crate) fn index_set_out_of_bounds(receiver: &str, method: &str, index: usize, count: usize) -> ! {
+    index_set_beyond(receiver, method, index, count, "array")
+}
+
+/// `index_set_out_of_bounds`, naming what an empty receiver is.
+#[cold]
+#[track_caller]
+pub(crate) fn index_set_beyond(receiver: &str, method: &str, index: usize, count: usize, noun: &str) -> ! {
     if count == 0 {
-        panic!("*** -[{receiver} {method}]: index {index} in index set beyond bounds for empty array");
+        panic!("*** -[{receiver} {method}]: index {index} in index set beyond bounds for empty {noun}");
     }
     panic!("*** -[{receiver} {method}]: index {index} in index set beyond bounds [0 .. {}]", count - 1);
 }
@@ -165,8 +180,22 @@ pub(crate) fn index_set_out_of_bounds(receiver: &str, method: &str, index: usize
 #[cold]
 #[track_caller]
 pub(crate) fn range_out_of_bounds(receiver: &str, method: &str, location: usize, length: usize, count: usize) -> ! {
+    range_beyond(receiver, method, location, length, count, "array")
+}
+
+/// `range_out_of_bounds`, naming what an empty receiver is.
+#[cold]
+#[track_caller]
+pub(crate) fn range_beyond(
+    receiver: &str,
+    method: &str,
+    location: usize,
+    length: usize,
+    count: usize,
+    noun: &str,
+) -> ! {
     if count == 0 {
-        panic!("*** -[{receiver} {method}]: range {{{location}, {length}}} extends beyond bounds for empty array");
+        panic!("*** -[{receiver} {method}]: range {{{location}, {length}}} extends beyond bounds for empty {noun}");
     }
     panic!("*** -[{receiver} {method}]: range {{{location}, {length}}} extends beyond bounds [0 .. {}]", count - 1);
 }

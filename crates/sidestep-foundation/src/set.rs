@@ -29,7 +29,7 @@ use crate::enumerator::{self, Mutations, Source, immutable_mutations};
 use crate::guarded::Reading;
 use crate::table::{CowTable, Entry, Frozen, Probe, Table, shared};
 use crate::util::{self, inherits, is_exactly, nil_argument};
-use crate::{array, describe};
+use crate::{array, describe, sort_descriptor};
 
 type Members = Table<()>;
 
@@ -148,7 +148,7 @@ pub(crate) fn mutations(obj: &AnyObject) -> *mut c_ulong {
 }
 
 /// Whether any set has a member equal to `object`. Retains nothing.
-fn contains(obj: &AnyObject, object: &AnyObject) -> bool {
+pub(crate) fn contains(obj: &AnyObject, object: &AnyObject) -> bool {
     match kind(obj) {
         Kind::Fixed(s) => s.ivars().position(object).is_some(),
         Kind::Mutable(m) => m.ivars().table.position(object).is_some(),
@@ -483,6 +483,11 @@ define_class!(
         #[unsafe(method_id(objectsWithOptions:passingTest:))]
         fn objects_with_options_passing_test(&self, _options: NSEnumerationOptions, test: &MemberTest) -> Retained<NSSet> {
             make(passing(self, test))
+        }
+
+        #[unsafe(method_id(sortedArrayUsingDescriptors:))]
+        fn sorted_array_using_descriptors(&self, descriptors: &NSArray) -> Retained<NSArray> {
+            sort_descriptor::sorted(descriptors, &members(self))
         }
 
         #[unsafe(method(isEqualToSet:))]

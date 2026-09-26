@@ -33,6 +33,15 @@ mod table;
 mod util;
 mod value;
 
+// Collections follow-on: each module declares its classes' shells.
+mod cache;
+mod counted_set;
+mod hash_index;
+mod ordered_set;
+mod pointer_array;
+mod pointer_table;
+mod sort_descriptor;
+
 pub use const_string::{ConstStr, ConstantString};
 pub use notification::notification;
 pub use timer::{fire_due_timers, next_timer_deadline};

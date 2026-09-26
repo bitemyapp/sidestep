@@ -31,7 +31,7 @@ use unicode_normalization::UnicodeNormalization;
 use crate::number::fast_value;
 use crate::string::fast_parts;
 use crate::util::{description, is_exactly};
-use crate::{array, dictionary};
+use crate::{array, dictionary, ordered_set};
 
 fn pad(out: &mut String, level: usize) {
     for _ in 0..level {
@@ -49,6 +49,10 @@ pub(crate) fn element(out: &mut String, obj: &AnyObject, level: usize) {
         array::describe(out, obj, level);
     } else if is_exactly(obj, &crate::NSDICTIONARY) || is_exactly(obj, &crate::NSMUTABLEDICTIONARY) {
         dictionary::describe(out, obj, level);
+    } else if ordered_set::is_ordered_set(obj) {
+        // Foundation nests only arrays and dictionaries; ordered sets, which
+        // answer the indenting description too, appear quoted as sets do.
+        quote(out, &description(obj));
     } else if responds(obj, sel!(descriptionWithLocale:indent:)) {
         // SAFETY: the selector returns an NSString.
         let text: Option<Retained<NSString>> =

@@ -280,6 +280,46 @@ ones, as the objc2 bindings require.
 - **Failures.** Where Foundation raises (an index out of range, a nil
   element), Sidestep panics with Foundation's message, which unwinds into
   the Rust caller like an unrecognized selector.
+- **Ordered sets.** `NSOrderedSet` keeps its members in a vector, which is
+  their order, with each member's hash beside it and, past eight members,
+  an open-addressed index of positions by hash (`hash_index.rs`), so
+  membership and `-indexOfObject:` cost a hash and usually one comparison,
+  and fast enumeration hands out the vector as an array's does. A change in
+  the middle renumbers the index, as moving an array's elements costs time
+  in proportion to its length. The mutable class follows the arrays'
+  design (copy-on-write storage, counted readers, subclasses changed
+  through their primitives). `-array` and `-set` answer proxies that read
+  the set when asked, so they follow its changes as Foundation's do.
+- **Sort descriptors.** Sorting by descriptors reads each element's values
+  once, before comparing, rather than twice a comparison. Key paths go
+  through `-valueForKey:` where objects answer it (dictionaries, looked up
+  without a message when they are Sidestep's), else through the getter
+  key-value coding would find, its number or `BOOL` wrapped in an
+  `NSNumber`; Sidestep has no general key-value coding. A column of values
+  that are all Sidestep's numbers, sorted by `compare:`, is compared
+  without messages.
+- **Weak collections.** `NSHashTable`, `NSMapTable` and `NSPointerArray`
+  hold each member (or key, or value) as their pointer functions say:
+  retained, weakly, or as a bare pointer, compared by `-isEqual:`, by
+  address or as an integer. A weak member is a runtime weak reference in a
+  box of its own, so its address survives the table moving its entries;
+  when the object deallocates the runtime zeroes it and the entry is dead.
+  Lookups, enumeration and descriptions pass over dead entries, and
+  `-count` is exact, which costs a look at each entry (it reads the weak
+  locations atomically, as the runtime writes them, without loading). The
+  table sweeps dead entries out, releasing what they held, once per as
+  many changes as it has entries. A lookup loads (retains) a weak member
+  only when its hash matches, and releases what it loaded after letting
+  the table go, since a release may run a `-dealloc` that changes the
+  table. Enumerators of weak tables walk a snapshot that keeps the members
+  alive, and still fail if the table changes.
+- **Counted sets and caches.** `NSCountedSet` is a subclass of
+  `NSMutableSet` whose table keeps each member's count, reached by the
+  inherited methods through its primitives. `NSCache` is safe from any
+  thread, its state behind a mutex: entries in a slab threaded on a
+  least-recently-used list, evicted when the count or total cost passes its
+  limit. Objects leaving are told to the delegate and released after the
+  lock is let go, so a delegate may use the cache.
 
 ## AppKit: a main thread and a render thread
 
