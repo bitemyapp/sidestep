@@ -242,25 +242,3 @@ impl SourceSignal {
         self.shared.wake.wake();
     }
 }
-
-/// When the next timer on this thread's loop is due in the default mode;
-/// now if work is waiting there. For event loops that sleep elsewhere and
-/// fire timers with [`fire_due_timers`].
-pub fn next_timer_deadline() -> Option<Instant> {
-    let now = Instant::now();
-    let shared = self::core::current_shared();
-    self::core::drain_inbox(&shared);
-    with_state(|s| {
-        if s.has_blocks_for(Mode::DEFAULT) {
-            return Some(now);
-        }
-        s.next_due(Mode::DEFAULT).map(|(key, _)| key.0)
-    })
-}
-
-/// One pass of this thread's loop in the default mode, without sleeping:
-/// fires the timers due, runs queued blocks and, on the main thread, the
-/// main dispatch queue.
-pub fn fire_due_timers(_now: Instant) {
-    self::core::run(Mode::DEFAULT, Some(Instant::now()), false);
-}

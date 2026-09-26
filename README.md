@@ -111,7 +111,13 @@ SIDESTEP_DECORATIONS=client FLOATING=1 SCALE=2 SIZE=2560x1600 SHOT=/work/target/
 `examples/appkit-input` prints every key, mouse and window event it gets and
 exercises the clipboard, several windows and child windows, tracking areas,
 cursors, input methods, nested and modal event loops. `THEN` runs a command (an input injector,
-`wl-copy`) while the program runs.
+`wl-copy`) while the program runs. `examples/appkit-events` shows a
+tooltip (`SCENARIO=hover`, the default), a sheet (`sheet`) or a modal
+window (`modal`).
+
+Tests can run AppKit without a compositor: `SIDESTEP_BACKEND=null` starts
+a render thread that answers at once and draws nothing (see
+[docs/architecture.md](docs/architecture.md#events-and-the-run-loop)).
 
 On Linux, drawing is recorded on the main thread and rasterized on a
 separate render thread, and scroll views are tiled onto Wayland subsurfaces;

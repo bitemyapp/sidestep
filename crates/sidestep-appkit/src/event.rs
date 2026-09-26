@@ -131,6 +131,9 @@ pub(crate) struct EventIvars {
     rotation: f32,
     /// A key's pending compose sequence (see `Key::composing`).
     composing: Option<String>,
+    /// A press that gave its window the keyboard (see
+    /// `window_events::mouse_down_reaches`).
+    activating: Cell<bool>,
 }
 
 impl EventIvars {
@@ -164,6 +167,7 @@ impl EventIvars {
             magnification: 0.0,
             rotation: 0.0,
             composing: None,
+            activating: Cell::new(false),
         }
     }
 }
@@ -284,6 +288,16 @@ define_class!(
                 at.map(|i| monitors.remove(i))
             });
             drop(gone);
+        }
+
+        #[unsafe(method(startPeriodicEventsAfterDelay:withPeriod:))]
+        fn start_periodic_events(delay: f64, period: f64) {
+            crate::event_loop::start_periodic(delay, period);
+        }
+
+        #[unsafe(method(stopPeriodicEvents))]
+        fn stop_periodic_events() {
+            crate::event_loop::stop_periodic();
         }
 
         #[unsafe(method(mouseLocation))]
@@ -495,6 +509,11 @@ fn make(ivars: EventIvars) -> Retained<NSEvent> {
     unsafe { Retained::cast_unchecked(event) }
 }
 
+/// A periodic event (see `event_loop::start_periodic`).
+pub(crate) fn periodic_event() -> Retained<NSEvent> {
+    make(EventIvars::new(NSEventType::Periodic, NSPoint::ZERO, current_flags(), None))
+}
+
 /// A mouse button event, or a move or drag.
 pub(crate) fn mouse_event(
     kind: NSEventType,
@@ -605,6 +624,21 @@ pub(crate) fn key_event(window: &NSWindow, key: Key) -> Retained<NSEvent> {
     ivars.key_code = crate::keycodes::mac_key_code(key.code);
     ivars.composing = key.composing;
     make(ivars)
+}
+
+fn imp(event: &NSEvent) -> &NSEventImpl {
+    // SAFETY: every NSEvent is an NSEventImpl.
+    unsafe { &*(event as *const NSEvent).cast::<NSEventImpl>() }
+}
+
+/// Mark a mouse press as the one that gave its window the keyboard.
+pub(crate) fn mark_activating(event: &NSEvent) {
+    imp(event).ivars().activating.set(true);
+}
+
+/// Whether a mouse press gave its window the keyboard.
+pub(crate) fn is_activating(event: &NSEvent) -> bool {
+    imp(event).ivars().activating.get()
 }
 
 /// The compose sequence a key event left pending, if it touched one.

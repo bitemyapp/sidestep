@@ -1,5 +1,5 @@
-//! The responder chain and the view hierarchy: `NSResponder`, `NSView`,
-//! `NSClipView` and `NSScrollView`.
+//! The view hierarchy: `NSView`, `NSClipView` and `NSScrollView` (the
+//! responder chain they sit in is `responder`).
 //!
 //! Views keep their geometry in ivars. Everything that subclasses may
 //! override (`isFlipped`, `drawRect:`, `hitTest:`, the event methods) is
@@ -16,7 +16,7 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 
 use objc2::rc::{Allocated, Retained};
-use objc2::runtime::{AnyObject, MessageReceiver, NSObject, NSObjectProtocol, Sel};
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
     NSAutoresizingMaskOptions, NSClipView, NSCursor, NSEvent, NSResponder, NSTextInputContext, NSTrackingArea, NSView,
@@ -30,221 +30,6 @@ use crate::window::{self, NSWindowImpl};
 
 /// A reference that doesn't retain, as AppKit's back pointers are.
 type Unretained<T> = Cell<Option<NonNull<T>>>;
-
-// NSResponder
-
-#[derive(Default)]
-pub(crate) struct ResponderIvars {
-    next: Unretained<NSResponder>,
-}
-
-define_class!(
-    #[unsafe(super(NSObject))]
-    #[thread_kind = MainThreadOnly]
-    #[name = "NSResponder"]
-    #[ivars = ResponderIvars]
-    pub(crate) struct NSResponderImpl;
-
-    impl NSResponderImpl {
-        #[unsafe(method_id(init))]
-        fn init(this: Allocated<Self>) -> Retained<Self> {
-            let this = this.set_ivars(ResponderIvars::default());
-            // SAFETY: NSObject's designated initializer.
-            unsafe { msg_send![super(this), init] }
-        }
-
-        #[unsafe(method_id(nextResponder))]
-        fn next_responder(&self) -> Option<Retained<NSResponder>> {
-            // SAFETY: the next responder outlives the link (it is the
-            // superview or window, which own this responder).
-            self.ivars().next.get().map(|p| unsafe { p.as_ref() }.retain())
-        }
-
-        #[unsafe(method(setNextResponder:))]
-        fn set_next_responder(&self, next: Option<&NSResponder>) {
-            self.ivars().next.set(next.map(NonNull::from));
-        }
-
-        #[unsafe(method(acceptsFirstResponder))]
-        fn accepts_first_responder(&self) -> bool {
-            false
-        }
-
-        #[unsafe(method(becomeFirstResponder))]
-        fn become_first_responder(&self) -> bool {
-            true
-        }
-
-        #[unsafe(method(resignFirstResponder))]
-        fn resign_first_responder(&self) -> bool {
-            true
-        }
-
-        #[unsafe(method(mouseDown:))]
-        fn mouse_down(&self, event: &NSEvent) {
-            forward(self, |next| next.mouseDown(event));
-        }
-
-        #[unsafe(method(mouseUp:))]
-        fn mouse_up(&self, event: &NSEvent) {
-            forward(self, |next| next.mouseUp(event));
-        }
-
-        #[unsafe(method(mouseDragged:))]
-        fn mouse_dragged(&self, event: &NSEvent) {
-            forward(self, |next| next.mouseDragged(event));
-        }
-
-        #[unsafe(method(mouseMoved:))]
-        fn mouse_moved(&self, event: &NSEvent) {
-            forward(self, |next| next.mouseMoved(event));
-        }
-
-        #[unsafe(method(rightMouseDown:))]
-        fn right_mouse_down(&self, event: &NSEvent) {
-            forward(self, |next| next.rightMouseDown(event));
-        }
-
-        #[unsafe(method(rightMouseUp:))]
-        fn right_mouse_up(&self, event: &NSEvent) {
-            forward(self, |next| next.rightMouseUp(event));
-        }
-
-        #[unsafe(method(otherMouseDown:))]
-        fn other_mouse_down(&self, event: &NSEvent) {
-            forward(self, |next| next.otherMouseDown(event));
-        }
-
-        #[unsafe(method(otherMouseUp:))]
-        fn other_mouse_up(&self, event: &NSEvent) {
-            forward(self, |next| next.otherMouseUp(event));
-        }
-
-        #[unsafe(method(scrollWheel:))]
-        fn scroll_wheel(&self, event: &NSEvent) {
-            forward(self, |next| next.scrollWheel(event));
-        }
-
-        #[unsafe(method(keyDown:))]
-        fn key_down(&self, event: &NSEvent) {
-            forward(self, |next| next.keyDown(event));
-        }
-
-        #[unsafe(method(keyUp:))]
-        fn key_up(&self, event: &NSEvent) {
-            forward(self, |next| next.keyUp(event));
-        }
-
-        #[unsafe(method(performKeyEquivalent:))]
-        fn perform_key_equivalent(&self, _event: &NSEvent) -> bool {
-            false
-        }
-
-        #[unsafe(method(flagsChanged:))]
-        fn flags_changed(&self, event: &NSEvent) {
-            forward(self, |next| next.flagsChanged(event));
-        }
-
-        #[unsafe(method(rightMouseDragged:))]
-        fn right_mouse_dragged(&self, event: &NSEvent) {
-            forward(self, |next| next.rightMouseDragged(event));
-        }
-
-        #[unsafe(method(otherMouseDragged:))]
-        fn other_mouse_dragged(&self, event: &NSEvent) {
-            forward(self, |next| next.otherMouseDragged(event));
-        }
-
-        #[unsafe(method(mouseEntered:))]
-        fn mouse_entered(&self, event: &NSEvent) {
-            forward(self, |next| next.mouseEntered(event));
-        }
-
-        #[unsafe(method(mouseExited:))]
-        fn mouse_exited(&self, event: &NSEvent) {
-            forward(self, |next| next.mouseExited(event));
-        }
-
-        #[unsafe(method(cursorUpdate:))]
-        fn cursor_update(&self, event: &NSEvent) {
-            forward(self, |next| next.cursorUpdate(event));
-        }
-
-        #[unsafe(method(magnifyWithEvent:))]
-        fn magnify_with_event(&self, event: &NSEvent) {
-            forward(self, |next| next.magnifyWithEvent(event));
-        }
-
-        #[unsafe(method(rotateWithEvent:))]
-        fn rotate_with_event(&self, event: &NSEvent) {
-            forward(self, |next| next.rotateWithEvent(event));
-        }
-
-        #[unsafe(method(swipeWithEvent:))]
-        fn swipe_with_event(&self, event: &NSEvent) {
-            forward(self, |next| next.swipeWithEvent(event));
-        }
-
-        #[unsafe(method(smartMagnifyWithEvent:))]
-        fn smart_magnify_with_event(&self, event: &NSEvent) {
-            forward(self, |next| next.smartMagnifyWithEvent(event));
-        }
-
-        #[unsafe(method(interpretKeyEvents:))]
-        fn interpret_key_events(&self, events: &AnyObject) {
-            crate::keybindings::interpret_all(as_responder(self), events);
-        }
-
-        #[unsafe(method(insertText:))]
-        fn insert_text(&self, text: &AnyObject) {
-            // SAFETY: insertText: takes the text.
-            forward(self, |next| unsafe { msg_send![next, insertText: text] });
-        }
-
-        #[unsafe(method(doCommandBySelector:))]
-        fn do_command_by_selector(&self, selector: Sel) {
-            do_command(self, selector);
-        }
-
-        /// Perform `action` here, or ask up the chain.
-        #[unsafe(method(tryToPerform:with:))]
-        fn try_to_perform(&self, action: Sel, object: Option<&AnyObject>) -> bool {
-            crate::app::perform(self, action, object)
-                // SAFETY: tryToPerform:with: takes a selector and an object.
-                || self.ivars().next.get().is_some_and(|n| unsafe { n.as_ref().tryToPerform_with(action, object) })
-        }
-    }
-
-    unsafe impl NSObjectProtocol for NSResponderImpl {}
-);
-
-fn as_responder(this: &NSResponderImpl) -> &NSResponder {
-    // SAFETY: NSResponder is NSResponderImpl's class.
-    unsafe { &*(this as *const NSResponderImpl).cast::<NSResponder>() }
-}
-
-/// Perform an editing command if this responder has it, else pass it up
-/// the chain.
-fn do_command(this: &NSResponderImpl, selector: Sel) {
-    // SAFETY: respondsToSelector: takes a selector and returns BOOL.
-    let responds: bool = unsafe { msg_send![this, respondsToSelector: selector] };
-    if responds {
-        // SAFETY: editing commands are action methods: they take the sender
-        // (none, as AppKit sends them) and return nothing.
-        unsafe { MessageReceiver::send_message::<_, ()>(this, selector, (None::<&AnyObject>,)) }
-    } else {
-        // SAFETY: doCommandBySelector: takes a selector.
-        forward(this, |next| unsafe { msg_send![next, doCommandBySelector: selector] });
-    }
-}
-
-/// Pass an event a responder doesn't handle up the chain.
-fn forward(this: &NSResponderImpl, send: impl FnOnce(&NSResponder)) {
-    if let Some(next) = this.ivars().next.get() {
-        // SAFETY: as in `nextResponder`.
-        send(unsafe { next.as_ref() });
-    }
-}
 
 // NSView
 
@@ -261,6 +46,12 @@ pub(crate) struct ViewIvars {
     tracking: RefCell<crate::tracking::ViewTracking>,
     /// Made when first asked for, for views that are text input clients.
     input_context: RefCell<Option<Retained<NSTextInputContext>>>,
+    /// Frame and bounds notification state (see `changed`).
+    notes: Cell<u8>,
+    /// The view's place in its window's key view loop (see `keyloop`).
+    key_links: crate::keyloop::KeyLinks,
+    /// `toolTip` (see `tooltip`).
+    tool_tip: RefCell<Option<Retained<objc2_foundation::NSString>>>,
 }
 
 impl ViewIvars {
@@ -276,6 +67,9 @@ impl ViewIvars {
             is_clip: Cell::new(false),
             tracking: RefCell::default(),
             input_context: RefCell::new(None),
+            notes: Cell::new(0),
+            key_links: Default::default(),
+            tool_tip: RefCell::new(None),
         }
     }
 }
@@ -518,6 +312,105 @@ define_class!(
         fn input_context(&self) -> Option<Retained<NSTextInputContext>> {
             crate::inputcontext::for_view(self)
         }
+
+        // The key view loop (see `keyloop`).
+
+        #[unsafe(method_id(nextKeyView))]
+        fn next_key_view(&self) -> Option<Retained<NSView>> {
+            crate::keyloop::next(self)
+        }
+
+        #[unsafe(method(setNextKeyView:))]
+        fn set_next_key_view(&self, next: Option<&NSView>) {
+            crate::keyloop::set_next(self, next);
+        }
+
+        #[unsafe(method_id(previousKeyView))]
+        fn previous_key_view(&self) -> Option<Retained<NSView>> {
+            crate::keyloop::previous(self)
+        }
+
+        #[unsafe(method_id(nextValidKeyView))]
+        fn next_valid_key_view(&self) -> Option<Retained<NSView>> {
+            crate::keyloop::next_valid(self)
+        }
+
+        #[unsafe(method_id(previousValidKeyView))]
+        fn previous_valid_key_view(&self) -> Option<Retained<NSView>> {
+            crate::keyloop::previous_valid(self)
+        }
+
+        // Tooltips (see `tooltip`).
+
+        #[unsafe(method_id(toolTip))]
+        fn tool_tip(&self) -> Option<Retained<objc2_foundation::NSString>> {
+            self.ivars().tool_tip.borrow().clone()
+        }
+
+        #[unsafe(method(setToolTip:))]
+        fn set_tool_tip(&self, text: Option<&objc2_foundation::NSString>) {
+            crate::tooltip::set_tool_tip(as_view(self), text);
+        }
+
+        #[unsafe(method(addToolTipRect:owner:userData:))]
+        fn add_tool_tip_rect(&self, rect: NSRect, owner: &AnyObject, data: *mut c_void) -> isize {
+            crate::tooltip::add_tool_tip_rect(as_view(self), rect, owner, data)
+        }
+
+        #[unsafe(method(removeToolTip:))]
+        fn remove_tool_tip(&self, tag: isize) {
+            crate::tooltip::remove_tool_tip(as_view(self), tag);
+        }
+
+        #[unsafe(method(removeAllToolTips))]
+        fn remove_all_tool_tips(&self) {
+            crate::tooltip::remove_all(as_view(self));
+        }
+
+        /// Views that take typing (text views and fields) say yes.
+        #[unsafe(method(needsPanelToBecomeKey))]
+        fn needs_panel_to_become_key(&self) -> bool {
+            false
+        }
+
+        #[unsafe(method(canBecomeKeyView))]
+        fn can_become_key_view(&self) -> bool {
+            crate::keyloop::can_become_key_view(self)
+        }
+
+        /// A click in a view that isn't opaque can move a window that moves
+        /// by its background, as on macOS.
+        #[unsafe(method(mouseDownCanMoveWindow))]
+        fn mouse_down_can_move_window(&self) -> bool {
+            // SAFETY: isOpaque takes nothing and returns BOOL.
+            let opaque: bool = unsafe { msg_send![self, isOpaque] };
+            !opaque
+        }
+
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
+            false
+        }
+
+        #[unsafe(method(postsFrameChangedNotifications))]
+        fn posts_frame_changed_notifications(&self) -> bool {
+            self.ivars().notes.get() & Change::Frame.off() == 0
+        }
+
+        #[unsafe(method(setPostsFrameChangedNotifications:))]
+        fn set_posts_frame_changed_notifications(&self, flag: bool) {
+            set_posts(self, Change::Frame, flag);
+        }
+
+        #[unsafe(method(postsBoundsChangedNotifications))]
+        fn posts_bounds_changed_notifications(&self) -> bool {
+            self.ivars().notes.get() & Change::Bounds.off() == 0
+        }
+
+        #[unsafe(method(setPostsBoundsChangedNotifications:))]
+        fn set_posts_bounds_changed_notifications(&self, flag: bool) {
+            set_posts(self, Change::Bounds, flag);
+        }
     }
 
     unsafe impl NSObjectProtocol for NSViewImpl {}
@@ -580,6 +473,14 @@ pub(crate) fn tracking(view: &NSViewImpl) -> &RefCell<crate::tracking::ViewTrack
 
 pub(crate) fn input_context(view: &NSViewImpl) -> &RefCell<Option<Retained<NSTextInputContext>>> {
     &view.ivars().input_context
+}
+
+pub(crate) fn key_links(view: &NSViewImpl) -> &crate::keyloop::KeyLinks {
+    &view.ivars().key_links
+}
+
+pub(crate) fn tool_tip(view: &NSViewImpl) -> &RefCell<Option<Retained<objc2_foundation::NSString>>> {
+    &view.ivars().tool_tip
 }
 
 /// The view moved in its window, or showed or hid: tracking areas and
@@ -752,6 +653,7 @@ fn change_frame(view: &NSViewImpl, new: NSRect) {
     }
     invalidate(view, bounds(view));
     moved(view);
+    changed(view, Change::Frame);
 }
 
 fn change_bounds_origin(view: &NSViewImpl, origin: NSPoint) {
@@ -765,6 +667,88 @@ fn change_bounds_origin(view: &NSViewImpl, origin: NSPoint) {
         _ => invalidate(view, bounds(view)),
     }
     moved(view);
+    changed(view, Change::Bounds);
+}
+
+// Frame and bounds notifications.
+//
+// A view posts NSViewFrameDidChangeNotification when its frame changes
+// (after its subviews were resized, so theirs come first) and
+// NSViewBoundsDidChangeNotification when its bounds origin does, a clip
+// view's scrolling included; a new frame size alone changes no bounds
+// notification, as on macOS. Posting is on by default and a program may
+// turn it off; turning it back on posts once if anything changed meanwhile
+// (conformance/tests/appkit_events.rs pins all of this). A change nobody
+// observes costs a load or two: whether anyone observes each name is
+// remembered until the notification center's registrations change.
+
+#[derive(Clone, Copy)]
+enum Change {
+    Frame,
+    Bounds,
+}
+
+impl Change {
+    /// The view's flag: posting is off.
+    fn off(self) -> u8 {
+        match self {
+            Change::Frame => 1,
+            Change::Bounds => 2,
+        }
+    }
+
+    /// The view's flag: it changed while posting was off.
+    fn missed(self) -> u8 {
+        self.off() << 2
+    }
+
+    fn name(self) -> &'static objc2_foundation::NSString {
+        match self {
+            Change::Frame => crate::notifications::name!(NSViewFrameDidChangeNotification),
+            Change::Bounds => crate::notifications::name!(NSViewBoundsDidChangeNotification),
+        }
+    }
+}
+
+thread_local! {
+    /// The notification center's generation when last asked, and whether
+    /// each name was observed then.
+    static OBSERVED: Cell<(u64, bool, bool)> = const { Cell::new((0, false, false)) };
+}
+
+fn observed(change: Change) -> bool {
+    use sidestep_foundation::notification_center::{generation, has_observers};
+    let now = generation();
+    let (seen, mut frame, mut bounds) = OBSERVED.with(Cell::get);
+    if seen != now {
+        (frame, bounds) = (has_observers(Change::Frame.name()), has_observers(Change::Bounds.name()));
+        OBSERVED.with(|o| o.set((now, frame, bounds)));
+    }
+    match change {
+        Change::Frame => frame,
+        Change::Bounds => bounds,
+    }
+}
+
+fn changed(view: &NSViewImpl, change: Change) {
+    let notes = view.ivars().notes.get();
+    if notes & change.off() != 0 {
+        view.ivars().notes.set(notes | change.missed());
+    } else if observed(change) {
+        sidestep_foundation::notification_center::post(change.name(), Some(view), None);
+    }
+}
+
+fn set_posts(view: &NSViewImpl, change: Change, on: bool) {
+    let notes = view.ivars().notes.get();
+    if !on {
+        view.ivars().notes.set(notes | change.off());
+        return;
+    }
+    view.ivars().notes.set(notes & !(change.off() | change.missed()));
+    if notes & change.missed() != 0 && observed(change) {
+        sidestep_foundation::notification_center::post(change.name(), Some(view), None);
+    }
 }
 
 /// Share a change in the superview's size among a view's flexible margins
@@ -856,12 +840,7 @@ pub(crate) fn set_window(view: &NSViewImpl, window: Option<NonNull<NSWindow>>) {
     // A content view leaving its window (or the window going away) keeps
     // no link to it as its next responder.
     if let Some(old) = view.ivars().window.get() {
-        // SAFETY: every view is an NSResponderImpl, whose ivars hold the
-        // link.
-        let responder = unsafe { &*(view as *const NSViewImpl).cast::<NSResponderImpl>() };
-        if responder.ivars().next.get() == Some(old.cast::<NSResponder>()) {
-            responder.ivars().next.set(None);
-        }
+        crate::responder::unlink_next(as_view(view), old.cast::<NSResponder>());
     }
     if is_clip(view)
         && let Some(old) = window_of(view)

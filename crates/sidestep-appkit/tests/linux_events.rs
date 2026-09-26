@@ -1,0 +1,723 @@
+//! Input and window behaviour on Linux, through the null render thread:
+//! each test shows windows that no compositor displays and plays the
+//! compositor's part itself (`sidestep_appkit::testing`), so what the
+//! program sees, and when, is exact. What Apple's AppKit does is pinned by
+//! `conformance/`; these cover what only a real display could show there:
+//! input arriving from the render thread, focus and activation, pointer
+//! tracking and cursors.
+//!
+//! AppKit belongs to the main thread, so this file has its own `main`.
+
+#[cfg(target_vendor = "apple")]
+fn main() {}
+
+#[cfg(not(target_vendor = "apple"))]
+fn main() {
+    linux::main();
+}
+
+#[cfg(not(target_vendor = "apple"))]
+mod linux {
+    use std::cell::RefCell;
+
+    use objc2::rc::Retained;
+    use objc2::runtime::{NSObject, NSObjectProtocol, ProtocolObject};
+    use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+    use objc2_app_kit::{
+        NSApplication, NSApplicationDelegate, NSBackingStoreType, NSEvent, NSEventMask, NSEventType, NSPanel,
+        NSResponder, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    };
+    use objc2_foundation::{NSNotification, NSNumber, NSPoint, NSRect, NSSize};
+    use sidestep_appkit::testing::{self, Seen};
+
+    thread_local!(static LOG: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) });
+
+    fn log(line: String) {
+        LOG.with(|l| l.borrow_mut().push(line));
+    }
+
+    fn take_log() -> Vec<String> {
+        LOG.with(|l| std::mem::take(&mut *l.borrow_mut()))
+    }
+
+    pub(crate) struct ProbeIvars {
+        name: &'static str,
+        /// What a mouse down does: nothing more, or follow the drag in a
+        /// loop of its own until the button comes up.
+        tracks: bool,
+    }
+
+    define_class!(
+        /// A view that writes down what it gets.
+        #[unsafe(super(NSView, NSResponder, NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "LinuxEventsProbe"]
+        #[ivars = ProbeIvars]
+        pub(crate) struct Probe;
+
+        impl Probe {
+            #[unsafe(method(isFlipped))]
+            fn is_flipped(&self) -> bool {
+                true
+            }
+
+            #[unsafe(method(acceptsFirstResponder))]
+            fn accepts_first_responder(&self) -> bool {
+                true
+            }
+
+            #[unsafe(method(mouseDown:))]
+            fn mouse_down(&self, event: &NSEvent) {
+                log(format!("{} mouseDown: {}", self.ivars().name, at(self, event)));
+                if !self.ivars().tracks {
+                    return;
+                }
+                let window = self.window().expect("in a window");
+                let mask = NSEventMask::LeftMouseDragged | NSEventMask::LeftMouseUp;
+                while let Some(e) = window.nextEventMatchingMask(mask) {
+                    let what = if e.r#type() == NSEventType::LeftMouseUp { "up" } else { "drag" };
+                    log(format!("{} tracked {what} {}", self.ivars().name, at(self, &e)));
+                    if e.r#type() == NSEventType::LeftMouseUp {
+                        break;
+                    }
+                }
+            }
+
+            #[unsafe(method(mouseUp:))]
+            fn mouse_up(&self, event: &NSEvent) {
+                log(format!("{} mouseUp: {}", self.ivars().name, at(self, event)));
+            }
+
+            #[unsafe(method(keyDown:))]
+            fn key_down(&self, event: &NSEvent) {
+                let chars = event.characters().map(|c| c.to_string()).unwrap_or_default();
+                log(format!("{} keyDown: {chars}", self.ivars().name));
+                // And up the chain, to the window.
+                unsafe { msg_send![super(self), keyDown: event] }
+            }
+        }
+
+        unsafe impl NSObjectProtocol for Probe {}
+    );
+
+    impl Probe {
+        fn new(mtm: MainThreadMarker, name: &'static str, frame: NSRect, tracks: bool) -> Retained<Self> {
+            let this = Self::alloc(mtm).set_ivars(ProbeIvars { name, tracks });
+            unsafe { msg_send![super(this), initWithFrame: frame] }
+        }
+    }
+
+    fn at(view: &NSView, event: &NSEvent) -> String {
+        let p = view.convertPoint_fromView(event.locationInWindow(), None);
+        format!("{:.0},{:.0}", p.x, p.y)
+    }
+
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> NSRect {
+        NSRect::new(NSPoint::new(x, y), NSSize::new(w, h))
+    }
+
+    /// A titled window on "screen", settled: configured and key.
+    fn shown(mtm: MainThreadMarker, content: &NSView) -> (Retained<NSWindow>, u32) {
+        let style = NSWindowStyleMask::Titled | NSWindowStyleMask::Closable | NSWindowStyleMask::Resizable;
+        let w = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                rect(0.0, 0.0, 300.0, 200.0),
+                style,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        unsafe { w.setReleasedWhenClosed(false) };
+        w.setContentView(Some(content));
+        w.makeKeyAndOrderFront(None);
+        testing::settle();
+        let id = testing::showing_id(&w);
+        (w, id)
+    }
+
+    fn windows_show_and_take_the_keyboard(mtm: MainThreadMarker) {
+        let view = Probe::new(mtm, "content", rect(0.0, 0.0, 300.0, 200.0), false);
+        let (w, id) = shown(mtm, &view);
+        assert!(w.isVisible());
+        assert!(w.isKeyWindow() && w.isMainWindow());
+        assert!(NSApplication::sharedApplication(mtm).isActive());
+        let log = testing::take_render_log();
+        let created = Seen::Created { window: id, width: 300, height: 200, popup_of: None, sheet_of: None };
+        assert!(log.contains(&created), "{log:?}");
+        w.orderOut(None);
+        testing::settle();
+        assert!(!w.isVisible() && !w.isKeyWindow());
+        assert!(testing::take_render_log().contains(&Seen::Closed { window: id }));
+        take_log();
+    }
+
+    fn input_reaches_views_in_order(mtm: MainThreadMarker) {
+        let view = Probe::new(mtm, "content", rect(0.0, 0.0, 300.0, 200.0), false);
+        let (w, id) = shown(mtm, &view);
+        testing::inject_enter(id, 10.0, 10.0);
+        testing::inject_button(id, 10.0, 20.0, 0, true, 1, 0);
+        testing::inject_button(id, 10.0, 20.0, 0, false, 1, 0);
+        testing::inject_key(id, 38, "a", "a", true, 0);
+        testing::settle();
+        assert_eq!(take_log(), ["content mouseDown: 10,20", "content mouseUp: 10,20", "content keyDown: a"]);
+        w.orderOut(None);
+        testing::settle();
+    }
+
+    /// A loop nested in a handler carries on with the input after the event
+    /// being handled, even input that arrived with it.
+    fn a_nested_loop_gets_the_rest_of_a_batch(mtm: MainThreadMarker) {
+        let view = Probe::new(mtm, "content", rect(0.0, 0.0, 300.0, 200.0), true);
+        let (w, id) = shown(mtm, &view);
+        testing::inject_button(id, 5.0, 5.0, 0, true, 1, 0);
+        testing::inject_motion(id, 6.0, 7.0, 0);
+        testing::inject_motion(id, 8.0, 9.0, 0);
+        testing::inject_button(id, 8.0, 9.0, 0, false, 1, 0);
+        testing::inject_key(id, 38, "a", "a", true, 0);
+        testing::settle();
+        // The two moves are coalesced into the later one; the key waits for
+        // the loop to end.
+        assert_eq!(
+            take_log(),
+            ["content mouseDown: 5,5", "content tracked drag 8,9", "content tracked up 8,9", "content keyDown: a"]
+        );
+        w.orderOut(None);
+        testing::settle();
+    }
+
+    define_class!(
+        /// An application and window delegate that writes down what it
+        /// hears.
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "LinuxEventsDelegate"]
+        pub(crate) struct Delegate;
+
+        unsafe impl NSObjectProtocol for Delegate {}
+
+        unsafe impl NSWindowDelegate for Delegate {
+            #[unsafe(method(windowDidBecomeKey:))]
+            fn did_become_key(&self, _: &NSNotification) {
+                log("windowDidBecomeKey:".into());
+            }
+
+            #[unsafe(method(windowDidResignKey:))]
+            fn did_resign_key(&self, _: &NSNotification) {
+                log("windowDidResignKey:".into());
+            }
+
+            #[unsafe(method(windowDidResize:))]
+            fn did_resize(&self, n: &NSNotification) {
+                let w: Retained<NSWindow> = n.object().unwrap().downcast().unwrap();
+                log(format!("windowDidResize: {}", w.contentLayoutRect().size.width));
+            }
+
+            #[unsafe(method(windowWillStartLiveResize:))]
+            fn will_start_live_resize(&self, n: &NSNotification) {
+                let w: Retained<NSWindow> = n.object().unwrap().downcast().unwrap();
+                log(format!("windowWillStartLiveResize: {}", w.inLiveResize()));
+            }
+
+            #[unsafe(method(windowDidEndLiveResize:))]
+            fn did_end_live_resize(&self, n: &NSNotification) {
+                let w: Retained<NSWindow> = n.object().unwrap().downcast().unwrap();
+                log(format!("windowDidEndLiveResize: {}", w.inLiveResize()));
+            }
+
+            #[unsafe(method(windowDidChangeBackingProperties:))]
+            fn did_change_backing(&self, n: &NSNotification) {
+                let info = n.userInfo().expect("user info");
+                let key = unsafe { objc2_app_kit::NSBackingPropertyOldScaleFactorKey };
+                let old: Retained<NSNumber> = info.objectForKey(key).unwrap().downcast().unwrap();
+                log(format!("windowDidChangeBackingProperties: from {}", old.doubleValue()));
+            }
+
+            #[unsafe(method(windowWillClose:))]
+            fn will_close(&self, _: &NSNotification) {
+                log("windowWillClose:".into());
+            }
+        }
+
+        unsafe impl NSApplicationDelegate for Delegate {
+            #[unsafe(method(applicationWillBecomeActive:))]
+            fn will_become_active(&self, _: &NSNotification) {
+                log("applicationWillBecomeActive:".into());
+            }
+
+            #[unsafe(method(applicationDidBecomeActive:))]
+            fn did_become_active(&self, _: &NSNotification) {
+                log("applicationDidBecomeActive:".into());
+            }
+
+            #[unsafe(method(applicationWillResignActive:))]
+            fn will_resign_active(&self, _: &NSNotification) {
+                log("applicationWillResignActive:".into());
+            }
+
+            #[unsafe(method(applicationDidResignActive:))]
+            fn did_resign_active(&self, _: &NSNotification) {
+                log("applicationDidResignActive:".into());
+            }
+
+            #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
+            fn should_terminate_after_last_window_closed(&self, _: &NSApplication) -> bool {
+                log("applicationShouldTerminateAfterLastWindowClosed:".into());
+                false
+            }
+        }
+    );
+
+    impl Delegate {
+        fn new(mtm: MainThreadMarker) -> Retained<Self> {
+            unsafe { msg_send![super(Self::alloc(mtm).set_ivars(())), init] }
+        }
+    }
+
+    fn focus_and_activation_notify(mtm: MainThreadMarker) {
+        let app = NSApplication::sharedApplication(mtm);
+        let delegate = Delegate::new(mtm);
+        app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+        let view = Probe::new(mtm, "content", rect(0.0, 0.0, 300.0, 200.0), false);
+        let (w, id) = shown(mtm, &view);
+        w.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+        take_log();
+        testing::inject_focus(id, false);
+        testing::settle();
+        // Losing the keyboard resigns key at once, and the application's
+        // activity a moment later, unless a window of ours gets it back.
+        assert_eq!(take_log(), ["windowDidResignKey:"]);
+        testing::run_for(80);
+        assert_eq!(take_log(), ["applicationWillResignActive:", "applicationDidResignActive:"]);
+        testing::inject_focus(id, true);
+        testing::settle();
+        assert_eq!(take_log(), ["windowDidBecomeKey:", "applicationWillBecomeActive:", "applicationDidBecomeActive:"]);
+        // Focus leaving and coming back in one batch of input changes
+        // nothing.
+        testing::inject_focus(id, false);
+        testing::inject_focus(id, true);
+        testing::settle();
+        testing::run_for(80);
+        assert_eq!(take_log(), Vec::<String>::new());
+        // In two, the window resigns and becomes key again, but the
+        // application stays active.
+        testing::inject_focus(id, false);
+        testing::settle();
+        testing::inject_focus(id, true);
+        testing::settle();
+        testing::run_for(80);
+        assert_eq!(take_log(), ["windowDidResignKey:", "windowDidBecomeKey:"]);
+        w.setDelegate(None);
+        app.setDelegate(None);
+        w.orderOut(None);
+        testing::settle();
+        take_log();
+    }
+
+    fn live_resizes_and_scale_changes_notify(mtm: MainThreadMarker) {
+        let delegate = Delegate::new(mtm);
+        let view = Probe::new(mtm, "content", rect(0.0, 0.0, 300.0, 200.0), false);
+        let (w, id) = shown(mtm, &view);
+        w.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+        testing::inject_configure(id, 320, 200, 1.0, true, false);
+        testing::inject_configure(id, 340, 200, 1.0, true, false);
+        testing::inject_configure(id, 340, 200, 1.0, false, false);
+        testing::settle();
+        assert_eq!(
+            take_log(),
+            [
+                "windowWillStartLiveResize: true",
+                "windowDidResize: 320",
+                "windowDidResize: 340",
+                "windowDidEndLiveResize: false",
+            ]
+        );
+        testing::inject_configure(id, 340, 200, 2.0, false, false);
+        testing::settle();
+        assert_eq!(take_log(), ["windowDidChangeBackingProperties: from 1"]);
+        assert_eq!(w.backingScaleFactor(), 2.0);
+        w.setDelegate(None);
+        w.orderOut(None);
+        testing::settle();
+    }
+
+    define_class!(
+        /// Closes its window when clicked.
+        #[unsafe(super(NSView, NSResponder, NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "LinuxEventsCloser"]
+        pub(crate) struct Closer;
+
+        impl Closer {
+            #[unsafe(method(mouseDown:))]
+            fn mouse_down(&self, _: &NSEvent) {
+                self.window().unwrap().close();
+                log("closed".into());
+            }
+        }
+    );
+
+    fn the_last_window_closing_is_asked_about_afterwards(mtm: MainThreadMarker) {
+        let app = NSApplication::sharedApplication(mtm);
+        let delegate = Delegate::new(mtm);
+        app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+        let view: Retained<Closer> =
+            unsafe { msg_send![super(Closer::alloc(mtm).set_ivars(())), initWithFrame: rect(0.0, 0.0, 300.0, 200.0)] };
+        let (w, id) = shown(mtm, &view);
+        w.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+        take_log();
+        testing::inject_button(id, 5.0, 5.0, 0, true, 1, 0);
+        testing::settle();
+        testing::run_for(80);
+        // Asked once the click is handled, not inside close. (Without a
+        // key window the application is no longer active, on Wayland.)
+        assert_eq!(
+            take_log(),
+            [
+                "windowWillClose:",
+                "windowDidResignKey:",
+                "closed",
+                "applicationShouldTerminateAfterLastWindowClosed:",
+                "applicationWillResignActive:",
+                "applicationDidResignActive:",
+            ]
+        );
+        w.setDelegate(None);
+        app.setDelegate(None);
+    }
+
+    define_class!(
+        /// A view that takes the click that activates its window.
+        #[unsafe(super(NSView, NSResponder, NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "LinuxEventsFirstMouse"]
+        pub(crate) struct FirstMouse;
+
+        impl FirstMouse {
+            #[unsafe(method(acceptsFirstMouse:))]
+            fn accepts_first_mouse(&self, _: Option<&NSEvent>) -> bool {
+                true
+            }
+
+            #[unsafe(method(mouseDown:))]
+            fn mouse_down(&self, _: &NSEvent) {
+                log("first mouseDown:".into());
+            }
+
+            #[unsafe(method(mouseUp:))]
+            fn mouse_up(&self, _: &NSEvent) {
+                log("first mouseUp:".into());
+            }
+        }
+    );
+
+    fn activating_clicks_reach_views_that_accept_them(mtm: MainThreadMarker) {
+        let view = Probe::new(mtm, "content", rect(0.0, 0.0, 300.0, 200.0), false);
+        let (w, id) = shown(mtm, &view);
+        // The click that activated the window only activated it.
+        testing::inject_activating_press(id, 5.0, 5.0);
+        testing::inject_button(id, 5.0, 5.0, 0, false, 1, 0);
+        testing::settle();
+        assert_eq!(take_log(), Vec::<String>::new());
+        testing::inject_button(id, 6.0, 6.0, 0, true, 1, 0);
+        testing::inject_button(id, 6.0, 6.0, 0, false, 1, 0);
+        testing::settle();
+        assert_eq!(take_log(), ["content mouseDown: 6,6", "content mouseUp: 6,6"]);
+        // A view that accepts first mouse gets it.
+        let first: Retained<FirstMouse> = unsafe {
+            msg_send![super(FirstMouse::alloc(mtm).set_ivars(())), initWithFrame: rect(0.0, 0.0, 300.0, 200.0)]
+        };
+        w.setContentView(Some(&first));
+        testing::inject_activating_press(id, 5.0, 5.0);
+        testing::inject_button(id, 5.0, 5.0, 0, false, 1, 0);
+        testing::settle();
+        assert_eq!(take_log(), ["first mouseDown:", "first mouseUp:"]);
+        w.orderOut(None);
+        testing::settle();
+    }
+
+    fn windows_move_by_their_background(mtm: MainThreadMarker) {
+        // A plain view isn't opaque: pressing it moves the window.
+        let plain = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, 300.0, 200.0));
+        let (w, id) = shown(mtm, &plain);
+        w.setMovableByWindowBackground(true);
+        testing::take_render_log();
+        testing::inject_button(id, 5.0, 5.0, 0, true, 1, 0);
+        testing::inject_button(id, 5.0, 5.0, 0, false, 1, 0);
+        testing::settle();
+        assert!(testing::take_render_log().contains(&Seen::Request { window: id, request: "Move".into() }));
+        // A view that handles its clicks (the probe says it's flipped, not
+        // opaque, so make it refuse): only right clicks and views that
+        // won't let the window move reach views.
+        w.setMovableByWindowBackground(false);
+        testing::inject_button(id, 5.0, 5.0, 0, true, 1, 0);
+        testing::inject_button(id, 5.0, 5.0, 0, false, 1, 0);
+        testing::settle();
+        assert!(!testing::take_render_log().iter().any(|s| matches!(s, Seen::Request { .. })));
+        w.orderOut(None);
+        testing::settle();
+    }
+
+    fn tab_through_input(mtm: MainThreadMarker) {
+        let content = Probe::new(mtm, "content", rect(0.0, 0.0, 300.0, 200.0), false);
+        let a = Probe::new(mtm, "a", rect(10.0, 10.0, 50.0, 20.0), false);
+        let b = Probe::new(mtm, "b", rect(10.0, 50.0, 50.0, 20.0), false);
+        content.addSubview(&a);
+        content.addSubview(&b);
+        let (w, id) = shown(mtm, &content);
+        unsafe { a.setNextKeyView(Some(&b)) };
+        w.makeFirstResponder(Some(&a));
+        take_log();
+        // Tab (evdev 15), then Shift-Tab.
+        testing::inject_key(id, 23, "\t", "\t", true, 0);
+        testing::settle();
+        let first = w.firstResponder().unwrap();
+        assert!(std::ptr::eq(&*first, &**b as &NSResponder));
+        let shift = objc2_app_kit::NSEventModifierFlags::Shift.0;
+        testing::inject_key(id, 23, "\u{19}", "\u{19}", true, shift);
+        testing::settle();
+        let first = w.firstResponder().unwrap();
+        assert!(std::ptr::eq(&*first, &**a as &NSResponder));
+        assert_eq!(
+            take_log(),
+            ["a keyDown: \t", "content keyDown: \t", "b keyDown: \u{19}", "content keyDown: \u{19}"]
+        );
+        w.orderOut(None);
+        testing::settle();
+    }
+
+    fn titled_window(mtm: MainThreadMarker, content: &NSView, width: f64, height: f64) -> Retained<NSWindow> {
+        let style = NSWindowStyleMask::Titled | NSWindowStyleMask::Closable;
+        let w = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                rect(0.0, 0.0, width, height),
+                style,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        unsafe { w.setReleasedWhenClosed(false) };
+        w.setContentView(Some(content));
+        w
+    }
+
+    fn sheets_take_keys_and_block_their_parent(mtm: MainThreadMarker) {
+        let parent_view = Probe::new(mtm, "parent", rect(0.0, 0.0, 300.0, 200.0), false);
+        let (parent, parent_id) = shown(mtm, &parent_view);
+        let sheet_view = Probe::new(mtm, "sheet", rect(0.0, 0.0, 200.0, 100.0), false);
+        let sheet = titled_window(mtm, &sheet_view, 200.0, 100.0);
+        parent.makeFirstResponder(Some(&parent_view));
+        sheet.makeFirstResponder(Some(&sheet_view));
+        testing::take_render_log();
+        parent.beginSheet_completionHandler(&sheet, None);
+        testing::settle();
+        let sheet_id = testing::showing_id(&sheet);
+        let created =
+            Seen::Created { window: sheet_id, width: 200, height: 100, popup_of: None, sheet_of: Some(parent_id) };
+        assert!(testing::take_render_log().contains(&created));
+        // The sheet is key in its parent's place; the parent stays main.
+        assert!(sheet.isKeyWindow() && !parent.isKeyWindow());
+        assert!(parent.isMainWindow() && !sheet.isMainWindow());
+        // Keys typed on the parent's toplevel go to the sheet; clicks on the
+        // parent go nowhere, clicks on the sheet reach it.
+        testing::inject_key(parent_id, 38, "a", "a", true, 0);
+        testing::inject_button(parent_id, 5.0, 5.0, 0, true, 1, 0);
+        testing::inject_button(parent_id, 5.0, 5.0, 0, false, 1, 0);
+        testing::inject_button(sheet_id, 7.0, 8.0, 0, true, 1, 0);
+        testing::inject_button(sheet_id, 7.0, 8.0, 0, false, 1, 0);
+        testing::settle();
+        assert_eq!(take_log(), ["sheet keyDown: a", "sheet mouseDown: 7,8", "sheet mouseUp: 7,8"]);
+        // Ended, the parent is key again and takes input.
+        parent.endSheet(&sheet);
+        testing::settle();
+        assert!(parent.isKeyWindow() && !sheet.isVisible());
+        testing::inject_key(parent_id, 38, "b", "b", true, 0);
+        testing::settle();
+        assert_eq!(take_log(), ["parent keyDown: b"]);
+        parent.orderOut(None);
+        testing::settle();
+    }
+
+    fn modal_loops_take_only_their_input(mtm: MainThreadMarker) {
+        let other_view = Probe::new(mtm, "other", rect(0.0, 0.0, 300.0, 200.0), false);
+        let (other, other_id) = shown(mtm, &other_view);
+        let panel_view = Probe::new(mtm, "panel", rect(0.0, 0.0, 100.0, 100.0), false);
+        let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
+            NSPanel::alloc(mtm),
+            rect(0.0, 0.0, 100.0, 100.0),
+            NSWindowStyleMask::Titled | NSWindowStyleMask::UtilityWindow,
+            NSBackingStoreType::Buffered,
+            false,
+        );
+        panel.setContentView(Some(&panel_view));
+        panel.setWorksWhenModal(true);
+        panel.orderFront(None);
+        let modal_view = Probe::new(mtm, "modal", rect(0.0, 0.0, 200.0, 100.0), false);
+        let modal = titled_window(mtm, &modal_view, 200.0, 100.0);
+        testing::settle();
+        let panel_id = testing::showing_id(&panel);
+        take_log();
+        // Clicks for each window arrive once the modal loop runs; a timer in
+        // it ends it.
+        let block = block2::RcBlock::new(move |_: std::ptr::NonNull<objc2_foundation::NSTimer>| {
+            let modal_id = testing::showing_id(
+                &NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).modalWindow().unwrap(),
+            );
+            for id in [other_id, modal_id, panel_id] {
+                testing::inject_button(id, 5.0, 5.0, 0, true, 1, 0);
+                testing::inject_button(id, 5.0, 5.0, 0, false, 1, 0);
+            }
+        });
+        let stop = block2::RcBlock::new(|_: std::ptr::NonNull<objc2_foundation::NSTimer>| {
+            NSApplication::sharedApplication(MainThreadMarker::new().unwrap()).stopModalWithCode(9);
+        });
+        let common = unsafe { objc2_foundation::NSRunLoopCommonModes };
+        let run_loop = objc2_foundation::NSRunLoop::currentRunLoop();
+        let clicks = unsafe { objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(0.02, false, &block) };
+        let stopper = unsafe { objc2_foundation::NSTimer::timerWithTimeInterval_repeats_block(0.2, false, &stop) };
+        unsafe {
+            run_loop.addTimer_forMode(&clicks, common);
+            run_loop.addTimer_forMode(&stopper, common);
+        }
+        let response = NSApplication::sharedApplication(mtm).runModalForWindow(&modal);
+        assert_eq!(response, 9);
+        assert_eq!(
+            take_log(),
+            ["modal mouseDown: 5,5", "modal mouseUp: 5,5", "panel mouseDown: 5,5", "panel mouseUp: 5,5"]
+        );
+        for w in [&*modal, &*panel as &NSWindow, &*other] {
+            w.orderOut(None);
+        }
+        testing::settle();
+    }
+
+    /// Set `NSInitialToolTipDelay`, in milliseconds.
+    fn set_tool_tip_delay(ms: isize) {
+        let class = objc2::runtime::AnyClass::get(c"NSUserDefaults").unwrap();
+        unsafe {
+            let defaults: Retained<objc2::runtime::AnyObject> = msg_send![class, standardUserDefaults];
+            let key = objc2_foundation::NSString::from_str("NSInitialToolTipDelay");
+            let _: () = msg_send![&*defaults, setInteger: ms, forKey: &*key];
+        }
+    }
+
+    fn tool_tips_show_after_a_rest(mtm: MainThreadMarker) {
+        set_tool_tip_delay(40);
+        let content = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, 300.0, 200.0));
+        let tipped = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 100.0, 100.0, 100.0));
+        tipped.setToolTip(Some(&objc2_foundation::NSString::from_str("A tip")));
+        content.addSubview(&tipped);
+        let (w, id) = shown(mtm, &content);
+        testing::take_render_log();
+        let popups = |log: &[Seen]| -> Vec<u32> {
+            log.iter()
+                .filter_map(|s| match s {
+                    Seen::Created { window, popup_of: Some(parent), .. } if *parent == id => Some(*window),
+                    _ => None,
+                })
+                .collect()
+        };
+        // Resting over the view (its top left, 10 points in) brings the tip
+        // up below the pointer.
+        testing::inject_enter(id, 10.0, 10.0);
+        testing::settle();
+        assert!(popups(&testing::take_render_log()).is_empty());
+        testing::run_for(120);
+        testing::settle();
+        let shown = popups(&testing::take_render_log());
+        assert_eq!(shown.len(), 1);
+        // Leaving takes it down.
+        testing::inject_motion(id, 200.0, 150.0, 0);
+        testing::settle();
+        assert!(testing::take_render_log().contains(&Seen::Closed { window: shown[0] }));
+        // A click takes it down too, and it doesn't come back until the
+        // pointer moves on and rests.
+        testing::inject_motion(id, 10.0, 10.0, 0);
+        testing::run_for(120);
+        testing::settle();
+        let again = popups(&testing::take_render_log());
+        assert_eq!(again.len(), 1);
+        testing::inject_button(id, 10.0, 10.0, 0, true, 1, 0);
+        testing::inject_button(id, 10.0, 10.0, 0, false, 1, 0);
+        testing::settle();
+        testing::run_for(120);
+        testing::settle();
+        let log = testing::take_render_log();
+        assert!(log.contains(&Seen::Closed { window: again[0] }));
+        assert!(popups(&log).is_empty());
+        w.orderOut(None);
+        testing::settle();
+        set_tool_tip_delay(0);
+    }
+
+    define_class!(
+        /// Stands in for a menu: performs Command-Q.
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "LinuxEventsMenu"]
+        pub(crate) struct Menu;
+
+        impl Menu {
+            #[unsafe(method(performKeyEquivalent:))]
+            fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
+                let key = event.charactersIgnoringModifiers().map(|c| c.to_string()).unwrap_or_default();
+                log(format!("menu performKeyEquivalent: {key}"));
+                key == "q"
+            }
+        }
+    );
+
+    fn the_main_menu_has_key_equivalents_after_the_window(mtm: MainThreadMarker) {
+        let app = NSApplication::sharedApplication(mtm);
+        let menu: Retained<Menu> = unsafe { msg_send![super(Menu::alloc(mtm).set_ivars(())), init] };
+        let _: () = unsafe { msg_send![&*app, setMainMenu: &*menu] };
+        let view = Probe::new(mtm, "content", rect(0.0, 0.0, 300.0, 200.0), false);
+        let (w, id) = shown(mtm, &view);
+        w.makeFirstResponder(Some(&view));
+        take_log();
+        let command = objc2_app_kit::NSEventModifierFlags::Command.0;
+        testing::inject_key(id, 32, "q", "q", true, command);
+        testing::inject_key(id, 33, "w", "w", true, command);
+        testing::settle();
+        // The menu performs Q; W goes on to the first responder.
+        let log = take_log();
+        assert_eq!(log[0], "menu performKeyEquivalent: q");
+        assert!(log.contains(&"menu performKeyEquivalent: w".to_string()));
+        assert!(log.contains(&"content keyDown: w".to_string()) && !log.contains(&"content keyDown: q".to_string()));
+        let _: () = unsafe { msg_send![&*app, setMainMenu: None::<&objc2::runtime::AnyObject>] };
+        w.orderOut(None);
+        testing::settle();
+    }
+
+    type Test = (&'static str, fn(MainThreadMarker));
+
+    pub(crate) fn main() {
+        let mtm = MainThreadMarker::new().expect("runs on the main thread");
+        testing::use_null_backend();
+        let tests: &[Test] = &[
+            ("windows_show_and_take_the_keyboard", windows_show_and_take_the_keyboard),
+            ("input_reaches_views_in_order", input_reaches_views_in_order),
+            ("a_nested_loop_gets_the_rest_of_a_batch", a_nested_loop_gets_the_rest_of_a_batch),
+            ("focus_and_activation_notify", focus_and_activation_notify),
+            ("live_resizes_and_scale_changes_notify", live_resizes_and_scale_changes_notify),
+            ("the_last_window_closing_is_asked_about_afterwards", the_last_window_closing_is_asked_about_afterwards),
+            ("activating_clicks_reach_views_that_accept_them", activating_clicks_reach_views_that_accept_them),
+            ("windows_move_by_their_background", windows_move_by_their_background),
+            ("tab_through_input", tab_through_input),
+            ("sheets_take_keys_and_block_their_parent", sheets_take_keys_and_block_their_parent),
+            ("modal_loops_take_only_their_input", modal_loops_take_only_their_input),
+            ("tool_tips_show_after_a_rest", tool_tips_show_after_a_rest),
+            ("the_main_menu_has_key_equivalents_after_the_window", the_main_menu_has_key_equivalents_after_the_window),
+        ];
+        let only = std::env::args().nth(1).filter(|a| !a.starts_with('-'));
+        for (name, test) in tests {
+            if only.as_deref().is_some_and(|o| !name.contains(o)) {
+                continue;
+            }
+            objc2::rc::autoreleasepool(|_| test(mtm));
+            testing::take_render_log();
+            println!("test {name} ... ok");
+        }
+    }
+}

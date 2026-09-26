@@ -364,13 +364,6 @@ impl State {
             || self.blocks.iter().any(|b| b.modes.matches(mode, &self.common)))
     }
 
-    /// Whether blocks, or on the main thread the main queue, wait for
-    /// `mode`.
-    pub(crate) fn has_blocks_for(&self, mode: Mode) -> bool {
-        self.blocks.iter().any(|b| b.modes.matches(mode, &self.common))
-            || (self.main_queue_runs_in(mode) && main_queue_pending())
-    }
-
     pub(crate) fn depth(&self) -> usize {
         self.stack.len()
     }

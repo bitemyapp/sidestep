@@ -12,8 +12,8 @@ sidestep-runtime.workspace = true
 sidestep-foundation.workspace = true
 objc2 = { workspace = true, features = ["gnustep-2-1"] }
 block2 = { workspace = true, features = ["gnustep-2-1"] }
-objc2-foundation = { workspace = true, features = ["gnustep-2-1", "NSObject", "NSString", "NSDictionary", "NSGeometry", "NSNotification", "NSTimer", "NSDate", "NSZone", "NSRange", "block2"] }
-objc2-app-kit = { workspace = true, features = ["gnustep-2-1", "NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics", "NSColor", "NSFont", "NSFontDescriptor", "NSBezierPath", "NSStringDrawing", "NSAttributedString", "NSEvent", "NSScrollView", "NSClipView", "NSRunningApplication", "objc2-core-foundation", "NSPasteboard", "NSText", "NSCursor", "NSTrackingArea", "NSTextInputContext", "NSParagraphStyle", "NSCell"] }
+objc2-foundation = { workspace = true, features = ["gnustep-2-1", "NSObject", "NSString", "NSDictionary", "NSGeometry", "NSNotification", "NSTimer", "NSDate", "NSZone", "NSRange", "block2", "NSRunLoop", "NSValue", "NSUserDefaults", "NSBundle"] }
+objc2-app-kit = { workspace = true, features = ["gnustep-2-1", "NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics", "NSColor", "NSFont", "NSFontDescriptor", "NSBezierPath", "NSStringDrawing", "NSAttributedString", "NSEvent", "NSScrollView", "NSClipView", "NSRunningApplication", "objc2-core-foundation", "NSPasteboard", "NSText", "NSCursor", "NSTrackingArea", "NSTextInputContext", "NSParagraphStyle", "NSCell", "NSPanel", "block2", "NSViewController", "NSWindowController", "NSNib"] }
 smithay-client-toolkit = { version = "0.19", default-features = false, features = ["calloop"] }
 tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }
 # Keymaps and compose sequences, in pure Rust: no libxkbcommon at build or
@@ -35,3 +35,9 @@ swash = { version = "0.2.10", default-features = false, features = ["std", "scal
 icu_provider = { version = "2.1", default-features = false, features = ["logging"] }
 # Which characters are emoji, to draw them in color (compiled into the binary).
 icu_properties = { version = "2.1", default-features = false, features = ["compiled_data"] }
+
+# Input and windows through the null render thread; AppKit belongs to the
+# main thread, which the test harness doesn't run on.
+[[test]]
+name = "linux_events"
+harness = false

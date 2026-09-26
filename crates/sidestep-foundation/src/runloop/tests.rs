@@ -165,25 +165,3 @@ fn an_idle_loop_sleeps() {
     here.remove_observer(observer);
     source.invalidate();
 }
-
-#[test]
-fn shims_for_event_loops_that_sleep_elsewhere() {
-    use objc2_foundation::NSTimer;
-    let fired = Rc::new(Cell::new(0));
-    let f = fired.clone();
-    let block = block2::RcBlock::new(move |_: std::ptr::NonNull<NSTimer>| f.set(f.get() + 1));
-    let timer = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.02, true, &block) };
-    let deadline = super::next_timer_deadline().unwrap();
-    let ahead = deadline.saturating_duration_since(Instant::now());
-    assert!(ahead <= Duration::from_millis(20) && ahead > Duration::from_millis(5), "{ahead:?}");
-    super::fire_due_timers(Instant::now());
-    assert_eq!(fired.get(), 0);
-    std::thread::sleep(ahead);
-    super::fire_due_timers(Instant::now());
-    assert_eq!(fired.get(), 1);
-    current().perform(&[Mode::DEFAULT], || {});
-    assert!(super::next_timer_deadline().unwrap() <= Instant::now());
-    super::fire_due_timers(Instant::now());
-    timer.invalidate();
-    assert!(super::next_timer_deadline().is_none());
-}

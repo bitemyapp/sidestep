@@ -1,0 +1,17 @@
+[package]
+name = "appkit-events"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+objc2.workspace = true
+block2.workspace = true
+objc2-foundation = { workspace = true, features = ["NSString", "NSObject", "NSTimer", "NSDate", "NSDictionary", "NSGeometry", "NSNotification", "NSZone", "NSUserDefaults", "block2"] }
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics", "NSColor", "NSFont", "NSFontDescriptor", "NSBezierPath", "NSStringDrawing", "NSAttributedString", "NSEvent", "NSRunningApplication", "NSPanel", "block2", "objc2-core-foundation"] }
+sidestep.workspace = true
+
+# The hover scenario puts the pointer over the window itself on Linux,
+# where a headless compositor has no pointer to move.
+[target.'cfg(not(target_vendor = "apple"))'.dependencies]
+sidestep-appkit.workspace = true

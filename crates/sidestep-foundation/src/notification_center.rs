@@ -28,7 +28,7 @@
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use block2::{DynBlock, RcBlock};
@@ -250,11 +250,14 @@ pub(crate) struct CenterIvars {
     /// Registrations in the index, so a center nobody observes costs one
     /// load per post.
     count: AtomicUsize,
+    /// Bumped whenever registrations are added or removed, so a poster can
+    /// cache whether a name is observed (see [`generation`]).
+    generation: AtomicU64,
 }
 
 impl CenterIvars {
     fn new() -> Self {
-        CenterIvars { index: Mutex::new(Index::default()), count: AtomicUsize::new(0) }
+        CenterIvars { index: Mutex::new(Index::default()), count: AtomicUsize::new(0), generation: AtomicU64::new(0) }
     }
 }
 
@@ -343,6 +346,7 @@ impl NSNotificationCenterImpl {
         let reg = Arc::new(Registration { seq: index.seq, slot, removed: AtomicBool::new(false), target });
         index.insert(slot, Entry { reg, name, object: address(object), observer });
         self.ivars().count.fetch_add(1, Ordering::Release);
+        self.ivars().generation.fetch_add(1, Ordering::Release);
     }
 
     /// Remove `observer`'s registrations for `name` and `object` (`None`
@@ -371,6 +375,7 @@ impl NSNotificationCenterImpl {
             chosen.into_iter().filter_map(|slot| index.take(slot)).collect()
         };
         self.ivars().count.fetch_sub(removed.len(), Ordering::Release);
+        self.ivars().generation.fetch_add(1, Ordering::Release);
         // Dropped here, unlocked: a token's block may hold the last
         // reference to anything.
         drop(removed);
@@ -430,6 +435,7 @@ impl NSNotificationCenterImpl {
                 .collect()
         };
         self.ivars().count.fetch_sub(removed.len(), Ordering::Release);
+        self.ivars().generation.fetch_add(1, Ordering::Release);
     }
 }
 
@@ -516,6 +522,17 @@ pub fn default_center() -> Retained<NSNotificationCenter> {
     // SAFETY: the implementation class is the class NSNotificationCenter
     // names.
     unsafe { Retained::cast_unchecked(default_center_impl()) }
+}
+
+/// A number that changes whenever the default center's registrations do
+/// (0 before any): a framework that posts often can remember what
+/// [`has_observers`] answered for a name and ask again only when this
+/// changed, so an unobserved post costs a load or two.
+pub fn generation() -> u64 {
+    let Some(center) = DEFAULT.get() else { return 0 };
+    // SAFETY: the default center is immortal.
+    let center = unsafe { &*center.0 };
+    center.ivars().generation.load(Ordering::Acquire)
 }
 
 /// Whether anyone observes `name` on the default center (with any object).

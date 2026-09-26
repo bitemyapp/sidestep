@@ -113,6 +113,28 @@ The platform layer since (`examples/appkit-input` shows it):
 - Nested event loops (`nextEventMatchingMask:…`, posted events), modal
   loops (`runModalForWindow:`), local event monitors; target/action through
   the responder chain.
+
+Events and window behaviour since (`examples/appkit-events` shows sheets,
+modal windows and tooltips; `examples/eventbench` measures):
+
+- AppKit runs on Foundation's run loop: the render thread's messages are a
+  source and the display pass an observer in the common modes, which
+  include `NSModalPanelRunLoopMode` and `NSEventTrackingRunLoopMode`; every
+  loop runs in its mode, so timers fire where they were added.
+- Window and application notifications with every name exported, and
+  delegates that hear through the notification center; close,
+  `releasedWhenClosed`, moves, resizes, live resizes, backing scale;
+  launching, `terminate:` with now, cancel and later answers, the question
+  after the last window closes; view frame and bounds notifications.
+- Keys to the key window, the window's Tab, Shift-Tab and Escape, the key
+  view loop (links, valid key views, selection, recalculation),
+  `noResponderFor:`, first mouse, moving windows by their background,
+  `+sharedApplication` for subclasses.
+- Sheets (attached inside their parent as subsurfaces), modal sessions,
+  `NSPanel`, tooltips, frame autosave, `NSViewController` and
+  `NSWindowController` (without nibs), periodic events.
+- A render thread without a display (`SIDESTEP_BACKEND=null`) and a testing
+  module that plays the compositor for input.
 - The general `NSPasteboard` as the Wayland clipboard, for strings (other
   types wait for `NSData` and `NSArray`), bounded so a client that never
   answers can't stall the main thread more than once, with the old type
@@ -120,6 +142,11 @@ The platform layer since (`examples/appkit-input` shows it):
 
 Next:
 
+- Popups of sheets (menus, tooltips over a sheet); `windowWillResize:toSize:`
+  during a live resize; `NSApplicationWillUpdateNotification` and
+  `DidUpdate`; content under a client-side title bar
+  (`NSWindowStyleMaskFullSizeContentView`, a transparent title bar); view
+  controllers' appearance callbacks; image cursors (with `NSImage`).
 - Input methods: surrounding text (and so deleting around the caret),
   content types from the client.
 - Image cursors, drag and drop, `NSScreen`. (`-[NSView trackingAreas]`

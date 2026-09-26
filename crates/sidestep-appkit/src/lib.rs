@@ -31,29 +31,40 @@ pub(crate) fn load_shell<T: ClassType>() {
 mod app;
 mod backend;
 mod clipboard;
+mod controllers;
 mod cursor;
 mod desktop;
 mod event;
+mod event_loop;
 mod font;
 mod graphics;
 mod inputcontext;
 mod keybindings;
 mod keycodes;
+mod keyloop;
+mod modal;
 mod momentum;
+mod notifications;
+mod panel;
 mod paragraph;
 mod pasteboard;
 mod protocol;
 mod raster;
+mod responder;
 mod string_drawing;
 #[cfg(test)]
 mod test_objects;
+#[doc(hidden)]
+pub mod testing;
 mod text;
+mod tooltip;
 mod tracking;
 mod views;
 mod window;
+mod window_events;
 
 sidestep_runtime::static_class!(pub NSRESPONDER, NSRESPONDER_META = "NSResponder", || {
-    let _ = views::NSResponderImpl::class();
+    let _ = responder::NSResponderImpl::class();
 });
 
 sidestep_runtime::static_class!(pub NSVIEW, NSVIEW_META = "NSView", || {
@@ -72,8 +83,20 @@ sidestep_runtime::static_class!(pub NSWINDOW, NSWINDOW_META = "NSWindow", || {
     let _ = window::NSWindowImpl::class();
 });
 
+sidestep_runtime::static_class!(pub NSVIEWCONTROLLER, NSVIEWCONTROLLER_META = "NSViewController", || {
+    let _ = controllers::NSViewControllerImpl::class();
+});
+
+sidestep_runtime::static_class!(pub NSWINDOWCONTROLLER, NSWINDOWCONTROLLER_META = "NSWindowController", || {
+    let _ = controllers::NSWindowControllerImpl::class();
+});
+
+sidestep_runtime::static_class!(pub NSPANEL, NSPANEL_META = "NSPanel", || {
+    let _ = panel::NSPanelImpl::class();
+});
+
 sidestep_runtime::static_class!(pub NSAPPLICATION, NSAPPLICATION_META = "NSApplication", || {
-    let _ = app::NSApplicationImpl::class();
+    app::load();
     // Programs make fonts soon after; open the system's in the meantime.
     text::fonts::prewarm();
 });
@@ -128,10 +151,6 @@ sidestep_runtime::static_class!(pub NSTRACKINGAREA, NSTRACKINGAREA_META = "NSTra
 sidestep_runtime::static_class!(pub NSTEXTINPUTCONTEXT, NSTEXTINPUTCONTEXT_META = "NSTextInputContext", || {
     let _ = inputcontext::NSTextInputContextImpl::class();
 });
-
-// Run loop modes AppKit adds.
-sidestep_foundation::constant_string!(NSEventTrackingRunLoopMode = "NSEventTrackingRunLoopMode");
-sidestep_foundation::constant_string!(NSModalPanelRunLoopMode = "NSModalPanelRunLoopMode");
 
 // Pasteboard types and names.
 sidestep_foundation::constant_string!(NSPasteboardTypeString = "public.utf8-plain-text");

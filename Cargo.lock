@@ -12,6 +12,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "appkit-events"
+version = "0.0.0"
+dependencies = [
+ "block2",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "sidestep",
+ "sidestep-appkit",
+]
+
+[[package]]
 name = "appkit-input"
 version = "0.0.0"
 dependencies = [
@@ -294,6 +306,17 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "eventbench"
+version = "0.0.0"
+dependencies = [
+ "block2",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "sidestep",
 ]
 
 [[package]]
