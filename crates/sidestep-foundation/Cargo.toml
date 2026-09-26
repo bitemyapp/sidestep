@@ -11,4 +11,4 @@ license.workspace = true
 sidestep-runtime.workspace = true
 objc2 = { workspace = true, features = ["gnustep-2-1"] }
 block2 = { workspace = true, features = ["gnustep-2-1"] }
-objc2-foundation = { workspace = true, features = ["gnustep-2-1", "NSObject", "NSString", "NSThread", "NSZone", "NSDictionary", "NSTimer", "NSDate", "NSNotification", "block2"] }
+objc2-foundation = { workspace = true, features = ["gnustep-2-1", "NSObject", "NSString", "NSThread", "NSZone", "NSDictionary", "NSTimer", "NSDate", "NSNotification", "block2", "NSArray", "NSSet", "NSEnumerator", "NSValue", "NSNull", "NSRange", "NSObjCRuntime", "NSGeometry", "objc2-core-foundation", "NSIndexSet"] }

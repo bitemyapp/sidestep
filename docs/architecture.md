@@ -112,6 +112,51 @@ unwinds into the Rust caller.
 first, with messages from inside `+initialize` on the same thread allowed
 through.
 
+## Foundation collections
+
+Apple's collections are class clusters: `NSArray` is abstract and every
+instance is some private subclass. Sidestep's are concrete classes under
+the public names, and the mutable ones are subclasses of the immutable
+ones, as the objc2 bindings require.
+
+- **Storage.** An immutable `NSArray` holds a boxed slice of retained
+  elements, `NSIndexSet` sorted ranges, and `NSDictionary` and `NSSet` a
+  hash table (`crates/sidestep-foundation/src/table.rs`): entries in a
+  vector with their hashes, plus an open-addressed index of positions once
+  there are more than four. Nothing in them changes after `init`, so any
+  thread may read them. The mutable classes keep their own storage in a
+  `RefCell`, with a count of changes.
+- **No messages on hot paths.** Methods check whether the receiver's class
+  is exactly Sidestep's, one comparison, and then read the storage
+  directly. Keys and elements that are exactly Sidestep's strings or
+  numbers are hashed and compared without messages (strings cache their
+  hashes); anything else gets `-hash` and `-isEqual:`. A subclass defined
+  in an app is reached through its primitive methods (`-count`,
+  `-objectAtIndex:`, `-objectForKey:`, `-keyEnumerator`), as Foundation
+  specifies.
+- **Callbacks can't break the storage.** A mutable collection stays
+  borrowed for reading while it sends messages to its elements, so an
+  `-isEqual:` or comparator that mutates it panics (with Foundation's
+  "was mutated while being enumerated") instead of freeing elements under
+  the loop. Changes never run other code while they hold the storage: they
+  retain what they add before and release what they remove after.
+- **Fast enumeration.** Arrays hand out their element buffer in one batch;
+  dictionaries and sets copy batches into the caller's buffer.
+  `mutationsPtr` points at the mutation count, which objc2's iterators
+  check before reading each element.
+- **Copy-on-write.** A copy of a mutable collection shares its storage
+  behind a reference count; the mutable one copies the storage before its
+  next change. So `[items copy]` costs the same for ten elements or ten
+  thousand, as on Apple's Foundation.
+- **Numbers.** `NSNumber` keeps the value in its widest type and reports
+  Foundation's C types (`numberWithUnsignedChar:` is a `short`, and so
+  on). Numbers compare by value across types and hash through their value
+  as a `double`, so `1` and `1.0` are one dictionary key. Small integers
+  are shared objects made on first use.
+- **Failures.** Where Foundation raises (an index out of range, a nil
+  element), Sidestep panics with Foundation's message, which unwinds into
+  the Rust caller like an unrecognized selector.
+
 ## AppKit: a main thread and a render thread
 
 AppKit's contract is single-threaded: events, timers, the responder chain and

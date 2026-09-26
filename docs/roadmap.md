@@ -16,11 +16,22 @@ Done so far: constant strings from static memory, an immutable
 `NSDictionary` (faster than Apple's on the same Mac, see `examples/dictbench`), `NSTimer` with blocks, a timer-only `NSRunLoop`, and
 `NSNotification` for delegate callbacks.
 
+Collections and values: `NSArray`, `NSMutableArray`, `NSMutableDictionary`,
+`NSSet`, `NSMutableSet`, `NSIndexSet`, `NSMutableIndexSet`, `NSEnumerator`
+and fast enumeration with mutation detection, `NSNumber`, `NSValue` and
+`NSNull`, with Foundation's
+descriptions, copy-on-write copies, and its failures (out-of-range indexes,
+nil elements) as panics carrying its messages. Faster than Apple's on the
+same Mac in nearly every operation `examples/arraybench` and `dictbench`
+measure; creating a small `NSNumber` is the exception (Apple's are tagged
+pointers).
+
 - `NSMutableString`; `-description` on NSObject before Foundation's
   `NSString` has loaded.
-- Collections: `NSArray`, `NSMutableArray`, `NSMutableDictionary`, `NSSet`.
-- `NSNumber`, `NSValue`, `NSData`, `NSDate`, `NSError`, `NSURL`,
-  `NSProcessInfo`.
+- Collections: `NSOrderedSet`, `NSCountedSet`, `NSHashTable`, `NSMapTable`,
+  key-value coding on collections; `-[NSString compare:]`, which sorting
+  strings by selector needs.
+- `NSData`, `NSDate`, `NSError`, `NSURL`, `NSProcessInfo`.
 - `NSNotificationCenter`, the rest of `NSRunLoop`, `NSAutoreleasePool`, and
   the rest of `NSThread`.
 - Every static class findable by name, not only after first use.

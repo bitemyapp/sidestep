@@ -1,0 +1,11 @@
+[package]
+name = "arraybench"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+objc2.workspace = true
+block2.workspace = true
+objc2-foundation = { workspace = true, features = ["NSString", "NSObject", "NSArray", "NSSet", "NSValue", "NSEnumerator", "NSObjCRuntime", "NSRange", "block2"] }
+sidestep.workspace = true

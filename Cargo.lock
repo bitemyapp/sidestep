@@ -20,6 +20,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "arraybench"
+version = "0.0.0"
+dependencies = [
+ "block2",
+ "objc2",
+ "objc2-foundation",
+ "sidestep",
+]
+
+[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
