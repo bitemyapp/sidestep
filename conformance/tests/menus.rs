@@ -923,8 +923,15 @@ fn application_validation(mtm: MainThreadMarker, app: &NSApplication) {
     };
     assert!(!answer(sel!(unhideAllApplications:)));
     assert!(!answer(sel!(hide:)));
-    for action in [sel!(terminate:), sel!(hideOtherApplications:), sel!(unhide:), sel!(orderFrontStandardAboutPanel:)] {
+    for action in [sel!(terminate:), sel!(unhide:), sel!(orderFrontStandardAboutPanel:)] {
         assert!(answer(action), "{action:?}");
+    }
+    // Hiding the others depends on which other applications are running
+    // and visible: yes on a desktop, no on CI's headless macOS runner.
+    // Sidestep sees no other applications and always answers yes.
+    let hide_others = answer(sel!(hideOtherApplications:));
+    if !cfg!(target_vendor = "apple") {
+        assert!(hide_others);
     }
     // Arranging and miniaturizing all windows wants one on screen.
     if !app.windows().iter().any(|w| w.isVisible()) {
