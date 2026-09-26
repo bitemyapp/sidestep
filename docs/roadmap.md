@@ -21,8 +21,20 @@ beyond `malloc` and `free`.
 ## 1. Foundation core
 
 Done so far: constant strings from static memory, an immutable
-`NSDictionary` (faster than Apple's on the same Mac, see `examples/dictbench`), `NSTimer` with blocks, a timer-only `NSRunLoop`, and
-`NSNotification` for delegate callbacks.
+`NSDictionary` (faster than Apple's on the same Mac, see
+`examples/dictbench`), and the system services: `NSRunLoop` and
+CFRunLoop with modes, timers, observers, sources and cross-thread
+handoff; `NSTimer`, `NSDate`, `NSNotification` and
+`NSNotificationCenter`; `NSThread` and the `performSelector…` family;
+libdispatch (queues, groups, semaphores, `after`, timer, data and vnode
+sources) and `NSOperationQueue` with dependencies; `NSData`, `NSURL`, `NSURLComponents`,
+`NSError`, `NSFileManager` over XDG directories, `NSBundle`,
+`NSProcessInfo`, `NSUUID`, the runtime lookup functions,
+`NSUserDefaults`, property lists, `NSJSONSerialization`, the locks,
+`NSDateFormatter` with `NSLocale` and `NSTimeZone`, and toll-free
+CoreFoundation for strings, data, dates, errors, URLs, dictionaries and
+preferences. `examples/servicebench` measures the run loop and the
+notification center.
 
 Collections and values: `NSArray`, `NSMutableArray`, `NSMutableDictionary`,
 `NSSet`, `NSMutableSet`, `NSIndexSet`, `NSMutableIndexSet`, `NSEnumerator`
@@ -54,9 +66,12 @@ numbers; `NSAttributedString` and `NSMutableAttributedString`;
 - Collections: `NSOrderedSet`, `NSCountedSet`, `NSHashTable`, `NSMapTable`,
   key-value coding on collections, `NSCoding`; class factory methods
   (`+array`, `+dictionary`) that return the receiving subclass.
-- `NSData`, `NSDate`, `NSError`, `NSURL`, `NSProcessInfo`.
-- `NSNotificationCenter`, the rest of `NSRunLoop`, `NSAutoreleasePool`, and
-  the rest of `NSThread`.
+- `NSAutoreleasePool`; `NSCalendar`, `NSDateComponents` and
+  `NSNumberFormatter`; locale data beyond English.
+- `NSStream`; `NSURLSession`; `dispatch_io`, `dispatch_data` and
+  dispatch blocks (`dispatch_block_create`).
+- Remove sidestep-foundation's `collections` feature gates (the feature is
+  on by default now that the collections exist).
 - `-forwardInvocation:`, once `NSInvocation` exists (the runtime forwards
   through `-forwardingTargetForSelector:` already).
 

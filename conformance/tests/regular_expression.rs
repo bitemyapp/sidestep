@@ -353,7 +353,6 @@ fn equality_and_lone_surrogates() {
 }
 
 #[test]
-#[cfg_attr(not(target_vendor = "apple"), ignore = "needs NSError from the Foundation services workstream")]
 fn invalid_patterns_are_errors() {
     let e = NSRegularExpression::regularExpressionWithPattern_options_error(&s("("), NSRegularExpressionOptions(0))
         .expect_err("an invalid pattern");

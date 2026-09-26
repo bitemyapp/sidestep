@@ -61,6 +61,12 @@ pub(crate) fn empty() -> Retained<NSString> {
     unsafe { Retained::retain(EMPTY.as_object().cast()) }.expect("static object")
 }
 
+/// [`hash_bytes`] on a `&str`: what every string class's `-hash` is for
+/// its text.
+pub(crate) const fn hash_str(s: &str) -> NSUInteger {
+    hash_bytes(s.as_bytes())
+}
+
 /// The hash of a string's UTF-8 (WTF-8) bytes. Every string class's `-hash`
 /// is this, and collections hash Sidestep's own strings with it directly. It
 /// is never 0, which marks a hash not yet computed.

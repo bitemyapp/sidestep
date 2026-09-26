@@ -11,10 +11,10 @@ license.workspace = true
 sidestep-runtime.workspace = true
 objc2 = { workspace = true, features = ["gnustep-2-1"] }
 block2 = { workspace = true, features = ["gnustep-2-1"] }
-objc2-foundation = { workspace = true, features = ["gnustep-2-1", "NSObject", "NSString", "NSThread", "NSZone", "NSDictionary", "NSTimer", "NSDate", "NSNotification", "block2", "NSArray", "NSSet", "NSEnumerator", "NSValue", "NSNull", "NSRange", "NSObjCRuntime", "NSGeometry", "objc2-core-foundation", "NSIndexSet", "NSAttributedString", "NSCharacterSet", "NSScanner", "NSPathUtilities", "NSRegularExpression", "NSTextCheckingResult"] }
+objc2-foundation = { workspace = true, features = ["gnustep-2-1", "NSObject", "NSString", "NSThread", "NSZone", "NSDictionary", "NSTimer", "NSDate", "NSNotification", "block2", "NSArray", "NSSet", "NSEnumerator", "NSValue", "NSNull", "NSRange", "NSObjCRuntime", "NSGeometry", "objc2-core-foundation", "NSIndexSet", "NSAttributedString", "NSCharacterSet", "NSScanner", "NSPathUtilities", "NSRegularExpression", "NSTextCheckingResult", "NSRunLoop", "NSOperation", "NSData", "NSURL", "NSError", "NSFileManager", "NSProcessInfo", "NSUUID", "NSBundle", "NSUserDefaults", "NSLock", "NSFormatter", "NSDateFormatter", "NSLocale", "NSTimeZone"] }
 # Strings and attributed strings.
 memchr = "2.7"
-libc = "0.2"
+libc = "0.2.177"
 icu_normalizer = { version = "2.1", default-features = false, features = ["compiled_data"] }
 icu_casemap = { version = "2.1", default-features = false, features = ["compiled_data"] }
 icu_collator = { version = "2.1", default-features = false, features = ["compiled_data"] }
@@ -22,3 +22,15 @@ icu_properties = { version = "2.1", default-features = false, features = ["compi
 icu_segmenter = { version = "2.1", default-features = false, features = ["compiled_data"] }
 icu_locale_core = { version = "2.1", default-features = false }
 fancy-regex = "0.16"
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "objc2", "CFRunLoop", "CFDate"] }
+plist = { version = "1.10.1", default-features = false }
+jiff = { version = "0.2.37", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
+
+[features]
+default = ["collections"]
+# Every method and function that returns or takes NSArray, NSNumber or
+# NSNull: in URLs, the file manager, search paths, bundles, process info,
+# operations, user defaults, formatters, locales and time zones, property
+# lists and JSON, and CFArray and CFNumber. On by default now that the
+# collections exist; the gates are to be removed.
+collections = ["objc2-foundation/NSArray", "objc2-foundation/NSNull"]
