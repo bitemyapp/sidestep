@@ -11,13 +11,17 @@
 //! )
 //! ```
 //!
-//! Each level indents by four spaces. Arrays and dictionaries nested in a
-//! collection describe themselves at the next level (through
+//! Each level indents by four spaces. Arrays and dictionaries nested in an
+//! array or a dictionary describe themselves at the next level (through
 //! `-descriptionWithLocale:indent:`); anything else contributes its
 //! `-description`, quoted unless it is a plain run of ASCII letters and
-//! digits. Dictionaries whose keys are all strings list them sorted as
-//! Foundation's `-compare:` orders strings: by canonical decomposition, so
-//! a precomposed letter sorts with its base letter, then by code point.
+//! digits. Sets and ordered sets (`{( ... )}`) list their members more
+//! loosely, as Foundation's do: strings quoted, anything that describes
+//! itself at a level (sets and ordered sets too) nested, and anything else
+//! as its `-description`, unquoted. Dictionaries whose keys are all
+//! strings list them sorted as Foundation's `-compare:` orders strings: by
+//! canonical decomposition, so a precomposed letter sorts with its base
+//! letter, then by code point.
 
 use std::fmt::Write;
 
@@ -30,8 +34,8 @@ use objc2_foundation::NSString;
 
 use crate::number::fast_value;
 use crate::string::fast_parts;
-use crate::util::{description, is_exactly};
-use crate::{array, dictionary};
+use crate::util::{description, inherits, is_exactly};
+use crate::{array, dictionary, ordered_set};
 
 fn pad(out: &mut String, level: usize) {
     for _ in 0..level {
@@ -49,6 +53,11 @@ pub(crate) fn element(out: &mut String, obj: &AnyObject, level: usize) {
         array::describe(out, obj, level);
     } else if is_exactly(obj, &crate::NSDICTIONARY) || is_exactly(obj, &crate::NSMUTABLEDICTIONARY) {
         dictionary::describe(out, obj, level);
+    } else if ordered_set::is_ordered_set(obj) || inherits(obj, &crate::NSSET) {
+        // Arrays and dictionaries nest only arrays and dictionaries; sets
+        // and ordered sets, which describe themselves at a level too,
+        // appear quoted.
+        quote(out, &description(obj));
     } else if responds(obj, sel!(descriptionWithLocale:indent:)) {
         // SAFETY: the selector returns an NSString.
         let text: Option<Retained<NSString>> =
@@ -66,6 +75,35 @@ fn responds(obj: &AnyObject, sel: Sel) -> bool {
     unsafe { msg_send![obj, respondsToSelector: sel] }
 }
 
+/// Append `obj` as a member of a set or an ordered set at `level`.
+pub(crate) fn member(out: &mut String, obj: &AnyObject, level: usize) {
+    if let Some((text, _)) = fast_parts(obj) {
+        quote(out, text);
+    } else if let Some(n) = fast_value(obj) {
+        out.push_str(&n.to_string());
+    } else if is_exactly(obj, &crate::NSARRAY) || is_exactly(obj, &crate::NSMUTABLEARRAY) {
+        array::describe(out, obj, level);
+    } else if is_exactly(obj, &crate::NSDICTIONARY) || is_exactly(obj, &crate::NSMUTABLEDICTIONARY) {
+        dictionary::describe(out, obj, level);
+    } else if responds(obj, sel!(descriptionWithLocale:indent:)) {
+        // SAFETY: the selector returns an NSString.
+        let text: Option<Retained<NSString>> =
+            unsafe { msg_send![obj, descriptionWithLocale: None::<&AnyObject>, indent: level] };
+        if let Some(text) = text {
+            out.push_str(&text.to_string());
+        }
+    } else if let Some(text) = string_text(obj) {
+        quote(out, &text);
+    } else {
+        out.push_str(&description(obj));
+    }
+}
+
+/// `{( ... )}`: the members of a set or an ordered set, one per line.
+pub(crate) fn members<'a>(out: &mut String, elements: impl IntoIterator<Item = &'a AnyObject>, level: usize) {
+    lines(out, "{(", ")}", elements, level, member);
+}
+
 /// A list of elements between `open` and `close`, one per line.
 pub(crate) fn list<'a>(
     out: &mut String,
@@ -73,6 +111,19 @@ pub(crate) fn list<'a>(
     close: &str,
     elements: impl IntoIterator<Item = &'a AnyObject>,
     level: usize,
+) {
+    lines(out, open, close, elements, level, element);
+}
+
+/// Elements between `open` and `close`, one per line, each appended by
+/// `each`.
+fn lines<'a>(
+    out: &mut String,
+    open: &str,
+    close: &str,
+    elements: impl IntoIterator<Item = &'a AnyObject>,
+    level: usize,
+    each: fn(&mut String, &AnyObject, usize),
 ) {
     pad(out, level);
     out.push_str(open);
@@ -84,7 +135,7 @@ pub(crate) fn list<'a>(
         }
         any = true;
         pad(out, level + 1);
-        element(out, obj, level + 1);
+        each(out, obj, level + 1);
     }
     if any {
         out.push('\n');

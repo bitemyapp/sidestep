@@ -7,5 +7,5 @@ publish = false
 [dependencies]
 objc2.workspace = true
 block2.workspace = true
-objc2-foundation = { workspace = true, features = ["NSString", "NSObject", "NSArray", "NSSet", "NSValue", "NSEnumerator", "NSObjCRuntime", "NSRange", "block2", "NSIndexSet", "NSDictionary"] }
+objc2-foundation = { workspace = true, features = ["NSString", "NSObject", "NSArray", "NSSet", "NSValue", "NSEnumerator", "NSObjCRuntime", "NSRange", "block2", "NSIndexSet", "NSDictionary", "NSOrderedSet", "NSSortDescriptor", "NSHashTable", "NSMapTable", "NSPointerFunctions", "NSPointerArray", "NSCache", "NSKeyValueCoding"] }
 sidestep.workspace = true

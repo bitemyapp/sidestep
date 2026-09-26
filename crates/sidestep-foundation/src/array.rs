@@ -40,7 +40,7 @@ use std::sync::Arc;
 
 use block2::DynBlock;
 use objc2::rc::{Allocated, Retained};
-use objc2::runtime::{AnyClass, AnyObject, Bool, MessageReceiver, NSObject, NSObjectProtocol, Sel};
+use objc2::runtime::{AnyClass, AnyObject, Bool, NSObject, NSObjectProtocol, Sel};
 use objc2::{AnyThread, DefinedClass, Message, define_class, msg_send};
 use objc2_foundation::{
     NSArray, NSBinarySearchingOptions, NSComparator, NSEnumerationOptions, NSEnumerator, NSFastEnumerationState,
@@ -52,7 +52,7 @@ use crate::enumerator::{self, Mutations, Source, immutable_mutations};
 use crate::guarded::{Cow, Reading, counted};
 use crate::table::{SCAN, Table};
 use crate::util::{self, Needle, equal, index_out_of_bounds, is_exactly, nil_argument, range_out_of_bounds};
-use crate::{describe, index_set, string};
+use crate::{describe, index_set, sort_descriptor, string};
 
 type Items = Vec<Retained<AnyObject>>;
 /// A mutable array's elements.
@@ -268,12 +268,13 @@ fn shared_copy(obj: &AnyObject) -> Arc<Buffer> {
 }
 
 /// `count` objects from a C array, retained. A nil among them fails as
-/// Foundation's `-initWithObjects:count:` does.
+/// `receiver`'s `method` (`initWithObjects:count:` and the like) does in
+/// Foundation.
 ///
 /// # Safety
 /// `objects` must point to `count` object pointers (or be anything when
 /// `count` is 0).
-unsafe fn from_c_array(receiver: &str, objects: *const *mut AnyObject, count: usize) -> Items {
+pub(crate) unsafe fn from_c_array(receiver: &str, method: &str, objects: *const *mut AnyObject, count: usize) -> Items {
     (0..count)
         .map(|i| {
             // SAFETY: guaranteed by the caller.
@@ -281,9 +282,7 @@ unsafe fn from_c_array(receiver: &str, objects: *const *mut AnyObject, count: us
             match NonNull::new(obj) {
                 // SAFETY: a live object from the caller.
                 Some(obj) => unsafe { obj.as_ref() }.retain(),
-                None => {
-                    panic!("*** -[{receiver} initWithObjects:count:]: attempt to insert nil object from objects[{i}]")
-                }
+                None => panic!("*** -[{receiver} {method}]: attempt to insert nil object from objects[{i}]"),
             }
         })
         .collect()
@@ -371,9 +370,13 @@ pub(crate) fn block_order(cmp: NSComparator) -> impl FnMut(*mut AnyObject, *mut 
     }
 }
 
-type CompareFn = unsafe extern "C-unwind" fn(NonNull<AnyObject>, NonNull<AnyObject>, *mut c_void) -> NSInteger;
+pub(crate) type CompareFn =
+    unsafe extern "C-unwind" fn(NonNull<AnyObject>, NonNull<AnyObject>, *mut c_void) -> NSInteger;
 
-fn function_order(compare: CompareFn, context: *mut c_void) -> impl FnMut(*mut AnyObject, *mut AnyObject) -> Ordering {
+pub(crate) fn function_order(
+    compare: CompareFn,
+    context: *mut c_void,
+) -> impl FnMut(*mut AnyObject, *mut AnyObject) -> Ordering {
     move |a, b| {
         // SAFETY: the caller passes a comparison function for the elements;
         // elements are never null.
@@ -381,21 +384,30 @@ fn function_order(compare: CompareFn, context: *mut c_void) -> impl FnMut(*mut A
     }
 }
 
+/// `[a selector b]` as an ordering. Sent through the runtime's lookup
+/// directly, so a selector the elements don't answer fails as Foundation's
+/// does (an unrecognized selector) rather than objc2's debug check.
 pub(crate) fn selector_order(selector: Sel) -> impl FnMut(*mut AnyObject, *mut AnyObject) -> Ordering {
     move |a, b| {
-        // SAFETY: the caller passes a comparison selector the elements
-        // answer, taking an object and returning NSComparisonResult.
-        let order: NSInteger = unsafe { MessageReceiver::send_message(a, selector, (b,)) };
+        // SAFETY: the runtime returns the implementation for the selector
+        // (or one that fails loudly); comparison selectors take an object
+        // and return NSComparisonResult, an NSInteger.
+        let order: NSInteger = unsafe {
+            let imp = objc2::ffi::objc_msg_lookup(a, selector).expect("the runtime always finds an implementation");
+            let imp: unsafe extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject) -> NSInteger =
+                std::mem::transmute(imp);
+            imp(a, selector, b)
+        };
         order.cmp(&0)
     }
 }
 
-fn pointers(items: &[Retained<AnyObject>]) -> Vec<*mut AnyObject> {
+pub(crate) fn pointers(items: &[Retained<AnyObject>]) -> Vec<*mut AnyObject> {
     items.iter().map(|o| Retained::as_ptr(o).cast_mut()).collect()
 }
 
 /// The positions of `items` in the order `order` puts them, stably.
-fn sorted_positions(
+pub(crate) fn sorted_positions(
     items: &[Retained<AnyObject>],
     order: &mut dyn FnMut(*mut AnyObject, *mut AnyObject) -> Ordering,
 ) -> Vec<usize> {
@@ -420,7 +432,9 @@ fn sorted(obj: &AnyObject, mut order: impl FnMut(*mut AnyObject, *mut AnyObject)
 /// `-indexOfObject:inSortedRange:options:usingComparator:` over sorted
 /// `items`: where `object` is, or with `InsertionIndex` where it would go;
 /// with `FirstEqual` or `LastEqual`, the first or last of equal elements.
-fn binary_search(
+/// Failures name `receiver`.
+pub(crate) fn binary_search(
+    receiver: &str,
     items: &[Retained<AnyObject>],
     object: &AnyObject,
     range: NSRange,
@@ -431,7 +445,7 @@ fn binary_search(
         (options.contains(NSBinarySearchingOptions::FirstEqual), options.contains(NSBinarySearchingOptions::LastEqual));
     if first && last {
         panic!(
-            "-[NSArray indexOfObject:inSortedRange:options:usingComparator:]: both NSBinarySearchingFirstEqual \
+            "-[{receiver} indexOfObject:inSortedRange:options:usingComparator:]: both NSBinarySearchingFirstEqual \
              and NSBinarySearchingLastEqual options cannot be specified"
         );
     }
@@ -722,7 +736,7 @@ define_class!(
         #[unsafe(method_id(arrayWithObjects:count:))]
         fn array_with_objects(objects: *const *mut AnyObject, count: NSUInteger) -> Retained<NSArray> {
             // SAFETY: the caller passes `count` objects.
-            make(unsafe { from_c_array("NSArray", objects, count) })
+            make(unsafe { from_c_array("NSArray", "initWithObjects:count:", objects, count) })
         }
 
         #[unsafe(method_id(arrayWithArray:))]
@@ -738,7 +752,7 @@ define_class!(
         #[unsafe(method_id(initWithObjects:count:))]
         fn init_with_objects(this: Allocated<Self>, objects: *const *mut AnyObject, count: NSUInteger) -> Retained<Self> {
             // SAFETY: the caller passes `count` objects.
-            let items = unsafe { from_c_array("NSArray", objects, count) };
+            let items = unsafe { from_c_array("NSArray", "initWithObjects:count:", objects, count) };
             init_fixed(this, Store::Owned(items.into_boxed_slice()))
         }
 
@@ -869,7 +883,7 @@ define_class!(
         ) -> NSUInteger {
             let items = elements(self);
             check_range(self, "indexOfObject:inSortedRange:options:usingComparator:", range, items.len());
-            binary_search(&items, object, range, options, comparator)
+            binary_search("NSArray", &items, object, range, options, comparator)
         }
 
         #[unsafe(method_id(objectsAtIndexes:))]
@@ -1038,6 +1052,14 @@ define_class!(
             sorted(self, selector_order(selector))
         }
 
+        #[unsafe(method_id(sortedArrayUsingDescriptors:))]
+        fn sorted_array_using_descriptors(&self, descriptors: &NSArray) -> Retained<NSArray> {
+            let items = elements(self);
+            let sorted = sort_descriptor::sorted(descriptors, &items);
+            drop(items);
+            sorted
+        }
+
         #[unsafe(method(makeObjectsPerformSelector:))]
         fn make_objects_perform_selector(&self, selector: Sel) {
             let mut checked = None;
@@ -1171,10 +1193,11 @@ impl Subclass<'_> {
         }
     }
 
-    /// Put the elements in the order `order` gives, stably.
-    fn sort(&self, order: &mut dyn FnMut(*mut AnyObject, *mut AnyObject) -> Ordering) {
+    /// Put the elements in the order `arrange` gives: it returns their
+    /// positions, in their new order.
+    fn arrange(&self, arrange: impl FnOnce(&[Retained<AnyObject>]) -> Vec<usize>) {
         let items = self.all();
-        for (i, at) in sorted_positions(&items, order).into_iter().enumerate() {
+        for (i, at) in arrange(&items).into_iter().enumerate() {
             self.replace(i, &items[at]);
         }
     }
@@ -1315,11 +1338,17 @@ impl NSMutableArrayImpl {
 
     /// Put the elements in the order `order` gives, stably.
     fn sort(&self, mut order: impl FnMut(*mut AnyObject, *mut AnyObject) -> Ordering) {
+        self.arrange(|items| sorted_positions(items, &mut order));
+    }
+
+    /// Put the elements in the order `arrange` gives: it returns their
+    /// positions, in their new order.
+    fn arrange(&self, arrange: impl FnOnce(&[Retained<AnyObject>]) -> Vec<usize>) {
         if let Some(subclass) = self.subclass() {
-            return subclass.sort(&mut order);
+            return subclass.arrange(arrange);
         }
-        // The array is read while the comparator runs, so it can't change.
-        let positions = sorted_positions(&self.read(), &mut order);
+        // The array is read while comparisons run, so they can't change it.
+        let positions = arrange(&self.read());
         // SAFETY: the elements are only moved among their slots.
         let buffer = unsafe { self.buffer() };
         if buffer.len() == positions.len() {
@@ -1366,7 +1395,7 @@ define_class!(
         #[unsafe(method_id(arrayWithObjects:count:))]
         fn array_with_objects(objects: *const *mut AnyObject, count: NSUInteger) -> Retained<NSMutableArray> {
             // SAFETY: the caller passes `count` objects.
-            make_mutable(unsafe { from_c_array("NSMutableArray", objects, count) })
+            make_mutable(unsafe { from_c_array("NSMutableArray", "initWithObjects:count:", objects, count) })
         }
 
         #[unsafe(method_id(arrayWithArray:))]
@@ -1387,7 +1416,7 @@ define_class!(
         #[unsafe(method_id(initWithObjects:count:))]
         fn init_with_objects(this: Allocated<Self>, objects: *const *mut AnyObject, count: NSUInteger) -> Retained<Self> {
             // SAFETY: the caller passes `count` objects.
-            init_mutable(this, owned(unsafe { from_c_array("NSMutableArray", objects, count) }))
+            init_mutable(this, owned(unsafe { from_c_array("NSMutableArray", "initWithObjects:count:", objects, count) }))
         }
 
         #[unsafe(method_id(initWithArray:))]
@@ -1713,6 +1742,11 @@ define_class!(
         #[unsafe(method(sortUsingSelector:))]
         fn sort_using_selector(&self, selector: Sel) {
             self.sort(selector_order(selector));
+        }
+
+        #[unsafe(method(sortUsingDescriptors:))]
+        fn sort_using_descriptors(&self, descriptors: &NSArray) {
+            self.arrange(|items| sort_descriptor::positions(descriptors, items));
         }
     }
 

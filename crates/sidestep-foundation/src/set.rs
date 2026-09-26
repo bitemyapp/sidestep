@@ -29,7 +29,7 @@ use crate::enumerator::{self, Mutations, Source, immutable_mutations};
 use crate::guarded::Reading;
 use crate::table::{CowTable, Entry, Frozen, Probe, Table, shared};
 use crate::util::{self, inherits, is_exactly, nil_argument};
-use crate::{array, describe};
+use crate::{array, counted_set, describe, sort_descriptor};
 
 type Members = Table<()>;
 
@@ -148,7 +148,7 @@ pub(crate) fn mutations(obj: &AnyObject) -> *mut c_ulong {
 }
 
 /// Whether any set has a member equal to `object`. Retains nothing.
-fn contains(obj: &AnyObject, object: &AnyObject) -> bool {
+pub(crate) fn contains(obj: &AnyObject, object: &AnyObject) -> bool {
     match kind(obj) {
         Kind::Fixed(s) => s.ivars().position(object).is_some(),
         Kind::Mutable(m) => m.ivars().table.position(object).is_some(),
@@ -276,10 +276,11 @@ fn init_mutable(this: Allocated<NSMutableSetImpl>, table: CowTable<()>) -> Retai
     unsafe { msg_send![super(this), init] }
 }
 
-fn description_of(obj: &AnyObject) -> Retained<NSString> {
+/// The description of any set at `level`.
+fn description_of(obj: &AnyObject, level: usize) -> Retained<NSString> {
     let table = table(obj);
     let mut out = String::new();
-    describe::list(&mut out, "{(", ")}", table.entries().iter().map(|e| &*e.key), 0);
+    describe::members(&mut out, table.entries().iter().map(|e| &*e.key), level);
     drop(table);
     NSString::from_str(&out)
 }
@@ -290,9 +291,11 @@ fn is_subset(a: &AnyObject, b: &AnyObject) -> bool {
     table.len() <= count_of(b) && table.entries().iter().all(|e| contains(b, &e.key))
 }
 
-/// `-isEqualToSet:` for any two sets: the same members.
+/// `-isEqualToSet:` for any two sets: the same members, and against a
+/// counted set, each counted once.
 fn sets_equal(a: &AnyObject, b: &AnyObject) -> bool {
-    ptr::eq(a, b) || (count_of(a) == count_of(b) && is_subset(a, b))
+    ptr::eq(a, b)
+        || (count_of(a) == count_of(b) && is_subset(a, b) && counted_set::counts_once(a) && counted_set::counts_once(b))
 }
 
 /// Call `each` with the members of any set until it returns false. An
@@ -485,6 +488,11 @@ define_class!(
             make(passing(self, test))
         }
 
+        #[unsafe(method_id(sortedArrayUsingDescriptors:))]
+        fn sorted_array_using_descriptors(&self, descriptors: &NSArray) -> Retained<NSArray> {
+            sort_descriptor::sorted(descriptors, &members(self))
+        }
+
         #[unsafe(method(isEqualToSet:))]
         fn is_equal_to_set(&self, other: &NSSet) -> bool {
             sets_equal(self, other)
@@ -557,12 +565,19 @@ define_class!(
 
         #[unsafe(method_id(description))]
         fn description(&self) -> Retained<NSString> {
-            description_of(self)
+            description_of(self, 0)
         }
 
         #[unsafe(method_id(descriptionWithLocale:))]
         fn description_with_locale(&self, _locale: Option<&AnyObject>) -> Retained<NSString> {
-            description_of(self)
+            description_of(self, 0)
+        }
+
+        /// Foundation's sets answer this too, and nest in one another's
+        /// descriptions through it.
+        #[unsafe(method_id(descriptionWithLocale:indent:))]
+        fn description_with_locale_indent(&self, _locale: Option<&AnyObject>, level: NSUInteger) -> Retained<NSString> {
+            description_of(self, level)
         }
 
         #[unsafe(method(countByEnumeratingWithState:objects:count:))]
@@ -589,7 +604,7 @@ define_class!(
                 }
                 Kind::Foreign => {
                     // SAFETY: the caller passes a valid state and buffer.
-                    unsafe { enumerator::gathered(state, buffer, len, || array::make(members(self))) }
+                    unsafe { enumerator::gathered(state, buffer, len, immutable_mutations(), || array::make(members(self))) }
                 }
             }
         }

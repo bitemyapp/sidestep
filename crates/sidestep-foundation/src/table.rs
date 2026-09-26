@@ -10,8 +10,8 @@
 //! without sending messages.
 //!
 //! Removal moves the last entry into the hole and closes the gap in the
-//! index by shifting later slots back, so the entries stay dense (fast to
-//! enumerate) and the index needs no tombstones.
+//! index (`hash_index.rs`) by shifting later slots back, so the entries
+//! stay dense (fast to enumerate) and the index needs no tombstones.
 //!
 //! Mutable collections keep their table in a [`CowTable`]: copying one
 //! shares the table with the copy, and the next change copies it first.
@@ -28,6 +28,7 @@ use objc2::runtime::AnyObject;
 use objc2_foundation::NSUInteger;
 
 use crate::guarded::{Cow, counted};
+use crate::hash_index::{self, Index};
 use crate::number::{Number, fast_value};
 use crate::string::fast_parts;
 
@@ -36,8 +37,6 @@ pub(crate) const SCAN: usize = 4;
 /// Up to this many entries, a lookup first looks for the very key object,
 /// which needs no hashing.
 const IDENTITY: usize = 8;
-/// A free slot in the index.
-const FREE: u32 = u32::MAX;
 
 pub(crate) struct Entry<V> {
     pub(crate) hash: NSUInteger,
@@ -47,14 +46,14 @@ pub(crate) struct Entry<V> {
 
 pub(crate) struct Table<V> {
     entries: Vec<Entry<V>>,
-    /// Positions in `entries`, by hash: a power-of-two table at most half
-    /// full, or empty for tables searched in order.
-    index: Box<[u32]>,
+    /// Positions in `entries`, by hash (`hash_index.rs`), or empty for
+    /// tables searched in order.
+    index: Index,
 }
 
 impl<V> Default for Table<V> {
     fn default() -> Self {
-        Table { entries: Vec::new(), index: Box::default() }
+        Table { entries: Vec::new(), index: Index::default() }
     }
 }
 
@@ -86,40 +85,49 @@ impl<'a> Probe<'a> {
     }
 
     fn matches<V>(&self, entry: &Entry<V>) -> bool {
-        match self.matches_quietly(entry) {
-            Some(verdict) => verdict,
-            // SAFETY: -isEqual: takes an object and returns BOOL.
-            None => unsafe { objc2::msg_send![&*entry.key, isEqual: self.key] },
-        }
+        self.matches_key(entry.hash, &entry.key)
     }
 
     /// Whether `entry`'s key matches, if that can be told without sending
     /// a message.
     #[inline]
     fn matches_quietly<V>(&self, entry: &Entry<V>) -> Option<bool> {
-        if entry.hash != self.hash {
+        self.matches_key_quietly(entry.hash, &entry.key)
+    }
+
+    /// Whether a key stored with `hash` matches, asking it `-isEqual:`
+    /// when that can't be told otherwise.
+    #[inline]
+    pub(crate) fn matches_key(&self, hash: NSUInteger, key: &AnyObject) -> bool {
+        match self.matches_key_quietly(hash, key) {
+            Some(verdict) => verdict,
+            // SAFETY: -isEqual: takes an object and returns BOOL.
+            None => unsafe { objc2::msg_send![key, isEqual: self.key] },
+        }
+    }
+
+    /// Whether a key stored with `hash` matches, if that can be told
+    /// without sending a message.
+    #[inline]
+    pub(crate) fn matches_key_quietly(&self, hash: NSUInteger, key: &AnyObject) -> Option<bool> {
+        if hash != self.hash {
             return Some(false);
         }
-        if ptr::eq(&*entry.key, self.key) {
+        if ptr::eq(key, self.key) {
             return Some(true);
         }
         match self.fast {
-            Fast::Text(text) => fast_parts(&entry.key).map(|(other, _)| text == other),
-            Fast::Number(n) => fast_value(&entry.key).map(|other| n.equals(&other)),
+            Fast::Text(text) => fast_parts(key).map(|(other, _)| text == other),
+            Fast::Number(n) => fast_value(key).map(|other| n.equals(&other)),
             Fast::Other => None,
         }
     }
 }
 
-/// Where a hash starts probing. Keys' own hashes can be weak in their low
-/// bits (addresses, small integers), so they are spread first.
-fn home(hash: NSUInteger, mask: usize) -> usize {
-    ((hash as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 32) as usize & mask
-}
-
 impl<V> Table<V> {
     pub(crate) fn with_capacity(count: usize) -> Self {
-        let index = if count > SCAN { vec![FREE; (count * 2).next_power_of_two()].into() } else { Box::default() };
+        let index =
+            if count > SCAN { Index::<false>::with_size(hash_index::size_for(count)) } else { Index::default() };
         Table { entries: Vec::with_capacity(count), index }
     }
 
@@ -136,40 +144,26 @@ impl<V> Table<V> {
     /// the keys, so callers holding a mutable table must not be mutating
     /// it meanwhile.
     pub(crate) fn locate(&self, probe: &Probe) -> Result<usize, usize> {
+        let entries = &self.entries;
         if self.index.is_empty() {
-            return self.entries.iter().position(|e| probe.matches(e)).ok_or(0);
+            return entries.iter().position(|e| probe.matches(e)).ok_or(0);
         }
-        let mask = self.index.len() - 1;
-        let mut slot = home(probe.hash, mask);
-        loop {
-            match self.index[slot] {
-                FREE => return Err(slot),
-                at if probe.matches(&self.entries[at as usize]) => return Ok(at as usize),
-                _ => slot = (slot + 1) & mask,
-            }
-        }
+        self.index.find(probe.hash, |at| probe.matches(&entries[at]))
     }
 
     /// `locate`, if it can be done without sending a message; `None` if
     /// some key would have to be asked.
     pub(crate) fn locate_quietly(&self, probe: &Probe) -> Option<Result<usize, usize>> {
+        let entries = &self.entries;
         if self.index.is_empty() {
-            for (i, e) in self.entries.iter().enumerate() {
+            for (i, e) in entries.iter().enumerate() {
                 if probe.matches_quietly(e)? {
                     return Some(Ok(i));
                 }
             }
             return Some(Err(0));
         }
-        let mask = self.index.len() - 1;
-        let mut slot = home(probe.hash, mask);
-        loop {
-            match self.index[slot] {
-                FREE => return Some(Err(slot)),
-                at if probe.matches_quietly(&self.entries[at as usize])? => return Some(Ok(at as usize)),
-                _ => slot = (slot + 1) & mask,
-            }
-        }
+        self.index.find_quietly(probe.hash, |at| probe.matches_quietly(&entries[at]))
     }
 
     /// The position of the very object `key`, in a table small enough that
@@ -191,21 +185,17 @@ impl<V> Table<V> {
     /// Add an entry for a key known to be absent, `located` being what
     /// `locate` returned for it. Sends no messages.
     pub(crate) fn push(&mut self, hash: NSUInteger, key: Retained<AnyObject>, value: V, located: usize) {
-        let mut slot = located;
         let len = self.entries.len();
+        self.entries.push(Entry { hash, key, value });
         if self.index.is_empty() {
             if len >= SCAN {
-                self.rebuild(((len + 1) * 2).next_power_of_two());
-                slot = self.free_slot(hash);
+                self.rebuild();
             }
-        } else if (len + 1) * 2 > self.index.len() {
-            self.rebuild(self.index.len() * 2);
-            slot = self.free_slot(hash);
+        } else if self.index.full_for(len + 1) {
+            self.rebuild();
+        } else {
+            self.index.put(located, len);
         }
-        if !self.index.is_empty() {
-            self.index[slot] = len as u32;
-        }
-        self.entries.push(Entry { hash, key, value });
     }
 
     /// Add a pair; an equal key already present keeps its place, and its
@@ -245,66 +235,20 @@ impl<V> Table<V> {
     /// Sends no messages: the caller releases the entry.
     pub(crate) fn remove(&mut self, at: usize) -> Entry<V> {
         if !self.index.is_empty() {
-            let hole = self.slot_of(at);
-            self.close(hole);
-            let last = self.entries.len() - 1;
+            let entries = &self.entries;
+            self.index.remove(entries[at].hash, at, |p| entries[p].hash);
+            let last = entries.len() - 1;
             if at != last {
-                let slot = self.slot_of(last);
-                self.index[slot] = at as u32;
+                self.index.moved(entries[last].hash, last, at);
             }
         }
         self.entries.swap_remove(at)
     }
 
-    /// The first free slot from `hash`'s home.
-    fn free_slot(&self, hash: NSUInteger) -> usize {
-        let mask = self.index.len() - 1;
-        let mut slot = home(hash, mask);
-        while self.index[slot] != FREE {
-            slot = (slot + 1) & mask;
-        }
-        slot
-    }
-
-    /// The index slot holding entry `at`.
-    fn slot_of(&self, at: usize) -> usize {
-        let mask = self.index.len() - 1;
-        let mut slot = home(self.entries[at].hash, mask);
-        while self.index[slot] != at as u32 {
-            slot = (slot + 1) & mask;
-        }
-        slot
-    }
-
-    /// Free `hole`, moving back later slots of the same run whose probe
-    /// sequence passes through it.
-    fn close(&mut self, mut hole: usize) {
-        let mask = self.index.len() - 1;
-        self.index[hole] = FREE;
-        let mut slot = hole;
-        loop {
-            slot = (slot + 1) & mask;
-            let at = self.index[slot];
-            if at == FREE {
-                return;
-            }
-            let start = home(self.entries[at as usize].hash, mask);
-            // The entry may move back if the hole lies between its home and
-            // where it sits now.
-            if hole.wrapping_sub(start) & mask < slot.wrapping_sub(start) & mask {
-                self.index[hole] = at;
-                self.index[slot] = FREE;
-                hole = slot;
-            }
-        }
-    }
-
-    fn rebuild(&mut self, size: usize) {
-        self.index = vec![FREE; size].into();
-        for i in 0..self.entries.len() {
-            let slot = self.free_slot(self.entries[i].hash);
-            self.index[slot] = i as u32;
-        }
+    /// An index for the entries, twice their number or more.
+    fn rebuild(&mut self) {
+        let entries = &self.entries;
+        self.index.rebuild(hash_index::size_for(entries.len()), entries.len(), |at| entries[at].hash);
     }
 }
 

@@ -59,6 +59,20 @@ methods get the rest. Faster than Apple's on the same Mac in nearly every
 operation `examples/arraybench` and `dictbench` measure; creating a small
 `NSNumber` is the exception (Apple's are tagged pointers).
 
+Then `NSOrderedSet` and `NSMutableOrderedSet` (with the live `-array` and
+`-set` views), `NSSortDescriptor` and sorting arrays, sets and ordered sets
+by descriptors (key paths through `-valueForKey:` where objects answer it,
+else their getters), `NSHashTable`, `NSMapTable` and `NSPointerArray` with
+strong, weak and unretained members and object, address and integer
+personalities (weak members disappear when their objects deallocate),
+`NSPointerFunctions` options, `NSCountedSet`, and a thread-safe `NSCache`
+with count and cost limits, least-recently-used eviction and its delegate.
+Faster than Apple's in every operation `arraybench` measures for them
+but two: a weak table's `-count`, which Sidestep keeps exact, and a
+single change deep inside a large mutable ordered set (1.7 times Apple's
+time at a random place among 20,000 members), which renumbers its index;
+changes at its ends and changes of many members at once are faster.
+
 Strings: `NSString` and `NSMutableString` with encodings, comparison,
 search, case mapping, normalization, lines and enumeration, paths and
 numbers; `NSAttributedString` and `NSMutableAttributedString`;
@@ -74,9 +88,12 @@ numbers; `NSAttributedString` and `NSMutableAttributedString`;
   folding and exact hit-end flags; attributed string drawing (with the text
   engine).
 - `-description` on NSObject before Foundation's `NSString` has loaded.
-- Collections: `NSOrderedSet`, `NSCountedSet`, `NSHashTable`, `NSMapTable`,
-  key-value coding on collections, `NSCoding`; class factory methods
-  (`+array`, `+dictionary`) that return the receiving subclass.
+- Collections: key-value coding on collections (beyond `NSDictionary`'s
+  `-valueForKey:`), `NSCoding`; class factory methods (`+array`,
+  `+dictionary`) that return the receiving subclass; the C functions of
+  `NSHashTable` and `NSMapTable` (`NSHashGet`, `NSMapInsert`, …), custom
+  `NSPointerFunctions` functions, and C-string and struct personalities;
+  `NSDiscardableContent` in `NSCache`; ordered collection differences.
 - `NSAutoreleasePool`; `NSCalendar`, `NSDateComponents` and
   `NSNumberFormatter`; locale data beyond English.
 - `NSStream`; `NSURLSession`; `dispatch_io`, `dispatch_data` and

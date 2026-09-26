@@ -36,7 +36,7 @@ use crate::enumerator::{self, Mutations, Source, immutable_mutations};
 use crate::guarded::Reading;
 use crate::table::{CowTable, Entry, Frozen, Probe, Table, shared};
 use crate::util::{self, equal, inherits, is_exactly};
-use crate::{array, describe, set};
+use crate::{array, describe, set, sort_descriptor, string};
 
 type Values = Table<Retained<AnyObject>>;
 
@@ -178,6 +178,17 @@ fn lookup(obj: &AnyObject, key: &AnyObject) -> Option<Retained<AnyObject>> {
         }
         // SAFETY: -objectForKey: takes an object and returns one or nil.
         Kind::Foreign => unsafe { msg_send![obj, objectForKey: key] },
+    }
+}
+
+/// `[obj valueForKey:key]` for one of Sidestep's own dictionaries, looked
+/// up without a message; `None` for other objects, and for keys starting
+/// with `@`, which name the dictionary's own properties.
+pub(crate) fn own_value_for_key(obj: &AnyObject, key: &NSString, text: &str) -> Option<Option<Retained<AnyObject>>> {
+    match kind(obj) {
+        Kind::Foreign => None,
+        _ if text.starts_with('@') => None,
+        _ => Some(lookup(obj, key)),
     }
 }
 
@@ -543,6 +554,18 @@ define_class!(
             }
         }
 
+        /// Key-value coding's view of a dictionary: the value for `key`,
+        /// or for a key starting with `@`, the dictionary's own property of
+        /// the name that follows (`@count`).
+        #[unsafe(method_id(valueForKey:))]
+        fn value_for_key(&self, key: &NSString) -> Option<Retained<AnyObject>> {
+            let own = match string::fast_parts(key) {
+                Some((text, _)) => text.starts_with('@'),
+                None => key.length() > 0 && key.characterAtIndex(0) == u16::from(b'@'),
+            };
+            if own { sort_descriptor::property(self, &key.to_string()[1..]) } else { lookup(self, key) }
+        }
+
         /// A subclass answers through its own `-objectForKey:`.
         #[unsafe(method(objectForKeyedSubscript:))]
         fn object_for_keyed_subscript(&self, key: Option<&AnyObject>) -> *mut AnyObject {
@@ -736,7 +759,7 @@ define_class!(
                     unsafe { enumerator::batch(state, buffer, len, mutations, |i| key(entries, i)) }
                 }
                 // SAFETY: the caller passes a valid state and buffer.
-                Kind::Foreign => unsafe { enumerator::gathered(state, buffer, len, || all_keys(self)) },
+                Kind::Foreign => unsafe { enumerator::gathered(state, buffer, len, immutable_mutations(), || all_keys(self)) },
             }
         }
     }

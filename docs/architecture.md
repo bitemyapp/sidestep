@@ -298,7 +298,8 @@ ones, as the objc2 bindings require.
   elements, `NSIndexSet` sorted ranges with their total, and `NSDictionary`
   and `NSSet` a hash table (`crates/sidestep-foundation/src/table.rs`):
   entries in a vector with their hashes, plus an open-addressed index of
-  positions once there are more than four. Nothing in them changes after
+  positions (`hash_index.rs`, shared with the other hashed collections)
+  once there are more than four. Nothing in them changes after
   `init`, so any thread may read them. A mutable `NSArray` keeps its
   elements in a `Deque` (`deque.rs`), a vector with room at both ends, so
   adding and removing at either end costs constant time and apps can use
@@ -349,6 +350,70 @@ ones, as the objc2 bindings require.
 - **Failures.** Where Foundation raises (an index out of range, a nil
   element), Sidestep panics with Foundation's message, which unwinds into
   the Rust caller like an unrecognized selector.
+- **Descriptions.** Arrays and dictionaries nest only arrays and
+  dictionaries in their descriptions and quote everything else; sets and
+  ordered sets nest any collection that describes itself at a level
+  (`-descriptionWithLocale:indent:`), quote strings, and show anything else
+  as its description, unquoted, as Foundation's do (`describe.rs`).
+- **Ordered sets.** `NSOrderedSet` keeps its members in a `Deque`, which
+  is their order, with each member's hash beside it and, past eight
+  members, an open-addressed index of positions by hash (`hash_index.rs`),
+  so membership and `-indexOfObject:` cost a hash and usually one
+  comparison, and fast enumeration hands out the members as an array's. A
+  change at either end moves nothing. One in the middle moves the shorter
+  side of the members, and the index renumbers that side, finding each
+  member through its hash, or rewriting its slots in one pass when they
+  are many; positions are stored offset from a base, so renumbering the
+  front side moves the base instead. Changes of many members at once
+  (`-insertObjects:atIndexes:`, `-replaceObjectsInRange:…`,
+  `-moveObjectsAtIndexes:toIndex:`) move and renumber once. So a queue or a
+  bulk change costs a fraction of Foundation's, but a single change deep
+  in a large set costs more (Foundation's mutable `-indexOfObject:`
+  searches instead of indexing). The mutable class follows the arrays'
+  design (copy-on-write storage, counted readers, subclasses changed
+  through their primitives). `-array` and `-set` answer proxies that read
+  the set when asked, so they follow its changes as Foundation's do.
+- **Sort descriptors.** Sorting by descriptors reads each element's values
+  once, before comparing, rather than twice a comparison. Key paths go
+  through `-valueForKey:` where objects answer it (dictionaries, looked up
+  without a message when they are Sidestep's), else through the getter
+  key-value coding would find, its number or `BOOL` wrapped in an
+  `NSNumber`, else through `-valueForUndefinedKey:` where the object
+  overrides it; Sidestep has no general key-value coding. How a step reads
+  a class's objects is found once per sort, and the getters' selectors
+  when the descriptor is made. `NSNull` sorts as nil wherever a key path
+  meets it, as in Foundation, and neither reaches a comparator. A column
+  of values that are all Sidestep's numbers, sorted by `compare:`, is
+  compared without messages.
+- **Weak collections.** `NSHashTable`, `NSMapTable` and `NSPointerArray`
+  hold each member (or key, or value) as their pointer functions say:
+  retained, weakly, or as a bare pointer, compared by `-isEqual:`, by
+  address or as an integer (an object held as a bare pointer is still
+  handed out as an object, by `-allObjects` and the rest). A weak member
+  is a runtime weak reference in a box of its own, so its address
+  survives the table moving its entries; when the object deallocates the
+  runtime zeroes it and the entry is dead. Lookups, enumeration and
+  descriptions pass over dead entries, and `-count` is exact, which costs
+  a look at each entry (it reads the weak locations atomically, as the
+  runtime writes them, without loading). The table sweeps dead entries
+  out, releasing what they held, once per as many changes as it has
+  entries. A lookup loads (retains) a weak member
+  only when its hash matches, and releases what it loaded after letting
+  the table go, since a release may run a `-dealloc` that changes the
+  table. Enumerators of weak tables walk a snapshot that keeps the members
+  alive, and still fail if the table changes. The write-barrier flags of
+  `NSPointerFunctions` are only reported, as in Foundation: setting one
+  never changes how a side holds its pointers.
+- **Counted sets and caches.** `NSCountedSet` is a subclass of
+  `NSMutableSet` whose table keeps each member's count, reached by the
+  inherited methods through its primitives. Its set algebra counts, a
+  plain set counting each member once: a union adds counts, a difference
+  takes them away, an intersection keeps the smaller, and a plain set
+  equals a counted set only if every count is one. `NSCache` is safe from
+  any thread, its state behind a mutex: entries in a slab threaded on a
+  least-recently-used list, evicted when the count or total cost passes
+  its limit. Objects leaving are told to the delegate and released after
+  the lock is let go, so a delegate may use the cache.
 
 ## Strings
 

@@ -48,6 +48,19 @@ fn allocate<T>(cap: usize) -> NonNull<T> {
     }
 }
 
+/// Move `count` elements from `from` to `to`, as `ptr::copy` does, without
+/// calling `memmove` for none: changes at the ends move none.
+///
+/// # Safety
+/// As for `ptr::copy`.
+#[inline]
+unsafe fn shift<T>(from: *const T, to: *mut T, count: usize) {
+    if count > 0 {
+        // SAFETY: guaranteed by the caller.
+        unsafe { ptr::copy(from, to, count) };
+    }
+}
+
 /// Free a buffer from `allocate`, or from a `Vec`, of `cap` elements.
 ///
 /// # Safety
@@ -119,14 +132,14 @@ impl<T> Deque<T> {
             self.reserve_front(1);
             // SAFETY: the `index` elements before the new one move down into
             // the free slot `reserve_front` left before the first.
-            unsafe { ptr::copy(self.slot(self.head), self.slot(self.head - 1), index) };
+            unsafe { shift(self.slot(self.head), self.slot(self.head - 1), index) };
             self.head -= 1;
         } else {
             self.reserve_back(1);
             let at = self.head + index;
             // SAFETY: the elements from `index` on move up into the free slot
             // `reserve_back` left after the last.
-            unsafe { ptr::copy(self.slot(at), self.slot(at + 1), self.len - index) };
+            unsafe { shift(self.slot(at), self.slot(at + 1), self.len - index) };
         }
         // SAFETY: the slot at `index` is free now.
         unsafe { self.slot(self.head + index).write(item) };
@@ -143,11 +156,11 @@ impl<T> Deque<T> {
         let after = self.len - 1 - index;
         if index < after {
             // SAFETY: the elements before it move up by one.
-            unsafe { ptr::copy(self.slot(self.head), self.slot(self.head + 1), index) };
+            unsafe { shift(self.slot(self.head), self.slot(self.head + 1), index) };
             self.head += 1;
         } else {
             // SAFETY: the elements after it move down by one.
-            unsafe { ptr::copy(self.slot(at + 1), self.slot(at), after) };
+            unsafe { shift(self.slot(at + 1), self.slot(at), after) };
         }
         self.len -= 1;
         item
