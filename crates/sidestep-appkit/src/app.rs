@@ -162,6 +162,12 @@ fn window_at(i: usize) -> Option<Retained<NSWindow>> {
     WINDOWS.with(|w| w.borrow().get(i).cloned())
 }
 
+/// Whether any window is on screen, without making objects: controls'
+/// tracking loops ask on every event (see `controls::track`).
+pub(crate) fn any_window_on_screen() -> bool {
+    WINDOWS.with(|w| !w.borrow().is_empty())
+}
+
 /// The window with this `windowNumber`, on screen or not.
 pub(crate) fn window_by_number(number: isize) -> Option<Retained<NSWindow>> {
     if number <= 0 {
@@ -691,6 +697,13 @@ define_class!(
         #[unsafe(method(replyToApplicationShouldTerminate:))]
         fn reply_to_application_should_terminate(&self, terminate: bool) {
             crate::modal::reply_to_terminate(terminate);
+        }
+
+        /// On, as on GNOME, unless `SIDESTEP_FULL_KEYBOARD_ACCESS=0` (see
+        /// `controls::focus`).
+        #[unsafe(method(isFullKeyboardAccessEnabled))]
+        fn is_full_keyboard_access_enabled(&self) -> bool {
+            crate::controls::focus::full_keyboard_access()
         }
     }
 

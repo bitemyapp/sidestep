@@ -1445,11 +1445,14 @@ define_class!(
             send_event(self, event);
         }
 
-        /// The end of the responder chain for keys: Tab, Shift-Tab and
-        /// Escape (see `keyloop`).
+        /// The end of the responder chain for keys: Return to the default
+        /// button (see `controls::focus`), then key equivalents, Tab,
+        /// Shift-Tab and Escape (see `keyloop`).
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
-            crate::keyloop::window_key_down(self, event);
+            if !crate::controls::focus::window_key_down(as_window(self), event) {
+                crate::keyloop::window_key_down(self, event);
+            }
         }
 
         #[unsafe(method(selectNextKeyView:))]
@@ -1521,6 +1524,19 @@ define_class!(
         fn animator(&self) -> Retained<NSWindow> {
             // Changes apply at once (see `crate::animation`).
             as_window(self).retain()
+        }
+
+        // The default button, and the keys that reach the window (see
+        // `controls::focus`).
+
+        #[unsafe(method_id(defaultButtonCell))]
+        fn default_button_cell(&self) -> Option<Retained<objc2_app_kit::NSButtonCell>> {
+            crate::controls::focus::default_button_cell(as_window(self))
+        }
+
+        #[unsafe(method(setDefaultButtonCell:))]
+        fn set_default_button_cell(&self, cell: Option<&objc2_app_kit::NSButtonCell>) {
+            crate::controls::focus::set_default_button_cell(as_window(self), cell);
         }
     }
 
@@ -1893,6 +1909,9 @@ impl NSWindowImpl {
 
     pub(crate) fn frame_done(&self) {
         self.ivars().frame_pending.set(false);
+        // Animating controls redraw after each frame shown (see
+        // `controls::progress`).
+        crate::controls::progress::frame(self);
     }
 
     /// The window became the key window, or stopped being it (see
@@ -1903,6 +1922,9 @@ impl NSWindowImpl {
         }
         self.tracking().borrow_mut().recheck();
         crate::inputcontext::update(self);
+        // The first responder's focus ring shows only in the key window.
+        let first = self.ivars().first_responder.borrow().clone();
+        crate::controls::focus::focus_moved(first.as_deref().and_then(|r| r.downcast_ref::<NSView>()), None);
         let this = as_window(self);
         if key {
             self.deminiaturized();
@@ -2299,6 +2321,12 @@ fn make_first_responder(window: &NSWindowImpl, responder: Option<&NSResponder>) 
     let responder = if foreign { None } else { responder };
     let accepted = responder.is_none_or(|r| r.becomeFirstResponder());
     let old = window.ivars().first_responder.replace(if accepted { responder.map(|r| r.retain()) } else { None });
+    // Focus rings move with the focus (see `controls::focus`).
+    let new = window.ivars().first_responder.borrow().clone();
+    crate::controls::focus::focus_moved(
+        old.as_deref().and_then(|r| r.downcast_ref::<NSView>()),
+        new.as_deref().and_then(|r| r.downcast_ref::<NSView>()),
+    );
     drop(old);
     window.tracking().borrow_mut().recheck();
     crate::inputcontext::update(window);
@@ -2329,7 +2357,8 @@ fn send_event(window: &NSWindowImpl, event: &NSEvent) {
                 return;
             }
             crate::panel::clicked(as_window(window), &view);
-            if view.acceptsFirstResponder() {
+            // A click never gives the keyboard to a button-like control.
+            if view.acceptsFirstResponder() && !crate::controls::focus::click_keeps_focus(&view) {
                 as_window(window).makeFirstResponder(Some(&view));
             }
             let button = match kind {
@@ -2428,6 +2457,7 @@ pub(crate) fn display_if_needed(window: &NSWindowImpl) {
     let color = background(window);
     // User space's base is the window's content, origin at the bottom left.
     let base = Xf { tx: 0.0, a: -1.0, ty: window.content_height() };
+    let ring = crate::controls::focus::ring_view(window);
     for area in coalesce(damage) {
         crate::context::begin_recording(base, ivars.scale.get());
         graphics::push(Op::Fill { rect: area, color });
@@ -2436,7 +2466,7 @@ pub(crate) fn display_if_needed(window: &NSWindowImpl) {
             let xf = views::root_xf(root, ROOT_LAYER, window.content_height());
             let size = ivars.size.get();
             let all = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
-            record(root, xf, all, area);
+            record(root, xf, all, area, ring.as_deref());
         }
         let ops = graphics::end_recording();
         app::send(ToRender::Paint { window: id, layer: ROOT_LAYER, rects: vec![area], ops });
@@ -2480,32 +2510,38 @@ fn set_title_text(title: &NSString) -> TitleText {
 }
 
 /// Record `view` and its subviews for `area` of a layer. `xf` maps the view
-/// to the layer; `clip` is where its ancestors let it draw.
-pub(crate) fn record(view: &NSViewImpl, xf: Xf, clip: Rect, area: Rect) {
+/// to the layer; `clip` is where its ancestors let it draw. `ring` is the
+/// view whose focus ring shows (see `controls::focus`), drawn after its
+/// subtree and clipped only by its ancestors.
+pub(crate) fn record(view: &NSViewImpl, xf: Xf, clip: Rect, area: Rect, ring: Option<&NSView>) {
     let visible = clip.intersect(&xf.rect(views::bounds(view)));
     let target = visible.intersect(&area);
-    if target.is_empty() {
-        return;
-    }
-    // Its opacity, over its subviews too: nothing at 0, a group below 1.
-    let Some(_opacity) = crate::context::opacity(view, target) else { return };
-    // A fresh graphics state and the view's appearance for its drawRect:.
-    let mark = crate::context::begin_view(view, xf, target);
-    // SAFETY: drawRect: takes an NSRect.
-    unsafe { msg_send![view, drawRect: xf.inverse_rect(target)] }
-    crate::context::end_view(mark);
-    if views::is_clip(view) {
-        // The document has a layer of its own.
-        return;
-    }
-    let flipped = views::is_flipped(view);
-    for sub in views::subviews(view) {
-        let sub = views::imp(&sub);
-        if views::is_hidden(sub) {
-            continue;
+    let is_ring = ring.is_some_and(|r| std::ptr::eq(views::imp(r), view));
+    if !target.is_empty() {
+        // Its opacity, over its subviews too: nothing at 0, a group below 1.
+        let Some(_opacity) = crate::context::opacity(view, target) else { return };
+        // A fresh graphics state and the view's appearance for its drawRect:.
+        let mark = crate::context::begin_view(view, xf, target);
+        // SAFETY: drawRect: takes an NSRect.
+        unsafe { msg_send![view, drawRect: xf.inverse_rect(target)] }
+        crate::context::end_view(mark);
+        if !views::is_clip(view) {
+            // (A clip view's document has a layer of its own.)
+            let flipped = views::is_flipped(view);
+            for sub in views::subviews(view) {
+                let sub = views::imp(&sub);
+                if views::is_hidden(sub) {
+                    continue;
+                }
+                let sub_xf = views::step(sub, flipped, views::frame(sub)).then(&xf);
+                record(sub, sub_xf, visible, area, ring);
+            }
         }
-        let sub_xf = views::step(sub, flipped, views::frame(sub)).then(&xf);
-        record(sub, sub_xf, visible, area);
+    }
+    if is_ring {
+        let mark = crate::context::begin_view(view, xf, clip.intersect(&area));
+        crate::controls::focus::draw_ring(views::as_view(view));
+        crate::context::end_view(mark);
     }
 }
 
@@ -2579,10 +2615,11 @@ fn update_scroll_layer(window: &NSWindowImpl, clip: &NSViewImpl) {
     drop(layers);
 
     let color = background(window);
+    let ring = crate::controls::focus::ring_view(window);
     for area in areas {
         crate::context::begin_recording(doc_xf, ivars.scale.get());
         graphics::push(Op::Fill { rect: area, color });
-        record(doc, doc_xf, doc_rect, area);
+        record(doc, doc_xf, doc_rect, area, ring.as_deref());
         let ops = graphics::end_recording();
         app::send(ToRender::Paint { window: window.id(), layer: id, rects: vec![area], ops });
     }

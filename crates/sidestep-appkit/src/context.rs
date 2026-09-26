@@ -859,7 +859,8 @@ fn draw_view_into(view: &crate::views::NSViewImpl, rect: NSRect, ctx: Retained<N
     let area = Rect::new(0.0, 0.0, w, h);
     begin_current(ctx);
     let outer = SNAPSHOT_ROOT.with(|r| r.replace(view as *const crate::views::NSViewImpl as usize));
-    crate::window::record(view, xf, area, area);
+    // Snapshots show no focus ring, as on macOS.
+    crate::window::record(view, xf, area, area, None);
     SNAPSHOT_ROOT.with(|r| r.set(outer));
     if let Some(ctx) = end_current() {
         imp(&ctx).state().flush();

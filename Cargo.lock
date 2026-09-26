@@ -215,6 +215,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "controlbench"
+version = "0.0.0"
+dependencies = [
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "sidestep",
+]
+
+[[package]]
+name = "controls-gallery"
+version = "0.0.0"
+dependencies = [
+ "block2",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "sidestep",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1391,6 +1412,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "parley",
+ "png",
  "rustix 1.1.5",
  "sidestep-foundation",
  "sidestep-runtime",

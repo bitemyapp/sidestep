@@ -1432,6 +1432,97 @@ need; its editable buffers fit a text editor better than string drawing.
 Both shape with harfrust (HarfBuzz ported to Rust) and can rasterize with
 swash.
 
+## Controls
+
+`crates/sidestep-appkit/src/controls/` has the controls and
+`crates/sidestep-appkit/src/theme/` draws them.
+
+- **Cells are real.** As in AppKit, a control makes its cell from
+  `+cellClass` (each control class registers its own), forwards its
+  properties to it by message and draws and tracks through it, so a
+  program's subclass of either, or a replaced cell, behaves as on macOS.
+  A cell keeps its value as it was set (a string, an attributed string, a
+  number of one of four kinds, or an object) and converts it when read: a
+  number reads as `NSNumber` describes itself in the current locale (so
+  Foundation decides "1,234.5"), and the cell keeps that string until the
+  value changes; a plain value read as an attributed string carries the
+  cell's font, color and paragraph settings. Only text cells take
+  numbers. Cells copy (`copyWithZone:`), each class copying its own
+  settings. Setters that change only a cell's look call `updateCellInside:`
+  and keep the control's measured size; setters that can change its size
+  call `updateCell:`; setting what's already there does neither.
+  Everything a subclass may override is reached by message; the rest is
+  plain Rust.
+- **Tracking.** `-[NSControl mouseDown:]` and `-[NSCell
+  trackMouse:inRect:ofView:untilMouseUp:]` run AppKit's loop in AppKit's
+  order of calls, which `conformance/tests/control_events.rs` records on
+  macOS, taking events from `nextEventMatchingMask:…` in the event-tracking
+  run loop mode, so default-mode timers wait. What sends the action is the
+  cell's `sendActionOn:` mask, which also says whether the cell is
+  continuous (the periodic bit; a slider's drag bit), as on macOS. A
+  periodic event is a wait that times out; a delay too long to be a time
+  means no repeats. With no window on screen, a loop takes the events
+  already posted and ends. Segmented controls, steppers, sliders and
+  switches have loops of their own; macOS 26 tracks the real mouse for
+  them, so their tests run on Linux only.
+- **Geometry** is Apple's: every size and rectangle a program can read is
+  measured by `conformance/tests/controls.rs` (every button bezel at every
+  control size among them), and the constants are in `theme/metrics.rs`.
+  Sizes that depend on text are formulas over the text's measured size,
+  since the fonts differ. Controls cache their intrinsic size until their
+  cell's size may have changed; a cell's generation, bumped by such
+  changes, lets buttons keep their title's measurement and segmented
+  controls their segments' widths.
+- **Drawing.** `drawRect:` records, as every view's does; there is no
+  widget op. `theme/parts.rs` has a painter per part (a bezel, a check
+  box, a knob, a focus ring) that takes the rectangle AppKit's geometry
+  gives and the part's state; `theme/paint.rs` turns them into fills and
+  antialiased polygons (rounded rectangles with a radius per corner,
+  ellipses, strokes as rings, arcs) in view coordinates, whichever way the
+  view is flipped. The colors (`theme/palette.rs`) are Adwaita's, light or
+  dark as `SIDESTEP_APPEARANCE` says, else as the decorations are told
+  (`SIDESTEP_THEME`); following the desktop waits for `NSAppearance`.
+  The painters take plain values and make no objects; the cells that call
+  them draw from the measurements they keep, and a button makes its title
+  into an `NSAttributedString` only for a subclass that overrides
+  `drawTitle:withFrame:inView:`. `bench_controls_drawing`
+  (`controls/bench.rs`) times a window's worth.
+  `theme/golden/` holds reference images of every part, which a unit test
+  compares (`SIDESTEP_BLESS=1` rewrites them).
+- **Animation.** Progress indicators animate on the window's frame
+  callbacks: each frame redraws the animating indeterminate indicators in
+  that window, their phase taken from the clock (a determinate one shows
+  its value, which the clock doesn't change). With no frames (the window
+  hidden, covered or gone), nothing runs; there are no timers.
+- **Focus.** The window draws the focus ring after the first responder's
+  subtree, clipped to what its parent shows, and damages the ring's
+  outset when focus moves. Full keyboard access is on, as on GNOME
+  (`SIDESTEP_FULL_KEYBOARD_ACCESS=0` turns it off); a click never focuses a
+  button-like control. Space presses the focused control, arrows move
+  radio groups (buttons with an action; without one they're on their
+  own) and segments, and step sliders and steppers through the action
+  methods key bindings send (`moveUp:`, `pageDown:` …); Return presses the
+  default button and Escape the button whose key equivalent it is. Key
+  equivalents match Control, Option and Command exactly and ignore Shift,
+  which the characters carry. Keys nothing takes go up the responder
+  chain from the window.
+- **Text fields** display, size, truncate and draw placeholders; the
+  editing entry points (`currentEditor`, `editWithFrame:…`,
+  `selectWithFrame:…`, `selectText:`, `endEditing:`) are hooks in
+  `text_field.rs` for the field editor to fill. The field already turns
+  `textDidBeginEditing:` and the rest into one
+  `NSControlTextDid…Notification` (the field editor, and at the end the
+  text movement, in its user info) for its delegate and then the
+  notification center, holding no borrow while they run.
+- **Accessibility** is a store (`controls/a11y.rs`): views and cells keep
+  what `setAccessibility…:` sets, nil included, and answer macOS's
+  default for their class until then (as on macOS, a control's cell is
+  the element: a button's cell has the button role and the title as its
+  label; help set on a control is its cell's too, and a label set on a
+  button leaves its cell's empty). Records are keyed by object and
+  dropped with it, with fields that map onto AccessKit's node properties,
+  for an adapter to read.
+
 ## Conformance
 
 `conformance/` holds tests written only against objc2. They run on macOS

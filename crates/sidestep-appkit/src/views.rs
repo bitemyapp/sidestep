@@ -55,6 +55,10 @@ pub(crate) struct ViewIvars {
     key_links: crate::keyloop::KeyLinks,
     /// `toolTip` and the view's tooltip areas (see `tooltip`).
     tool_tips: crate::tooltip::ViewTips,
+    /// `focusRingType` (see `controls::focus`).
+    focus_ring: Cell<objc2_app_kit::NSFocusRingType>,
+    /// The view's accessibility record (see `controls::a11y`).
+    a11y: crate::controls::a11y::Node,
 }
 
 impl ViewIvars {
@@ -75,6 +79,8 @@ impl ViewIvars {
             notes: Cell::new(0),
             key_links: Default::default(),
             tool_tips: Default::default(),
+            focus_ring: Cell::new(objc2_app_kit::NSFocusRingType::Default),
+            a11y: Default::default(),
         }
     }
 }
@@ -507,6 +513,53 @@ define_class!(
         fn set_posts_bounds_changed_notifications(&self, flag: bool) {
             set_posts(self, Change::Bounds, flag);
         }
+
+        // Sizing, which controls override (see `controls`).
+
+        #[unsafe(method(intrinsicContentSize))]
+        fn intrinsic_content_size(&self) -> NSSize {
+            NSSize::new(crate::controls::control::NO_METRIC, crate::controls::control::NO_METRIC)
+        }
+
+        #[unsafe(method(invalidateIntrinsicContentSize))]
+        fn invalidate_intrinsic_content_size(&self) {}
+
+        #[unsafe(method(fittingSize))]
+        fn fitting_size(&self) -> NSSize {
+            crate::controls::fitting_size(as_view(self))
+        }
+
+        // Focus rings (see `controls::focus`).
+
+        #[unsafe(method(focusRingType))]
+        fn focus_ring_type(&self) -> objc2_app_kit::NSFocusRingType {
+            self.ivars().focus_ring.get()
+        }
+
+        #[unsafe(method(setFocusRingType:))]
+        fn set_focus_ring_type(&self, kind: objc2_app_kit::NSFocusRingType) {
+            if self.ivars().focus_ring.replace(kind) != kind {
+                crate::controls::focus::ring_changed(as_view(self));
+            }
+        }
+
+        #[unsafe(method(drawFocusRingMask))]
+        fn draw_focus_ring_mask(&self) {}
+
+        #[unsafe(method(focusRingMaskBounds))]
+        fn focus_ring_mask_bounds(&self) -> NSRect {
+            NSRect::ZERO
+        }
+
+        #[unsafe(method(noteFocusRingMaskChanged))]
+        fn note_focus_ring_mask_changed(&self) {
+            crate::controls::focus::ring_changed(as_view(self));
+        }
+
+        #[unsafe(method(setKeyboardFocusRingNeedsDisplayInRect:))]
+        fn set_keyboard_focus_ring_needs_display_in_rect(&self, _rect: NSRect) {
+            crate::controls::focus::ring_changed(as_view(self));
+        }
     }
 
     unsafe impl NSObjectProtocol for NSViewImpl {}
@@ -516,6 +569,10 @@ define_class!(
 pub(crate) fn imp(view: &NSView) -> &NSViewImpl {
     // SAFETY: NSView is NSViewImpl's class; subclasses share its layout.
     unsafe { &*(view as *const NSView).cast::<NSViewImpl>() }
+}
+
+pub(crate) fn a11y_node(view: &NSView) -> &crate::controls::a11y::Node {
+    &imp(view).ivars().a11y
 }
 
 pub(crate) fn as_view(view: &NSViewImpl) -> &NSView {

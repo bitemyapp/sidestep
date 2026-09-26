@@ -32,6 +32,7 @@ mod app;
 mod backend;
 mod clipboard;
 mod controllers;
+mod controls;
 mod cursor;
 mod desktop;
 #[doc(hidden)]
@@ -78,6 +79,7 @@ mod test_objects;
 #[doc(hidden)]
 pub mod testing;
 mod text;
+mod theme;
 mod tooltip;
 mod tracking;
 mod views;
@@ -89,7 +91,7 @@ sidestep_runtime::static_class!(pub NSRESPONDER, NSRESPONDER_META = "NSResponder
 });
 
 sidestep_runtime::static_class!(pub NSVIEW, NSVIEW_META = "NSView", || {
-    let _ = views::NSViewImpl::class();
+    controls::a11y::install(views::NSViewImpl::class());
 });
 
 sidestep_runtime::static_class!(pub NSCLIPVIEW, NSCLIPVIEW_META = "NSClipView", || {

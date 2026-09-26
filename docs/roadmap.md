@@ -272,8 +272,36 @@ relayout of only what an edit touched. See
 
 ## 4. Controls and services
 
-Scroll, split, popup and segmented views; image views; open panels through
-xdg-desktop-portal; accessibility through AccessKit.
+Done so far (`examples/controls-gallery` shows them): `NSCell`,
+`NSActionCell` and `NSControl` with real cells, so programs that subclass
+either get macOS's behavior; values and their conversions, target and
+action, the mouse-tracking loops in AppKit's order of calls,
+`performClick:`, copying, hit testing, and the sizes and rectangles a
+program can read, as measured on macOS; `NSButton` (push buttons of every
+bezel style at every control size, check boxes, radio groups, the default
+button and key equivalents);
+`NSTextField` as a label, a wrapping label and a field, with
+`NSSecureTextField` and `NSSearchField` (display and sizing; editing waits
+for the field editor); `NSBox`; `NSProgressIndicator`, animated by the
+window's frames; `NSSegmentedControl`, `NSStepper`, `NSSlider` and
+`NSSwitch`; intrinsic sizes; focus rings and full keyboard access; and
+accessibility properties that views and cells keep but nothing reads yet.
+They are drawn in an Adwaita-like theme, light or dark. See
+[architecture.md](architecture.md#controls).
+
+Next:
+
+- Editing text fields (the field editor, with the text-editing work),
+  `NSPopUpButton`, `NSImageView` and images in buttons.
+- Numbers in cells read as Foundation's `-[NSNumber descriptionWithLocale:]`
+  gives them, which on Linux doesn't yet group digits or print "NaN" and
+  "∞" as macOS does.
+- Check boxes' and radio buttons' `cellSizeForBounds:` (macOS wraps the
+  title into the width given) and the width a wrapping label keeps at
+  `maximumNumberOfLines`.
+- Accessibility through AccessKit, from the store.
+- Scroll views' scrollers, split and popup views; open panels through
+  xdg-desktop-portal.
 
 ## 5. A real app
 

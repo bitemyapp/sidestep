@@ -279,11 +279,14 @@ mod tests {
 
     /// How many of the messages `send` sends take the slow path, once
     /// they have all been sent before. A method change elsewhere (another
-    /// test's) empties every cache, so that measurement is taken again.
+    /// test's) empties every cache, and one during the first pass leaves
+    /// some of it uncached, so the measurement is taken again unless the
+    /// method tables stayed the same over both passes.
     fn misses(send: impl Fn()) -> usize {
         for _ in 0..10 {
+            let epoch = crate::cache::epoch();
             send();
-            let (epoch, before) = (crate::cache::epoch(), MISSES.get());
+            let before = MISSES.get();
             send();
             if crate::cache::epoch() == epoch {
                 return MISSES.get() - before;

@@ -130,6 +130,17 @@ Tests can run AppKit without a compositor: `SIDESTEP_BACKEND=null` starts
 a render thread that answers at once and draws nothing (see
 [docs/architecture.md](docs/architecture.md#events-and-the-run-loop)).
 
+`examples/controls-gallery` shows the controls (buttons, text fields, boxes,
+indicators, segmented controls, steppers, sliders and switches) in their
+states; `SCENARIO` is `buttons`, `text`, `indicators`, `segmented` or `all`,
+and `SIDESTEP_THEME=dark` draws them dark:
+
+```sh
+scripts/linux-cargo build --release -p controls-gallery
+SIDESTEP_THEME=dark SCENARIO=all SHOT=/work/target/controls-dark.png \
+  scripts/linux-run scripts/headless-wayland /target/release/controls-gallery
+```
+
 On Linux, drawing is recorded on the main thread and rasterized on a
 separate render thread, and scroll views are tiled onto Wayland subsurfaces;
 see [docs/architecture.md](docs/architecture.md#appkit-a-main-thread-and-a-render-thread).

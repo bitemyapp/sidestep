@@ -33,6 +33,15 @@ objc2-foundation = { workspace = true, features = ["NSRange", "NSAttributedStrin
 name = "appkit_input"
 harness = false
 
+# Controls, without a window and with one that is never shown.
+[[test]]
+name = "controls"
+harness = false
+
+[[test]]
+name = "control_events"
+harness = false
+
 [[test]]
 name = "appkit_keybindings"
 harness = false
@@ -76,10 +85,10 @@ harness = false
 name = "defaults"
 harness = false
 
-# Pasteboards, drag and drop, and screens (pasteboard, drag_defaults,
-# screen). A table of its own, so the features merge with the ones above.
+# Pasteboards, drag and drop, screens and controls. A table of its own, so
+# the features merge with the ones above.
 [target.'cfg(all())'.dev-dependencies]
-objc2-app-kit = { workspace = true, features = ["NSPasteboard", "NSPasteboardItem", "NSDragging", "NSScreen", "NSGraphics"] }
+objc2-app-kit = { workspace = true, features = ["NSPasteboard", "NSPasteboardItem", "NSDragging", "NSScreen", "NSGraphics", "NSControl", "NSCell", "NSActionCell", "NSButton", "NSButtonCell", "NSTextField", "NSTextFieldCell", "NSSecureTextField", "NSSearchField", "NSSearchFieldCell", "NSBox", "NSProgressIndicator", "NSSegmentedControl", "NSSegmentedCell", "NSStepper", "NSStepperCell", "NSSlider", "NSSliderCell", "NSSwitch", "NSLayoutConstraint", "NSUserInterfaceLayout", "NSText", "NSParagraphStyle", "NSAccessibilityConstants", "NSAccessibilityProtocols"] }
 objc2-foundation = { workspace = true, features = ["NSData", "NSArray"] }
 
 [[test]]
