@@ -54,6 +54,7 @@ mod string_drawing;
 #[cfg(test)]
 mod test_objects;
 mod text;
+mod textkit;
 mod tracking;
 mod views;
 mod window;

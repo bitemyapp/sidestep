@@ -85,3 +85,18 @@ harness = false
 [[test]]
 name = "screen"
 harness = false
+
+# Text editing: text storage and layout run on any thread (text_storage,
+# text_layout use the default harness); undo and text views need the main
+# thread. A table of its own, so the features merge with the ones above.
+[[test]]
+name = "undo_manager"
+harness = false
+
+[[test]]
+name = "text_view"
+harness = false
+
+[target.'cfg(not(any()))'.dev-dependencies]
+objc2-app-kit = { workspace = true, features = ["NSTextStorage", "NSLayoutManager", "NSTextContainer", "NSTextView", "NSText", "NSTextTable", "NSTextInputClient", "NSColor", "NSFont", "NSParagraphStyle", "NSAttributedString", "NSWindow", "NSGraphics", "NSUserInterfaceValidation", "NSMenu", "NSMenuItem", "NSPasteboard", "NSEvent"] }
+objc2-foundation = { workspace = true, features = ["NSUndoManager", "NSNotification", "NSValue", "NSArray", "NSInvocation", "NSMethodSignature", "NSRunLoop", "NSDate"] }

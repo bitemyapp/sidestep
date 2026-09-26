@@ -13,7 +13,7 @@ sidestep-foundation.workspace = true
 objc2 = { workspace = true, features = ["gnustep-2-1"] }
 block2 = { workspace = true, features = ["gnustep-2-1"] }
 objc2-foundation = { workspace = true, features = ["gnustep-2-1", "NSObject", "NSString", "NSDictionary", "NSGeometry", "NSNotification", "NSTimer", "NSDate", "NSZone", "NSRange", "block2", "NSArray", "NSData", "NSValue"] }
-objc2-app-kit = { workspace = true, features = ["gnustep-2-1", "NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics", "NSColor", "NSFont", "NSFontDescriptor", "NSBezierPath", "NSStringDrawing", "NSAttributedString", "NSEvent", "NSScrollView", "NSClipView", "NSRunningApplication", "objc2-core-foundation", "NSPasteboard", "NSText", "NSCursor", "NSTrackingArea", "NSTextInputContext", "NSParagraphStyle", "NSCell", "NSPasteboardItem", "NSDragging", "NSDraggingItem", "NSScreen", "block2"] }
+objc2-app-kit = { workspace = true, features = ["gnustep-2-1", "NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics", "NSColor", "NSFont", "NSFontDescriptor", "NSBezierPath", "NSStringDrawing", "NSAttributedString", "NSEvent", "NSScrollView", "NSClipView", "NSRunningApplication", "objc2-core-foundation", "NSPasteboard", "NSText", "NSCursor", "NSTrackingArea", "NSTextInputContext", "NSParagraphStyle", "NSCell", "NSPasteboardItem", "NSDragging", "NSDraggingItem", "NSScreen", "block2", "NSTextStorage", "NSLayoutManager", "NSTextContainer", "NSTextView", "NSTextTable", "NSTextInputClient"] }
 smithay-client-toolkit = { version = "0.19", default-features = false, features = ["calloop"] }
 tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }
 # Keymaps and compose sequences, in pure Rust: no libxkbcommon at build or
@@ -33,6 +33,11 @@ swash = { version = "0.2.10", default-features = false, features = ["std", "scal
 # Routes ICU's diagnostics (parley's segmenter has no CJK dictionary, and
 # says so on every CJK line in debug builds) to the `log` crate.
 icu_provider = { version = "2.1", default-features = false, features = ["logging"] }
+# Text editing: paragraphs' attribute runs inline, and word and
+# character boundaries for selection and commands (both already built for
+# parley).
+smallvec = "1.13"
+icu_segmenter = { version = "2.1", default-features = false, features = ["compiled_data"] }
 # Which characters are emoji, to draw them in color (compiled into the binary).
 icu_properties = { version = "2.1", default-features = false, features = ["compiled_data"] }
 
