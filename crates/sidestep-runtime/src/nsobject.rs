@@ -169,7 +169,9 @@ unsafe extern "C-unwind" fn description(this: Id, _: Sel) -> Id {
     unsafe {
         let string = send0((string_class as *const Class).cast_mut().cast(), sel!(alloc));
         let sel = sel!(initWithBytes:length:encoding:);
-        let imp = method_for(class_of(string), raw(sel));
+        // A message, not `method_for`: +alloc may return an object of a
+        // class that hasn't loaded yet (Foundation's placeholder).
+        let imp = crate::message::objc_msg_lookup(obj(string), raw(sel)).expect("lookup never fails");
         let imp: unsafe extern "C-unwind" fn(Id, Sel, *const c_void, usize, i32) -> Id = std::mem::transmute(imp);
         crate::arc::objc_autorelease(imp(string, sel, text.as_ptr().cast(), text.len(), 4).cast()).cast()
     }

@@ -281,6 +281,52 @@ ones, as the objc2 bindings require.
   element), Sidestep panics with Foundation's message, which unwinds into
   the Rust caller like an unrecognized selector.
 
+## Strings
+
+Strings are stored as WTF-8: UTF-8 that can also hold the lone surrogates
+UTF-16 allows, with a surrogate pair always joined into one 4-byte
+character. An immutable string is one allocation holding a header (UTF-8
+and UTF-16 lengths, an all-ASCII flag, a has-lone-surrogate flag, the cached
+hash, an index) and the bytes with a trailing NUL, so `-UTF8String` and
+`Display` are free. ASCII strings index by byte. Otherwise the index is a
+cursor plus a crumb every 64 UTF-16 units, built lazily and published with
+atomics, so sequential `characterAtIndex:` is about as fast as Apple's and a
+random one walks at most 64 units. `NSMutableString` keeps the same form in
+a buffer whose crumbs are cut back at each edit. `+[NSString alloc]` returns
+a static placeholder whose initializers build the final object, as Apple's
+class cluster does; subclasses get ordinary instances.
+
+`NSString` is the one class registered by hand (`objc_allocateClassPair`,
+methods copied from helper classes, then `objc_registerClassPair`), so
+another thread can never see it with some methods missing.
+
+Non-literal comparison and search fold both sides (NFD, then case, diacritic
+and width folding as asked) and match on composed character sequence
+boundaries: ICU4X graphemes, adjusted the way Foundation's sequences are.
+The text is folded a piece at a time as a search or comparison walks it,
+and what it has passed is dropped, so an early hit or an early difference
+costs only what comes before it, and a walk over the whole text needs
+little memory. ASCII runs skip the segmenter and the normalizer, and an
+ASCII needle is found with memchr through stretches that hold none of the
+handful of characters that fold to ASCII. A backwards search folds ever
+longer stretches from the end. Edits that replace many matches build the
+new text in one pass. Unicode data comes from ICU4X (normalization, case
+mapping, collation, properties, word and sentence segmentation), regular
+expressions from fancy-regex after translating ICU syntax (line
+terminators, inline flags, POSIX classes, escapes). A search range acts as
+ICU's region, and string searches keep their last compiled patterns per
+thread.
+
+An attributed string is its text (a live `NSMutableString` subclass whose
+edits come back to the owner) and a vector of runs, each a range and an
+attribute dictionary. Runs merge only when their dictionaries are the same
+object, as Apple's do, and every run without attributes shares one empty
+dictionary. Edits rebuild the touched runs and their neighbours in one
+splice. Receivers that are not Sidestep's own are driven through the
+primitive methods, so subclasses behave as on macOS; whether a subclass
+keeps Sidestep's storage is asked of the method cache, without a lock, on
+each call.
+
 ## AppKit: a main thread and a render thread
 
 AppKit's contract is single-threaded: events, timers, the responder chain and

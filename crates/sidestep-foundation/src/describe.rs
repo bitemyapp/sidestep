@@ -21,12 +21,12 @@
 
 use std::fmt::Write;
 
+use icu_normalizer::DecomposingNormalizerBorrowed;
 use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::sel;
 use objc2_foundation::NSString;
-use unicode_normalization::UnicodeNormalization;
 
 use crate::number::fast_value;
 use crate::string::fast_parts;
@@ -118,7 +118,11 @@ pub(crate) fn map<'a>(out: &mut String, pairs: impl IntoIterator<Item = (&'a Any
 /// What a key sorts by: its canonical decomposition, which Rust's `str`
 /// ordering then compares by code point. Plain ASCII needs no change.
 fn sort_key(text: &str) -> String {
-    if text.is_ascii() { text.to_owned() } else { text.nfd().collect() }
+    if text.is_ascii() {
+        text.to_owned()
+    } else {
+        DecomposingNormalizerBorrowed::new_nfd().normalize(text).into_owned()
+    }
 }
 
 /// The text of any NSString, or `None` for other objects.

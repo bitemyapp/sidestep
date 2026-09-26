@@ -268,6 +268,13 @@ pub static NSFontWidthStandard: f64 = 0.0;
 #[unsafe(no_mangle)]
 pub static NSFontWidthExpanded: f64 = 0.2f32 as f64;
 
+// Keys only newer macOS versions define (values as macOS prints them).
+sidestep_foundation::constant_string!(NSCharacterShapeAttributeName = "NSCharacterShape");
+sidestep_foundation::constant_string!(NSTextHighlightStyleAttributeName = "NSTextHighlightStyle");
+sidestep_foundation::constant_string!(NSTextHighlightColorSchemeAttributeName = "NSTextHighlightColorScheme");
+sidestep_foundation::constant_string!(NSAdaptiveImageGlyphAttributeName = "CTAdaptiveImageProvider");
+sidestep_foundation::constant_string!(NSWritingToolsExclusionAttributeName = "WTWritingToolsPreserved");
+
 // Font weights, as `NSFontWeight` values (single precision on macOS too).
 #[unsafe(no_mangle)]
 pub static NSFontWeightUltraLight: f64 = -0.8f32 as f64;
