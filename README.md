@@ -11,8 +11,10 @@ objc2 and its framework crates stay unmodified.
 (classes, subclassing, ivars, `super`, reference counting, autorelease pools,
 weak references, protocols, blocks). Foundation has strings, a dictionary,
 timers and threads. AppKit runs a first slice on Wayland: an application,
-windows, views with `drawRect:`, mouse and scroll events, scroll views, and
-fills, paths and text. See the [roadmap](docs/roadmap.md).
+windows (with GNOME-style decorations where the compositor leaves them to
+the program), views with `drawRect:`, keyboard, mouse and scroll events,
+scroll views, fills, paths and text at any display scale, and the
+clipboard for strings. See the [roadmap](docs/roadmap.md).
 
 [objc2]: https://github.com/madsmtm/objc2
 
@@ -91,6 +93,20 @@ open target/anim.png
 ```
 
 The first run builds the container image, which takes a few minutes.
+
+`SCALE=2` (or `1.5`) renders at that output scale, with `SIZE` in pixels;
+`FLOATING=1` floats windows as most desktops do; and
+`SIDESTEP_DECORATIONS=client` makes the program draw its own title bar, as
+it does on GNOME (sway draws one otherwise):
+
+```sh
+SIDESTEP_DECORATIONS=client FLOATING=1 SCALE=2 SIZE=2560x1600 SHOT=/work/target/hidpi.png \
+  scripts/linux-run scripts/headless-wayland /target/release/appkit-slice
+```
+
+`examples/appkit-input` prints every key, mouse and window event it gets and
+exercises the clipboard, several windows and child windows. `THEN` runs a
+command (an input injector, `wl-copy`) while the program runs.
 
 On Linux, drawing is recorded on the main thread and rasterized on a
 separate render thread, and scroll views are tiled onto Wayland subsurfaces;

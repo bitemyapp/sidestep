@@ -13,13 +13,19 @@
 //! forces the `define_class!` type, and code here reaches other classes
 //! through their objc2-app-kit types.
 #![cfg(not(target_vendor = "apple"))]
+// `define_class!` recurses once per method, and NSWindow has many.
+#![recursion_limit = "256"]
 
 use objc2::ClassType;
 
 mod app;
 mod backend;
+mod clipboard;
+mod cursor;
 mod event;
 mod graphics;
+mod keybindings;
+mod pasteboard;
 mod protocol;
 mod raster;
 mod text;
@@ -65,6 +71,28 @@ sidestep_runtime::static_class!(pub NSFONT, NSFONT_META = "NSFont", || {
 sidestep_runtime::static_class!(pub NSBEZIERPATH, NSBEZIERPATH_META = "NSBezierPath", || {
     let _ = graphics::NSBezierPathImpl::class();
 });
+
+sidestep_runtime::static_class!(pub NSPASTEBOARD, NSPASTEBOARD_META = "NSPasteboard", || {
+    let _ = pasteboard::NSPasteboardImpl::class();
+});
+
+sidestep_runtime::static_class!(pub NSCURSOR, NSCURSOR_META = "NSCursor", || {
+    let _ = cursor::NSCursorImpl::class();
+});
+
+// Pasteboard types and names.
+sidestep_foundation::constant_string!(NSPasteboardTypeString = "public.utf8-plain-text");
+sidestep_foundation::constant_string!(NSPasteboardTypePDF = "com.adobe.pdf");
+sidestep_foundation::constant_string!(NSPasteboardTypeTIFF = "public.tiff");
+sidestep_foundation::constant_string!(NSPasteboardTypePNG = "public.png");
+sidestep_foundation::constant_string!(NSPasteboardTypeRTF = "public.rtf");
+sidestep_foundation::constant_string!(NSPasteboardTypeRTFD = "com.apple.flat-rtfd");
+sidestep_foundation::constant_string!(NSPasteboardTypeHTML = "public.html");
+sidestep_foundation::constant_string!(NSPasteboardTypeTabularText = "public.utf8-tab-separated-values-text");
+sidestep_foundation::constant_string!(NSPasteboardTypeURL = "public.url");
+sidestep_foundation::constant_string!(NSPasteboardTypeFileURL = "public.file-url");
+sidestep_foundation::constant_string!(NSPasteboardNameGeneral = "Apple CFPasteboard general");
+sidestep_foundation::constant_string!(NSPasteboardNameFind = "Apple CFPasteboard find");
 
 // Attribute names for attributed strings and string drawing.
 sidestep_foundation::constant_string!(NSFontAttributeName = "NSFont");

@@ -15,9 +15,11 @@ use std::cell::{Cell, RefCell};
 use std::ptr::NonNull;
 
 use objc2::rc::{Allocated, Retained};
-use objc2::runtime::{NSObject, NSObjectProtocol};
+use objc2::runtime::{AnyObject, MessageReceiver, NSObject, NSObjectProtocol, Sel};
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send};
-use objc2_app_kit::{NSAutoresizingMaskOptions, NSClipView, NSEvent, NSResponder, NSView, NSWindow};
+use objc2_app_kit::{
+    NSAutoresizingMaskOptions, NSClipView, NSEvent, NSEventModifierFlags, NSResponder, NSView, NSWindow,
+};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 
 use crate::graphics::Xf;
@@ -130,10 +132,76 @@ define_class!(
         fn key_up(&self, event: &NSEvent) {
             forward(self, |next| next.keyUp(event));
         }
+
+        #[unsafe(method(performKeyEquivalent:))]
+        fn perform_key_equivalent(&self, _event: &NSEvent) -> bool {
+            false
+        }
+
+        #[unsafe(method(flagsChanged:))]
+        fn flags_changed(&self, event: &NSEvent) {
+            forward(self, |next| next.flagsChanged(event));
+        }
+
+        #[unsafe(method(rightMouseDragged:))]
+        fn right_mouse_dragged(&self, event: &NSEvent) {
+            forward(self, |next| next.rightMouseDragged(event));
+        }
+
+        #[unsafe(method(otherMouseDragged:))]
+        fn other_mouse_dragged(&self, event: &NSEvent) {
+            forward(self, |next| next.otherMouseDragged(event));
+        }
+
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, event: &NSEvent) {
+            forward(self, |next| next.mouseEntered(event));
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, event: &NSEvent) {
+            forward(self, |next| next.mouseExited(event));
+        }
+
+        #[unsafe(method(interpretKeyEvents:))]
+        fn interpret_key_events(&self, events: &AnyObject) {
+            crate::keybindings::interpret_all(as_responder(self), events);
+        }
+
+        #[unsafe(method(insertText:))]
+        fn insert_text(&self, text: &AnyObject) {
+            // SAFETY: insertText: takes the text.
+            forward(self, |next| unsafe { msg_send![next, insertText: text] });
+        }
+
+        #[unsafe(method(doCommandBySelector:))]
+        fn do_command_by_selector(&self, selector: Sel) {
+            do_command(self, selector);
+        }
     }
 
     unsafe impl NSObjectProtocol for NSResponderImpl {}
 );
+
+fn as_responder(this: &NSResponderImpl) -> &NSResponder {
+    // SAFETY: NSResponder is NSResponderImpl's class.
+    unsafe { &*(this as *const NSResponderImpl).cast::<NSResponder>() }
+}
+
+/// Perform an editing command if this responder has it, else pass it up
+/// the chain.
+fn do_command(this: &NSResponderImpl, selector: Sel) {
+    // SAFETY: respondsToSelector: takes a selector and returns BOOL.
+    let responds: bool = unsafe { msg_send![this, respondsToSelector: selector] };
+    if responds {
+        // SAFETY: editing commands are action methods: they take the sender
+        // and return nothing.
+        unsafe { MessageReceiver::send_message::<_, ()>(this, selector, (as_responder(this),)) }
+    } else {
+        // SAFETY: doCommandBySelector: takes a selector.
+        forward(this, |next| unsafe { msg_send![next, doCommandBySelector: selector] });
+    }
+}
 
 /// Pass an event a responder doesn't handle up the chain.
 fn forward(this: &NSResponderImpl, send: impl FnOnce(&NSResponder)) {
@@ -344,6 +412,12 @@ define_class!(
         #[unsafe(method_id(hitTest:))]
         fn hit_test(&self, point: NSPoint) -> Option<Retained<NSView>> {
             hit_test(self, point)
+        }
+
+        #[unsafe(method(performKeyEquivalent:))]
+        fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
+            // Depth first, subviews in order, until one performs it.
+            subviews(self).iter().any(|sub| !is_hidden(imp(sub)) && sub.performKeyEquivalent(event))
         }
     }
 
@@ -641,6 +715,9 @@ pub(crate) fn set_window(view: &NSViewImpl, window: Option<NonNull<NSWindow>>) {
     if view.ivars().window.get() == window {
         return;
     }
+    if let Some(old) = window_of(view) {
+        old.view_left(view);
+    }
     if is_clip(view)
         && let Some(old) = window_of(view)
     {
@@ -865,11 +942,22 @@ impl NSScrollViewImpl {
     }
 }
 
+/// A line, for wheels, which scroll by lines.
+const LINE_SCROLL: f64 = 16.0;
+
 fn scroll_by_wheel(clip: &NSClipView, event: &NSEvent) {
-    let dy = event.scrollingDeltaY();
+    let (mut dx, mut dy) = (event.scrollingDeltaX(), event.scrollingDeltaY());
+    if !event.hasPreciseScrollingDeltas() {
+        (dx, dy) = (dx * LINE_SCROLL, dy * LINE_SCROLL);
+        // Shift turns a wheel sideways.
+        if dx == 0.0 && event.modifierFlags().contains(NSEventModifierFlags::Shift) {
+            (dx, dy) = (dy, 0.0);
+        }
+    }
     let bounds = clip.bounds();
-    // Positive deltas scroll toward the top of the document.
+    // Positive deltas scroll toward the top and the left of the document.
     let y = if clip.isFlipped() { bounds.origin.y - dy } else { bounds.origin.y + dy };
-    let target = clip.constrainBoundsRect(NSRect::new(NSPoint::new(bounds.origin.x, y), bounds.size));
+    let x = bounds.origin.x - dx;
+    let target = clip.constrainBoundsRect(NSRect::new(NSPoint::new(x, y), bounds.size));
     clip.scrollToPoint(target.origin);
 }

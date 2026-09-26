@@ -1,5 +1,10 @@
 //! CPU rasterization of recorded ops into XRGB8888 pixels, touching only the
 //! damaged rectangles. Runs on the render thread.
+//!
+//! Ops are in points; a canvas has `scale` pixels per point. A fill covers
+//! the pixels whose centers lie inside it, and so does a damaged rectangle
+//! or a clip, so a pixel's value never depends on how the damage was cut
+//! up, at any scale.
 
 use std::collections::HashMap;
 
@@ -7,12 +12,15 @@ use crate::protocol::{Color, Op, Rect};
 use crate::text::fonts;
 
 /// Pixels of a layer (or of one tile of it), `origin_y` being the layer
-/// coordinate of the first row.
+/// coordinate (points) of the first row. `width` and `height` count
+/// pixels.
 pub(crate) struct Canvas<'a> {
     pub px: &'a mut [u32],
     pub width: u32,
     pub height: u32,
     pub origin_y: f32,
+    /// Pixels per point.
+    pub scale: f32,
 }
 
 #[derive(Default)]
@@ -65,8 +73,19 @@ pub(crate) fn paint(canvas: &mut Canvas, glyphs: &mut Glyphs, rects: &[Rect], op
     }
 }
 
+/// The pixels whose centers lie in `r` (layer points), within the canvas.
+fn device_pixels(canvas: &Canvas, r: &Rect) -> Option<(usize, usize, usize, usize)> {
+    let s = canvas.scale;
+    let edge = |v: f32| (v * s - 0.5).ceil();
+    let x0 = edge(r.x0).max(0.0);
+    let x1 = edge(r.x1).min(canvas.width as f32);
+    let y0 = edge(r.y0 - canvas.origin_y).max(0.0);
+    let y1 = edge(r.y1 - canvas.origin_y).min(canvas.height as f32);
+    (x0 < x1 && y0 < y1).then_some((x0 as usize, y0 as usize, x1 as usize, y1 as usize))
+}
+
 fn fill(canvas: &mut Canvas, r: &Rect, color: Color) {
-    let Some((x0, y0, x1, y1)) = pixels(canvas, r) else { return };
+    let Some((x0, y0, x1, y1)) = device_pixels(canvas, r) else { return };
     let (rgb, a) = channels(color);
     let w = canvas.width as usize;
     for y in y0..y1 {
@@ -86,15 +105,27 @@ fn path(canvas: &mut Canvas, points: &[[f32; 2]], color: Color, clip: &Rect) {
     let bounds = points
         .iter()
         .fold(Rect::new(f32::MAX, f32::MAX, f32::MIN, f32::MIN), |r, p| r.union(&Rect::new(p[0], p[1], p[0], p[1])));
-    let area = bounds.round_out().intersect(clip);
-    let Some((x0, y0, x1, y1)) = pixels(canvas, &area) else { return };
+    // The pixels the path can touch (antialiasing included), in the clip.
+    let (s, oy) = (canvas.scale, canvas.origin_y);
+    let touched = Rect::new(bounds.x0 * s, (bounds.y0 - oy) * s, bounds.x1 * s, (bounds.y1 - oy) * s).round_out();
+    let Some((cx0, cy0, cx1, cy1)) = device_pixels(canvas, clip) else { return };
+    let x0 = (touched.x0.max(0.0) as usize).max(cx0);
+    let y0 = (touched.y0.max(0.0) as usize).max(cy0);
+    let x1 = (touched.x1.max(0.0) as usize).min(cx1);
+    let y1 = (touched.y1.max(0.0) as usize).min(cy1);
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
     let (w, h) = ((x1 - x0) as u32, (y1 - y0) as u32);
     let Some(mut pm) = tiny_skia::Pixmap::new(w, h) else { return };
-    let (ox, oy) = (x0 as f32, y0 as f32 + canvas.origin_y);
+    // Points to this pixmap's pixels.
+    let at = |p: &[f32; 2]| (p[0] * s - x0 as f32, (p[1] - oy) * s - y0 as f32);
     let mut pb = tiny_skia::PathBuilder::new();
-    pb.move_to(points[0][0] - ox, points[0][1] - oy);
+    let (mx, my) = at(&points[0]);
+    pb.move_to(mx, my);
     for p in &points[1..] {
-        pb.line_to(p[0] - ox, p[1] - oy);
+        let (x, y) = at(p);
+        pb.line_to(x, y);
     }
     pb.close();
     let Some(shape) = pb.finish() else { return };
@@ -163,5 +194,64 @@ fn draw_text(
             }
         }
         pen += m.advance_width;
+    }
+}
+
+#[cfg(test)]
+mod scale_tests {
+    use super::*;
+
+    fn canvas_with(px: &mut [u32], w: u32, h: u32, scale: f32) -> Canvas<'_> {
+        Canvas { px, width: w, height: h, origin_y: 0.0, scale }
+    }
+
+    fn covered(px: &[u32]) -> usize {
+        px.iter().filter(|&&p| p != 0).count()
+    }
+
+    #[test]
+    fn fills_scale_to_pixels() {
+        let mut px = vec![0u32; 40 * 40];
+        let mut c = canvas_with(&mut px, 40, 40, 2.0);
+        fill(&mut c, &Rect::new(1.0, 1.0, 5.0, 3.0), [1.0, 1.0, 1.0, 1.0]);
+        // 4 × 2 points at 2 pixels a point.
+        assert_eq!(covered(&px), 8 * 4);
+        assert_ne!(px[2 * 40 + 2], 0);
+        assert_eq!(px[40 + 1], 0);
+    }
+
+    #[test]
+    fn neighbours_tile_without_gaps_at_fractional_scales() {
+        for scale in [1.0, 1.25, 1.5, 1.75, 2.0, 2.5] {
+            let mut px = vec![0u32; 64 * 8];
+            let c = canvas_with(&mut px, 64, 8, scale);
+            // Adjacent fills, one after another, each adding one to what's there.
+            let mut x = 0.0;
+            for w in [1.0, 2.5, 0.7, 3.3, 4.0, 1.5] {
+                let Some((x0, y0, x1, y1)) = device_pixels(&c, &Rect::new(x, 0.0, x + w, 4.0)) else {
+                    x += w;
+                    continue;
+                };
+                for y in y0..y1 {
+                    for p in &mut c.px[y * 64 + x0..y * 64 + x1] {
+                        *p += 1;
+                    }
+                }
+                x += w;
+            }
+            // Every pixel whose center is inside the run, exactly once.
+            let row = &px[..((x * scale - 0.5).ceil() as usize).min(64)];
+            assert!(row.iter().all(|&p| p == 1), "scale {scale}: {row:?}");
+        }
+    }
+
+    #[test]
+    fn paths_scale() {
+        let mut px = vec![0u32; 20 * 20];
+        let mut c = canvas_with(&mut px, 20, 20, 2.0);
+        let square = [[1.0, 1.0], [6.0, 1.0], [6.0, 6.0], [1.0, 6.0]];
+        path(&mut c, &square, [1.0, 1.0, 1.0, 1.0], &Rect::new(0.0, 0.0, 10.0, 10.0));
+        // 5 × 5 points is 10 × 10 pixels.
+        assert_eq!(covered(&px), 100);
     }
 }

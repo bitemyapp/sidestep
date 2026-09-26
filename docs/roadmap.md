@@ -37,11 +37,33 @@ blinking caret, a spinner at 60 fps, and a 2000-line list in an
 responder chain, `NSColor`, `NSFont`, `NSBezierPath` fills and string
 drawing. The design is in [architecture.md](architecture.md).
 
+The platform layer since (`examples/appkit-input` shows it):
+
+- Keyboard: keymaps compiled in pure Rust (kbvm), compose and dead keys,
+  key repeat, key-down, key-up and flags-changed events with characters
+  and modifier flags, key equivalents, AppKit's standard key bindings
+  (`interpretKeyEvents:`, `insertText:`, `doCommandBySelector:`), key window
+  focus and application activation.
+- Pointer: enter and leave, all buttons, click counts, horizontal and
+  high-resolution scrolling, `NSCursor`'s standard cursors as cursor shapes
+  with a themed fallback.
+- Windows: several at once, client-side decorations where the compositor
+  wants them (GNOME), resizing by the user, size limits, zoom, full screen,
+  miniaturize, borderless child windows as popups, activation.
+- HiDPI at integer and fractional scales.
+- The general `NSPasteboard` as the Wayland clipboard, for strings.
+
 Next:
 
-- Keyboard input and text input methods; target/action.
+- `keyCode`: Apple's virtual key codes come only from Apple's headers, so
+  Sidestep reports XKB keycodes; a clean-room table (for example measured
+  with a program on a Mac) needs a decision.
+- Text input methods (zwp_text_input_v3, `NSTextInputClient`, marked text);
+  target/action.
+- `NSTrackingArea` and cursor rectangles, image cursors, drag and drop,
+  `NSScreen`.
 - `NSGraphicsContext`, strokes, curves, images, transforms.
-- Scrollers, resizing by the user, several windows, HiDPI.
+- Scrollers.
 - Text shaping and fallback with parley and fontique.
 - `NSMenu`, which has no system-wide equivalent on Linux, so it becomes a
   menu bar inside the window.

@@ -16,3 +16,15 @@ sidestep.workspace = true
 [[test]]
 name = "appkit"
 harness = false
+
+# Input, windows and pasteboards (appkit_input).
+[dev-dependencies]
+objc2-app-kit = { workspace = true, features = ["NSEvent", "NSWindow", "NSGraphics", "NSGraphicsContext", "NSPasteboard", "NSResponder", "NSView", "NSCursor", "NSColor", "objc2-core-foundation"] }
+
+[[test]]
+name = "appkit_input"
+harness = false
+
+[[test]]
+name = "appkit_keybindings"
+harness = false

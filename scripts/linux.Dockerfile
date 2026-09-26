@@ -7,3 +7,6 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends sway grim fonts-dejavu-core \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --create-home compositor
+# Clipboard tools, to test copy and paste between programs under the
+# headless compositor.
+RUN apt-get update && apt-get install -y --no-install-recommends wl-clipboard && rm -rf /var/lib/apt/lists/*

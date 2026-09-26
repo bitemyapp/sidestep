@@ -2,17 +2,30 @@
 # Run a Wayland program under a headless sway with the software renderer,
 # inside the Linux container:
 #   scripts/linux-run scripts/headless-wayland /target/debug/appkit-slice
-# SIZE sets the output (default 1280x800). SHOT=file.png saves a screenshot
-# SHOT_AFTER seconds (default 2) after start and then stops the program.
+# SIZE sets the output in pixels (default 1280x800) and SCALE its scale
+# (default 1; fractional scales such as 1.5 work). FLOATING=1 floats
+# windows instead of tiling them, as most desktops do. SHOT=file.png saves
+# a screenshot SHOT_AFTER seconds (default 2) after start and then stops
+# the program. THEN runs a shell command THEN_AFTER seconds (default 1)
+# after start, such as an input injector, and stops the program when it
+# ends (after the SHOT, if one is asked for).
+#
+# sway draws server-side decorations; SIDESTEP_DECORATIONS=client makes a
+# Sidestep program draw its own, as it does on GNOME.
 set -eu
 export XDG_RUNTIME_DIR=$(mktemp -d)
 export WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1
 config=$XDG_RUNTIME_DIR/sway.conf
 cat >"$config" <<CONF
-output HEADLESS-1 resolution ${SIZE:-1280x800} position 0 0
+output HEADLESS-1 resolution ${SIZE:-1280x800} position 0 0 scale ${SCALE:-1}
 default_border none
 default_floating_border none
 CONF
+if [ -n "${FLOATING:-}" ]; then
+  echo 'for_window [title=".*"] floating enable' >>"$config"
+  # A backdrop to see window shadows against.
+  echo 'output * bg #7f8c99 solid_color' >>"$config"
+fi
 # sway won't run as root; the container's compositor user runs it.
 if [ "$(id -u)" = 0 ]; then
   chown compositor "$XDG_RUNTIME_DIR"
@@ -31,7 +44,12 @@ done
 export WAYLAND_DISPLAY=$(ls "$XDG_RUNTIME_DIR" | grep '^wayland-[0-9]*$' | head -n1)
 "$@" &
 app_pid=$!
-if [ -n "${SHOT:-}" ]; then
+if [ -n "${THEN:-}" ]; then
+  sleep "${THEN_AFTER:-1}"
+  sh -c "$THEN" || echo "headless-wayland: THEN failed" >&2
+  if [ -n "${SHOT:-}" ]; then grim "$SHOT"; fi
+  kill $app_pid 2>/dev/null || true
+elif [ -n "${SHOT:-}" ]; then
   sleep "${SHOT_AFTER:-2}"
   grim "$SHOT"
   kill $app_pid 2>/dev/null || true
