@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_int};
 use std::mem::transmute;
-use std::sync::atomic::{AtomicI32, AtomicPtr, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex, OnceLock, RwLock};
 
 use crate::ivar::Ivar;
@@ -28,6 +28,11 @@ pub(crate) const SHELL: u32 = 1 << 7;
 /// One of the block classes, whose instances follow the blocks ABI rather
 /// than the object header layout.
 pub(crate) const BLOCK: u32 = 1 << 8;
+/// The class overrides `+alloc` or `+allocWithZone:`, so `+new` must send
+/// `+alloc` instead of allocating directly.
+pub(crate) const CUSTOM_ALLOC: u32 = 1 << 9;
+/// Flags a class passes on to its subclasses.
+const INHERITED: u32 = CUSTOM_RR | CUSTOM_ALLOC;
 
 /// A class or metaclass.
 ///
@@ -47,6 +52,15 @@ pub struct Class {
     /// The method cache, read on every message without locking; see
     /// `cache`.
     pub(crate) cache: AtomicPtr<crate::cache::Slot>,
+    /// The size and alignment of an instance, not counting its header. Set
+    /// while the class is built and read on every allocation, so they live
+    /// here rather than behind `rt`.
+    pub(crate) instance_size: AtomicUsize,
+    pub(crate) instance_align: AtomicUsize,
+    /// An instance's allocation, header included, worked out when the class
+    /// is registered: its size in the high half, the object's offset into
+    /// it (also its alignment) in the low half. Zero until then.
+    pub(crate) alloc_layout: AtomicU64,
     pub(crate) rt: OnceLock<ClassRt>,
 }
 
@@ -68,8 +82,7 @@ pub(crate) struct ClassRt {
     pub(crate) methods: RwLock<MethodTable>,
     pub(crate) ivars: RwLock<Vec<Shared<Ivar>>>,
     pub(crate) protocols: RwLock<Vec<Shared<Protocol>>>,
-    pub(crate) instance_size: AtomicUsize,
-    pub(crate) instance_align: AtomicUsize,
+    pub(crate) properties: RwLock<Vec<Shared<crate::property::Property>>>,
     pub(crate) version: AtomicI32,
 }
 
@@ -91,6 +104,9 @@ impl Class {
             peer: AtomicPtr::new(meta),
             loader: Some(load),
             cache: crate::cache::empty(),
+            instance_size: AtomicUsize::new(0),
+            instance_align: AtomicUsize::new(0),
+            alloc_layout: AtomicU64::new(0),
             rt: OnceLock::new(),
         }
     }
@@ -107,6 +123,9 @@ impl Class {
             peer: AtomicPtr::new((class as *const Class).cast_mut()),
             loader: None,
             cache: crate::cache::empty(),
+            instance_size: AtomicUsize::new(0),
+            instance_align: AtomicUsize::new(0),
+            alloc_layout: AtomicU64::new(0),
             rt: OnceLock::new(),
         }
     }
@@ -120,6 +139,9 @@ impl Class {
             peer: AtomicPtr::new(std::ptr::null_mut()),
             loader: None,
             cache: crate::cache::empty(),
+            instance_size: AtomicUsize::new(0),
+            instance_align: AtomicUsize::new(0),
+            alloc_layout: AtomicU64::new(0),
             rt: OnceLock::new(),
         }
     }
@@ -168,12 +190,15 @@ impl Class {
         if self.is_meta() { self.peer() } else { self }
     }
 
+    /// Relaxed: they are written while the class is built, and read once it
+    /// is loaded, which the reader established with an acquire load of the
+    /// flags (`ensure_loaded`).
     pub(crate) fn instance_size(&self) -> usize {
-        self.rt().instance_size.load(Ordering::Acquire)
+        self.instance_size.load(Ordering::Relaxed)
     }
 
     pub(crate) fn instance_align(&self) -> usize {
-        self.rt().instance_align.load(Ordering::Acquire)
+        self.instance_align.load(Ordering::Relaxed)
     }
 
     pub(crate) fn is_subclass_of(&self, other: &Class) -> bool {
@@ -188,8 +213,55 @@ impl Class {
     }
 }
 
-/// Registered classes by name.
-static REGISTRY: LazyLock<RwLock<HashMap<&'static CStr, Shared<Class>>>> = LazyLock::new(Default::default);
+/// One entry of the program's list of static shells; see [`linked`]. Not
+/// for direct use.
+#[doc(hidden)]
+#[repr(transparent)]
+pub struct LinkedClass(pub &'static Class);
+
+/// Every static shell linked into the program, loaded or not.
+///
+/// [`static_class!`](crate::static_class) puts a pointer to each shell in
+/// the `sidestep_classes` section. The linker concatenates that section
+/// from every object it links and, because the name is a valid C
+/// identifier, defines `__start_sidestep_classes` and
+/// `__stop_sidestep_classes` around the result, with no constructor
+/// involved. `#[used]` keeps the entries through garbage collection of
+/// sections.
+///
+/// Which objects are linked decides which classes are listed. rustc links
+/// into every executable and shared library an object referring to each
+/// symbol an upstream crate exports under a fixed name, and every shell is
+/// exported as `._OBJC_CLASS_<Name>`. So linking a framework crate at all
+/// (which `use sidestep as _;` does) links every shell it defines, and its
+/// entries with it, whether or not the program names the class.
+fn linked() -> &'static [LinkedClass] {
+    unsafe extern "Rust" {
+        #[link_name = "__start_sidestep_classes"]
+        static START: LinkedClass;
+        #[link_name = "__stop_sidestep_classes"]
+        static STOP: LinkedClass;
+    }
+    let (start, stop) = (&raw const START, &raw const STOP);
+    let len = (stop.addr() - start.addr()) / size_of::<LinkedClass>();
+    // SAFETY: the linker places the section's contents, pointer-sized and
+    // pointer-aligned entries written by `static_class!`, contiguously
+    // between the two symbols. The runtime's own shells (NSObject, the
+    // block classes) guarantee the section exists.
+    unsafe { std::slice::from_raw_parts(start, len) }
+}
+
+/// Classes by name: every linked static shell, loaded or not, and every
+/// class registered with `objc_registerClassPair`.
+static REGISTRY: LazyLock<RwLock<HashMap<&'static CStr, Shared<Class>>>> = LazyLock::new(|| {
+    let mut classes = HashMap::new();
+    for entry in linked() {
+        // Two shells with one name can only come from two copies of a
+        // framework; the first wins.
+        classes.entry(entry.0.name()).or_insert(Shared(entry.0 as *const Class));
+    }
+    RwLock::new(classes)
+});
 /// Static shells whose loader is running, waiting to be claimed by
 /// `objc_allocateClassPair`.
 static PENDING: LazyLock<Mutex<HashMap<&'static CStr, Shared<Class>>>> = LazyLock::new(Default::default);
@@ -204,6 +276,33 @@ pub(crate) fn reset_cache(cls: &Class) {
     crate::cache::flush(cls);
 }
 
+/// Give `cls` a flag saying it overrides a method, and pass it on to the
+/// subclasses it already has. Classes built later inherit it in
+/// `init_pair`.
+pub(crate) fn set_override_flag(cls: &'static Class, flag: u32) {
+    debug_assert!(flag & !INHERITED == 0);
+    if cls.flags.fetch_or(flag, Ordering::AcqRel) & flag != 0 || !cls.is_loaded() {
+        return;
+    }
+    // Rare: a method added to a class in use. Unloaded shells have no
+    // superclass yet, so they are skipped and inherit the flag when they
+    // load.
+    for sub in loaded_classes() {
+        if sub.is_subclass_of(cls) {
+            sub.flags.fetch_or(flag, Ordering::AcqRel);
+        }
+    }
+}
+
+/// Every loaded class (not metaclass), for the rare changes that must
+/// visit them all.
+pub(crate) fn loaded_classes() -> Vec<&'static Class> {
+    let registry = REGISTRY.read().unwrap();
+    // SAFETY: registered classes are never freed.
+    registry.values().map(|c| unsafe { c.get() }).filter(|c| c.is_loaded()).collect()
+}
+
+/// The class named `name`, which may be a static shell not loaded yet.
 pub(crate) fn lookup_name(name: &CStr) -> Option<&'static Class> {
     let registry = REGISTRY.read().unwrap();
     // SAFETY: registered classes are never freed.
@@ -295,12 +394,14 @@ pub(crate) fn find_method(cls: &'static Class, sel: Sel) -> Option<&'static Meth
     None
 }
 
-/// The implementation `sel` resolves to on `cls`, through the method cache.
+/// The implementation of the method `sel` names on `cls`, through the
+/// method cache. A cached forwarding trampoline is not a method: classes
+/// don't respond to the selectors they forward.
 #[inline]
 pub(crate) fn lookup_imp(cls: &'static Class, sel: Sel) -> Option<Imp> {
     match crate::cache::probe(cls, sel) {
-        Some(imp) => Some(imp),
-        None => lookup_slow(cls, sel),
+        Some(imp) if !crate::forward::is_trampoline(imp) => Some(imp),
+        _ => lookup_slow(cls, sel),
     }
 }
 
@@ -315,7 +416,6 @@ fn lookup_slow(cls: &'static Class, sel: Sel) -> Option<Imp> {
 
 /// Wire up a class and metaclass under `superclass` (or as a new root).
 fn init_pair(cls: &'static Class, meta: &'static Class, superclass: Option<&'static Class>) {
-    let rt = cls.rt();
     let as_mut = |c: &'static Class| (c as *const Class).cast_mut();
     match superclass {
         Some(sup) => {
@@ -324,18 +424,16 @@ fn init_pair(cls: &'static Class, meta: &'static Class, superclass: Option<&'sta
             meta.superclass.store(as_mut(sup_meta), Ordering::Release);
             // Every metaclass's isa is the root metaclass.
             meta.isa.store(as_mut(sup_meta.metaclass()), Ordering::Release);
-            rt.instance_size.store(sup.instance_size(), Ordering::Release);
-            rt.instance_align.store(sup.instance_align(), Ordering::Release);
-            if sup.flags() & CUSTOM_RR != 0 {
-                cls.flags.fetch_or(CUSTOM_RR, Ordering::AcqRel);
-            }
+            cls.instance_size.store(sup.instance_size(), Ordering::Relaxed);
+            cls.instance_align.store(sup.instance_align(), Ordering::Relaxed);
+            cls.flags.fetch_or(sup.flags() & INHERITED, Ordering::AcqRel);
         }
         None => {
             cls.superclass.store(std::ptr::null_mut(), Ordering::Release);
             meta.superclass.store(as_mut(cls), Ordering::Release);
             meta.isa.store(as_mut(meta), Ordering::Release);
-            rt.instance_size.store(size_of::<Object>(), Ordering::Release);
-            rt.instance_align.store(align_of::<Object>(), Ordering::Release);
+            cls.instance_size.store(size_of::<Object>(), Ordering::Relaxed);
+            cls.instance_align.store(align_of::<Object>(), Ordering::Relaxed);
             cls.flags.fetch_or(ROOT, Ordering::AcqRel);
             meta.flags.fetch_or(ROOT, Ordering::AcqRel);
         }
@@ -412,6 +510,9 @@ pub unsafe extern "C" fn objc_registerClassPair(cls: *mut Class) {
         return;
     }
     with_load_lock(|| {
+        if let Some((total, offset)) = crate::object::instance_layout(cls, 0) {
+            cls.alloc_layout.store(((total as u64) << 32) | offset as u64, Ordering::Relaxed);
+        }
         cls.metaclass().flags.fetch_or(LOADED, Ordering::AcqRel);
         cls.flags.fetch_or(LOADED, Ordering::AcqRel);
         REGISTRY.write().unwrap().insert(cls.name(), Shared(cls));
@@ -433,13 +534,19 @@ pub unsafe extern "C" fn objc_disposeClassPair(cls: *mut Class) {
     // The memory is kept: stale pointers to a disposed class stay harmless.
 }
 
+/// Finds static shells too, and loads them, so the class is ready to use
+/// however the caller goes on to use it.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn objc_getClass(name: *const c_char) -> *const Class {
     if name.is_null() {
         return std::ptr::null();
     }
     // SAFETY: the caller passes a C string.
-    as_ptr(lookup_name(unsafe { CStr::from_ptr(name) }))
+    let cls = lookup_name(unsafe { CStr::from_ptr(name) });
+    if let Some(cls) = cls {
+        ensure_loaded(cls);
+    }
+    as_ptr(cls)
 }
 
 #[unsafe(no_mangle)]
@@ -468,6 +575,8 @@ pub unsafe extern "C" fn objc_getMetaClass(name: *const c_char) -> *const Class 
     unsafe { cls.as_ref() }.map_or(std::ptr::null(), |c| c.metaclass() as *const Class)
 }
 
+/// Every class, including static shells not loaded yet: they come back as
+/// they are, and load when something reads more than their name.
 fn registered() -> Vec<*const Class> {
     REGISTRY.read().unwrap().values().map(|c| c.0).collect()
 }

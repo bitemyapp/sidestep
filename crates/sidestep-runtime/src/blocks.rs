@@ -310,6 +310,10 @@ pub static _NSConcreteGlobalBlock: Class =
     Class::shell_with_flags(&GLOBAL_BLOCK_META, "__NSGlobalBlock__\0", load_global, BLOCK);
 static GLOBAL_BLOCK_META: Class = Class::meta_shell(&_NSConcreteGlobalBlock, "__NSGlobalBlock__\0");
 
+crate::__linked_class!(_NSConcreteStackBlock);
+crate::__linked_class!(_NSConcreteMallocBlock);
+crate::__linked_class!(_NSConcreteGlobalBlock);
+
 type Id = *mut AnyObject;
 
 unsafe extern "C-unwind" fn block_copy(this: Id, _: Sel) -> Id {

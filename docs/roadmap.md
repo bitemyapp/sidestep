@@ -10,6 +10,14 @@ ivars and `Drop`, `super`, autorelease pools, weak references under thread
 contention, protocols, introspection (including before a class's first
 message), blocks, strings. Passing on macOS, and on Linux aarch64 and x86_64.
 
+Since then: every framework class findable by name before its first use,
+message forwarding through `-forwardingTargetForSelector:`, the autorelease
+return-value handoff, declared properties, methods implemented by blocks,
+`objc_msgSend` for direct callers, every association policy, and side
+tables (weak references, associated objects, `@synchronized`) sharded so
+threads don't contend. Allocating and freeing an object costs about 4 ns
+beyond `malloc` and `free`.
+
 ## 1. Foundation core
 
 Done so far: constant strings from static memory, an immutable
@@ -23,8 +31,8 @@ Done so far: constant strings from static memory, an immutable
   `NSProcessInfo`.
 - `NSNotificationCenter`, the rest of `NSRunLoop`, `NSAutoreleasePool`, and
   the rest of `NSThread`.
-- Every static class findable by name, not only after first use.
-- Message forwarding.
+- `-forwardInvocation:`, once `NSInvocation` exists (the runtime forwards
+  through `-forwardingTargetForSelector:` already).
 
 ## 2. AppKit skeleton
 

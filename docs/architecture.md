@@ -59,24 +59,84 @@ explanation if that happens.
 builds it with objc2's `ClassBuilder::root`, which gives the same encoding
 guarantees.
 
+**Finding classes by name.** `static_class!` also puts a pointer to each
+shell in a linker section, `sidestep_classes`. The linker concatenates the
+section from every object it links and defines `__start_sidestep_classes`
+and `__stop_sidestep_classes` around it, so the runtime reads the list of
+every framework class without a constructor. The name registry starts out
+holding all of them, loaded or not, and `objc_getClass`, `objc_lookUpClass`
+and `objc_getRequiredClass` load a shell when they find it;
+`objc_copyClassList` and `objc_getClassList` list shells as they are, and a
+shell loads as soon as anything reads more than its name. A class nobody has
+used also keeps its name: `objc_allocateClassPair` refuses it.
+
+A class the program never names still ends up in the list: rustc links into
+every executable and shared library an object that refers to every symbol an
+upstream crate exports under a fixed name, and each shell is exported as
+`._OBJC_CLASS_<Name>`. Linking a framework crate at all, which
+`use sidestep as _;` does, therefore links all of its shells and their
+entries. `objc_getClass("NSTimer")`, which `NSClassFromString` rests on,
+works in a program that never mentions `NSTimer`.
+
 ## Objects
 
 Every object is preceded by a 16-byte header holding an atomic word: the retain
-count above four flag bits (deallocating, weakly referenced, has associated
-objects, immortal). Retain is a single `fetch_add`; release is a CAS loop that
-sets the deallocating bit at zero and sends `-dealloc`. Weak references live in
-a side table keyed by object, cleared when the object is freed; loads retain
-through a CAS that fails once deallocation has begun.
+count above five flag bits (deallocating, weakly referenced, has associated
+objects, immortal, locked with `@synchronized`). Retain is a single
+`fetch_add`; release is a CAS loop that sets the deallocating bit at zero and
+sends `-dealloc`. Before either, `objc_retain` and `objc_release` ask one
+question in two relaxed loads, the object's class and its flags: is this an
+ordinary counted object whose class doesn't override `retain` or `release`?
+Class objects and blocks have no header; their classes' flags say so, and
+static shells carry those flags from the start, so this works even before a
+class has loaded.
 
-Class objects and blocks have no header. The ARC entry points tell them apart
-by their class's flags, which static shells carry from the start, so this works
-even before a class has loaded.
+Allocation is short too. A class works out its instances' allocation (header,
+alignment, size rounded up to whole words) when it is registered, so
+`class_createInstance` is a `malloc` of a known size, a header, the `isa`,
+and word stores zeroing the instance variables; `calloc` would zero the
+header and `isa` for nothing, and `memset` costs more than a few stores.
+`+new` allocates directly unless the class overrides `+alloc` or
+`+allocWithZone:`, a flag its subclasses inherit. Replacing one of these
+methods' implementations later (swizzling the root class's `-retain`, say)
+sets the same flags on the class that owns it and every class below, so
+the replacement is called. Objects come from Rust's global allocator, so a
+program's `#[global_allocator]` serves them too. Freeing checks the
+header's side-table bits once and, when none is set, goes straight to the
+allocator.
+
+**Side tables.** Weak references, associated objects and `@synchronized`
+locks live in tables keyed by object address, each split into 64 shards on
+cache lines of their own, with a one-multiply hash rather than SipHash.
+Threads working on different objects don't wait for each other. A weak load
+locks only the shard of the object it read, checks the location still holds
+it, and retains through a CAS that fails once deallocation has begun;
+freeing an object zeroes its weak references under that same lock, so the
+object can't be freed under a load. An object with one weak reference, the
+usual case, needs no allocation for it. The atomic association policies
+retain the value under the lock and autorelease it after, as Apple's do.
+
+**The autorelease handoff.** A method returning an object it doesn't own
+ends with `objc_autoreleaseReturnValue`, and a caller keeping the object
+starts with `objc_retainAutoreleasedReturnValue`, which objc2 emits on both
+sides. The first parks the object in a thread-local slot instead of the
+pool, and the second, given the same object, takes it back: the reference
+passes from callee to caller without touching the count or the pool. The
+parked object counts as the newest entry of the current pool, and
+everything that could observe the difference (another autorelease, a pool
+push or pop, the thread ending) first moves it into the pool, where
+autoreleasing would have put it, so an object the caller doesn't keep lives
+exactly as long as before.
 
 ## Message dispatch
 
 `objc_msg_lookup(receiver, sel)` returns the implementation and the caller
 calls it, the GNUstep convention objc2 already supports. No assembly
-trampoline is involved, so the runtime is portable Rust.
+trampoline is involved, so dispatch is portable Rust. Small stubs for
+aarch64 and x86_64 serve the rest: forwarding (below), `objc_msgSend` for
+code that calls it directly, and methods made from blocks with
+`imp_implementationWithBlock`, whose stubs are written into pages made
+executable only once written.
 
 The lookup is built to cost less than Apple's `objc_msgSend`. Each class
 keeps its method cache in one word: a pointer to a table of slots with the
@@ -96,17 +156,36 @@ class initialized?" check, because a class only gets a table once
   use, or changing an implementation, empties every class's cache.
 
 Selectors are allocated side by side, 16-byte aligned, so selectors spread
-evenly over a table's slots, and tables grow at half full, so most
-selectors are found in the first slot they probe. On an M-series Mac, a
-message costs about 1.1 ns on Sidestep (under Linux in a VM) against 1.25 ns
-on Apple's runtime; `examples/msgbench` measures it. With link-time
+evenly over a table's slots, the runtime's own selectors (`init`, `dealloc`
+and so on) first. Tables grow at half full, and a table still sparse also
+grows rather than let a new selector share a first slot with another, so
+nearly every selector is found in the first slot it probes. On an M-series
+Mac, a message costs about 1.1 ns on Sidestep (under Linux in a VM) against
+1.25 ns on Apple's runtime; `examples/msgbench` measures it. With link-time
 optimization (`lto = "fat"` in the release profile) the lookup inlines into
 every call site, which `objc_msgSend` never can: 0.9 ns.
 
 Unknown selectors go through `+resolveInstanceMethod:` /
-`+resolveClassMethod:` and then panic with the message Apple's runtime raises,
-`-[Class selector]: unrecognized selector sent to instance 0x…`; the panic
-unwinds into the Rust caller.
+`+resolveClassMethod:`, then forwarding, and then panic with the message
+Apple's runtime raises, `-[Class selector]: unrecognized selector sent to
+instance 0x…`; the panic unwinds into the Rust caller.
+
+**Forwarding.** Since the caller calls the implementation with the receiver
+it already has, sending a message on to another object means changing the
+receiver on the way. When a class overrides `-forwardingTargetForSelector:`
+(or `+forwardingTargetForSelector:`), selectors it doesn't implement resolve
+to a trampoline of a few dozen instructions, one per architecture (aarch64
+and x86_64, in `forward.rs`): it saves the argument registers, asks the
+receiver for its target, puts the target where the receiver was, restores
+the rest and jumps to the target's implementation. Arguments, stack
+arguments and struct returns pass through untouched; on x86_64, where a
+struct returned in memory moves the receiver to the second register, the
+trampoline tells the two cases apart by whether that register holds a
+selector. The trampoline is cached like a method, but the target is asked
+for on every message. The trampolines carry unwind tables, so a panic in
+`-forwardingTargetForSelector:` or from an unrecognized selector unwinds
+through them. `-forwardInvocation:` is not supported: it needs
+`NSInvocation`.
 
 `+initialize` is sent lazily before a class's first message, superclasses
 first, with messages from inside `+initialize` on the same thread allowed

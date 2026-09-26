@@ -35,9 +35,11 @@
 //! An acquire load would cost about half a nanosecond per message on arm64
 //! after any release store, such as an object's release.
 //!
-//! Tables double as they grow and are replaced wholesale only when a method
-//! table changes while classes are in use, which is rare, so the memory
-//! never reclaimed stays small.
+//! Tables double as they grow (at half full, or while still sparse when a
+//! new selector's first slot is taken) and are replaced wholesale only when a
+//! method table changes while classes are in use, which is rare, so the
+//! memory never reclaimed stays small: what a class's growth leaves behind
+//! is less than its current table.
 
 use std::collections::BTreeMap;
 use std::hint::cold_path;
@@ -162,8 +164,16 @@ pub(crate) fn remember(cls: &'static Class, sel: Sel, imp: Imp, epoch: u64) {
     let key = cls as *const Class as usize;
     let (mut slots, mut mask) = unpack(cls.cache.load(Ordering::Relaxed));
     let mut used = book.used.get(&key).copied();
-    // At most half full, so most selectors are in the first slot they probe.
-    if used.is_none_or(|n| (n + 1) * 2 > mask + 1) {
+    // At most half full, so most selectors are in the first slot they
+    // probe. A table still sparse also doubles when the new selector's
+    // first slot is taken: two selectors sharing a slot at one size may
+    // not at the next, and a table that small costs little memory. Classes
+    // use few selectors, so this keeps nearly all of them in their first
+    // slot, whatever order they arrive in.
+    while used.is_none_or(|n| {
+        let size = mask + 1;
+        (n + 1) * 2 > size || ((n + 1) * SPARSE <= size && size < SPARSE_LIMIT && taken(slots, mask, sel.addr()))
+    }) {
         let size = if used.is_some() { (mask + 1) * 2 } else { 16 };
         let Some(fresh) = new_table(&mut book, size) else { return };
         let mut n = 0;
@@ -184,6 +194,19 @@ pub(crate) fn remember(cls: &'static Class, sel: Sel, imp: Imp, epoch: u64) {
     if insert(slots, mask, sel.addr(), imp as usize) {
         book.used.insert(key, used.unwrap_or(0) + 1);
     }
+}
+
+/// A table at most one entry in `SPARSE` full, below `SPARSE_LIMIT`
+/// slots, grows rather than let a new selector share a first slot.
+const SPARSE: usize = 8;
+const SPARSE_LIMIT: usize = 1024;
+
+/// Whether `sel`'s first slot holds another selector.
+fn taken(slots: *const Slot, mask: usize, sel: usize) -> bool {
+    // SAFETY: within the table.
+    let slot = unsafe { &*slots.add(home(sel, mask)) };
+    let tag = slot.tag.load(Ordering::Relaxed);
+    tag != 0 && tag ^ slot.imp.load(Ordering::Relaxed) != sel
 }
 
 /// A table of `size` free slots, or `None` if there's no memory for it or

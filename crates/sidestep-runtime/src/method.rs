@@ -4,7 +4,9 @@ use std::ffi::{CStr, c_char, c_uint, c_void};
 use std::mem::transmute;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-use crate::class::{CUSTOM_RR, Class, ROOT, bump_epoch, class_ref, find_method, reset_cache};
+use crate::class::{
+    CUSTOM_ALLOC, CUSTOM_RR, Class, ROOT, bump_epoch, class_ref, find_method, reset_cache, set_override_flag,
+};
 use crate::encoding;
 use crate::selector::{Sel, known};
 use crate::util::{Shared, leak_cstr, malloc_array, malloc_cstr};
@@ -35,6 +37,11 @@ fn is_rr_selector(sel: Sel) -> bool {
     sel == k.retain || sel == k.release || sel == k.autorelease || sel == k.retain_count
 }
 
+fn is_alloc_selector(sel: Sel) -> bool {
+    let k = known();
+    sel == k.alloc || sel == k.alloc_with_zone
+}
+
 fn add_method(cls: &'static Class, sel: Sel, imp: Imp, types: &CStr) -> Option<&'static Method> {
     let mut table = cls.rt().methods.write().unwrap();
     if table.by_sel.contains_key(&(sel as usize)) {
@@ -45,8 +52,14 @@ fn add_method(cls: &'static Class, sel: Sel, imp: Imp, types: &CStr) -> Option<&
     table.by_sel.insert(sel as usize, Shared(method));
     table.order.push(Shared(method));
     drop(table);
-    if is_rr_selector(sel) && cls.flags() & ROOT == 0 && !cls.is_meta() {
-        cls.flags.fetch_or(CUSTOM_RR, Ordering::AcqRel);
+    // The root class's own implementations are the defaults the fast paths
+    // stand in for.
+    if cls.flags() & ROOT == 0 {
+        if !cls.is_meta() && is_rr_selector(sel) {
+            set_override_flag(cls, CUSTOM_RR);
+        } else if cls.is_meta() && is_alloc_selector(sel) {
+            set_override_flag(cls.peer(), CUSTOM_ALLOC);
+        }
     }
     if cls.is_loaded() {
         // Subclasses may have cached what this method now overrides.
@@ -150,6 +163,7 @@ pub unsafe extern "C" fn method_setImplementation(method: *const Method, imp: Im
     let method = unsafe { method.as_ref() }?;
     let old = method.imp.swap(imp as *mut c_void, Ordering::AcqRel);
     bump_epoch();
+    implementation_changed(method);
     // SAFETY: only IMPs are stored.
     Some(unsafe { transmute::<*mut c_void, Imp>(old) })
 }
@@ -162,6 +176,36 @@ pub unsafe extern "C" fn method_exchangeImplementations(a: *mut Method, b: *mut 
     let imp_b = b.imp.swap(imp_a, Ordering::AcqRel);
     a.imp.store(imp_b, Ordering::Release);
     bump_epoch();
+    implementation_changed(a);
+    implementation_changed(b);
+}
+
+/// A method's implementation was replaced. If it is one the ARC and
+/// allocation fast paths stand in for, the class owning it (the root class
+/// included, when its default is swizzled) and every class below loses
+/// those fast paths, so the replacement is called.
+fn implementation_changed(method: &'static Method) {
+    let (flag, class_method) = if is_rr_selector(method.sel) {
+        (CUSTOM_RR, false)
+    } else if is_alloc_selector(method.sel) {
+        (CUSTOM_ALLOC, true)
+    } else {
+        return;
+    };
+    for cls in crate::class::loaded_classes() {
+        let holder = if class_method { cls.metaclass() } else { cls };
+        let owns = holder
+            .rt()
+            .methods
+            .read()
+            .unwrap()
+            .by_sel
+            .get(&(method.sel as usize))
+            .is_some_and(|m| std::ptr::eq(m.0, method));
+        if owns {
+            set_override_flag(cls, flag);
+        }
+    }
 }
 
 fn types_of<'a>(method: *const Method) -> Vec<&'a [u8]> {

@@ -1,12 +1,13 @@
 //! Message dispatch in the libobjc2 style: `objc_msg_lookup` returns the
 //! implementation and the caller calls it, so no assembly trampoline is
-//! needed.
+//! needed except to forward a message to another object (see `forward`).
 
 use std::hint::cold_path;
 use std::mem::transmute;
 use std::sync::atomic::Ordering;
 
 use crate::class::{Class, INITIALIZED, class_ref, ensure_initialized, ensure_loaded, lookup_imp};
+use crate::forward;
 use crate::object::{Object, isa, isa_relaxed};
 use crate::selector::{self, Sel, known};
 use crate::{Bool, Imp, NO, YES};
@@ -59,14 +60,25 @@ unsafe fn resolve(cls: &'static Class, sel: Sel) -> Option<Imp> {
 }
 
 /// Resolve `sel` for instances of `cls` (or for class objects, if `cls` is a
-/// metaclass), falling back to the unrecognized-selector handler.
+/// metaclass): its method, one `+resolveInstanceMethod:` or
+/// `+resolveClassMethod:` adds, the forwarding trampoline if the class
+/// forwards, or else the unrecognized-selector handler.
 pub(crate) unsafe fn method_for(cls: &'static Class, sel: Sel) -> Imp {
+    let epoch = crate::cache::epoch();
     if let Some(imp) = lookup_imp(cls, sel) {
         return imp;
     }
     // SAFETY: forwarded contract.
     if let Some(imp) = unsafe { resolve(cls, sel) } {
         return imp;
+    }
+    if let Some(trampoline) = forward::trampoline()
+        && forward::forwards(cls)
+    {
+        // Cached like a method, so the next message goes straight to the
+        // trampoline; the target itself is asked for each time.
+        crate::cache::remember(cls, sel, trampoline, epoch);
+        return trampoline;
     }
     // SAFETY: the handler is only called as a method.
     unsafe { transmute::<unsafe extern "C-unwind" fn(Id, Sel), Imp>(unrecognized_selector) }
@@ -107,20 +119,33 @@ unsafe fn lookup_miss(receiver: Id, sel: Sel) -> Option<Imp> {
     Some(unsafe { method_for(cls, sel) })
 }
 
+/// Like `objc_msg_lookup`, with the same frameless hit path: a class with a
+/// cache is loaded and initialized, so the cache is tried first.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn objc_msg_lookup_super(sup: *const ObjcSuper, sel: Sel) -> Option<Imp> {
     // SAFETY: the caller passes a valid objc_super.
     let sup = unsafe { &*sup };
     if sup.receiver.is_null() {
+        cold_path();
         return Some(as_imp(nil_method));
     }
-    // A class with a cache is loaded, so try it first.
-    // SAFETY: the caller passes a class.
-    if let Some(imp) = unsafe { sup.super_class.as_ref() }.and_then(|c| crate::cache::probe(c, sel)) {
+    // SAFETY: the caller passes a class or null.
+    if let Some(cls) = unsafe { sup.super_class.as_ref() }
+        && let Some(imp) = crate::cache::probe(cls, sel)
+    {
         return Some(imp);
     }
-    // SAFETY: the caller passes a class.
-    let cls = unsafe { class_ref(sup.super_class) }?;
+    cold_path();
+    // SAFETY: forwarded contract.
+    unsafe { super_miss(sup.super_class, sel) }
+}
+
+#[cold]
+#[inline(never)]
+unsafe fn super_miss(cls: *const Class, sel: Sel) -> Option<Imp> {
+    // SAFETY: the caller passes a class or null.
+    let cls = unsafe { class_ref(cls) }?;
+    ensure_initialized(cls.instance_class());
     // SAFETY: `cls` is loaded.
     Some(unsafe { method_for(cls, sel) })
 }

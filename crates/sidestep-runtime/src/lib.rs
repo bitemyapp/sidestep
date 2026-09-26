@@ -21,21 +21,26 @@
 
 mod arc;
 mod associated;
+mod block_imp;
 mod blocks;
 mod cache;
 mod class;
 mod encoding;
+mod exception;
+mod forward;
 mod ivar;
 mod message;
 mod method;
+mod msgsend;
 mod nsobject;
 mod object;
+mod property;
 mod protocol;
 mod selector;
 mod sync;
 mod util;
 
-pub use class::Class;
+pub use class::{Class, LinkedClass};
 pub use object::{Object, ObjectRef, StaticObject};
 pub use selector::Selector;
 
@@ -63,6 +68,9 @@ pub(crate) const NO: Bool = 0;
 /// register a class with the same name (normally by forcing an objc2
 /// `define_class!` type), and it must not call back into the class it is
 /// defining.
+///
+/// The shell is also recorded in the program's list of linked classes, so
+/// `objc_getClass("NSString")` finds it before anything has used it.
 #[macro_export]
 macro_rules! static_class {
     ($vis:vis $class:ident, $meta:ident = $name:literal, $load:expr $(,)?) => {
@@ -72,5 +80,21 @@ macro_rules! static_class {
         #[unsafe(export_name = concat!("._OBJC_METACLASS_", $name))]
         $vis static $meta: $crate::Class =
             $crate::Class::meta_shell(&$class, concat!($name, "\0"));
+        $crate::__linked_class!($class);
+    };
+}
+
+/// Record a class shell in the `sidestep_classes` linker section, which the
+/// runtime reads to find classes by name (see `class::linked`). Not for
+/// direct use.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __linked_class {
+    ($class:ident) => {
+        const _: () = {
+            #[used]
+            #[unsafe(link_section = "sidestep_classes")]
+            static ENTRY: $crate::LinkedClass = $crate::LinkedClass(&$class);
+        };
     };
 }
