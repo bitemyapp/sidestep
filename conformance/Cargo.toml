@@ -9,10 +9,14 @@ publish = false
 objc2.workspace = true
 block2.workspace = true
 objc2-foundation = { workspace = true, features = ["NSString", "NSObject", "NSThread", "NSZone", "NSGeometry", "NSDictionary", "NSEnumerator"] }
-objc2-app-kit = { workspace = true, features = ["NSResponder", "NSView", "NSClipView", "NSScrollView"] }
+objc2-app-kit = { workspace = true, features = ["NSResponder", "NSView", "NSClipView", "NSScrollView", "NSFont", "NSFontDescriptor", "NSParagraphStyle", "NSText", "NSStringDrawing", "NSAttributedString", "NSColor", "NSCell", "objc2-core-foundation"] }
 sidestep.workspace = true
 
 # AppKit belongs to the main thread, which the test harness doesn't run on.
 [[test]]
 name = "appkit"
+harness = false
+
+[[test]]
+name = "text"
 harness = false

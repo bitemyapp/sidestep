@@ -121,8 +121,8 @@ everything that touches pixels or the display server to a render thread.
 - **Drawing records.** Inside `drawRect:`, `-[NSColor setFill]`,
   `+[NSBezierPath fillRect:]`, `-[NSBezierPath fill]` and
   `-[NSString drawAtPoint:withAttributes:]` append operations (fills, paths,
-  runs of text) to a list, already mapped to the view's layer and clipped to
-  the view and its ancestors. The main thread never rasterizes.
+  runs of shaped glyphs) to a list, already mapped to the view's layer and
+  clipped to the view and its ancestors. The main thread never rasterizes.
 - **Layers.** A window's own surface is one layer, and each `NSClipView` adds
   one holding its document. `setNeedsDisplayInRect:` records damage per
   layer, in layer pixels.
@@ -132,7 +132,7 @@ everything that touches pixels or the display server to a render thread.
   gets no frame callbacks, so it stops drawing.
 - **Rendering.** The render thread owns the Wayland connection through
   smithay-client-toolkit. It rasterizes operations on the CPU into a cache
-  per layer (tiny-skia for paths, fontdue for glyphs), only inside damaged
+  per layer (tiny-skia for paths, swash for glyphs), only inside damaged
   rectangles. The window surface is presented from a few shared-memory
   buffers, each remembering what changed since it was last written, so a
   frame copies and damages only changed pixels.
@@ -145,6 +145,82 @@ everything that touches pixels or the display server to a render thread.
 This design keeps GPU wake-ups and uploads proportional to what changed,
 which is what dominates power on a mostly idle desktop. A GPU rasterizer can
 replace the CPU one behind the same operations later.
+
+## Text
+
+AppKit measures text synchronously (`sizeWithAttributes:`,
+`boundingRectWithSize:options:attributes:context:`), so text is shaped and
+laid out on the thread that asks, and the render thread only ever sees
+glyphs: a glyph-run op names a registered face, a size, and glyph ids with
+positions in points. `crates/sidestep-appkit/src/text/` holds the stack.
+
+- **Fonts.** fontique finds the system's fonts through fontconfig, loaded
+  at run time with `dlopen` (every Linux desktop has `libfontconfig.so.1`;
+  nothing is linked at build time). So the desktop's configuration decides
+  what `system-ui`, `sans-serif` and `monospace` are and which families
+  fill in for missing glyphs, as it does for GTK and Qt programs. The system
+  font is `system-ui` (else `sans-serif`), the monospaced one `monospace`.
+  Without fontconfig, the usual font directories are scanned and
+  well-known families stand in. Opening the collection reads fontconfig's
+  cache and takes some milliseconds (13 ms with 300 fonts), so it starts
+  on a background thread as soon as `NSApplication` loads.
+- **NSFont.** A font is a spec (family or system design, weight, italic,
+  width, size) resolved to a face, whose metrics and names come from the
+  font file through skrifa. `NSFontWeight` values map through the named
+  weights to CSS weights. Like browsers, and unlike parley's default, a
+  face is emboldened only when bold is asked of a family without one:
+  Medium in a family with Regular and Bold is Regular. `fontWithName:`
+  finds families, PostScript names (`DejaVuSans-Bold`) and full names, and
+  maps Apple's own families (Menlo, SF Mono, Helvetica, Times, …) to the
+  system designs, so programs written for macOS find a font. Descriptors
+  take family, name, size, traits and feature settings (by Apple's feature
+  registry numbers or OpenType tags) from attribute dictionaries.
+- **Layout.** parley does bidi, line breaking (ICU4X, compiled in),
+  shaping (harfrust) and fallback per script; `text/layout.rs` places the
+  lines as AppKit's string drawing does, from measurements of Apple's (the
+  conformance tests in `conformance/tests/text.rs` check them on both
+  platforms): a line is as tall as its fonts' ascents and descents, each
+  rounded to a whole point, plus their leading only with
+  `usesFontLeading`; `lineHeightMultiple`, minimum and maximum apply next,
+  extra height going above the text; `lineSpacing` goes between lines and
+  paragraph spacing between paragraphs, never outside the text. Word
+  wrapping breaks inside a word that doesn't fit a line alone; clipping and
+  truncation don't wrap. Widths count trailing spaces, and count indents
+  only for text that wraps. `drawInRect:` clips lines that don't fit rather
+  than dropping them; `boundingRectWithSize:` drops them, and truncates the
+  last one with `truncatesLastVisibleLine`. Emoji are shaped from the color
+  emoji family first, as on macOS, where the text's own face might
+  otherwise give them plain glyphs. Tabs go to the paragraph's tab stops
+  (left, right, centered or decimal; by default twelve, 28 points apart),
+  then every
+  `defaultTabInterval`; control characters take no room.
+- **Caches.** Laid-out text is cached per thread by string, attributes and
+  options (two generations of 2048 entries or 4 MB), so a view that
+  redraws the same lines records them for about 0.1 µs a line. Glyph runs
+  keep their glyphs in an `Arc`, so recording a cached line copies no
+  glyphs.
+- **Parallel layout.** Drawing doesn't need the layout until the pass
+  ends, so text drawn without having been measured is set aside, and the
+  pass lays it all out at its end on a small pool of worker threads, the
+  main thread taking a share, and splices the ops in where they were
+  drawn. A new page of text lays out several times faster than one line
+  after another; measuring (`sizeWithAttributes:`) stays synchronous.
+- **Rasterizing.** The render thread rasterizes each glyph once per face,
+  pixel size and quarter-pixel horizontal offset with swash (no hinting,
+  as macOS draws), and composites coverage masks and premultiplied color
+  images (COLR layers and CBDT or sbix bitmaps, such as Noto Color Emoji)
+  from the cache. Baselines sit on whole pixels.
+
+parley was chosen over cosmic-text, the other complete pure-Rust stack.
+parley takes styles as ranges over the text, which is what an attributed
+string's runs are; it lets each line have its own width and indent and
+aligns and justifies lines itself, which paragraph styles need; and
+fontique asks fontconfig for families, aliases and fallback, where
+cosmic-text's fontdb scans directories and falls back through lists of its
+own. cosmic-text is organized around editable buffers with one line height
+per buffer, which fits a text editor better than AppKit's paragraph model.
+Both shape with harfrust (HarfBuzz ported to Rust) and can rasterize with
+swash.
 
 ## Conformance
 

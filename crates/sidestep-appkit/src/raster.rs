@@ -1,10 +1,8 @@
 //! CPU rasterization of recorded ops into XRGB8888 pixels, touching only the
 //! damaged rectangles. Runs on the render thread.
 
-use std::collections::HashMap;
-
 use crate::protocol::{Color, Op, Rect};
-use crate::text::fonts;
+pub(crate) use crate::text::Glyphs;
 
 /// Pixels of a layer (or of one tile of it), `origin_y` being the layer
 /// coordinate of the first row.
@@ -13,17 +11,6 @@ pub(crate) struct Canvas<'a> {
     pub width: u32,
     pub height: u32,
     pub origin_y: f32,
-}
-
-#[derive(Default)]
-pub(crate) struct Glyphs {
-    cache: HashMap<(bool, u32, char), (fontdue::Metrics, Vec<u8>)>,
-}
-
-impl Glyphs {
-    fn get(&mut self, mono: bool, size: f32, c: char) -> &(fontdue::Metrics, Vec<u8>) {
-        self.cache.entry((mono, (size * 64.0) as u32, c)).or_insert_with(|| fonts().face(mono).rasterize(c, size))
-    }
 }
 
 fn channels(c: Color) -> ([u32; 3], u32) {
@@ -57,9 +44,7 @@ pub(crate) fn paint(canvas: &mut Canvas, glyphs: &mut Glyphs, rects: &[Rect], op
             match op {
                 Op::Fill { rect: r, color } => fill(canvas, &r.intersect(rect), *color),
                 Op::Path { points, color, clip } => path(canvas, points, *color, &clip.intersect(rect)),
-                Op::Text { x, baseline, size, mono, text, color, clip } => {
-                    draw_text(canvas, glyphs, *x, *baseline, *size, *mono, text, *color, &clip.intersect(rect))
-                }
+                Op::Glyphs(run) => crate::text::draw_glyphs(canvas, glyphs, run, &run.clip.intersect(rect)),
             }
         }
     }
@@ -116,52 +101,5 @@ fn path(canvas: &mut Canvas, points: &[[f32; 2]], color: Color, clip: &Rect) {
         let inv = 255 - a;
         let mix = |shift: u32, s: u8| s as u32 + (((*d >> shift) & 0xff) * inv + 127) / 255;
         *d = (mix(16, p.red()) << 16) | (mix(8, p.green()) << 8) | mix(0, p.blue());
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_text(
-    canvas: &mut Canvas,
-    glyphs: &mut Glyphs,
-    x: f32,
-    baseline: f32,
-    size: f32,
-    mono: bool,
-    text: &str,
-    color: Color,
-    clip: &Rect,
-) {
-    let Some((cx0, cy0, cx1, cy1)) = pixels(canvas, clip) else { return };
-    let (rgb, alpha) = channels(color);
-    let stride = canvas.width as usize;
-    let baseline = baseline - canvas.origin_y;
-    let mut pen = x;
-    for c in text.chars() {
-        if pen >= cx1 as f32 {
-            break;
-        }
-        let (m, bitmap) = glyphs.get(mono, size, c);
-        let gx = pen.round() as i64 + m.xmin as i64;
-        if gx + m.width as i64 <= cx0 as i64 {
-            pen += m.advance_width;
-            continue;
-        }
-        let gy = baseline.round() as i64 - m.height as i64 - m.ymin as i64;
-        for row in 0..m.height {
-            let y = gy + row as i64;
-            if y < cy0 as i64 || y >= cy1 as i64 {
-                continue;
-            }
-            for col in 0..m.width {
-                let px = gx + col as i64;
-                let cov = bitmap[row * m.width + col] as u32;
-                if cov == 0 || px < cx0 as i64 || px >= cx1 as i64 {
-                    continue;
-                }
-                let d = &mut canvas.px[y as usize * stride + px as usize];
-                *d = blend(*d, rgb, cov * alpha / 255);
-            }
-        }
-        pen += m.advance_width;
     }
 }

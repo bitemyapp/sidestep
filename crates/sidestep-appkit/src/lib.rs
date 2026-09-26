@@ -19,9 +19,14 @@ use objc2::ClassType;
 mod app;
 mod backend;
 mod event;
+mod font;
 mod graphics;
+mod paragraph;
 mod protocol;
 mod raster;
+mod string_drawing;
+#[cfg(test)]
+mod test_objects;
 mod text;
 mod views;
 mod window;
@@ -48,6 +53,8 @@ sidestep_runtime::static_class!(pub NSWINDOW, NSWINDOW_META = "NSWindow", || {
 
 sidestep_runtime::static_class!(pub NSAPPLICATION, NSAPPLICATION_META = "NSApplication", || {
     let _ = app::NSApplicationImpl::class();
+    // Programs make fonts soon after; open the system's in the meantime.
+    text::fonts::prewarm();
 });
 
 sidestep_runtime::static_class!(pub NSEVENT, NSEVENT_META = "NSEvent", || {
@@ -56,20 +63,117 @@ sidestep_runtime::static_class!(pub NSEVENT, NSEVENT_META = "NSEvent", || {
 
 sidestep_runtime::static_class!(pub NSCOLOR, NSCOLOR_META = "NSColor", || {
     let _ = graphics::NSColorImpl::class();
+    string_drawing::install_string_drawing();
 });
 
 sidestep_runtime::static_class!(pub NSFONT, NSFONT_META = "NSFont", || {
-    let _ = graphics::NSFontImpl::class();
+    let _ = font::NSFontImpl::class();
+    string_drawing::install_string_drawing();
+});
+
+sidestep_runtime::static_class!(pub NSFONTDESCRIPTOR, NSFONTDESCRIPTOR_META = "NSFontDescriptor", || {
+    let _ = font::NSFontDescriptorImpl::class();
+});
+
+sidestep_runtime::static_class!(pub NSPARAGRAPHSTYLE, NSPARAGRAPHSTYLE_META = "NSParagraphStyle", || {
+    let _ = paragraph::NSParagraphStyleImpl::class();
+    string_drawing::install_string_drawing();
+});
+
+sidestep_runtime::static_class!(pub NSMUTABLEPARAGRAPHSTYLE, NSMUTABLEPARAGRAPHSTYLE_META = "NSMutableParagraphStyle", || {
+    let _ = paragraph::NSMutableParagraphStyleImpl::class();
+});
+
+sidestep_runtime::static_class!(pub NSTEXTTAB, NSTEXTTAB_META = "NSTextTab", || {
+    let _ = paragraph::NSTextTabImpl::class();
 });
 
 sidestep_runtime::static_class!(pub NSBEZIERPATH, NSBEZIERPATH_META = "NSBezierPath", || {
     let _ = graphics::NSBezierPathImpl::class();
 });
 
-// Attribute names for attributed strings and string drawing.
+// Attribute names for attributed strings and string drawing, with the
+// values macOS gives them (conformance/tests/text.rs compares).
 sidestep_foundation::constant_string!(NSFontAttributeName = "NSFont");
+sidestep_foundation::constant_string!(NSParagraphStyleAttributeName = "NSParagraphStyle");
 sidestep_foundation::constant_string!(NSForegroundColorAttributeName = "NSColor");
 sidestep_foundation::constant_string!(NSBackgroundColorAttributeName = "NSBackgroundColor");
+sidestep_foundation::constant_string!(NSLigatureAttributeName = "NSLigature");
+sidestep_foundation::constant_string!(NSKernAttributeName = "NSKern");
+sidestep_foundation::constant_string!(NSTrackingAttributeName = "CTTracking");
+sidestep_foundation::constant_string!(NSStrikethroughStyleAttributeName = "NSStrikethrough");
+sidestep_foundation::constant_string!(NSUnderlineStyleAttributeName = "NSUnderline");
+sidestep_foundation::constant_string!(NSStrokeColorAttributeName = "NSStrokeColor");
+sidestep_foundation::constant_string!(NSStrokeWidthAttributeName = "NSStrokeWidth");
+sidestep_foundation::constant_string!(NSShadowAttributeName = "NSShadow");
+sidestep_foundation::constant_string!(NSTextEffectAttributeName = "NSTextEffect");
+sidestep_foundation::constant_string!(NSAttachmentAttributeName = "NSAttachment");
+sidestep_foundation::constant_string!(NSLinkAttributeName = "NSLink");
+sidestep_foundation::constant_string!(NSBaselineOffsetAttributeName = "NSBaselineOffset");
+sidestep_foundation::constant_string!(NSUnderlineColorAttributeName = "NSUnderlineColor");
+sidestep_foundation::constant_string!(NSStrikethroughColorAttributeName = "NSStrikethroughColor");
+sidestep_foundation::constant_string!(NSObliquenessAttributeName = "NSObliqueness");
+sidestep_foundation::constant_string!(NSExpansionAttributeName = "NSExpansion");
+sidestep_foundation::constant_string!(NSWritingDirectionAttributeName = "NSWritingDirection");
+sidestep_foundation::constant_string!(NSVerticalGlyphFormAttributeName = "CTVerticalForms");
+sidestep_foundation::constant_string!(NSCursorAttributeName = "NSCursor");
+sidestep_foundation::constant_string!(NSToolTipAttributeName = "NSToolTip");
+sidestep_foundation::constant_string!(NSMarkedClauseSegmentAttributeName = "NSMarkedClauseSegment");
+sidestep_foundation::constant_string!(NSTextAlternativesAttributeName = "NSTextAlternatives");
+sidestep_foundation::constant_string!(NSSpellingStateAttributeName = "NSSpellingState");
+sidestep_foundation::constant_string!(NSSuperscriptAttributeName = "NSSuperScript");
+sidestep_foundation::constant_string!(NSGlyphInfoAttributeName = "NSGlyphInfo");
+sidestep_foundation::constant_string!(NSTabColumnTerminatorsAttributeName = "NSTabColumnTerminatorsAttributeName");
+
+// Font descriptor attributes, traits, designs and text styles.
+sidestep_foundation::constant_string!(NSFontFamilyAttribute = "NSFontFamilyAttribute");
+sidestep_foundation::constant_string!(NSFontNameAttribute = "NSFontNameAttribute");
+sidestep_foundation::constant_string!(NSFontFaceAttribute = "NSFontFaceAttribute");
+sidestep_foundation::constant_string!(NSFontSizeAttribute = "NSFontSizeAttribute");
+sidestep_foundation::constant_string!(NSFontVisibleNameAttribute = "NSFontVisibleNameAttribute");
+sidestep_foundation::constant_string!(NSFontMatrixAttribute = "NSFontMatrixAttribute");
+sidestep_foundation::constant_string!(NSFontVariationAttribute = "NSCTFontVariationAttribute");
+sidestep_foundation::constant_string!(NSFontCharacterSetAttribute = "NSCTFontCharacterSetAttribute");
+sidestep_foundation::constant_string!(NSFontCascadeListAttribute = "NSCTFontCascadeListAttribute");
+sidestep_foundation::constant_string!(NSFontTraitsAttribute = "NSCTFontTraitsAttribute");
+sidestep_foundation::constant_string!(NSFontFixedAdvanceAttribute = "NSCTFontFixedAdvanceAttribute");
+sidestep_foundation::constant_string!(NSFontFeatureSettingsAttribute = "NSCTFontFeatureSettingsAttribute");
+sidestep_foundation::constant_string!(NSFontFeatureTypeIdentifierKey = "CTFeatureTypeIdentifier");
+sidestep_foundation::constant_string!(NSFontFeatureSelectorIdentifierKey = "CTFeatureSelectorIdentifier");
+sidestep_foundation::constant_string!(NSFontVariationAxisIdentifierKey = "NSCTVariationAxisIdentifier");
+sidestep_foundation::constant_string!(NSFontVariationAxisMinimumValueKey = "NSCTVariationAxisMinimumValue");
+sidestep_foundation::constant_string!(NSFontVariationAxisMaximumValueKey = "NSCTVariationAxisMaximumValue");
+sidestep_foundation::constant_string!(NSFontVariationAxisDefaultValueKey = "NSCTVariationAxisDefaultValue");
+sidestep_foundation::constant_string!(NSFontVariationAxisNameKey = "NSCTVariationAxisName");
+sidestep_foundation::constant_string!(NSFontSymbolicTrait = "NSCTFontSymbolicTrait");
+sidestep_foundation::constant_string!(NSFontWeightTrait = "NSCTFontWeightTrait");
+sidestep_foundation::constant_string!(NSFontWidthTrait = "NSCTFontProportionTrait");
+sidestep_foundation::constant_string!(NSFontSlantTrait = "NSCTFontSlantTrait");
+sidestep_foundation::constant_string!(NSFontDescriptorSystemDesignDefault = "NSCTFontUIFontDesignDefault");
+sidestep_foundation::constant_string!(NSFontDescriptorSystemDesignSerif = "NSCTFontUIFontDesignSerif");
+sidestep_foundation::constant_string!(NSFontDescriptorSystemDesignMonospaced = "NSCTFontUIFontDesignMonospaced");
+sidestep_foundation::constant_string!(NSFontDescriptorSystemDesignRounded = "NSCTFontUIFontDesignRounded");
+sidestep_foundation::constant_string!(NSFontTextStyleLargeTitle = "UICTFontTextStyleTitle0");
+sidestep_foundation::constant_string!(NSFontTextStyleTitle1 = "UICTFontTextStyleTitle1");
+sidestep_foundation::constant_string!(NSFontTextStyleTitle2 = "UICTFontTextStyleTitle2");
+sidestep_foundation::constant_string!(NSFontTextStyleTitle3 = "UICTFontTextStyleTitle3");
+sidestep_foundation::constant_string!(NSFontTextStyleHeadline = "UICTFontTextStyleHeadline");
+sidestep_foundation::constant_string!(NSFontTextStyleSubheadline = "UICTFontTextStyleSubhead");
+sidestep_foundation::constant_string!(NSFontTextStyleBody = "UICTFontTextStyleBody");
+sidestep_foundation::constant_string!(NSFontTextStyleCallout = "UICTFontTextStyleCallout");
+sidestep_foundation::constant_string!(NSFontTextStyleFootnote = "UICTFontTextStyleFootnote");
+sidestep_foundation::constant_string!(NSFontTextStyleCaption1 = "UICTFontTextStyleCaption1");
+sidestep_foundation::constant_string!(NSFontTextStyleCaption2 = "UICTFontTextStyleCaption2");
+
+// Font widths, as `NSFontWidth` values (single precision on macOS too).
+#[unsafe(no_mangle)]
+pub static NSFontWidthCompressed: f64 = -0.3f32 as f64;
+#[unsafe(no_mangle)]
+pub static NSFontWidthCondensed: f64 = -0.2f32 as f64;
+#[unsafe(no_mangle)]
+pub static NSFontWidthStandard: f64 = 0.0;
+#[unsafe(no_mangle)]
+pub static NSFontWidthExpanded: f64 = 0.2f32 as f64;
 
 // Font weights, as `NSFontWeight` values.
 #[unsafe(no_mangle)]

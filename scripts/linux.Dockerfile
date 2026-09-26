@@ -7,3 +7,6 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends sway grim fonts-dejavu-core \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --create-home compositor
+# Text: fonts for shaping, fallback and emoji tests and screenshots (Latin,
+# Arabic, Hebrew and more in noto-core; CJK; color emoji).
+RUN apt-get update && apt-get install -y --no-install-recommends fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji && rm -rf /var/lib/apt/lists/*

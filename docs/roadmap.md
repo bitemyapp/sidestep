@@ -42,15 +42,36 @@ Next:
 - Keyboard input and text input methods; target/action.
 - `NSGraphicsContext`, strokes, curves, images, transforms.
 - Scrollers, resizing by the user, several windows, HiDPI.
-- Text shaping and fallback with parley and fontique.
 - `NSMenu`, which has no system-wide equivalent on Linux, so it becomes a
   menu bar inside the window.
 - X11, after Wayland is solid.
 
 ## 3. Text
 
-`NSAttributedString`, `NSTextField`, `NSTextView`, and the TextKit 1 subset
-(`NSLayoutManager`, `NSTextStorage`, `NSTextTable`) that real apps lean on.
+Done so far: fonts from the system's fontconfig with fallback, shaping,
+bidi, line breaking and color emoji (parley, fontique, swash); `NSFont`
+with weights, names, metrics, text styles and descriptors
+(`NSFontDescriptor` with symbolic traits, system designs and feature
+settings); `NSParagraphStyle` and `NSMutableParagraphStyle`; string
+drawing and measuring (`drawAtPoint:`, `drawInRect:`,
+`drawWithRect:options:`, `sizeWithAttributes:`,
+`boundingRectWithSize:options:`) with fonts, colors, backgrounds,
+paragraph styles, kerning, underlines, strikethroughs, baseline offsets,
+ligatures and tab stops (`NSTextTab`); all attribute name constants. See
+[architecture.md](architecture.md#text).
+
+- `NSAttributedString` drawing and measuring, as an adapter over the
+  layout's attribute runs, once Foundation has the class.
+- Reading tab stops back (`tabStops`, an `NSArray`); descriptors'
+  `fontAttributes` with numbers (`NSNumber`); `NSStringDrawingContext`.
+- The desktop's own interface font where fontconfig's `system-ui` doesn't
+  name it (GNOME keeps it in GSettings); dictionary line breaking for Thai,
+  Lao, Khmer and Myanmar (parley's `complex-scripts`, several megabytes of
+  data).
+- Vertical text, hyphenation, `allowsDefaultTighteningForTruncation`,
+  stroke and shadow attributes.
+- `NSTextField`, `NSTextView`, and the TextKit 1 subset (`NSLayoutManager`,
+  `NSTextStorage`, `NSTextTable`) that real apps lean on.
 
 ## 4. Controls and services
 

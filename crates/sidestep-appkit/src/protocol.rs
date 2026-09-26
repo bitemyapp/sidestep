@@ -60,7 +60,32 @@ pub(crate) type Color = [f32; 4];
 pub(crate) enum Op {
     Fill { rect: Rect, color: Color },
     Path { points: Vec<[f32; 2]>, color: Color, clip: Rect },
-    Text { x: f32, baseline: f32, size: f32, mono: bool, text: String, color: Color, clip: Rect },
+    Glyphs(GlyphRun),
+}
+
+/// Text, shaped and laid out on the main thread: glyphs of one face in one
+/// color. Lines drawn again share their glyphs through the `Arc`.
+#[derive(Clone, Debug)]
+pub(crate) struct GlyphRun {
+    /// The face, as `text::fonts` registered it.
+    pub font: u32,
+    /// Font size in points.
+    pub size: f32,
+    /// The run's origin on its baseline, in layer coordinates.
+    pub x: f32,
+    pub y: f32,
+    pub glyphs: std::sync::Arc<[Glyph]>,
+    pub color: Color,
+    pub clip: Rect,
+}
+
+/// A glyph of a [`GlyphRun`]: its id in the face and its position relative
+/// to the run's origin, in points, y down.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Glyph {
+    pub id: u32,
+    pub x: f32,
+    pub y: f32,
 }
 
 pub(crate) enum ToRender {

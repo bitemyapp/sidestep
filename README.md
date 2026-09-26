@@ -11,8 +11,9 @@ objc2 and its framework crates stay unmodified.
 (classes, subclassing, ivars, `super`, reference counting, autorelease pools,
 weak references, protocols, blocks). Foundation has strings, a dictionary,
 timers and threads. AppKit runs a first slice on Wayland: an application,
-windows, views with `drawRect:`, mouse and scroll events, scroll views, and
-fills, paths and text. See the [roadmap](docs/roadmap.md).
+windows, views with `drawRect:`, mouse and scroll events, scroll views,
+fills and paths, and text with fonts from fontconfig, shaping, bidi,
+fallback and color emoji. See the [roadmap](docs/roadmap.md).
 
 [objc2]: https://github.com/madsmtm/objc2
 
@@ -57,7 +58,9 @@ clicking. `SCENARIO` chooses what it does:
 | `anim` | the page, with a spinner turning at 60 fps in the top right corner |
 | `scroll` | a 2000-line list in an `NSScrollView`, scrolling at 120 px/s |
 
-`SLICE_QUIT_AFTER=<seconds>` makes it quit by itself.
+`SLICE_QUIT_AFTER=<seconds>` makes it quit by itself. `examples/text-demo`
+shows text: weights, kerning and ligatures, CJK, emoji, right-to-left and
+mixed scripts, alignment, wrapping and truncation.
 
 **macOS** runs it on Apple's AppKit:
 
@@ -67,11 +70,11 @@ SCENARIO=scroll cargo run -p appkit-slice
 ```
 
 **Linux** runs the same source on Sidestep. It needs a Wayland session (X11
-isn't supported yet) and a DejaVu or Noto font where distributions usually
-put them. Otherwise, point `SIDESTEP_FONT` and `SIDESTEP_MONO_FONT` at a sans
-and a monospaced `.ttf`. Nothing else is needed:
-no libobjc, no GNUstep, no system libraries beyond the C runtime every Rust
-program links.
+isn't supported yet). Fonts come from the system's fontconfig, loaded when
+the program runs, as every desktop has it; `SIDESTEP_FONT` and
+`SIDESTEP_MONO_FONT` can name a sans and a monospaced font file to use
+instead. Nothing else is needed: no libobjc, no GNUstep, and nothing to
+build against beyond the C runtime every Rust program links.
 
 ```sh
 cargo run --release -p appkit-slice
