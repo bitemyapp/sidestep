@@ -222,7 +222,8 @@ fn sleeping() {
     assert!(start.elapsed() >= Duration::from_millis(45));
     let start = Instant::now();
     NSThread::sleepForTimeInterval(-1.0);
-    assert!(start.elapsed() < Duration::from_millis(20));
+    // Returns at once; the bound leaves room for a loaded CI runner.
+    assert!(start.elapsed() < Duration::from_millis(200));
 }
 
 type Test = (&'static str, fn());

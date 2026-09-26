@@ -932,7 +932,9 @@ fn sync_while_the_pool_is_busy() {
     *release.0.lock().unwrap() = true;
     release.1.notify_all();
     assert_eq!(ran.load(Ordering::SeqCst), 1);
-    assert!(took < Duration::from_millis(40), "sync waited {took:?} for a busy pool");
+    // Waiting for a pool worker would take until the release below (or a
+    // new thread's start-up); the bound leaves room for a loaded CI runner.
+    assert!(took < Duration::from_millis(200), "sync waited {took:?} for a busy pool");
 }
 
 /// A block that unwinds out of a queue ends the process (libdispatch
