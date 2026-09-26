@@ -83,6 +83,8 @@ mod test_objects;
 #[doc(hidden)]
 pub mod testing;
 mod text;
+#[doc(hidden)]
+pub mod textkit;
 mod theme;
 mod tooltip;
 mod tracking;

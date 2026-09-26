@@ -1192,63 +1192,75 @@ fn did_end_editing(field: &NSTextFieldImpl, notification: &NSNotification) {
     }
 }
 
-// Text-editing hooks.
+// Text-editing hooks: the field editor (`textkit::field_editor`) does the
+// editing.
 
 /// `-[NSTextField selectText:]`, and a field becoming first responder:
 /// start editing with all the text selected.
-pub(crate) fn select_text(_control: &NSControl, _sender: Option<&AnyObject>) {}
+pub(crate) fn select_text(control: &NSControl, sender: Option<&AnyObject>) {
+    crate::textkit::field_editor::select_text(control, sender);
+}
 
 /// A click in a selectable field: start editing at the click.
-pub(crate) fn edit_on_click(_control: &NSControl, _event: &NSEvent) {}
+pub(crate) fn edit_on_click(control: &NSControl, event: &NSEvent) {
+    crate::textkit::field_editor::edit_on_click(control, event);
+}
 
 /// `-[NSCell editWithFrame:inView:editor:delegate:event:]`: start editing
 /// in `editor`, the field editor, over `frame`.
 pub(crate) fn edit_with_frame(
-    _cell: &NSCell,
-    _frame: NSRect,
-    _view: &NSView,
-    _editor: &AnyObject,
-    _delegate: Option<&AnyObject>,
-    _event: Option<&NSEvent>,
+    cell: &NSCell,
+    frame: NSRect,
+    view: &NSView,
+    editor: &AnyObject,
+    delegate: Option<&AnyObject>,
+    event: Option<&NSEvent>,
 ) {
+    crate::textkit::field_editor::edit_with_frame(cell, frame, view, editor, delegate, event);
 }
 
 /// `-[NSCell selectWithFrame:inView:editor:delegate:start:length:]`: as
 /// `edit_with_frame`, selecting a range.
 pub(crate) fn select_with_frame(
-    _cell: &NSCell,
-    _frame: NSRect,
-    _view: &NSView,
-    _editor: &AnyObject,
-    _delegate: Option<&AnyObject>,
-    _start: isize,
-    _length: isize,
+    cell: &NSCell,
+    frame: NSRect,
+    view: &NSView,
+    editor: &AnyObject,
+    delegate: Option<&AnyObject>,
+    start: isize,
+    length: isize,
 ) {
+    crate::textkit::field_editor::select_with_frame(cell, frame, view, editor, delegate, start, length);
 }
 
 /// `-[NSCell endEditing:]`: take the editor's text and let it go.
-pub(crate) fn end_editing(_cell: &NSCell, _editor: &AnyObject) {}
+pub(crate) fn end_editing(cell: &NSCell, editor: &AnyObject) {
+    crate::textkit::field_editor::end_editing(cell, editor);
+}
 
 /// `-[NSCell fieldEditorForView:]`: a custom field editor, or nil for the
-/// window's.
+/// window's (which `fieldEditor:forObject:` gives, the delegate asked
+/// first).
 pub(crate) fn field_editor(_cell: &NSCell, _view: &NSView) -> Option<Retained<AnyObject>> {
     None
 }
 
 /// `-[NSControl currentEditor]`: the field editor while the control is
 /// being edited.
-pub(crate) fn current_editor(_control: &NSControl) -> Option<Retained<AnyObject>> {
-    None
+pub(crate) fn current_editor(control: &NSControl) -> Option<Retained<AnyObject>> {
+    crate::textkit::field_editor::current_editor(control)
 }
 
 /// `-[NSControl abortEditing]`: stop editing without taking the text; true
 /// if there was editing to stop.
-pub(crate) fn abort_editing(_control: &NSControl) -> bool {
-    false
+pub(crate) fn abort_editing(control: &NSControl) -> bool {
+    crate::textkit::field_editor::abort_editing(control)
 }
 
 /// `-[NSControl validateEditing]`: take the editor's text into the cell.
-pub(crate) fn validate_editing(_control: &NSControl) {}
+pub(crate) fn validate_editing(control: &NSControl) {
+    crate::textkit::field_editor::validate_editing(control);
+}
 
 #[cfg(test)]
 mod tests {

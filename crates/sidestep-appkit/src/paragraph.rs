@@ -11,7 +11,8 @@
 //! it (first if there is none), and `removeTabStop:` takes out the first
 //! equal to it. `tabStops` hands back the `NSTextTab`s given. Stops compare
 //! as `NSTextTab`s do: by location, alignment and whether they line up
-//! decimal points, all exactly.
+//! decimal points, all exactly. Text blocks (`textBlocks`) are kept as
+//! given and compare by identity, as blocks do.
 
 use std::cell::{OnceCell, Ref, RefCell};
 use std::hash::Hasher;
@@ -22,7 +23,7 @@ use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
 use objc2::{AnyThread, DefinedClass, Message, define_class, msg_send};
 use objc2_app_kit::{
     NSLineBreakMode, NSLineBreakStrategy, NSMutableParagraphStyle, NSParagraphStyle,
-    NSTabColumnTerminatorsAttributeName, NSTextAlignment, NSTextTab, NSTextTabType, NSWritingDirection,
+    NSTabColumnTerminatorsAttributeName, NSTextAlignment, NSTextBlock, NSTextTab, NSTextTabType, NSWritingDirection,
 };
 use objc2_foundation::{NSArray, NSCopying, NSDictionary, NSString, NSZone};
 
@@ -41,6 +42,19 @@ pub(crate) struct Style {
     tightening_factor: f32,
     line_break_strategy: usize,
     header_level: isize,
+    blocks: Blocks,
+}
+
+/// A paragraph's text blocks, outermost first; equal when they are the
+/// same objects.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Blocks(pub Option<Arc<[Retained<NSTextBlock>]>>);
+
+impl PartialEq for Blocks {
+    fn eq(&self, other: &Self) -> bool {
+        let (a, b) = (self.0.as_deref().unwrap_or(&[]), other.0.as_deref().unwrap_or(&[]));
+        a.len() == b.len() && a.iter().zip(b).all(|(a, b)| std::ptr::eq(&**a, &**b))
+    }
 }
 
 impl Default for Style {
@@ -55,6 +69,7 @@ impl Default for Style {
             tightening_factor: 0.0,
             line_break_strategy: 0,
             header_level: 0,
+            blocks: Blocks(None),
         }
     }
 }
@@ -298,6 +313,12 @@ define_class!(
             self.get().header_level
         }
 
+        #[unsafe(method_id(textBlocks))]
+        fn text_blocks(&self) -> Retained<NSArray<NSTextBlock>> {
+            let blocks = self.get().blocks.0.clone();
+            NSArray::from_retained_slice(blocks.as_deref().unwrap_or(&[]))
+        }
+
         #[unsafe(method_id(tabStops))]
         fn tab_stops(&self) -> Retained<NSArray<NSTextTab>> {
             // Copied out first: making tabs sends messages.
@@ -466,6 +487,15 @@ define_class!(
             self.update(|s| s.header_level = value);
         }
 
+        #[unsafe(method(setTextBlocks:))]
+        fn set_text_blocks(&self, blocks: &NSArray<NSTextBlock>) {
+            let items = crate::font::array_items(blocks);
+            let blocks: Vec<Retained<NSTextBlock>> =
+                items.iter().filter_map(|b| b.downcast_ref::<NSTextBlock>()).map(|b| b.retain()).collect();
+            let blocks = Blocks((!blocks.is_empty()).then(|| Arc::from(blocks)));
+            self.update(|s| s.blocks = blocks);
+        }
+
         #[unsafe(method(setTabStops:))]
         fn set_tab_stops(&self, tabs: Option<&NSArray<NSTextTab>>) {
             // nil restores the default stops; an empty array leaves none.
@@ -555,6 +585,11 @@ pub(crate) fn imp(style: &NSParagraphStyle) -> &NSParagraphStyleImpl {
 /// What layout needs of a paragraph style.
 pub(crate) fn paragraph_of(style: &NSParagraphStyle) -> Paragraph {
     imp(style).get().layout.clone()
+}
+
+/// A paragraph style's text blocks, outermost first, if it has any.
+pub(crate) fn blocks_of(style: &NSParagraphStyle) -> Option<Arc<[Retained<NSTextBlock>]>> {
+    imp(style).get().blocks.0.clone()
 }
 
 /// Whether text in `language` (a BCP 47 or ICU code) runs right to left:

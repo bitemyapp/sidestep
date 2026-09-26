@@ -1,0 +1,11 @@
+[package]
+name = "textbench"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+objc2.workspace = true
+objc2-foundation = { workspace = true, features = ["NSString", "NSObject", "NSGeometry", "NSRange", "NSAttributedString", "NSDictionary"] }
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSResponder", "NSView", "NSFont", "NSFontDescriptor", "NSScrollView", "NSClipView", "NSText", "NSTextView", "NSTextStorage", "NSLayoutManager", "NSTextContainer", "NSTextInputClient", "NSAttributedString", "objc2-core-foundation"] }
+sidestep.workspace = true

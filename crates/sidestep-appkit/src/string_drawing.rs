@@ -296,6 +296,24 @@ pub(crate) fn record_frame(frame: &Frame, origin: NSPoint) {
     });
 }
 
+/// Record one laid-out line with its left edge and top at `origin` in the
+/// view being drawn: its backgrounds, or its glyphs and decorations (a
+/// layout manager's `drawBackgroundForGlyphRange:atPoint:` and
+/// `drawGlyphsForGlyphRange:atPoint:`, between which a text view draws its
+/// selection).
+pub(crate) fn record_line(line: &Line, origin: NSPoint, backgrounds: bool) {
+    with_recorder(|rec| {
+        let (x, y) = rec.xf.point(origin.x, origin.y);
+        let (left, top, clip) = (x as f32, y as f32, rec.clip);
+        if top - line.height > clip.y1 || top + 2.0 * line.height < clip.y0 {
+            return;
+        }
+        let fills: Vec<PlacedFill> = line.fills.iter().filter(|f| f.background == backgrounds).cloned().collect();
+        let runs: &[PlacedRun] = if backgrounds { &[] } else { &line.runs };
+        emit_parts(&mut rec.ops, runs, &fills, left, top, clip);
+    });
+}
+
 /// Record `lines`, the first's top at `top`: those in the clip.
 #[cfg_attr(not(test), allow(dead_code))]
 fn record_lines(ops: &mut Vec<Op>, lines: &[Line], left: f32, top: f32, clip: Rect) {

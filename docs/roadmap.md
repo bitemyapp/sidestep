@@ -263,7 +263,16 @@ name constants. The line layout TextKit will stand on: lines, clusters
 and carets with UTF-16 ranges and directions, a paragraph or a few lines
 at a time on any thread, hit testing, caret and selection geometry, and
 relayout of only what an edit touched. See
-[architecture.md](architecture.md#text).
+[architecture.md](architecture.md#text). Text editing: TextKit 1
+(`NSTextStorage` over a paragraph tree, `NSLayoutManager` laying out a
+paragraph at a time with idle layout, `NSTextContainer`), text blocks and
+tables, `NSText` and `NSTextView` with AppKit's edit transactions,
+delegate calls and notifications, selection by grapheme, word and
+paragraph, about eighty key-binding commands, the clipboard, input
+methods (`NSTextInputClient`) and coalesced typing undo; `NSUndoManager`;
+the window's field editor with the API controls start and end editing
+with; a keystroke and its layout in 11 MB of text in 0.07 ms at p99
+(drawing not measured). See [text.md](text.md).
 
 - `NSAttributedString` drawing and measuring: `string_drawing` turns
   attribute dictionaries over UTF-16 ranges into the layout's runs
@@ -286,8 +295,17 @@ relayout of only what an edit touched. See
   Lao, Khmer and Myanmar (parley's `complex-scripts`, several megabytes of
   data).
 - Vertical text, hyphenation, `allowsDefaultTighteningForTruncation`.
-- `NSTextField`, `NSTextView`, and the TextKit 1 subset (`NSLayoutManager`,
-  `NSTextStorage`, `NSTextTable`) that real apps lean on.
+- Text editing still to do: rich text on the pasteboard (RTF), the find
+  bar and `NSTextFinder`, spelling and substitutions, `NSTextList`, text
+  attachments, several text containers, text block height dimensions,
+  vertical alignment, row spans and `hidesEmptyCells`, TextKit 2
+  (`NSTextLayoutManager` and friends), temporary attributes other than a
+  background color drawn, `CGGlyphAtIndex:` and `getGlyphsInRange:…`,
+  laying a long paragraph out again from the edited line rather than
+  whole (the text engine's frames do; the layout manager needs a paragraph
+  entry point for it), and `setString:` as lazy as AppKit's (it builds the
+  paragraph tree and fixes attributes up front: 25 ms for 11 MB, against
+  1.7 ms).
 
 ## 4. Controls and services
 

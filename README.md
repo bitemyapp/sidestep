@@ -145,6 +145,13 @@ SIDESTEP_APPEARANCE=dark SCENARIO=all SHOT=/work/target/controls-dark.png \
 rows and a window laid out by constraints (`SCENARIO=split`, `stack`,
 `tabs`, `table`, `autolayout`).
 
+`examples/textedit` is a text editor: an `NSTextView` in a scroll view,
+with styled text, a selection and a find highlight (`SCENARIO=editor`, the
+default), text typed a character at a time (`typing`), 20 000 lines
+(`big`), text blocks and a table (`blocks`), or typing that rewraps a
+paragraph and moves the text below (`reflow`). `examples/textbench` times `setString:`,
+layout and keystrokes in 11 MB of text; see [docs/text.md](docs/text.md).
+
 On Linux, drawing is recorded on the main thread and rasterized on a
 separate render thread, and scroll views are tiled onto Wayland subsurfaces;
 see [docs/architecture.md](docs/architecture.md#appkit-a-main-thread-and-a-render-thread).

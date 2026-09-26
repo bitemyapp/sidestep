@@ -2332,15 +2332,21 @@ fn make_first_responder(window: &NSWindowImpl, responder: Option<&NSResponder>) 
         .and_then(|r| r.downcast_ref::<NSView>())
         .is_some_and(|v| views::window_of(views::imp(v)).is_none_or(|w| !std::ptr::eq(w, window)));
     let responder = if foreign { None } else { responder };
+    // The old one has let go: the window holds first responder while the
+    // new one takes it, and keeps what that did if it handed first
+    // responder on (a text field to its field editor, as AppKit's do).
+    drop(window.ivars().first_responder.replace(None));
     let accepted = responder.is_none_or(|r| r.becomeFirstResponder());
-    let old = window.ivars().first_responder.replace(if accepted { responder.map(|r| r.retain()) } else { None });
+    if window.ivars().first_responder.borrow().is_none() {
+        let old = window.ivars().first_responder.replace(if accepted { responder.map(|r| r.retain()) } else { None });
+        drop(old);
+    }
     // Focus rings move with the focus (see `controls::focus`).
     let new = window.ivars().first_responder.borrow().clone();
     crate::controls::focus::focus_moved(
-        old.as_deref().and_then(|r| r.downcast_ref::<NSView>()),
+        current.as_deref().and_then(|r| r.downcast_ref::<NSView>()),
         new.as_deref().and_then(|r| r.downcast_ref::<NSView>()),
     );
-    drop(old);
     window.tracking().borrow_mut().recheck();
     crate::inputcontext::update(window);
     accepted

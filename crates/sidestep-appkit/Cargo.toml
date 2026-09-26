@@ -13,7 +13,7 @@ sidestep-foundation.workspace = true
 objc2 = { workspace = true, features = ["gnustep-2-1"] }
 block2 = { workspace = true, features = ["gnustep-2-1"] }
 objc2-foundation = { workspace = true, features = ["gnustep-2-1", "NSObject", "NSString", "NSDictionary", "NSGeometry", "NSNotification", "NSTimer", "NSDate", "NSZone", "NSRange", "block2", "NSArray", "NSData", "NSValue", "NSAffineTransform", "NSURL", "objc2-core-foundation", "NSRunLoop", "NSUserDefaults", "NSBundle", "NSObjCRuntime", "NSIndexSet", "NSEnumerator"] }
-objc2-app-kit = { workspace = true, features = ["gnustep-2-1", "NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics", "NSColor", "NSFont", "NSFontDescriptor", "NSBezierPath", "NSStringDrawing", "NSAttributedString", "NSEvent", "NSScrollView", "NSClipView", "NSRunningApplication", "objc2-core-foundation", "NSPasteboard", "NSText", "NSCursor", "NSTrackingArea", "NSTextInputContext", "NSParagraphStyle", "NSCell", "NSPasteboardItem", "NSDragging", "NSDraggingItem", "NSScreen", "block2", "NSGraphicsContext", "NSImageRep", "NSBitmapImageRep", "NSCustomImageRep", "NSColorSpace", "NSAppearance", "NSAffineTransform", "NSColorList", "NSImage", "NSGradient", "NSShadow", "NSAnimation", "NSAnimationContext", "NSControl", "NSImageView", "NSVisualEffectView", "NSPanel", "NSViewController", "NSWindowController", "NSNib", "NSUserInterfaceItemIdentification", "NSUserInterfaceLayout", "NSLayoutConstraint", "NSLayoutAnchor", "NSLayoutGuide", "NSStackView", "NSSplitView", "NSTabView", "NSTabViewItem", "NSTableView", "NSTableColumn", "NSTableRowView", "NSTableCellView", "NSTableHeaderView"] }
+objc2-app-kit = { workspace = true, features = ["gnustep-2-1", "NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics", "NSColor", "NSFont", "NSFontDescriptor", "NSBezierPath", "NSStringDrawing", "NSAttributedString", "NSEvent", "NSScrollView", "NSClipView", "NSRunningApplication", "objc2-core-foundation", "NSPasteboard", "NSText", "NSCursor", "NSTrackingArea", "NSTextInputContext", "NSParagraphStyle", "NSCell", "NSPasteboardItem", "NSDragging", "NSDraggingItem", "NSScreen", "block2", "NSGraphicsContext", "NSImageRep", "NSBitmapImageRep", "NSCustomImageRep", "NSColorSpace", "NSAppearance", "NSAffineTransform", "NSColorList", "NSImage", "NSGradient", "NSShadow", "NSAnimation", "NSAnimationContext", "NSControl", "NSImageView", "NSVisualEffectView", "NSPanel", "NSViewController", "NSWindowController", "NSNib", "NSUserInterfaceItemIdentification", "NSUserInterfaceLayout", "NSLayoutConstraint", "NSLayoutAnchor", "NSLayoutGuide", "NSStackView", "NSSplitView", "NSTabView", "NSTabViewItem", "NSTableView", "NSTableColumn", "NSTableRowView", "NSTableCellView", "NSTableHeaderView", "NSTextStorage", "NSLayoutManager", "NSTextContainer", "NSTextView", "NSTextTable", "NSTextInputClient"] }
 smithay-client-toolkit = { version = "0.19", default-features = false, features = ["calloop"] }
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
 # Path geometry for NSBezierPath: bounds, winding, flattening.
@@ -40,6 +40,11 @@ swash = { version = "0.2.10", default-features = false, features = ["std", "scal
 icu_provider = { version = "2.1", default-features = false, features = ["logging"] }
 # Auto Layout's constraint solver (Cassowary), pure Rust.
 kasuari = { version = "0.4.12", default-features = false, features = ["std"] }
+# Text editing: paragraphs' attribute runs inline, and word and
+# character boundaries for selection and commands (both already built for
+# parley).
+smallvec = "1.13"
+icu_segmenter = { version = "2.1", default-features = false, features = ["compiled_data"] }
 # Which characters are emoji, to draw them in color (compiled into the binary).
 icu_properties = { version = "2.1", default-features = false, features = ["compiled_data"] }
 
@@ -69,3 +74,8 @@ objc2-app-kit = { workspace = true, features = ["NSControl", "NSActionCell", "NS
 # The theme's reference images (src/theme/golden).
 [target.'cfg(not(target_vendor = "apple"))'.dev-dependencies]
 png = "0.18"
+
+# Field editor sessions, driven through testing hooks (Linux only).
+[[test]]
+name = "field_editor"
+harness = false

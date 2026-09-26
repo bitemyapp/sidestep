@@ -1444,6 +1444,7 @@ dependencies = [
  "fontique",
  "icu_properties",
  "icu_provider",
+ "icu_segmenter",
  "image",
  "kasuari",
  "kbvm",
@@ -1457,6 +1458,7 @@ dependencies = [
  "sidestep-foundation",
  "sidestep-runtime",
  "skrifa",
+ "smallvec",
  "smithay-client-toolkit",
  "swash",
  "tiny-skia",
@@ -1627,6 +1629,27 @@ dependencies = [
 
 [[package]]
 name = "text-demo"
+version = "0.0.0"
+dependencies = [
+ "block2",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "sidestep",
+]
+
+[[package]]
+name = "textbench"
+version = "0.0.0"
+dependencies = [
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "sidestep",
+]
+
+[[package]]
+name = "textedit"
 version = "0.0.0"
 dependencies = [
  "block2",

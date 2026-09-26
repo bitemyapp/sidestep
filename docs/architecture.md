@@ -1550,6 +1550,18 @@ positions in points. `crates/sidestep-appkit/src/text/` holds the stack.
   program may measure or draw a string as its very first AppKit call
   (`conformance/tests/text_first_call.rs`).
 
+- **Text editing.** TextKit 1 and the text view live in
+  `crates/sidestep-appkit/src/textkit/`, on the lines above: a text
+  storage keeps its text as a tree of paragraphs with interned attribute
+  runs; a layout manager keeps an entry per paragraph (its lines, or an
+  estimate of its height, in chunks with lazily summed heights), lays out
+  a paragraph at a time as questions need it and, for text a view shows,
+  the rest when the main run loop is idle, places paragraphs in text
+  blocks and table rows, and tells its views what to draw again (a
+  paragraph, or from it down when it moved what follows); the text view
+  runs AppKit's edit transactions, commands, input methods and undo over
+  them. [text.md](text.md) has the details.
+
 parley was chosen over cosmic-text, the other complete pure-Rust stack.
 parley takes styles as ranges over the text, which is what an attributed
 string's runs are; it lets each line have its own width and indent and
