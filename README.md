@@ -143,7 +143,22 @@ SIDESTEP_APPEARANCE=dark SCENARIO=all SHOT=/work/target/controls-dark.png \
 
 `examples/containers` shows split, stack and tab views, a table of 1000
 rows and a window laid out by constraints (`SCENARIO=split`, `stack`,
-`tabs`, `table`, `autolayout`).
+`tabs`, `table`, `autolayout`), and scroll views: overlay scrollers with a
+view floating over the list (`overlay`), a scroll view without a
+background (`transparent`), scroll views inside a scroll view (`nested`),
+a wide timeline (`hscroll`), a flung list (`fling`), a growing log
+(`stream`) and a blinking caret (`idle`); `CONTAINERS_SCROLL=1` keeps the
+`nested`, `hscroll` and `table` ones scrolling. `CONTAINERS_PNG=file.png`
+draws the scenario into a file instead of showing it, on macOS too.
+`SIDESTEP_SCROLLER_STYLE=legacy` gives scroll views legacy scrollers
+instead of overlay ones, and `SIDESTEP_TRACE_FRAMES=1` prints, for every
+frame, what the main thread recorded and what the render thread uploaded
+and committed:
+
+```sh
+scripts/linux-cargo build --release -p containers
+SCENARIO=fling SIDESTEP_TRACE_FRAMES=1 scripts/linux-run scripts/headless-wayland /target/release/containers
+```
 
 `examples/textedit` is a text editor: an `NSTextView` in a scroll view,
 with styled text, a selection and a find highlight (`SCENARIO=editor`, the

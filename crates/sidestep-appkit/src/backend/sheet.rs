@@ -15,11 +15,11 @@
 //! drawn yet (committing its old buffer then would break the compositor's
 //! rules for maximized and full-screen windows) and its present is coming.
 //!
-//! The stacking among a window's subsurfaces is kept here in one place: a
-//! sheet is above its parent's scroll tiles, including tiles made after it.
-//! (Decorations sit outside the content, where sheets don't reach.)
+//! A sheet is above its parent's scroll tiles, including tiles made after
+//! it: `tiles` stacks every layer's surfaces directly above the window's
+//! own surface, so below its sheets. (Decorations sit outside the content,
+//! where sheets don't reach.)
 
-use smithay_client_toolkit::reexports::client::Proxy;
 use smithay_client_toolkit::reexports::client::protocol::wl_subsurface::WlSubsurface;
 use smithay_client_toolkit::reexports::client::protocol::wl_surface::WlSurface;
 
@@ -90,18 +90,6 @@ pub(crate) fn parent_resized(state: &State, parent: WindowId) {
     let sheets: Vec<WindowId> = sheets_of(state, parent).map(|(id, _)| id).collect();
     for sheet in sheets {
         place(state, sheet);
-    }
-}
-
-/// The surfaces of the sheets over `parent`, for a new tile to go below.
-pub(crate) fn surfaces_over(state: &State, parent: WindowId) -> Vec<WlSurface> {
-    sheets_of(state, parent).map(|(_, sheet)| sheet.surface.clone()).collect()
-}
-
-/// Keep a subsurface of the parent's (a new tile) below its sheets.
-pub(crate) fn keep_below(subsurface: &WlSubsurface, sheets: &[WlSurface]) {
-    for sheet in sheets.iter().filter(|s| s.is_alive()) {
-        subsurface.place_below(sheet);
     }
 }
 

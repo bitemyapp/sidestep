@@ -13,9 +13,139 @@ pub(crate) type WindowId = u32;
 pub(crate) type LayerId = u64;
 pub(crate) const ROOT_LAYER: LayerId = 0;
 
-/// Height of a scroll layer's tiles, in points (the render thread's tiles
-/// are this many points times the scale in pixels).
+/// Height of a scroll layer's tiles, in device pixels.
 pub(crate) const TILE_HEIGHT: u32 = 512;
+
+/// The widest a scroll layer's tiles get, in device pixels: a layer
+/// narrower than this has one column of tiles as wide as it is.
+pub(crate) const TILE_WIDTH_MAX: u32 = 2048;
+
+/// A tile, by its column and row: the tile holds the layer's device pixels
+/// from `column × width` and `row × height` (a layer's points times its
+/// scale), rows and columns counting from the layer's origin, so negative
+/// ones lie above it or to its left.
+pub(crate) type TileKey = [i32; 2];
+
+/// Where a scroll layer's tiles are: their size in device pixels, and the
+/// margin each keeps around it (so a tile placed at whole points always
+/// has the pixels its crop starts at).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TileGrid {
+    pub width: u32,
+    pub height: u32,
+    pub margin: u32,
+}
+
+impl TileGrid {
+    /// The grid for a layer spanning `extent` (layer points) at `scale`:
+    /// columns as wide as the layer, in steps of 64 pixels (so small
+    /// changes of its width keep its tiles), up to [`TILE_WIDTH_MAX`].
+    pub fn for_layer(extent: &Rect, scale: f64) -> TileGrid {
+        let px = (((extent.x1 - extent.x0).max(1.0) as f64) * scale).ceil() as u32;
+        TileGrid {
+            width: px.div_ceil(64).saturating_mul(64).clamp(64, TILE_WIDTH_MAX),
+            height: TILE_HEIGHT,
+            margin: scale.ceil().max(1.0) as u32,
+        }
+    }
+
+    /// A tile's pixels, margin included, on the layer's pixel grid: x0, y0,
+    /// width, height.
+    pub fn pixels(&self, key: TileKey) -> (i32, i32, u32, u32) {
+        let m = self.margin as i32;
+        (
+            key[0] * self.width as i32 - m,
+            key[1] * self.height as i32 - m,
+            self.width + 2 * self.margin,
+            self.height + 2 * self.margin,
+        )
+    }
+
+    /// A tile's own rectangle, without its margin, in layer points.
+    pub fn rect(&self, key: TileKey, scale: f64) -> Rect {
+        let (w, h) = (self.width as f64, self.height as f64);
+        let at = |v: f64| (v / scale) as f32;
+        Rect::new(
+            at(key[0] as f64 * w),
+            at(key[1] as f64 * h),
+            at((key[0] + 1) as f64 * w),
+            at((key[1] + 1) as f64 * h),
+        )
+    }
+
+    /// A tile's rectangle with its margin, in layer points: everything a
+    /// paint must reach for the tile to hold it.
+    pub fn padded(&self, key: TileKey, scale: f64) -> Rect {
+        let (x, y, w, h) = self.pixels(key);
+        let at = |v: f64| (v / scale) as f32;
+        Rect::new(at(x as f64), at(y as f64), at((x as f64) + w as f64), at((y as f64) + h as f64))
+    }
+
+    /// The tiles whose own rectangles meet `r` (layer points): columns, then
+    /// rows, as inclusive ranges.
+    pub fn keys(&self, r: &Rect, scale: f64) -> Option<(std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>)> {
+        if r.is_empty() {
+            return None;
+        }
+        let span = |lo: f32, hi: f32, size: u32| {
+            let size = size as f64;
+            let first = ((lo as f64 * scale) / size).floor() as i32;
+            // The last pixel the rectangle reaches, not the edge after it.
+            let last = (((hi as f64 * scale) / size).ceil() as i32 - 1).max(first);
+            first..=last
+        };
+        Some((span(r.x0, r.x1, self.width), span(r.y0, r.y1, self.height)))
+    }
+
+    /// The tiles whose rectangles with their margins meet `r`: the tiles a
+    /// paint of `r` changes.
+    pub fn padded_keys(
+        &self,
+        r: &Rect,
+        scale: f64,
+    ) -> Option<(std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>)> {
+        let m = (self.margin as f64 / scale) as f32;
+        self.keys(&Rect::new(r.x0 - m, r.y0 - m, r.x1 + m, r.y1 + m), scale)
+    }
+}
+
+/// Where a scroll layer shows (see `layers`): all rectangles in whole
+/// points of the window's content, top-left origin.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LayerPlace {
+    /// Stacking among the window's layers, bottom first: the tiles', and
+    /// the overlay's (above the layers nested in this one).
+    pub z: [u32; 2],
+    /// The part of the window the layer shows in: its clip view's visible
+    /// part.
+    pub viewport: Rect,
+    /// Where the layer's point (0, 0) is in the window (on the device pixel
+    /// grid).
+    pub origin: [f32; 2],
+    /// What the layer holds, in its points: its tiles cover this.
+    pub extent: Rect,
+    pub grid: TileGrid,
+    /// The color an opaque layer's tiles are cleared to; `None` for a
+    /// transparent layer, whose tiles show what's behind them.
+    pub opaque: Option<Color>,
+    /// The layer this one is nested in, [`ROOT_LAYER`] for none.
+    pub parent: LayerId,
+    /// Where the views drawn above the layer are, its overlay: in the
+    /// points of the layer they are drawn in (`parent`), which places and
+    /// clips it.
+    pub overlay: Option<Rect>,
+}
+
+/// What a paint draws into.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Target {
+    /// The window's own surface; rectangles in window points.
+    Root,
+    /// A scroll layer's tiles; rectangles in the layer's points.
+    Tiles(LayerId),
+    /// A scroll layer's overlay; rectangles in window points.
+    Overlay(LayerId),
+}
 
 /// A rectangle, top-left origin: in a layer's points in every message
 /// (drawing ops, damage, viewports). The render thread also keeps rectangles
@@ -428,27 +558,31 @@ pub(crate) enum ToRender {
         hidden: bool,
         until_moved: bool,
     },
-    /// Repaint `rects` of a layer from `ops`.
+    /// Repaint `rects` of a target from `ops`.
     Paint {
         window: WindowId,
-        layer: LayerId,
+        target: Target,
         rects: Vec<Rect>,
         ops: Vec<Op>,
     },
-    /// Where a scroll layer shows: its viewport in window coordinates and
-    /// the document position at the viewport's top edge.
-    ScrollLayer {
+    /// Show a scroll layer, or show it somewhere else: sent when its
+    /// placement changes. A new grid or opacity drops its tiles, a new
+    /// overlay rectangle the overlay's pixels.
+    PlaceLayer {
         window: WindowId,
         layer: LayerId,
-        viewport: Rect,
-        offset: f32,
-        doc_width: u32,
+        place: LayerPlace,
+    },
+    /// The layer is gone, with its tiles and overlay.
+    DropLayer {
+        window: WindowId,
+        layer: LayerId,
     },
     /// Tiles the main thread no longer keeps drawn.
     DropTiles {
         window: WindowId,
         layer: LayerId,
-        tiles: Vec<u32>,
+        tiles: Vec<TileKey>,
     },
     Present {
         window: WindowId,
@@ -702,4 +836,40 @@ pub(crate) enum FromRender {
         window: WindowId,
         outputs: Vec<u32>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tile_grids_follow_the_layer() {
+        let grid = |w: f32, scale| TileGrid::for_layer(&Rect::new(0.0, 0.0, w, 100.0), scale);
+        // As wide as the layer in 64-pixel steps, up to 2048.
+        assert_eq!((grid(400.0, 1.0).width, grid(400.0, 2.0).width), (448, 832));
+        assert_eq!((grid(3000.0, 1.0).width, grid(1100.0, 2.0).width), (2048, 2048));
+        assert_eq!(grid(400.0, 1.0).height, 512);
+        // A point of margin, in whole pixels.
+        assert_eq!([1.0, 1.5, 2.0, 3.0].map(|s| grid(400.0, s).margin), [1, 2, 2, 3]);
+    }
+
+    #[test]
+    fn tile_keys_count_from_the_origin() {
+        let g = TileGrid { width: 2048, height: 512, margin: 1 };
+        // Rows above the origin are negative; columns go on to the right.
+        let keys = g.keys(&Rect::new(0.0, -400.0, 3000.0, 0.0), 1.0).expect("tiles");
+        assert_eq!(keys, (0..=1, -1..=-1));
+        let keys = g.keys(&Rect::new(10.0, 500.0, 20.0, 1030.0), 1.0).expect("tiles");
+        assert_eq!(keys, (0..=0, 0..=2));
+        // At scale 2 a row is 256 points.
+        let keys = g.keys(&Rect::new(0.0, 250.0, 10.0, 260.0), 2.0).expect("tiles");
+        assert_eq!(keys, (0..=0, 0..=1));
+        // An edge on a boundary reaches no further.
+        assert_eq!(g.keys(&Rect::new(0.0, 0.0, 10.0, 512.0), 1.0), Some((0..=0, 0..=0)));
+        assert_eq!(g.keys(&Rect::default(), 1.0), None);
+        // A paint reaching a margin reaches the tile.
+        assert_eq!(g.padded_keys(&Rect::new(0.0, 512.5, 10.0, 520.0), 1.0), Some((-1..=0, 0..=1)));
+        assert_eq!(g.rect([1, -1], 2.0), Rect::new(1024.0, -256.0, 2048.0, 0.0));
+        assert_eq!(g.padded([0, 0], 1.0), Rect::new(-1.0, -1.0, 2049.0, 513.0));
+    }
 }

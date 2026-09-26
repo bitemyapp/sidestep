@@ -71,9 +71,18 @@ harness = false
 objc2-foundation = { workspace = true, features = ["NSValue", "NSAttributedString", "NSArray", "NSObjCRuntime", "NSLocale"] }
 objc2-app-kit = { workspace = true, features = ["NSControl", "NSActionCell", "NSButton", "NSButtonCell", "NSTextField", "NSTextFieldCell", "NSSecureTextField", "NSSearchField", "NSSearchFieldCell", "NSBox", "NSProgressIndicator", "NSSegmentedControl", "NSSegmentedCell", "NSStepper", "NSStepperCell", "NSSlider", "NSSliderCell", "NSSwitch", "NSUserInterfaceLayout", "NSLayoutConstraint", "NSAccessibilityConstants"] }
 
+# Scroll views and their scrollers (src/scroll.rs, src/scroller.rs).
+[target.'cfg(any(not(target_vendor = "apple")))'.dependencies]
+objc2-app-kit = { workspace = true, features = ["NSScroller", "NSScrollView", "NSClipView", "NSTrackingArea"] }
+
 # The theme's reference images (src/theme/golden).
 [target.'cfg(not(target_vendor = "apple"))'.dev-dependencies]
 png = "0.18"
+
+# Scroll views' layers and scrolling, through the null render thread.
+[[test]]
+name = "linux_scroll"
+harness = false
 
 # Field editor sessions, driven through testing hooks (Linux only).
 [[test]]

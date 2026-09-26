@@ -4,9 +4,10 @@
 //! - the root layer is the window's own surface, rasterized into a canvas and
 //!   presented through a few shared-memory buffers, copying and damaging only
 //!   what changed;
-//! - a scroll layer is a stack of tiles, each on its own subsurface, cropped
-//!   to the scroll view with the viewporter. Scrolling moves tiles; a tile is
-//!   uploaded again only when its content changes;
+//! - a scroll layer is a grid of tiles, each on its own subsurface, cropped
+//!   to the scroll view with the viewporter, with an overlay above for the
+//!   views drawn over it ([`tiles`]). Scrolling moves tiles; a tile uploads
+//!   only the pixels that changed;
 //! - when the compositor leaves decorations to the client, a title bar and a
 //!   resize border drawn here ([`decor`]), on subsurfaces around the root
 //!   surface so the content keeps its coordinates.
@@ -24,9 +25,9 @@
 //!
 //! Frames are paced by the compositor's frame callbacks, which are passed on
 //! to the main thread as permission to send the next frame. Each present asks
-//! for a callback on every surface it shows, and the first to fire counts:
-//! compositors send none to a surface they consider hidden, and tiles can
-//! cover a window's own surface completely.
+//! for a callback on the window's surface and on one tile or overlay, and
+//! the first to fire counts: compositors send none to a surface they
+//! consider hidden, and tiles can cover a window's own surface completely.
 
 mod decor;
 mod dnd;
@@ -37,6 +38,7 @@ mod seat;
 mod selection;
 mod sheet;
 mod textinput;
+mod tiles;
 
 pub(crate) use decor::{HEADER, TITLE_SIZE, explicit_theme};
 
@@ -56,7 +58,7 @@ pub(crate) fn median(mut f: impl FnMut()) -> f64 {
     runs[3]
 }
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 
@@ -70,7 +72,6 @@ use smithay_client_toolkit::reexports::client::backend::ObjectId;
 use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
 use smithay_client_toolkit::reexports::client::protocol::wl_callback::{self, WlCallback};
 use smithay_client_toolkit::reexports::client::protocol::wl_seat::WlSeat;
-use smithay_client_toolkit::reexports::client::protocol::wl_subsurface::WlSubsurface;
 use smithay_client_toolkit::reexports::client::protocol::wl_surface::WlSurface;
 use smithay_client_toolkit::reexports::client::protocol::{wl_output, wl_shm};
 use smithay_client_toolkit::reexports::client::{Connection, Dispatch, Proxy, QueueHandle};
@@ -100,8 +101,8 @@ use smithay_client_toolkit::{
 
 use crate::event_loop::MainSender;
 use crate::protocol::{
-    Cursor, FromRender, LayerId, Op, PopupPlacement, ROOT_LAYER, Rect, SizeLimits, Style, TILE_HEIGHT, TitleText,
-    ToRender, WindowId, WindowRequest, WindowState,
+    Cursor, FromRender, Op, PopupPlacement, Rect, SizeLimits, Style, Target, TitleText, ToRender, WindowId,
+    WindowRequest, WindowState,
 };
 use crate::raster::{self, Canvas, Glyphs};
 use sidestep_foundation::runloop::SourceSignal;
@@ -264,13 +265,12 @@ pub(crate) struct State {
     exit: bool,
 }
 
-/// What a surface is to input.
+/// What a surface is to input. Scroll layers' surfaces take no input
+/// (see `tiles`): what's over them goes to the window's own surface.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Role {
     /// A window's own surface.
     Root(WindowId),
-    /// A tile of a scroll layer.
-    Tile(WindowId, LayerId, u32),
     /// Part of the decorations.
     Decor(WindowId, decor::Part),
 }
@@ -278,7 +278,7 @@ pub(crate) enum Role {
 impl Role {
     fn window(self) -> WindowId {
         match self {
-            Role::Root(w) | Role::Tile(w, _, _) | Role::Decor(w, _) => w,
+            Role::Root(w) | Role::Decor(w, _) => w,
         }
     }
 }
@@ -306,7 +306,7 @@ pub(crate) struct Win {
     /// Damage in device pixels.
     damage: Vec<Rect>,
     buffers: Vec<RootBuffer>,
-    layers: HashMap<LayerId, ScrollLayer>,
+    layers: tiles::Layers,
     /// Counts presents; a frame callback names the present it belongs to.
     frame_seq: u64,
     frame_signalled: bool,
@@ -375,36 +375,6 @@ struct RootBuffer {
     stale: Vec<Rect>,
 }
 
-struct ScrollLayer {
-    viewport: Rect,
-    offset: f32,
-    doc_width: u32,
-    tiles: BTreeMap<u32, Tile>,
-}
-
-struct Tile {
-    canvas: Vec<u32>,
-    /// Canvas size in pixels.
-    px_width: u32,
-    px_height: u32,
-    dirty: bool,
-    surface: WlSurface,
-    subsurface: WlSubsurface,
-    viewport: WpViewport,
-    buffer: Option<Buffer>,
-    mapped: bool,
-    /// The window area this tile covered at the last present.
-    placed: Rect,
-}
-
-impl Drop for Tile {
-    fn drop(&mut self) {
-        self.viewport.destroy();
-        self.subsurface.destroy();
-        self.surface.destroy();
-    }
-}
-
 /// What canvases start as, before the first paint: opaque light gray.
 const BACKGROUND: u32 = u32::from_ne_bytes([0xec, 0xec, 0xec, 0xff]);
 
@@ -423,18 +393,21 @@ fn copy_pixels(dst: &mut [u32], src: &[u32], rgba: bool) {
     }
 }
 
-fn copy_rows(dst: &mut [u32], src: &[u32], width: u32, height: u32, r: &Rect, rgba: bool) {
+/// Copy a rectangle of canvas pixels into a buffer of the same size (the
+/// window's or a tile's). Returns the bytes copied.
+fn copy_rows(dst: &mut [u32], src: &[u32], width: u32, height: u32, r: &Rect, rgba: bool) -> usize {
     let r = r.round_out();
     let x0 = r.x0.max(0.0) as usize;
     let y0 = r.y0.max(0.0) as usize;
-    let x1 = r.x1.min(width as f32).max(0.0) as usize;
-    let y1 = r.y1.min(height as f32).max(0.0) as usize;
+    let x1 = (r.x1.min(width as f32).max(0.0) as usize).max(x0);
+    let y1 = (r.y1.min(height as f32).max(0.0) as usize).max(y0);
     let w = width as usize;
-    for y in y0..y1.max(y0) {
+    for y in y0..y1 {
         if x0 < x1 {
             copy_pixels(&mut dst[y * w + x0..y * w + x1], &src[y * w + x0..y * w + x1], rgba);
         }
     }
+    (x1 - x0) * (y1 - y0) * 4
 }
 
 /// A shared-memory buffer's bytes as pixels. Pool slots are page-aligned.
@@ -450,22 +423,6 @@ fn to_px(r: &Rect, scale: f64) -> Rect {
     Rect::new(r.x0 * s, r.y0 * s, r.x1 * s, r.y1 * s).round_out()
 }
 
-/// The part of a tile's buffer shown in `shown` (whole points of the
-/// window), the tile's top left being at `origin`: in buffer pixels, as
-/// wp_viewport.set_source counts. It's whole pixels, so the compositor
-/// copies rather than filters (a shift of at most half a pixel is left),
-/// and inside the buffer, as the protocol requires (a tile is a whole
-/// number of pixels, which at a fractional scale isn't exactly its points
-/// times the scale).
-fn tile_source(shown: &Rect, origin: (f32, f32), scale: f64, (pw, ph): (u32, u32)) -> (f64, f64, f64, f64) {
-    let (pw, ph) = (pw.max(1) as f64, ph.max(1) as f64);
-    let x = (((shown.x0 - origin.0) as f64) * scale).round().clamp(0.0, pw - 1.0);
-    let y = (((shown.y0 - origin.1) as f64) * scale).round().clamp(0.0, ph - 1.0);
-    let w = (((shown.x1 - shown.x0) as f64) * scale).round().clamp(1.0, pw - x);
-    let h = (((shown.y1 - shown.y0) as f64) * scale).round().clamp(1.0, ph - y);
-    (x, y, w, h)
-}
-
 /// What a window's decorations are drawn around.
 fn frame_info(win: &Win) -> decor::FrameInfo<'_> {
     decor::FrameInfo {
@@ -476,13 +433,6 @@ fn frame_info(win: &Win) -> decor::FrameInfo<'_> {
         state: WindowState { suspended: false, resizing: false, ..win.state },
         style: win.style,
         title: &win.title,
-    }
-}
-
-/// Tiles as `Role`s, to forget when they go.
-fn forget_tiles(roles: &mut HashMap<ObjectId, Role>, tiles: impl IntoIterator<Item = Tile>) {
-    for tile in tiles {
-        roles.remove(&tile.surface.id());
     }
 }
 
@@ -529,27 +479,14 @@ impl State {
                 seat::cursor_changed(self, window);
             }
             ToRender::HideCursor { hidden, until_moved } => seat::hide_cursor(self, hidden, until_moved),
-            ToRender::Paint { window, layer, rects, ops } => self.paint(window, layer, rects, ops),
-            ToRender::ScrollLayer { window, layer, viewport, offset, doc_width } => {
-                let Some(win) = self.windows.get_mut(&window) else { return };
-                let scroll = win.layers.entry(layer).or_insert_with(|| ScrollLayer {
-                    viewport,
-                    offset,
-                    doc_width,
-                    tiles: BTreeMap::new(),
-                });
-                if scroll.doc_width != doc_width {
-                    forget_tiles(&mut self.roles, std::mem::take(&mut scroll.tiles).into_values());
-                    scroll.doc_width = doc_width;
-                }
-                scroll.viewport = viewport;
-                scroll.offset = offset;
-            }
-            ToRender::DropTiles { window, layer, tiles } => {
-                if let Some(scroll) = self.windows.get_mut(&window).and_then(|w| w.layers.get_mut(&layer)) {
-                    forget_tiles(&mut self.roles, tiles.iter().filter_map(|i| scroll.tiles.remove(i)));
-                }
-            }
+            ToRender::Paint { window, target, rects, ops } => match target {
+                Target::Root => self.paint(window, rects, ops),
+                Target::Tiles(layer) => tiles::paint(self, window, layer, false, &rects, &ops),
+                Target::Overlay(layer) => tiles::paint(self, window, layer, true, &rects, &ops),
+            },
+            ToRender::PlaceLayer { window, layer, place } => tiles::place(self, window, layer, place),
+            ToRender::DropLayer { window, layer } => tiles::drop_layer(self, window, layer),
+            ToRender::DropTiles { window, layer, tiles } => tiles::drop_tiles(self, window, layer, &tiles),
             ToRender::Present { window } => self.present(window),
             ToRender::CloseWindow { window } => self.close_window(window),
             ToRender::SetSelection { contents } => selection::set(self, contents),
@@ -652,7 +589,7 @@ impl State {
                 canvas: Vec::new(),
                 damage: Vec::new(),
                 buffers: Vec::new(),
-                layers: HashMap::new(),
+                layers: tiles::Layers::default(),
                 frame_seq: 0,
                 frame_signalled: false,
                 style,
@@ -888,9 +825,7 @@ impl State {
         }
         win.scale = scale;
         // Tiles were drawn at the old scale; the main thread draws them again.
-        for layer in win.layers.values_mut() {
-            forget_tiles(&mut self.roles, std::mem::take(&mut layer.tiles).into_values());
-        }
+        tiles::rescaled(&mut win.layers);
         if let Some(d) = &mut win.decor {
             d.scale_changed();
         }
@@ -904,55 +839,16 @@ impl State {
         }
     }
 
-    fn paint(&mut self, window: WindowId, layer: LayerId, rects: Vec<Rect>, ops: Vec<Op>) {
+    /// Paint `rects` of the window's own canvas.
+    fn paint(&mut self, window: WindowId, rects: Vec<Rect>, ops: Vec<Op>) {
         let Some(win) = self.windows.get_mut(&window) else { return };
-        let scale = win.scale;
-        if layer == ROOT_LAYER {
-            if !win.configured {
-                return;
-            }
-            let mut canvas = Canvas::new(&mut win.canvas, win.px_width, win.px_height, 0.0, scale as f32);
-            raster::paint(&mut canvas, &mut self.glyphs, &rects, &ops);
-            win.damage.extend(rects.iter().map(|r| to_px(r, scale)));
+        if !win.configured {
             return;
         }
-        let parent = win.surface().clone();
-        let passthrough = win.passthrough;
-        let sheets = sheet::surfaces_over(self, window);
-        let Some(win) = self.windows.get_mut(&window) else { return };
-        let Some(scroll) = win.layers.get_mut(&layer) else { return };
-        let (tile_w, tile_h) = (px(scroll.doc_width, scale), px(TILE_HEIGHT, scale));
-        for rect in &rects {
-            let first = (rect.y0.max(0.0) as u32) / TILE_HEIGHT;
-            let last = ((rect.y1 - 1.0).max(0.0) as u32) / TILE_HEIGHT;
-            for index in first..=last {
-                let tile = scroll.tiles.entry(index).or_insert_with(|| {
-                    let (subsurface, surface) = self.subcompositor.create_subsurface(parent.clone(), &self.qh);
-                    sheet::keep_below(&subsurface, &sheets);
-                    let viewport = self.viewporter.get().expect("viewporter").get_viewport(&surface, &self.qh, ());
-                    self.roles.insert(surface.id(), Role::Tile(window, layer, index));
-                    if passthrough {
-                        surface.set_input_region(self.empty_region.as_ref().map(Region::wl_region));
-                    }
-                    Tile {
-                        canvas: vec![BACKGROUND; (tile_w * tile_h) as usize],
-                        px_width: tile_w,
-                        px_height: tile_h,
-                        dirty: true,
-                        surface,
-                        subsurface,
-                        viewport,
-                        buffer: None,
-                        mapped: false,
-                        placed: Rect::default(),
-                    }
-                });
-                let origin_y = (index * TILE_HEIGHT) as f32;
-                let mut canvas = Canvas::new(&mut tile.canvas, tile.px_width, tile.px_height, origin_y, scale as f32);
-                raster::paint(&mut canvas, &mut self.glyphs, std::slice::from_ref(rect), &ops);
-                tile.dirty = true;
-            }
-        }
+        let scale = win.scale;
+        let mut canvas = Canvas::new(&mut win.canvas, win.px_width, win.px_height, 0.0, scale as f32);
+        raster::paint(&mut canvas, &mut self.glyphs, &rects, &ops);
+        win.damage.extend(rects.iter().map(|r| to_px(r, scale)));
     }
 
     /// Whether buffers take canvas pixels as they are. Canvases are RGBA
@@ -975,48 +871,11 @@ impl State {
         win.frame_seq += 1;
         win.frame_signalled = false;
         let seq = win.frame_seq;
-        let s = win.scale;
-        for scroll in win.layers.values_mut() {
-            let vp = scroll.viewport;
-            let width = scroll.doc_width;
-            for (&index, tile) in scroll.tiles.iter_mut() {
-                let top = vp.y0 + (index * TILE_HEIGHT) as f32 - scroll.offset;
-                let shown =
-                    Rect::new(vp.x0, top, vp.x0 + width as f32, top + TILE_HEIGHT as f32).intersect(&vp).round_out();
-                if shown.is_empty() {
-                    if tile.mapped {
-                        tile.surface.attach(None, 0, 0);
-                        tile.surface.commit();
-                        tile.mapped = false;
-                    }
-                    continue;
-                }
-                if tile.dirty || !tile.mapped {
-                    let (w, h) = (tile.px_width, tile.px_height);
-                    let (buffer, bytes) = self
-                        .pool
-                        .create_buffer(w as i32, h as i32, w as i32 * 4, format(rgba))
-                        .expect("sidestep: tile buffer");
-                    // The pool rounds slots up to 64 bytes: the buffer is the
-                    // start of its slot.
-                    copy_pixels(as_pixels(&mut bytes[..(w * h * 4) as usize]), &tile.canvas, rgba);
-                    buffer.attach_to(&tile.surface).expect("sidestep: attach tile");
-                    tile.surface.damage_buffer(0, 0, w as i32, h as i32);
-                    tile.buffer = Some(buffer);
-                    tile.dirty = false;
-                    tile.mapped = true;
-                }
-                let (w, h) = (shown.x1 - shown.x0, shown.y1 - shown.y0);
-                tile.subsurface.set_position(shown.x0 as i32, shown.y0 as i32);
-                let (sx, sy, sw, sh) = tile_source(&shown, (vp.x0, top), s, (tile.px_width, tile.px_height));
-                tile.viewport.set_source(sx, sy, sw, sh);
-                tile.viewport.set_destination(w as i32, h as i32);
-                tile.surface.frame(&self.qh, FrameTag { window, seq });
-                tile.surface.commit();
-                tile.placed = shown;
-            }
+        let layers = tiles::present(self, window, seq);
+        let Some(win) = self.windows.get_mut(&window) else { return };
+        if crate::layers::tracing() {
+            tiles::trace(window, &layers, &win.damage);
         }
-
         if !win.damage.is_empty() {
             let damage = std::mem::take(&mut win.damage);
             let free = win.buffers.iter().position(|b| b.buffer.canvas(&mut self.pool).is_some());
@@ -1032,16 +891,13 @@ impl State {
                     win.buffers.len() - 1
                 }
             };
-            for (i, b) in win.buffers.iter_mut().enumerate() {
-                if i != index {
-                    b.stale.extend_from_slice(&damage);
-                }
-            }
+            // As tiles' buffers do (see `tiles`).
+            let mut stale: Vec<&mut Vec<Rect>> = win.buffers.iter_mut().map(|b| &mut b.stale).collect();
+            let stale = tiles::pass_on(&mut stale, index, &damage);
             let surface = win.surface().clone();
             let target = &mut win.buffers[index];
-            let stale = std::mem::take(&mut target.stale);
             let pixels = as_pixels(target.buffer.canvas(&mut self.pool).expect("free buffer"));
-            for r in stale.iter().chain(&damage) {
+            for r in tiles::missed(&stale, &damage) {
                 copy_rows(pixels, &win.canvas, win.px_width, win.px_height, r, rgba);
             }
             target.buffer.attach_to(&surface).expect("sidestep: attach window buffer");
@@ -1141,10 +997,6 @@ impl State {
         let empty = if wanted { self.empty_region.as_ref().map(Region::wl_region) } else { None };
         let Some(win) = self.windows.get_mut(&window) else { return };
         win.passthrough = empty.is_some();
-        for tile in win.layers.values().flat_map(|l| l.tiles.values()) {
-            tile.surface.set_input_region(empty);
-            tile.surface.commit();
-        }
         if let Some(d) = &mut win.decor {
             d.set_passthrough(empty);
         }
@@ -1160,17 +1012,10 @@ impl State {
         self.roles.get(&surface.id()).copied()
     }
 
-    /// Where a content surface's origin is in its window, in points.
-    fn content_offset(&self, role: Role) -> (f64, f64) {
-        match role {
-            Role::Tile(window, layer, index) => self
-                .windows
-                .get(&window)
-                .and_then(|w| w.layers.get(&layer))
-                .and_then(|l| l.tiles.get(&index))
-                .map_or((0.0, 0.0), |t| (t.placed.x0 as f64, t.placed.y0 as f64)),
-            _ => (0.0, 0.0),
-        }
+    /// Where a content surface's origin is in its window, in points: the
+    /// window's own surface is the only one taking input.
+    fn content_offset(&self, _role: Role) -> (f64, f64) {
+        (0.0, 0.0)
     }
 }
 
@@ -1425,38 +1270,3 @@ delegate_xdg_popup!(State);
 delegate_activation!(State, Activation);
 delegate_simple!(State, WpViewporter, 1);
 delegate_registry!(State);
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Tiles cut by the viewport at every scroll offset, at integer and
-    /// fractional scales, show whole pixels from inside their buffers.
-    #[test]
-    fn tile_sources_stay_in_their_buffers() {
-        let scales = [1.0, 1.1, 1.15, 1.2, 1.25, 1.3, 4.0 / 3.0, 1.4, 1.5, 1.6, 5.0 / 3.0, 1.75, 2.0, 2.25, 3.0];
-        for scale in scales {
-            let (pw, ph) = (px(1283, scale), px(TILE_HEIGHT, scale));
-            for vp in [Rect::new(0.0, 46.0, 1283.0, 800.0), Rect::new(10.5, 20.25, 700.75, 431.5)] {
-                for offset in 0..1100 {
-                    for index in 0..3u32 {
-                        let top = vp.y0 + (index * TILE_HEIGHT) as f32 - offset as f32;
-                        let shown =
-                            Rect::new(vp.x0, top, vp.x0 + 1283.0, top + TILE_HEIGHT as f32).intersect(&vp).round_out();
-                        if shown.is_empty() {
-                            continue;
-                        }
-                        let (x, y, w, h) = tile_source(&shown, (vp.x0, top), scale, (pw, ph));
-                        let at = format!("scale {scale}, offset {offset}, tile {index}: {x} {y} {w} {h}");
-                        assert!([x, y, w, h].iter().all(|v| v.fract() == 0.0), "{at}");
-                        assert!(x >= 0.0 && y >= 0.0 && w >= 1.0 && h >= 1.0, "{at}");
-                        assert!(x + w <= pw as f64 && y + h <= ph as f64, "{at}");
-                        // Within half a pixel of where the tile's content is.
-                        let exact = ((shown.y0 - top) as f64 * scale).clamp(0.0, ph as f64 - 1.0);
-                        assert!((y - exact).abs() <= 0.5 + 1e-9, "{at}");
-                    }
-                }
-            }
-        }
-    }
-}

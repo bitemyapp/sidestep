@@ -57,6 +57,7 @@ mod inputcontext;
 mod keybindings;
 mod keycodes;
 mod keyloop;
+mod layers;
 mod modal;
 mod momentum;
 mod notifications;
@@ -71,6 +72,8 @@ mod protocol;
 mod raster;
 mod responder;
 mod screen;
+mod scroll;
+mod scroller;
 mod settings;
 mod shadow;
 mod split;
@@ -102,11 +105,15 @@ sidestep_runtime::static_class!(pub NSVIEW, NSVIEW_META = "NSView", || {
 });
 
 sidestep_runtime::static_class!(pub NSCLIPVIEW, NSCLIPVIEW_META = "NSClipView", || {
-    let _ = views::NSClipViewImpl::class();
+    let _ = scroll::NSClipViewImpl::class();
 });
 
 sidestep_runtime::static_class!(pub NSSCROLLVIEW, NSSCROLLVIEW_META = "NSScrollView", || {
-    let _ = views::NSScrollViewImpl::class();
+    let _ = scroll::NSScrollViewImpl::class();
+});
+
+sidestep_runtime::static_class!(pub NSSCROLLER, NSSCROLLER_META = "NSScroller", || {
+    scroller::install_class_methods(scroller::NSScrollerImpl::class());
 });
 
 sidestep_runtime::static_class!(pub NSWINDOW, NSWINDOW_META = "NSWindow", || {

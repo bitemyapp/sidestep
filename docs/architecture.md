@@ -568,13 +568,15 @@ everything that touches pixels or the display server to a render thread.
   paths, strokes, images, runs of shaped glyphs) to a list, in the view's
   layer and clipped to the view and its ancestors (see
   [Drawing](#drawing)). The main thread never rasterizes a window.
-- **Layers.** A window's own surface is one layer, and each `NSClipView` adds
-  one holding its document. `setNeedsDisplayInRect:` records damage per
-  layer, in layer points.
+- **Layers.** A window's own surface is one layer, and each clip view big
+  enough to be worth it whose document overflows it adds one holding its
+  document (see [Scroll views and layers](#scroll-views-and-layers)).
+  `setNeedsDisplayInRect:` records damage per layer, in layer points.
 - **Display.** Once the render thread reports the last frame shown, the
   window places its scroll layers, calls `drawRect:` only for damaged areas,
-  sends the operations and presents. A window the compositor isn't showing
-  gets no frame callbacks, so it stops drawing.
+  sends the operations and presents; a pass that changed nothing presents
+  nothing. A window the compositor isn't showing gets no frame callbacks,
+  so it stops drawing.
 - **Rendering.** The render thread owns the Wayland connection through
   smithay-client-toolkit. It rasterizes operations on the CPU into a cache
   per layer (tiny-skia for paths and images, swash for glyphs), only inside damaged
@@ -584,11 +586,11 @@ everything that touches pixels or the display server to a render thread.
   ends the connection; the render thread then stops, and the main thread,
   seeing its channel close, exits with a message rather than running on
   without windows.
-- **Scrolling.** A document layer is cut into 512-point-tall tiles, each on
-  its own subsurface and cropped to the clip view with wp_viewporter.
-  Scrolling moves tiles and changes crops. A tile is drawn and uploaded when
-  it comes within a tile of the viewport or its content changes, and dropped
-  when it is two tiles away.
+- **Scrolling.** A document layer is cut into tiles of device pixels, each
+  on its own subsurface and cropped to the clip view with wp_viewporter.
+  Scrolling moves tiles and changes crops; it uploads nothing until a tile
+  comes into view. What is painted over a scroll view (overlay scrollers)
+  goes on a transparent overlay above its tiles.
 - **Nested and modal loops.** Every loop is the main thread's run loop,
   run in a mode (see "Events and the run loop" below): the main loop in
   the default mode, `nextEventMatchingMask:untilDate:inMode:dequeue:` (a
@@ -617,9 +619,11 @@ buffer of `points × scale` pixels (rounded as the fractional-scale protocol
 asks) and a wp_viewporter destination of its size in points, so the
 compositor maps buffer pixels to screen pixels one to one instead of
 resampling. A tile cut by its scroll view shows a crop of whole buffer
-pixels, kept inside the buffer; at a fractional scale that crop can be up
-to half a pixel from the exact one, which moves the tile by as much rather
-than blurring it. A canvas
+pixels, kept inside the buffer; a tile keeps a point's margin of pixels
+around it, so at integer scales the crop is exactly the pixels that
+belong there wherever the layer is scrolled, and at a fractional scale it
+can be up to half a pixel from the exact one, which moves the tile by as
+much rather than blurring it. A canvas
 has a `scale`; fills and damage cover the pixels whose centers they
 contain, so neighboring fills share edges without gaps or overlaps at any
 scale, and a pixel's value never depends on how damage was cut up. A scale
@@ -701,7 +705,8 @@ Wayland shows a client no other program's input.
   input so the input method starts over. Clients are recognized by their
   methods, since the runtime knows no protocol it wasn't given.
 - **Pointer.** A pointer frame may leave one of a window's surfaces and
-  enter another (a tile, the root), so the render thread settles crossings
+  enter another (the root, a decoration; scroll tiles take no input), so
+  the render thread settles crossings
   at the end of each frame and tells the main thread when the pointer
   enters or leaves a window's content. It counts clicks (400 ms and 5
   points apart at most, GTK's defaults, which GNOME keeps) with the
@@ -867,8 +872,8 @@ attached the parent refuses mouse input and the sheet is key in its place
 sheet is part of its parent: a desynchronized subsurface of the parent's
 surface with its own canvas, buffers and frame callbacks, placed
 top-centre under the title bar and kept there when the parent resizes,
-above the parent's scroll tiles (`backend/sheet.rs` keeps that stacking
-in one place). Its position is the parent's state: a parent's resize
+above the parent's scroll tiles (`backend/tiles.rs` stacks tiles
+directly above the window's surface, so below its sheets). Its position is the parent's state: a parent's resize
 leaves it to the parent's own present at the new size, so a configure
 never makes an extra commit, and a sheet made or resized commits the
 parent only if the parent shows its current size. A sheet of a window
@@ -1098,8 +1103,8 @@ gone are passed over, whatever the order. Destinations may run nested
 event loops (a modal panel in `performDragOperation:`), so every step
 works on its own drag: a drop ends its drag before the destination hears
 of it, and a drag that comes meanwhile is a drag of its own. Crossing
-between a window's surfaces (tiles are subsurfaces, and each brings a new
-offer) is one drag to the destination. A drop sends
+between a window's surfaces (decorations are subsurfaces, and each brings a
+new offer) is one drag to the destination. A drop sends
 `prepareForDragOperation:`, `performDragOperation:`,
 `concludeDragOperation:` and `draggingEnded:`, and is finished (the source
 told the data was taken) only if the destination performed it.
@@ -1282,9 +1287,10 @@ each one: the view leaves whatever superview it has by then, and each view
 joins the window its place puts it in once its own callback has run. A
 window that is going away detaches its views without telling them.
 `setBoundsSize:` is stored and reported by `bounds`, but drawing, hit
-testing and conversion don't scale yet. The scrolling helpers
-(`scrollRectToVisible:`, `autoscroll:`) work through the enclosing clip
-views.
+testing and conversion don't scale yet (so a scroll view's magnification is
+kept, scales its clip view's bounds as AppKit's does, and changes nothing
+drawn). The scrolling helpers (`scrollRectToVisible:`, `autoscroll:`) work
+through the enclosing clip views.
 
 **The layout pass.** Each view has a few flags: it needs layout, its
 constraints need updating, and "some view below does" for each, raised
@@ -1395,6 +1401,142 @@ takes 0.4 ms (1.0 ms). A page of table cells with constraints, in a window
 holding 1,200 other constraints, takes 5.1 ms (0.16 ms): each cell's
 constraints leave and join the one solver, and kasuari's removal looks
 through all of its rows.
+
+### Scroll views and layers
+
+`NSClipView`, `NSScrollView` (`scroll.rs`) and `NSScroller` (`scroller.rs`)
+follow AppKit as `conformance/tests/appkit_scroll.rs` measures it.
+`scrollToPoint:` moves a clip view's bounds where it is told and posts
+the bounds notification; `setBoundsOrigin:` constrains first
+(`constrainBoundsRect:`, which subclasses override to center a document
+or keep it in pages), moves, and has the superview
+`reflectScrolledClipView:`. The document can scroll past its edges by the
+content insets, and a clip view that changes size constrains again. A
+clip view follows its document's frame as AppKit's does by observing the
+document's frame notification, through a hook rather than the
+notification center: not while the document posts none (it catches up
+when posting is turned back on), through `viewFrameChanged:` when a
+subclass overrides it, constraining again, moving through the superview's
+`scrollClipView:toPoint:` when it must, and reflecting. A document that
+leaves its clip view (removed, moved elsewhere, or replaced by none) is no
+longer its document, and the bounds origin stays where its corner was. A
+scroll view's
+`tile` lays its clip view and scrollers out from the border (1 point, 2 for
+a groove), the scroller style (legacy scrollers take room, overlay ones
+sit over the clip view, full length) and the content and scroller insets;
+`reflectScrolledClipView:` gives the scrollers values and proportions over
+the document and its insets, enables them while there's somewhere to go,
+and shows or hides them when they hide automatically. A new scroll view
+takes `+[NSScroller preferredScrollerStyle]`: overlay, unless
+`SIDESTEP_SCROLLER_STYLE=legacy`. A wheel moves by lines of
+`verticalLineScroll` (10 points; a detent is three lines), a touchpad by
+points, along the predominant axis; an event along no axis the scroll view
+can move goes to the next responder, so a scroll view inside another hands
+it what it can't use. Each move posts `NSScrollViewDidLiveScrollNotification`
+(before the scrollers follow), a gesture's start and end (after its
+momentum) the will-start and did-end ones, and so does a press on a
+scroller that drags its knob or pages, from the press to its release; a
+wheel's moves aren't bracketed, as on macOS once a scroll view has
+scrolled once. Magnifying scales the clip view's bounds about a point
+that keeps its place (the middle, the pointer, or the one given), and
+`magnifyToFitRect:` centers the rectangle; drawing doesn't follow the
+scale yet. A scroller keeps its own value and proportion, so moving
+redraws only the stretch its knob left and reached; its knob is dragged
+and its slot paged from the mouse events (a held page repeats on a
+timer), with no nested loop; overlay scrollers show while their view
+scrolls, fade a second later on one timer every scroller shares, and widen
+while the pointer is over them.
+
+**Promotion** (`layers.rs`, main thread). At each display pass, a clip
+view in the window gets a layer when nothing above it is hidden or faded,
+its visible part is at least 64 device pixels each way, its document
+overflows it, and the window has fewer than 24 layers. A clip view inside
+a promoted one's document is nested in its layer; one without a layer
+draws its document inline, and scrolling it redraws its visible part.
+Gaining or losing a layer redraws the clip view's place in the layer it
+sits in. `views::placement` stops at the nearest promoted clip view, so
+invalidation lands in the right layer.
+
+**Layer coordinates** are the clip view's bounds coordinates with y turned
+down for an unflipped document: a flipped document grows downward from row
+0, an unflipped one into negative rows, so a growing document never moves
+pixels already drawn, and scrolling only moves the layer's origin in the
+window (snapped to device pixels). A document inside a layer that grows or
+shrinks from its origin redraws only what it gains when its
+`layerContentsRedrawPolicy` is `OnSetNeedsDisplay` or `Never`, as a
+layer-backed view's contents would stay; its clip view, drawn behind the
+tiles, isn't redrawn. As on macOS, `OnSetNeedsDisplay` is the default
+only for views without a `drawRect:` of their own: one that draws gets
+`DuringViewResize` and is drawn whole again, unless it asks otherwise (a
+log that only grows at its end should).
+
+**Tiles** are 512 device pixels tall and as wide as the layer in steps of
+64 pixels, up to 2048, keyed by column and row (`protocol::TileGrid`),
+each with a margin of a point's pixels. A pass draws the tiles coming into
+view and the damaged parts of those the render thread keeps (every tile a
+damaged rectangle reaches, margins included) and presents; then, while it
+has spent less than 4 ms, it draws one tile ahead in the direction the
+layer moved (downward when it hasn't), after `prepareContentInRect:` to
+the document, which the render thread rasterizes while the compositor
+shows the frame. Tiles more
+than two tiles from the viewport go, and the farthest from their viewports
+while a window's tiles hold more than 96 MB. An opaque clip view
+background makes the layer opaque: its tiles are cleared to that color and
+shown without alpha. Otherwise tiles are cleared to nothing and shown with
+alpha over what the window's surface drew there (the clip view's own
+background, what's behind the scroll view).
+
+**Overlays.** Views painted after a promoted clip view that reach its
+viewport would be hidden by its tiles. The pass walks the views after the
+clip view in paint order (in the layer it sits in), only through those
+reaching the viewport or what the overlay has taken so far, and into views
+that draw nothing of their own; those it takes are drawn into the layer's
+overlay, a transparent surface above the layer's tiles and the layers
+nested in it, and are left out of the layer below (a flag on the view), so
+a translucent one isn't drawn twice. The overlay is the size of their
+frames in the layer they are drawn in (the one this layer is nested in, or
+the window's surface) and kept in that layer's points, so scrolling that
+layer moves the overlay and redraws nothing; one far bigger than the
+window is cut to what that layer shows. Damage to them goes to the overlay
+only; the overlay is also drawn where the layer below it was damaged, and
+whole when its rectangle or views change. Stacking is paint order: a
+layer's tiles, the layers nested in it, its overlay.
+
+A pass runs program code (`drawRect:`, `prepareContentInRect:`, colors),
+which may order the window out, see its scale change, take clip views out
+or display another window. The window's layers are out of it during the
+pass, behind a stand-in that notes what happens to them, and the pass
+applies that when it puts them back; a window asked to display during its
+own pass does so at the next, and another window displays at once.
+
+**On the render thread** (`backend/tiles.rs`) a layer is its placement
+(`ToRender::PlaceLayer`, sent only when it changes: stacking, viewport,
+origin, extent, grid, opacity, the layer it is nested in, overlay), its
+tiles' canvases, and surface sets (surface, subsurface, viewport) while
+tiles are on screen. Every set has an empty input region, so pointer input
+lands on the window's surface in its own coordinates; sets taken off
+screen go to a pool. Only the main thread decides which tiles exist: a
+paint makes a tile only when it covers the whole tile with its margin,
+which is how the main thread draws a tile it starts keeping, and a paint
+reaching into the margin of a tile nobody keeps leaves it out. So a tile
+keeps its canvas exactly as long as the main thread keeps the tile (a
+dropped tile's canvas serves the next new one), and the memory cap counts
+every canvas. A tile has buffers only while it is on screen: two, each
+remembering the rectangles it misses (as the window's own buffers do), so
+a change uploads only its pixels. An overlay is placed and cropped from
+the origin and viewport of the layer it sits in, with a point's margin of
+pixels like a tile's. A present commits a tile or overlay only when its
+content or crop changed (positions belong to the window surface's commit),
+restacks only when the surfaces on screen or their order changed, and asks
+for a frame callback on the window's surface and on one other surface: the
+first tile or overlay to commit, else the biggest tile on screen of a
+layer nested in no other, committed for it. So a fling uploads nothing
+until a tile comes into view, scrolling a scroll view of scroll views
+uploads nothing to their overlays, appending a line to a log pinned to its
+end uploads the line, and a caret blinking in a scroll view commits two
+surfaces. `SIDESTEP_TRACE_FRAMES=1` prints, for each pass, the main
+thread's time and the tiles it recorded, and for each present the bytes
+uploaded to tiles, overlays and the window and the surfaces committed.
 
 ## Text
 

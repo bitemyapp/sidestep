@@ -1,13 +1,34 @@
-//! Containers: split views, stack views, tab views, a table and a layout
-//! made with anchors, in one window. Written only against objc2-app-kit:
-//! on macOS it runs on AppKit, on Linux on Sidestep.
+//! Containers: split views, stack views, tab views, a table, a layout made
+//! with anchors and scroll views, in one window. Written only against
+//! objc2-app-kit: on macOS it runs on AppKit, on Linux on Sidestep.
 //!
 //! SCENARIO: split (three panes, the middle one split again), stack (rows
 //! in each distribution), tabs (a tab view on its second page), table
-//! (1000 rows in a scroll view, one selected), or autolayout (a header,
-//! sidebar, content and footer placed by constraints; the default).
-//! CONTAINERS_SCROLL: in the table scenario, scroll at 600 points a second.
-//! CONTAINERS_QUIT_AFTER: seconds until the app terminates itself.
+//! (1000 rows in a scroll view, one selected), autolayout (a header,
+//! sidebar, content and footer placed by constraints; the default), or
+//! the scroll views:
+//!
+//! - overlay: a list with overlay scrollers, shown, and a badge floating
+//!   over it;
+//! - transparent: a scroll view drawing no background over a striped
+//!   backdrop;
+//! - nested: shelves of cards, each shelf a horizontal scroll view in a
+//!   vertical one;
+//! - hscroll: a wide timeline, scrolled sideways;
+//! - fling: a long list flung up and down, as a touchpad would;
+//! - stream: a log that grows by a line ten times a second, pinned to its
+//!   end;
+//! - idle: a list with a caret blinking in it.
+//!
+//! CONTAINERS_SCROLL: in the table and hscroll scenarios, scroll at 600
+//! points a second; in the nested one, move the shelves up and down at
+//! 300. CONTAINERS_QUIT_AFTER: seconds until the app
+//! terminates itself. CONTAINERS_PNG=path: show nothing; lay the scenario
+//! out in a window that is never shown, draw it into a bitmap with
+//! `cacheDisplayInRect:toBitmapImageRep:` (at CONTAINERS_SCALE pixels a
+//! point) and write it as a PNG, on macOS too: reference pictures taken
+//! without the screen. CONTAINERS_BENCH=1: show nothing and time
+//! scrolling a scroll view.
 
 use std::cell::{OnceCell, RefCell};
 use std::ptr::NonNull;
@@ -18,11 +39,12 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSAutoresizingMaskOptions, NSBackingStoreType,
-    NSBezierPath, NSColor, NSControlTextEditingDelegate, NSFont, NSFontAttributeName, NSForegroundColorAttributeName,
-    NSLayoutAttribute, NSLayoutConstraint, NSResponder, NSScrollView, NSSplitView, NSSplitViewDividerStyle,
-    NSStackView, NSStackViewDistribution, NSStringDrawing, NSTabView, NSTabViewItem, NSTableCellView, NSTableColumn,
-    NSTableView, NSTableViewDataSource, NSTableViewDelegate, NSTableViewStyle, NSUserInterfaceItemIdentification,
-    NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
+    NSBezierPath, NSBitmapFormat, NSBitmapImageRep, NSColor, NSControlTextEditingDelegate, NSDeviceRGBColorSpace,
+    NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSLayoutAttribute, NSLayoutConstraint, NSResponder,
+    NSScrollView, NSSplitView, NSSplitViewDividerStyle, NSStackView, NSStackViewDistribution, NSStringDrawing,
+    NSTabView, NSTabViewItem, NSTableCellView, NSTableColumn, NSTableView, NSTableViewDataSource, NSTableViewDelegate,
+    NSTableViewStyle, NSUserInterfaceItemIdentification, NSUserInterfaceLayoutOrientation, NSView, NSWindow,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSArray, NSDictionary, NSIndexSet, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -31,6 +53,8 @@ use objc2_foundation::{
 
 // Links Sidestep's runtime and frameworks on Linux; empty on macOS.
 use sidestep as _;
+
+mod scrolling;
 
 fn rect(x: f64, y: f64, w: f64, h: f64) -> NSRect {
     NSRect::new(NSPoint::new(x, y), NSSize::new(w, h))
@@ -358,6 +382,7 @@ impl Delegate {
         let mtm = self.mtm();
         let scenario = std::env::var("SCENARIO").unwrap_or_else(|_| "autolayout".into());
         let frame = rect(0.0, 0.0, 900.0, 600.0);
+        let png = std::env::var("CONTAINERS_PNG").ok();
         let style = NSWindowStyleMask::Titled
             | NSWindowStyleMask::Closable
             | NSWindowStyleMask::Miniaturizable
@@ -401,6 +426,13 @@ impl Delegate {
                 }
                 view
             }
+            "overlay" => scrolling::overlay(mtm, frame, &mut self.ivars().timers.borrow_mut()),
+            "transparent" => scrolling::transparent(mtm, frame),
+            "nested" => scrolling::nested(mtm, frame, &mut self.ivars().timers.borrow_mut()),
+            "hscroll" => scrolling::hscroll(mtm, frame, &mut self.ivars().timers.borrow_mut()),
+            "fling" => scrolling::fling(mtm, frame, &mut self.ivars().timers.borrow_mut()),
+            "stream" => scrolling::stream(mtm, frame, &mut self.ivars().timers.borrow_mut()),
+            "idle" => scrolling::idle(mtm, frame, &mut self.ivars().timers.borrow_mut()),
             _ => autolayout(mtm, frame),
         };
         window.setContentView(Some(&content));
@@ -420,14 +452,88 @@ impl Delegate {
             let timer = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(secs, false, &block) };
             self.ivars().timers.borrow_mut().push(timer);
         }
+        if let Some(path) = png {
+            // Laid out in the window, which is never shown.
+            write_png(&content, &path);
+            let _ = self.ivars().window.set(window);
+            return;
+        }
         window.makeKeyAndOrderFront(None);
         let _ = self.ivars().window.set(window);
     }
 }
 
+/// Draw `view`, laid out, into a bitmap and write it to `path` as a PNG.
+fn write_png(view: &NSView, path: &str) {
+    view.layoutSubtreeIfNeeded();
+    let scale: f64 = std::env::var("CONTAINERS_SCALE").ok().and_then(|s| s.parse().ok()).unwrap_or(1.0);
+    let b = view.bounds();
+    let (w, h) = ((b.size.width * scale) as usize, (b.size.height * scale) as usize);
+    // SAFETY: NULL planes make the rep allocate its own; the color space
+    // name is AppKit's constant.
+    let rep = unsafe {
+        NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bitmapFormat_bytesPerRow_bitsPerPixel(
+            <NSBitmapImageRep as objc2::AnyThread>::alloc(),
+            std::ptr::null_mut(),
+            w as isize,
+            h as isize,
+            8,
+            4,
+            true,
+            false,
+            NSDeviceRGBColorSpace,
+            NSBitmapFormat::empty(),
+            0,
+            32,
+        )
+    }
+    .expect("a bitmap");
+    rep.setSize(b.size);
+    view.cacheDisplayInRect_toBitmapImageRep(b, &rep);
+    // The premultiplied pixels, unpremultiplied for PNG.
+    let (data, row) = (rep.bitmapData(), rep.bytesPerRow() as usize);
+    let mut rgba = Vec::with_capacity(w * h * 4);
+    for y in 0..h {
+        for x in 0..w {
+            // SAFETY: inside the bitmap's rows.
+            let [r, g, b, a] = unsafe { std::ptr::read(data.add(y * row + x * 4).cast::<[u8; 4]>()) };
+            let un = |c: u8| {
+                if a == 0 { 0 } else { ((u32::from(c) * 255 + u32::from(a) / 2) / u32::from(a)).min(255) as u8 }
+            };
+            rgba.extend_from_slice(&[un(r), un(g), un(b), a]);
+        }
+    }
+    let image = image::RgbaImage::from_raw(w as u32, h as u32, rgba).expect("pixels");
+    image.save(path).expect("the PNG written");
+    println!("wrote {path} ({w} x {h})");
+}
+
 fn main() {
     let mtm = MainThreadMarker::new().expect("must run on the main thread");
     let app = NSApplication::sharedApplication(mtm);
+    if std::env::var_os("CONTAINERS_BENCH").is_some() {
+        app.setActivationPolicy(NSApplicationActivationPolicy::Prohibited);
+        // SAFETY: a plain window, never shown.
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                rect(0.0, 0.0, 600.0, 400.0),
+                NSWindowStyleMask::Titled,
+                NSBackingStoreType::Buffered,
+                true,
+            )
+        };
+        // SAFETY: Rust owns the window, so closing it mustn't release it.
+        unsafe { window.setReleasedWhenClosed(false) };
+        scrolling::bench(mtm, &window);
+        return;
+    }
+    if std::env::var_os("CONTAINERS_PNG").is_some() {
+        // No window shown and the application never runs or activates.
+        app.setActivationPolicy(NSApplicationActivationPolicy::Prohibited);
+        Delegate::new(mtm).open_window();
+        return;
+    }
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     let delegate = Delegate::new(mtm);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));

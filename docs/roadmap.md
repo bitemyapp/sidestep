@@ -166,6 +166,25 @@ The platform layer since (`examples/appkit-input` shows it):
   styles' geometry; views only for rows near the visible ones, reused by
   identifier; variable heights; selection following rows; column
   notifications; clicks).
+- Scroll views (`examples/containers` shows them: `SCENARIO=overlay`,
+  `transparent`, `nested`, `hscroll`, `fling`, `stream`, `idle`):
+  `NSClipView` (document rectangles, content insets, constraining,
+  backgrounds, the document cursor), `NSScrollView` (tiling with borders,
+  both scroller styles and insets, reflecting, autohiding, replacing its
+  parts, the size helpers, line and page amounts, `pageUp:` and
+  `pageDown:`, magnification kept, clamped and anchored as AppKit does),
+  `NSScroller` (AppKit's widths and parts at every style and size, hit
+  testing, knob drags and paging from mouse events, overlay scrollers that
+  fade and widen), wheel, touchpad and scroller scrolling with live scroll
+  notifications and nested scroll views passing on what they can't use,
+  clip views following their documents as AppKit's do (frame
+  notifications held back, `viewFrameChanged:`, documents leaving), and
+  views' `layerContentsRedrawPolicy` defaults. On screen, clip views get layers
+  of their own when it pays: nested ones too, scrolling both ways,
+  transparent or opaque, with overlays for what is drawn over them, tiles
+  anchored so growing documents keep their pixels, uploads of only what
+  changed and commits of only what moved, and counters behind
+  `SIDESTEP_TRACE_FRAMES`.
 
 Drawing (`examples/drawing-gallery` shows it, and draws the same
 pictures on macOS for comparison):
@@ -232,7 +251,13 @@ Next:
   visual effect views (no Wayland protocol yet), and batching a bitmap
   context's operations instead of rasterizing each at once (layouts other
   than RGBA are unpacked and packed for each).
-- Scrollers.
+- Scroll views: rubber-banding (Linux desktops don't), rulers
+  (`NSRulerView`), the find bar, animated `pageDown:`, drawing at a
+  magnification (it scales the clip view's bounds, which drawing doesn't
+  follow yet), `addFloatingSubview:forAxis:` kept still while scrolling,
+  keeping a layer's pixels through a width change that moves its tile
+  columns, and drawing tiles ahead on an idle timer rather than right
+  after each frame.
 - `NSMenu`, which has no system-wide equivalent on Linux, so it becomes a
   menu bar inside the window.
 - Containers: the visual format language; bounds scaling in drawing, hit
@@ -337,8 +362,7 @@ Next:
   title into the width given) and the width a wrapping label keeps at
   `maximumNumberOfLines`.
 - Accessibility through AccessKit, from the store.
-- Scroll views' scrollers and layers, popup views; open panels through
-  xdg-desktop-portal.
+- Popup views; open panels through xdg-desktop-portal.
 
 ## 5. A real app
 

@@ -500,7 +500,7 @@ fn axis_index(axis: wl_pointer::Axis) -> usize {
 fn content_position(state: &State, p: &Pointer) -> Option<(WindowId, f64, f64)> {
     let (_, role) = p.focus.as_ref()?;
     match *role {
-        Role::Root(window) | Role::Tile(window, _, _) => {
+        Role::Root(window) => {
             let (ox, oy) = state.content_offset(*role);
             Some((window, p.x + ox, p.y + oy))
         }

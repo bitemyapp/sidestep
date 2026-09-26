@@ -89,6 +89,9 @@ const FOLLOWS_CLIP: u16 = 1 << 8;
 /// work flags and never cleared, so trees that never used Auto Layout
 /// skip its bookkeeping when views move.
 const SUBTREE_AUTO: u16 = 1 << 9;
+/// The view is drawn in a scroll layer's overlay, not in its own layer
+/// (see `layers`).
+const IN_OVERLAY: u16 = 1 << 10;
 
 const ANY_WORK: u16 = NEEDS_LAYOUT | SUBTREE_LAYOUT | NEEDS_UPDATE | SUBTREE_UPDATE;
 
@@ -99,7 +102,8 @@ const MAX_ROUNDS: usize = 16;
 /// A view's part of the contract, kept in its ivars.
 pub(crate) struct ViewState {
     flags: Cell<u16>,
-    redraw_policy: Cell<NSViewLayerContentsRedrawPolicy>,
+    /// None until set: see [`redraw_policy`].
+    redraw_policy: Cell<Option<NSViewLayerContentsRedrawPolicy>>,
     /// The bounds size when it differs from the frame's (`setBoundsSize:`),
     /// kept in proportion as the frame resizes. Stored and reported by
     /// `bounds` only: drawing, hit testing and conversion don't scale yet.
@@ -115,7 +119,7 @@ impl Default for ViewState {
     fn default() -> Self {
         ViewState {
             flags: Cell::new(NEEDS_LAYOUT | NEEDS_UPDATE),
-            redraw_policy: Cell::new(NSViewLayerContentsRedrawPolicy::OnSetNeedsDisplay),
+            redraw_policy: Cell::new(None),
             bounds_size: Cell::new(None),
             identifier: RefCell::new(None),
             prepared: Cell::new(NSRect::ZERO),
@@ -173,6 +177,43 @@ pub(crate) fn mark_auto(view: &NSViewImpl) {
 /// Whether anything in the subtree at `view` may take part in Auto Layout.
 pub(crate) fn has_auto(view: &NSViewImpl) -> bool {
     has(view, SUBTREE_AUTO)
+}
+
+/// `layerContentsRedrawPolicy`: as set, else as macOS answers for a view
+/// that hasn't set it: `OnSetNeedsDisplay` when its class draws nothing of
+/// its own, `DuringViewResize` when it has a `drawRect:` (which then draws
+/// the whole view again on every resize). Framework classes that answer
+/// otherwise set theirs when made ([`set_redraw_policy`]).
+pub(crate) fn redraw_policy(view: &NSViewImpl) -> NSViewLayerContentsRedrawPolicy {
+    state(view).redraw_policy.get().unwrap_or_else(|| {
+        if crate::layers::overrides_draw_rect(view) {
+            NSViewLayerContentsRedrawPolicy::DuringViewResize
+        } else {
+            NSViewLayerContentsRedrawPolicy::OnSetNeedsDisplay
+        }
+    })
+}
+
+pub(crate) fn set_redraw_policy(view: &NSViewImpl, policy: NSViewLayerContentsRedrawPolicy) {
+    state(view).redraw_policy.set(Some(policy));
+}
+
+/// Whether a view keeps what it drew when resized, as a layer-backed view
+/// whose contents redraw only on `setNeedsDisplay:` (or never) does.
+pub(crate) fn keeps_content_on_resize(view: &NSViewImpl) -> bool {
+    matches!(
+        redraw_policy(view),
+        NSViewLayerContentsRedrawPolicy::Never | NSViewLayerContentsRedrawPolicy::OnSetNeedsDisplay
+    )
+}
+
+/// Whether `view` is drawn in a scroll layer's overlay.
+pub(crate) fn in_overlay(view: &NSViewImpl) -> bool {
+    has(view, IN_OVERLAY)
+}
+
+pub(crate) fn set_in_overlay(view: &NSViewImpl, on: bool) {
+    set_flag(view, IN_OVERLAY, on);
 }
 
 /// Lay `view` out again whenever the clip view it is the document of
@@ -658,11 +699,7 @@ fn scroll_clip_to(clip: &NSViewImpl, origin: NSPoint) -> bool {
     }
     c.scrollToPoint(target);
     if let Some(sup) = views::superview_of(clip) {
-        let sup = views::as_view(sup);
-        if sup.isKindOfClass(NSScrollView::class()) {
-            // SAFETY: an NSScrollView, which takes the clip view.
-            let _: () = unsafe { msg_send![sup, reflectScrolledClipView: c] };
-        }
+        views::as_view(sup).reflectScrolledClipView(c);
     }
     true
 }
@@ -967,12 +1004,12 @@ define_class!(
 
         #[unsafe(method(layerContentsRedrawPolicy))]
         fn layer_contents_redraw_policy(&self) -> NSViewLayerContentsRedrawPolicy {
-            state(me(self)).redraw_policy.get()
+            redraw_policy(me(self))
         }
 
         #[unsafe(method(setLayerContentsRedrawPolicy:))]
         fn set_layer_contents_redraw_policy(&self, policy: NSViewLayerContentsRedrawPolicy) {
-            state(me(self)).redraw_policy.set(policy);
+            set_redraw_policy(me(self), policy);
         }
 
         #[unsafe(method(autoresizesSubviews))]

@@ -16,17 +16,14 @@
 //! `frame` keeps the origin it was given.
 //!
 //! Invalidation collects damage per layer, in layer points. When the render
-//! thread has shown the last frame, a display pass
-//!
-//! - places each scroll layer: where its viewport is and how far it has
-//!   scrolled; the render thread moves tiles, nothing is redrawn;
-//! - draws the tiles that come near the viewport and forgets far ones;
-//! - redraws the damaged parts of each layer by calling `drawRect:` on the
-//!   views there, which records drawing ops for the render thread;
-//! - presents.
+//! thread has shown the last frame, a display pass lays out, has `layers`
+//! place the scroll layers (the render thread moves tiles, nothing is
+//! redrawn), draw the tiles that come into view and the damaged parts of
+//! every layer and overlay by calling `drawRect:` on the views there,
+//! which records drawing ops for the render thread, and presents.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -34,7 +31,7 @@ use objc2::rc::{Allocated, Retained, Weak};
 use objc2::runtime::{AnyObject, NSObjectProtocol};
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
-    NSBackingStoreType, NSClipView, NSColor, NSCursor, NSEvent, NSEventMask, NSEventPhase, NSEventType, NSFont,
+    NSBackingStoreType, NSColor, NSCursor, NSEvent, NSEventMask, NSEventPhase, NSEventType, NSFont,
     NSFontAttributeName, NSForegroundColorAttributeName, NSResponder, NSSelectionDirection, NSStringDrawing, NSView,
     NSWindow, NSWindowAnimationBehavior, NSWindowButton, NSWindowCollectionBehavior, NSWindowOcclusionState,
     NSWindowOrderingMode, NSWindowSharingType, NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility,
@@ -43,10 +40,11 @@ use objc2_foundation::{NSCopying, NSDictionary, NSPoint, NSRect, NSSize, NSStrin
 
 use crate::app;
 use crate::graphics::{self, Xf};
+pub(crate) use crate::layers::record;
 use crate::notifications::name;
 use crate::protocol::{
-    Button, Cursor, LayerId, Modifiers, Op, PopupPlacement, ROOT_LAYER, Rect, ScrollPhase, SizeLimits, Style,
-    TILE_HEIGHT, TitleText, ToRender, WindowId, WindowRequest, WindowState,
+    Button, Cursor, LayerId, Modifiers, PopupPlacement, ROOT_LAYER, Rect, ScrollPhase, SizeLimits, Style, TitleText,
+    ToRender, WindowId, WindowRequest, WindowState,
 };
 
 /// Where a scroll is in a touchpad gesture, the speed an ending one
@@ -127,7 +125,8 @@ pub(crate) struct WindowIvars {
     needs_display: Cell<bool>,
     damage: RefCell<HashMap<LayerId, Vec<Rect>>>,
     clips: RefCell<Vec<Retained<NSView>>>,
-    layers: RefCell<HashMap<LayerId, LayerState>>,
+    /// The scroll layers (see `layers`).
+    layers: RefCell<crate::layers::Layers>,
     /// The view that got the last mouse down, for the drags and up after
     /// it, and the button that went down.
     mouse_view: RefCell<Option<(Retained<NSView>, Button)>>,
@@ -234,13 +233,6 @@ impl Default for Settings {
     }
 }
 
-#[derive(Default)]
-struct LayerState {
-    doc_width: u32,
-    /// Tiles the render thread has drawn and keeps.
-    valid: BTreeSet<u32>,
-}
-
 define_class!(
     #[unsafe(super(NSResponder, objc2::runtime::NSObject))]
     #[thread_kind = MainThreadOnly]
@@ -289,7 +281,7 @@ define_class!(
                 needs_display: Cell::new(false),
                 damage: RefCell::new(HashMap::new()),
                 clips: RefCell::new(Vec::new()),
-                layers: RefCell::new(HashMap::new()),
+                layers: RefCell::default(),
                 mouse_view: RefCell::new(None),
                 pointer: Cell::new(None),
                 settings: RefCell::new(Settings::default()),
@@ -1778,6 +1770,47 @@ impl NSWindowImpl {
         self.ivars().damage.borrow().values().any(|rects| !rects.is_empty())
     }
 
+    /// The window's scroll layers.
+    pub(crate) fn layers(&self) -> &RefCell<crate::layers::Layers> {
+        &self.ivars().layers
+    }
+
+    /// The clip views in the window, in the order they joined it.
+    pub(crate) fn clips(&self) -> Vec<Retained<NSView>> {
+        self.ivars().clips.borrow().clone()
+    }
+
+    /// The damage collected since the last pass, by layer, taken.
+    pub(crate) fn take_damage(&self) -> HashMap<LayerId, Vec<Rect>> {
+        std::mem::take(&mut *self.ivars().damage.borrow_mut())
+    }
+
+    /// Forget a layer's damage (its overlays' too): it has gone.
+    pub(crate) fn discard_damage(&self, layer: LayerId) {
+        let mut damage = self.ivars().damage.borrow_mut();
+        damage.remove(&layer);
+        damage.remove(&crate::layers::damage_key(layer, true));
+    }
+
+    /// Pixels per point: the scale everything is drawn at.
+    pub(crate) fn scale(&self) -> f64 {
+        self.ivars().scale.get()
+    }
+
+    pub(crate) fn content_size(&self) -> NSSize {
+        self.ivars().size.get()
+    }
+
+    /// The window is on screen (ordered in).
+    pub(crate) fn on_screen(&self) -> bool {
+        self.ivars().visible.get()
+    }
+
+    /// What the window's views are drawn over.
+    pub(crate) fn background(&self) -> [f32; 4] {
+        background(self)
+    }
+
     pub(crate) fn add_clip(&self, clip: &NSView) {
         self.ivars().clips.borrow_mut().push(clip.retain());
         self.ivars().needs_display.set(true);
@@ -1834,19 +1867,16 @@ impl NSWindowImpl {
 
     pub(crate) fn remove_clip(&self, clip: &NSViewImpl) {
         let layer = views::layer_id(clip);
-        self.ivars().clips.borrow_mut().retain(|c| !std::ptr::eq(views::imp(c), clip));
+        let gone = {
+            let mut clips = self.ivars().clips.borrow_mut();
+            let at = clips.iter().position(|c| std::ptr::eq(views::imp(c), clip));
+            at.map(|i| clips.remove(i))
+        };
         self.ivars().damage.borrow_mut().remove(&layer);
-        if self.ivars().layers.borrow_mut().remove(&layer).is_some() && self.ivars().visible.get() {
-            // Hide it: an empty viewport shows no tiles.
-            app::send(ToRender::ScrollLayer {
-                window: self.id(),
-                layer,
-                viewport: Rect::default(),
-                offset: 0.0,
-                doc_width: 0,
-            });
-        }
+        crate::layers::clip_left(self, clip);
         self.ivars().needs_display.set(true);
+        // Released outside the borrow: releasing may run arbitrary code.
+        drop(gone);
     }
 
     pub(crate) fn damage_all(&self) {
@@ -1883,9 +1913,7 @@ impl NSWindowImpl {
         }
         if rescaled {
             // The render thread dropped every tile drawn at the old scale.
-            for layer in ivars.layers.borrow_mut().values_mut() {
-                layer.valid.clear();
-            }
+            ivars.layers.borrow_mut().rescaled();
         }
         if first || resized || rescaled {
             // The render thread made a new canvas: draw it all, now.
@@ -2215,9 +2243,7 @@ fn order_out(window: &NSWindowImpl) {
     ivars.frame_pending.set(false);
     ivars.popup.set(None);
     ivars.mouse_view.replace(None);
-    for layer in ivars.layers.borrow_mut().values_mut() {
-        layer.valid.clear();
-    }
+    ivars.layers.borrow_mut().reset();
     app::send(ToRender::CloseWindow { window: window.id() });
     app::remove_window(as_window(window));
 }
@@ -2456,47 +2482,29 @@ pub(crate) fn display_if_needed(window: &NSWindowImpl) {
     if !ivars.visible.get() || !ivars.configured.get() || ivars.frame_pending.get() || !ivars.needs_display.get() {
         return;
     }
-    // A first frame waits (briefly) for the desktop's light or dark.
-    if !crate::settings::ready() {
+    // A first frame waits (briefly) for the desktop's light or dark; a
+    // window asked to display during its own pass does at the next.
+    if !crate::settings::ready() || crate::layers::in_pass(window) {
         return;
     }
     // Constraints, layout and viewWillDraw, before anything is drawn.
     crate::view_layout::run(window);
     ivars.needs_display.set(false);
     let id = window.id();
-    if ivars.title_dirty.replace(false) {
+    let titled = ivars.title_dirty.replace(false);
+    if titled {
         send_title(window);
     }
 
-    let clips = ivars.clips.borrow().clone();
-    for clip in &clips {
-        update_scroll_layer(window, views::imp(clip));
-    }
-
-    let damage = ivars.damage.borrow_mut().remove(&ROOT_LAYER).unwrap_or_default();
-    let content = ivars.content.borrow().clone();
-    let color = background(window);
-    // User space's base is the window's content, origin at the bottom left.
-    let base = Xf { tx: 0.0, a: -1.0, ty: window.content_height() };
-    let ring = crate::controls::focus::ring_view(window);
-    for area in coalesce(damage) {
-        crate::context::begin_recording(base, ivars.scale.get());
-        graphics::push(Op::Fill { rect: area, color });
-        if let Some(content) = &content {
-            let root = views::imp(content);
-            let xf = views::root_xf(root, ROOT_LAYER, window.content_height());
-            let size = ivars.size.get();
-            let all = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
-            record(root, xf, all, area, ring.as_deref());
+    // The scroll layers, the damaged parts of every layer, the overlays;
+    // damage made meanwhile waits for the next pass. A pass that changed
+    // nothing the render thread shows commits nothing.
+    crate::layers::display(window, |changed| {
+        if (changed || titled) && ivars.visible.get() {
+            app::send(ToRender::Present { window: id });
+            ivars.frame_pending.set(true);
         }
-        let ops = graphics::end_recording();
-        app::send(ToRender::Paint { window: id, layer: ROOT_LAYER, rects: vec![area], ops });
-    }
-    // Damage to layers that no longer exist.
-    ivars.damage.borrow_mut().clear();
-
-    app::send(ToRender::Present { window: id });
-    ivars.frame_pending.set(true);
+    });
 }
 
 /// Send the title, set as drawing ops for the title bar when Sidestep
@@ -2528,148 +2536,4 @@ fn set_title_text(title: &NSString) -> TitleText {
     // SAFETY: as above.
     unsafe { title.drawAtPoint_withAttributes(NSPoint::ZERO, Some(&attributes)) };
     TitleText { ops: graphics::end_recording(), width, height }
-}
-
-/// Record `view` and its subviews for `area` of a layer. `xf` maps the view
-/// to the layer; `clip` is where its ancestors let it draw. `ring` is the
-/// view whose focus ring shows (see `controls::focus`), drawn after its
-/// subtree and clipped only by its ancestors.
-pub(crate) fn record(view: &NSViewImpl, xf: Xf, clip: Rect, area: Rect, ring: Option<&NSView>) {
-    let visible = clip.intersect(&xf.rect(views::bounds(view)));
-    let target = visible.intersect(&area);
-    let is_ring = ring.is_some_and(|r| std::ptr::eq(views::imp(r), view));
-    if !target.is_empty() {
-        // Its opacity, over its subviews too: nothing at 0, a group below 1.
-        let Some(_opacity) = crate::context::opacity(view, target) else { return };
-        // A fresh graphics state and the view's appearance for its drawRect:.
-        let mark = crate::context::begin_view(view, xf, target);
-        // SAFETY: drawRect: takes an NSRect.
-        unsafe { msg_send![view, drawRect: xf.inverse_rect(target)] }
-        crate::context::end_view(mark);
-        if !views::is_clip(view) {
-            // (A clip view's document has a layer of its own.)
-            let flipped = views::is_flipped(view);
-            for sub in views::subviews(view) {
-                let sub = views::imp(&sub);
-                if views::is_hidden(sub) {
-                    continue;
-                }
-                let sub_xf = views::step(sub, flipped, views::frame(sub)).then(&xf);
-                record(sub, sub_xf, visible, area, ring);
-            }
-        }
-    }
-    if is_ring {
-        let mark = crate::context::begin_view(view, xf, clip.intersect(&area));
-        crate::controls::focus::draw_ring(views::as_view(view));
-        crate::context::end_view(mark);
-    }
-}
-
-fn update_scroll_layer(window: &NSWindowImpl, clip: &NSViewImpl) {
-    let ivars = window.ivars();
-    let id = views::layer_id(clip);
-    // SAFETY: every clip view is an NSClipView.
-    let clip_view = unsafe { &*(clip as *const NSViewImpl).cast::<NSClipView>() };
-    let (Some(document), Some(p)) = (clip_view.documentView(), views::placement(clip)) else { return };
-    if p.layer != ROOT_LAYER {
-        // Scroll views inside scroll views aren't supported yet.
-        return;
-    }
-    let doc = views::imp(&document);
-    let full = p.xf.rect(views::bounds(clip)).round_out();
-    let viewport = full.intersect(&p.clip);
-    let size = views::frame(doc).size;
-    let doc_width = size.width.ceil().max(0.0) as u32;
-    let doc_height = size.height.ceil().max(0.0) as u32;
-
-    // Where the clip view's top edge falls in the document's layer.
-    let doc_xf = views::root_xf(doc, id, 0.0);
-    let clip_to_layer = views::step(doc, views::is_flipped(clip), views::frame(doc)).inverse().then(&doc_xf);
-    let shown = clip_to_layer.rect(views::bounds(clip));
-    let offset = (shown.y0 + (viewport.y0 - full.y0)).round();
-
-    app::send(ToRender::ScrollLayer { window: window.id(), layer: id, viewport, offset, doc_width });
-    if viewport.is_empty() || doc_width == 0 || doc_height == 0 {
-        return;
-    }
-
-    let mut layers = ivars.layers.borrow_mut();
-    let state = layers.entry(id).or_default();
-    if state.doc_width != doc_width {
-        state.valid.clear();
-        state.doc_width = doc_width;
-    }
-    let tile = TILE_HEIGHT as f32;
-    let last_tile = doc_height.div_ceil(TILE_HEIGHT) - 1;
-    let height = viewport.y1 - viewport.y0;
-    let first = ((offset - tile) / tile).floor().max(0.0) as u32;
-    let last = (((offset + height + tile) / tile).floor().max(0.0) as u32).min(last_tile);
-
-    // Forget tiles well away from the viewport.
-    let keep = first.saturating_sub(1)..=last + 1;
-    let far: Vec<u32> = state.valid.iter().copied().filter(|i| !keep.contains(i)).collect();
-    if !far.is_empty() {
-        for i in &far {
-            state.valid.remove(i);
-        }
-        app::send(ToRender::DropTiles { window: window.id(), layer: id, tiles: far });
-    }
-
-    let doc_rect = Rect::new(0.0, 0.0, doc_width as f32, doc_height as f32);
-    let tile_rect = |i: u32| Rect::new(0.0, (i * TILE_HEIGHT) as f32, doc_width as f32, ((i + 1) * TILE_HEIGHT) as f32);
-    let mut areas = Vec::new();
-    for i in first..=last {
-        if state.valid.insert(i) {
-            areas.push(tile_rect(i).intersect(&doc_rect));
-        }
-    }
-    let damage = ivars.damage.borrow_mut().remove(&id).unwrap_or_default();
-    for r in coalesce(damage) {
-        for &i in &state.valid {
-            let part = r.intersect(&tile_rect(i));
-            if !part.is_empty() && !areas.iter().any(|a: &Rect| a.intersect(&part) == part) {
-                areas.push(part);
-            }
-        }
-    }
-    drop(layers);
-
-    let color = background(window);
-    let ring = crate::controls::focus::ring_view(window);
-    for area in areas {
-        crate::context::begin_recording(doc_xf, ivars.scale.get());
-        graphics::push(Op::Fill { rect: area, color });
-        record(doc, doc_xf, doc_rect, area, ring.as_deref());
-        let ops = graphics::end_recording();
-        app::send(ToRender::Paint { window: window.id(), layer: id, rects: vec![area], ops });
-    }
-}
-
-/// Merge damage rectangles that overlap or nearly touch, so each area is
-/// drawn once.
-fn coalesce(mut rects: Vec<Rect>) -> Vec<Rect> {
-    rects.retain(|r| !r.is_empty());
-    let area = |r: &Rect| (r.x1 - r.x0) * (r.y1 - r.y0);
-    let mut merged = true;
-    while merged && rects.len() > 1 {
-        merged = false;
-        'outer: for i in 0..rects.len() {
-            for j in i + 1..rects.len() {
-                let u = rects[i].union(&rects[j]);
-                // Merge when the union wastes little over drawing both.
-                if area(&u) <= (area(&rects[i]) + area(&rects[j])) * 1.25 + 64.0 {
-                    rects[i] = u;
-                    rects.swap_remove(j);
-                    merged = true;
-                    break 'outer;
-                }
-            }
-        }
-    }
-    if rects.len() > 16 {
-        let all = rects.iter().skip(1).fold(rects[0], |a, r| a.union(r));
-        rects = vec![all];
-    }
-    rects
 }

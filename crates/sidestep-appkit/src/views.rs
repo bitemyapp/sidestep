@@ -1,15 +1,15 @@
-//! The view hierarchy: `NSView`, `NSClipView` and `NSScrollView` (the
-//! responder chain they sit in is `responder`).
+//! The view hierarchy: `NSView` (the responder chain it sits in is
+//! `responder`; clip and scroll views are `scroll`).
 //!
 //! Views keep their geometry in ivars. Everything that subclasses may
 //! override (`isFlipped`, `drawRect:`, `hitTest:`, the event methods) is
 //! reached by message; the rest is plain Rust.
 //!
-//! A window has layers: its own surface, and one per clip view, holding that
-//! clip view's document. A view's placement is where its bounds land in its
-//! layer, found by composing each view's map to its superview:
-//! `x' = x + tx` and `y' = a·y + ty`, with `a = -1` where a view and its
-//! superview disagree about flipping.
+//! A window has layers: its own surface, and one per clip view that
+//! `layers` promotes, holding that clip view's document. A view's
+//! placement is where its bounds land in its layer, found by composing
+//! each view's map to its superview: `x' = x + tx` and `y' = a·y + ty`,
+//! with `a = -1` where a view and its superview disagree about flipping.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -20,8 +20,7 @@ use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
-    NSAutoresizingMaskOptions, NSClipView, NSCursor, NSEvent, NSResponder, NSTextInputContext, NSTrackingArea, NSView,
-    NSWindow,
+    NSAutoresizingMaskOptions, NSCursor, NSEvent, NSResponder, NSTextInputContext, NSTrackingArea, NSView, NSWindow,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 
@@ -697,6 +696,11 @@ pub(crate) fn is_clip(view: &NSViewImpl) -> bool {
     view.ivars().is_clip.get()
 }
 
+/// Mark a new view as an NSClipView (see `scroll`).
+pub(crate) fn mark_clip(view: &NSViewImpl) {
+    view.ivars().is_clip.set(true);
+}
+
 pub(crate) fn is_hidden(view: &NSViewImpl) -> bool {
     view.ivars().hidden.get()
 }
@@ -727,10 +731,12 @@ pub(crate) fn tool_tips(view: &NSViewImpl) -> &crate::tooltip::ViewTips {
 }
 
 /// The view moved in its window, or showed or hid: tracking areas and
-/// cursor rectangles are due for an update.
+/// cursor rectangles are due for an update, and scroll layers are placed
+/// again.
 fn moved(view: &NSViewImpl) {
     if let Some(window) = window_of(view) {
         crate::tracking::views_moved(window, view);
+        window.layers_moved();
     }
 }
 
@@ -815,6 +821,9 @@ pub(crate) struct Placement {
     pub layer: LayerId,
     pub xf: Xf,
     pub clip: Rect,
+    /// The view is drawn in a scroll layer's overlay (it or an ancestor in
+    /// its layer is one of the overlay's views), not in `layer` itself.
+    pub overlay: bool,
 }
 
 /// A clip view's layer, named by the clip view.
@@ -822,30 +831,26 @@ pub(crate) fn layer_id(clip: &NSViewImpl) -> LayerId {
     clip as *const NSViewImpl as LayerId
 }
 
-/// The map from the root view of a layer to the layer: the window's content
-/// view to the window surface, or a document to its clip view's layer (whose
-/// top is the document's top).
-pub(crate) fn root_xf(root: &NSViewImpl, layer: LayerId, content_height: f64) -> Xf {
-    if layer == ROOT_LAYER {
-        step(root, false, frame(root)).then(&Xf { tx: 0.0, a: -1.0, ty: content_height })
-    } else {
-        let size = frame(root).size;
-        step(root, false, NSRect::new(NSPoint::ZERO, size)).then(&Xf { tx: 0.0, a: -1.0, ty: size.height })
-    }
+/// The map from a window's content view to the window's surface.
+pub(crate) fn root_xf(root: &NSViewImpl, content_height: f64) -> Xf {
+    step(root, false, frame(root)).then(&Xf { tx: 0.0, a: -1.0, ty: content_height })
 }
 
 pub(crate) fn placement(view: &NSViewImpl) -> Option<Placement> {
     let window = window_of(view)?;
-    // From the view up to the root of its layer.
+    // From the view up to the root of its layer: the window's content view,
+    // or a subview of a clip view with a layer of its own.
     let mut chain = vec![view];
     let mut layer = ROOT_LAYER;
+    let mut overlay = false;
     loop {
         let cur = *chain.last().expect("chain");
         if is_hidden(cur) {
             return None;
         }
+        overlay |= crate::view_layout::in_overlay(cur);
         match superview(cur) {
-            Some(sup) if is_clip(sup) => {
+            Some(sup) if is_clip(sup) && crate::layers::promoted(sup) => {
                 layer = layer_id(sup);
                 break;
             }
@@ -857,14 +862,19 @@ pub(crate) fn placement(view: &NSViewImpl) -> Option<Placement> {
     if layer == ROOT_LAYER && !window.is_content_view(root) {
         return None;
     }
-    let mut xf = root_xf(root, layer, window.content_height());
+    let mut xf = match superview(root) {
+        Some(clip) if layer != ROOT_LAYER => {
+            step(root, is_flipped(clip), frame(root)).then(&crate::layers::layer_xf(clip))
+        }
+        _ => root_xf(root, window.content_height()),
+    };
     let mut clip = xf.rect(bounds(root));
     for pair in chain.windows(2).rev() {
         let (child, parent) = (pair[0], pair[1]);
         xf = step(child, is_flipped(parent), frame(child)).then(&xf);
         clip = clip.intersect(&xf.rect(bounds(child)));
     }
-    Some(Placement { layer, xf, clip })
+    Some(Placement { layer, xf, clip, overlay })
 }
 
 /// Mark part of a view (in its coordinates) for redrawing.
@@ -873,7 +883,7 @@ pub(crate) fn invalidate(view: &NSViewImpl, rect: NSRect) {
     let Some(p) = placement(view) else { return };
     let r = p.xf.rect(rect).intersect(&p.clip).round_out();
     if !r.is_empty() {
-        window.invalidate(p.layer, r);
+        window.invalidate(crate::layers::damage_key(p.layer, p.overlay), r);
     }
 }
 
@@ -882,18 +892,35 @@ fn change_frame(view: &NSViewImpl, new: NSRect) {
     if old == new {
         return;
     }
-    if let Some(sup) = superview(view) {
+    // A document in a clip view with a layer that only grows or shrinks
+    // keeps its pixels, as a layer-backed view whose layer contents redraw
+    // on demand does (see `layers`): only what it gains is drawn, and its
+    // clip view, drawn behind the layer, needn't be.
+    let in_layer = superview(view).is_some_and(|s| is_clip(s) && crate::layers::promoted(s));
+    let keeps = in_layer && old.origin == new.origin && crate::view_layout::keeps_content_on_resize(view);
+    if let Some(sup) = superview(view)
+        && !in_layer
+    {
         invalidate(sup, old);
     }
     view.ivars().frame.set(new);
     // Bounds scaling, the layout flag, autoresizing and Auto Layout.
     crate::view_layout::frame_changed(view, old);
-    if let Some(window) = window_of(view)
-        && (is_clip(view) || superview(view).is_some_and(is_clip))
-    {
-        window.layers_moved();
+    // A clip view keeps its bounds over its document (see `scroll`).
+    crate::scroll::frame_changed(view, old);
+    if keeps {
+        let b = bounds(view);
+        let (w, h) = (old.size.width.min(b.size.width), old.size.height.min(b.size.height));
+        let right = NSRect::new(NSPoint::new(b.origin.x + w, b.origin.y), NSSize::new(b.size.width - w, b.size.height));
+        let rest = NSRect::new(NSPoint::new(b.origin.x, b.origin.y + h), NSSize::new(w, b.size.height - h));
+        for gained in [right, rest] {
+            if gained.size.width > 0.0 && gained.size.height > 0.0 {
+                invalidate(view, gained);
+            }
+        }
+    } else {
+        invalidate(view, bounds(view));
     }
-    invalidate(view, bounds(view));
     moved(view);
     changed(view, Change::Frame);
 }
@@ -906,10 +933,10 @@ fn change_bounds_origin(view: &NSViewImpl, origin: NSPoint) {
     if is_clip(view) {
         crate::view_layout::clip_moved(view);
     }
-    match window_of(view) {
-        // Scrolling a clip view moves its layer; nothing is redrawn.
-        Some(window) if is_clip(view) => window.layers_moved(),
-        _ => invalidate(view, bounds(view)),
+    // Scrolling a clip view with a layer moves the layer (`moved` below);
+    // nothing is redrawn.
+    if !(is_clip(view) && crate::layers::promoted(view)) {
+        invalidate(view, bounds(view));
     }
     moved(view);
     changed(view, Change::Bounds);
@@ -991,9 +1018,20 @@ fn set_posts(view: &NSViewImpl, change: Change, on: bool) {
         return;
     }
     view.ivars().notes.set(notes & !(change.off() | change.missed()));
-    if notes & change.missed() != 0 && observed(change) {
-        sidestep_foundation::notification_center::post(change.name(), Some(view), None);
+    if notes & change.missed() != 0 {
+        // A clip view follows its document as an observer would.
+        if let Change::Frame = change {
+            crate::scroll::frame_posted(view);
+        }
+        if observed(change) {
+            sidestep_foundation::notification_center::post(change.name(), Some(view), None);
+        }
     }
+}
+
+/// Whether a view posts NSViewFrameDidChangeNotification now.
+pub(crate) fn posts_frame_changes(view: &NSViewImpl) -> bool {
+    view.ivars().notes.get() & Change::Frame.off() == 0
 }
 
 /// Share a change in the superview's size among a view's flexible margins
@@ -1097,6 +1135,8 @@ fn relink_window(view: &NSViewImpl, window: Option<NonNull<NSWindow>>) {
     }
     if let Some(old) = window_of(view) {
         old.view_left(view);
+        // Its old window's overlays no longer draw it.
+        crate::view_layout::set_in_overlay(view, false);
     }
     // A content view leaving its window (or the window going away) keeps
     // no link to it as its next responder.
@@ -1135,210 +1175,4 @@ fn hit_test(view: &NSViewImpl, point: NSPoint) -> Option<Retained<NSView>> {
         }
     }
     Some(as_view(view).retain())
-}
-
-// NSClipView
-
-#[derive(Default)]
-pub(crate) struct ClipIvars {
-    document: RefCell<Option<Retained<NSView>>>,
-}
-
-define_class!(
-    #[unsafe(super(NSView, NSResponder, NSObject))]
-    #[thread_kind = MainThreadOnly]
-    #[name = "NSClipView"]
-    #[ivars = ClipIvars]
-    pub(crate) struct NSClipViewImpl;
-
-    impl NSClipViewImpl {
-        #[unsafe(method_id(initWithFrame:))]
-        fn init_with_frame(this: Allocated<Self>, frame: NSRect) -> Retained<Self> {
-            let this = this.set_ivars(ClipIvars::default());
-            // SAFETY: NSView's designated initializer.
-            let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
-            imp(&this).ivars().is_clip.set(true);
-            this
-        }
-
-        #[unsafe(method(isFlipped))]
-        fn is_flipped(&self) -> bool {
-            self.ivars().document.borrow().as_ref().is_some_and(|d| is_flipped(imp(d)))
-        }
-
-        #[unsafe(method_id(documentView))]
-        fn document_view(&self) -> Option<Retained<NSView>> {
-            self.ivars().document.borrow().clone()
-        }
-
-        #[unsafe(method(setDocumentView:))]
-        fn set_document_view(&self, document: Option<&NSView>) {
-            set_document(self, document);
-        }
-
-        #[unsafe(method(scrollToPoint:))]
-        fn scroll_to_point(&self, point: NSPoint) {
-            self.setBoundsOrigin(point);
-        }
-
-        #[unsafe(method(constrainBoundsRect:))]
-        fn constrain_bounds_rect(&self, proposed: NSRect) -> NSRect {
-            constrain(self, proposed)
-        }
-
-        #[unsafe(method(documentVisibleRect))]
-        fn document_visible_rect(&self) -> NSRect {
-            document_visible_rect(self)
-        }
-    }
-
-    unsafe impl NSObjectProtocol for NSClipViewImpl {}
-);
-
-fn set_document(clip: &NSClipViewImpl, document: Option<&NSView>) {
-    let old = clip.ivars().document.replace(document.map(|d| d.retain()));
-    if let Some(old) = old {
-        old.removeFromSuperview();
-    }
-    if let Some(document) = document {
-        clip.addSubview(document);
-    }
-    clip.setBoundsOrigin(NSPoint::ZERO);
-    if let Some(window) = window_of(imp(clip)) {
-        window.layers_moved();
-    }
-}
-
-/// Keep proposed clip view bounds within the document.
-fn constrain(clip: &NSClipViewImpl, proposed: NSRect) -> NSRect {
-    let Some(document) = clip.ivars().document.borrow().clone() else { return proposed };
-    let doc = frame(imp(&document));
-    let (o, size) = (proposed.origin, proposed.size);
-    let x = o.x.min(doc.origin.x + doc.size.width - size.width).max(doc.origin.x);
-    let y = o.y.min(doc.origin.y + doc.size.height - size.height).max(doc.origin.y);
-    NSRect::new(NSPoint::new(x, y), size)
-}
-
-fn document_visible_rect(clip: &NSClipViewImpl) -> NSRect {
-    let Some(document) = clip.ivars().document.borrow().clone() else { return NSRect::ZERO };
-    let d = imp(&document);
-    let to_doc = step(d, is_flipped(imp(clip)), frame(d)).inverse();
-    map_rect(&to_doc, bounds(imp(clip)))
-}
-
-// NSScrollView
-
-#[derive(Default)]
-pub(crate) struct ScrollIvars {
-    clip: RefCell<Option<Retained<NSClipView>>>,
-    vertical: Cell<bool>,
-    horizontal: Cell<bool>,
-}
-
-define_class!(
-    #[unsafe(super(NSView, NSResponder, NSObject))]
-    #[thread_kind = MainThreadOnly]
-    #[name = "NSScrollView"]
-    #[ivars = ScrollIvars]
-    pub(crate) struct NSScrollViewImpl;
-
-    impl NSScrollViewImpl {
-        #[unsafe(method_id(initWithFrame:))]
-        fn init_with_frame(this: Allocated<Self>, frame: NSRect) -> Retained<Self> {
-            let this = this.set_ivars(ScrollIvars::default());
-            // SAFETY: NSView's designated initializer.
-            let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
-            let bounds = NSRect::new(NSPoint::ZERO, frame.size);
-            // SAFETY: NSClipView's designated initializer.
-            let clip: Retained<NSClipView> = unsafe { msg_send![NSClipView::alloc(this.mtm()), initWithFrame: bounds] };
-            clip.setAutoresizingMask(
-                NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable,
-            );
-            this.addSubview(&clip);
-            this.ivars().clip.replace(Some(clip));
-            this
-        }
-
-        #[unsafe(method(isFlipped))]
-        fn is_flipped(&self) -> bool {
-            true
-        }
-
-        #[unsafe(method_id(contentView))]
-        fn content_view(&self) -> Retained<NSClipView> {
-            self.clip()
-        }
-
-        #[unsafe(method_id(documentView))]
-        fn document_view(&self) -> Option<Retained<NSView>> {
-            self.clip().documentView()
-        }
-
-        #[unsafe(method(setDocumentView:))]
-        fn set_document_view(&self, document: Option<&NSView>) {
-            self.clip().setDocumentView(document);
-        }
-
-        #[unsafe(method(documentVisibleRect))]
-        fn document_visible_rect(&self) -> NSRect {
-            self.clip().documentVisibleRect()
-        }
-
-        #[unsafe(method(contentSize))]
-        fn content_size(&self) -> NSSize {
-            self.clip().frame().size
-        }
-
-        #[unsafe(method(hasVerticalScroller))]
-        fn has_vertical_scroller(&self) -> bool {
-            self.ivars().vertical.get()
-        }
-
-        #[unsafe(method(setHasVerticalScroller:))]
-        fn set_has_vertical_scroller(&self, flag: bool) {
-            self.ivars().vertical.set(flag);
-        }
-
-        #[unsafe(method(hasHorizontalScroller))]
-        fn has_horizontal_scroller(&self) -> bool {
-            self.ivars().horizontal.get()
-        }
-
-        #[unsafe(method(setHasHorizontalScroller:))]
-        fn set_has_horizontal_scroller(&self, flag: bool) {
-            self.ivars().horizontal.set(flag);
-        }
-
-        #[unsafe(method(reflectScrolledClipView:))]
-        fn reflect_scrolled_clip_view(&self, _clip: &NSClipView) {}
-
-        #[unsafe(method(scrollWheel:))]
-        fn scroll_wheel(&self, event: &NSEvent) {
-            scroll_by_wheel(&self.clip(), event);
-        }
-    }
-
-    unsafe impl NSObjectProtocol for NSScrollViewImpl {}
-);
-
-impl NSScrollViewImpl {
-    fn clip(&self) -> Retained<NSClipView> {
-        self.ivars().clip.borrow().clone().expect("NSScrollView without a clip view")
-    }
-}
-
-/// A line, for wheels, which scroll by lines.
-const LINE_SCROLL: f64 = 16.0;
-
-fn scroll_by_wheel(clip: &NSClipView, event: &NSEvent) {
-    let (mut dx, mut dy) = (event.scrollingDeltaX(), event.scrollingDeltaY());
-    if !event.hasPreciseScrollingDeltas() {
-        (dx, dy) = (dx * LINE_SCROLL, dy * LINE_SCROLL);
-    }
-    let bounds = clip.bounds();
-    // Positive deltas scroll toward the top and the left of the document.
-    let y = if clip.isFlipped() { bounds.origin.y - dy } else { bounds.origin.y + dy };
-    let x = bounds.origin.x - dx;
-    let target = clip.constrainBoundsRect(NSRect::new(NSPoint::new(x, y), bounds.size));
-    clip.scrollToPoint(target.origin);
 }

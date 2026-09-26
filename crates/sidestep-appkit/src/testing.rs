@@ -198,6 +198,72 @@ pub fn inject_wheel(window: u32, x: f64, y: f64, dx: f64, dy: f64) {
     });
 }
 
+/// A touchpad scroll by `dx`, `dy` points (positive toward the bottom
+/// right, as Wayland counts), in a gesture's phase (0 none, 1 began, 2
+/// changed, 3 ended); an ending gesture's `velocity` (points a second)
+/// makes it coast.
+pub fn inject_scroll(window: u32, x: f64, y: f64, delta: (f64, f64), phase: u8, velocity: (f64, f64)) {
+    let (dx, dy) = delta;
+    let phase = match phase {
+        1 => ScrollPhase::Began,
+        2 => ScrollPhase::Changed,
+        3 => ScrollPhase::Ended,
+        _ => ScrollPhase::None,
+    };
+    event_loop::inject(FromRender::Scroll {
+        window,
+        x,
+        y,
+        dx,
+        dy,
+        wheel: false,
+        modifiers: 0,
+        phase,
+        velocity,
+        inverted: false,
+    });
+}
+
+/// A scroll layer as the main thread last placed it (see `layers`):
+/// rectangles are `[x0, y0, x1, y1]` in window points (the extent in the
+/// layer's, the overlay in those of the layer it is nested in), views are
+/// named by their addresses.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayerInfo {
+    /// The clip view whose layer it is.
+    pub clip: usize,
+    /// The clip view of the layer it is nested in, or 0.
+    pub parent: usize,
+    /// Stacking: the tiles', the overlay's.
+    pub z: [u32; 2],
+    pub viewport: [f32; 4],
+    pub origin: [f32; 2],
+    pub extent: [f32; 4],
+    /// Tiles' size in device pixels.
+    pub tile_size: [u32; 2],
+    pub opaque: bool,
+    pub overlay: Option<[f32; 4]>,
+    pub overlay_views: Vec<usize>,
+    /// The tiles drawn and kept, by column and row.
+    pub tiles: Vec<[i32; 2]>,
+    /// Paints of the tiles and of the overlay so far, and the area painted
+    /// into tiles (points squared, margins included).
+    pub tile_paints: u32,
+    pub overlay_paints: u32,
+    pub tile_area: f64,
+}
+
+/// The window's scroll layers, bottom first.
+pub fn scroll_layers(window: &NSWindow) -> Vec<LayerInfo> {
+    crate::layers::describe(crate::window::imp(window))
+}
+
+/// Lower the memory a window's scroll layers' tiles may hold, or with
+/// `None` restore it (96 MB).
+pub fn set_tile_memory_cap(bytes: Option<usize>) {
+    crate::layers::set_memory_cap(bytes);
+}
+
 /// The compositor asked to close the window (its close button).
 pub fn inject_close_request(window: u32) {
     event_loop::inject(FromRender::CloseRequested { window });
