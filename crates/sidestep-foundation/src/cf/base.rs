@@ -45,6 +45,12 @@ pub unsafe extern "C-unwind" fn CFEqual(a: *const c_void, b: *const c_void) -> u
     if a.is_null() || b.is_null() {
         return 0;
     }
+    // Arrays of values that needn't be objects compare by their callbacks
+    // either way round.
+    // SAFETY: the caller passes live objects.
+    if let Some(equal) = unsafe { super::value_array::cf_equal(a, b) } {
+        return equal as u8;
+    }
     // SAFETY: the caller passes live objects; -isEqual: returns BOOL.
     let equal: bool = unsafe { msg_send![object(a), isEqual: object(b)] };
     equal as u8

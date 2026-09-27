@@ -46,6 +46,14 @@ pub(crate) mod id {
     pub(crate) const LOCALE: CFTypeID = 46;
     pub(crate) const TIME_ZONE: CFTypeID = 47;
     pub(crate) const RUN_LOOP_SOURCE: CFTypeID = 48;
+    pub(crate) const CALENDAR: CFTypeID = 49;
+    pub(crate) const BUNDLE: CFTypeID = 50;
+    pub(crate) const READ_STREAM: CFTypeID = 51;
+    pub(crate) const WRITE_STREAM: CFTypeID = 52;
+    pub(crate) const FILE_SECURITY: CFTypeID = 53;
+    pub(crate) const MACH_PORT: CFTypeID = 54;
+    pub(crate) const MESSAGE_PORT: CFTypeID = 55;
+    pub(crate) const PLUG_IN: CFTypeID = 56;
     // CoreGraphics' types, whose classes Sidestep's AppKit defines.
     pub const CG_COLOR_SPACE: CFTypeID = 101;
     pub const CG_COLOR: CFTypeID = 102;
@@ -131,6 +139,11 @@ const BRIDGED: &[(&str, CFTypeID)] = &[
     ("NSTimeZone", id::TIME_ZONE),
     ("NSTimer", id::RUN_LOOP_TIMER),
     ("_SidestepCFRunLoop", id::RUN_LOOP),
+    ("NSBundle", id::BUNDLE),
+    ("_SidestepCFCalendar", id::CALENDAR),
+    ("_SidestepCFReadStream", id::READ_STREAM),
+    ("_SidestepCFWriteStream", id::WRITE_STREAM),
+    ("_SidestepCFFileSecurity", id::FILE_SECURITY),
     ("_SidestepRunLoopObserver", id::RUN_LOOP_OBSERVER),
     ("_SidestepCFAllocator", id::ALLOCATOR),
 ];
@@ -191,6 +204,71 @@ pub(crate) fn owned_by(owner: &AnyObject, key: &'static u8, value: Retained<AnyO
     ptr
 }
 
+/// Keep a value alive as long as `owner`, once per name, for the Get
+/// functions of objects whose values don't change: the first one kept is
+/// the one handed out again. They are kept in a dictionary associated with
+/// the owner. `make` runs without the lock (it may be any code, even code
+/// that comes back here); if another thread keeps a value for the name
+/// meanwhile, that one is handed out and this one dropped.
+pub(crate) fn keep_named(
+    owner: &AnyObject,
+    name: &str,
+    make: impl FnOnce() -> Option<Retained<AnyObject>>,
+) -> *const c_void {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static KEY: u8 = 0;
+    type Kept = objc2_foundation::NSMutableDictionary<NSString, AnyObject>;
+    let name = NSString::from_str(name);
+    let key = (&KEY as *const u8).cast();
+    let kept = {
+        let _guard = crate::thread::lock(&LOCK);
+        // SAFETY: a live object and a static key.
+        let found = unsafe { objc2::ffi::objc_getAssociatedObject(owner, key) };
+        if found.is_null() {
+            let kept = Kept::new();
+            // SAFETY: a retaining association keeps the dictionary for the
+            // owner's life.
+            unsafe {
+                objc2::ffi::objc_setAssociatedObject(
+                    (owner as *const AnyObject).cast_mut(),
+                    key,
+                    Retained::as_ptr(&kept).cast_mut().cast(),
+                    objc2::ffi::OBJC_ASSOCIATION_RETAIN,
+                )
+            };
+            kept
+        } else {
+            // SAFETY: only this function associates objects under the key.
+            unsafe { Retained::retain(found.cast::<Kept>().cast_mut()) }.expect("non-null")
+        }
+    };
+    // Looked up and set under the lock, as other threads change the
+    // dictionary; a value found stays in it, so its pointer outlives the
+    // `Retained` let go of here.
+    let lookup = |kept: &Kept| {
+        let _guard = crate::thread::lock(&LOCK);
+        kept.objectForKey(&name).map(|value| Retained::as_ptr(&value).cast::<c_void>())
+    };
+    if let Some(found) = lookup(&kept) {
+        return found;
+    }
+    let Some(value) = make() else { return std::ptr::null() };
+    let kept_now = {
+        let _guard = crate::thread::lock(&LOCK);
+        match kept.objectForKey(&name) {
+            Some(first) => Retained::as_ptr(&first).cast(),
+            None => {
+                // SAFETY: a string key and an object value.
+                unsafe { kept.setObject_forKey(&value, objc2::runtime::ProtocolObject::from_ref(&*name)) };
+                Retained::as_ptr(&value).cast()
+            }
+        }
+    };
+    // Ours, if another's was kept first, goes after the lock.
+    drop(value);
+    kept_now
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn CFGetTypeID(cf: *const c_void) -> CFTypeID {
     if cf.is_null() {
@@ -219,6 +297,14 @@ pub unsafe extern "C-unwind" fn CFCopyTypeIDDescription(type_id: CFTypeID) -> *m
         id::RUN_LOOP => "CFRunLoop",
         id::RUN_LOOP_TIMER => "CFRunLoopTimer",
         id::RUN_LOOP_OBSERVER => "CFRunLoopObserver",
+        id::RUN_LOOP_SOURCE => "CFRunLoopSource",
+        id::CALENDAR => "CFCalendar",
+        id::READ_STREAM => "CFReadStream",
+        id::WRITE_STREAM => "CFWriteStream",
+        id::FILE_SECURITY => "CFFileSecurity",
+        id::MACH_PORT => "CFMachPort",
+        id::MESSAGE_PORT => "CFMessagePort",
+        id::PLUG_IN => "CFPlugIn",
         id if FRAMEWORK_TYPES.iter().any(|t| t.1 == id) => {
             let name = FRAMEWORK_TYPES.iter().find(|t| t.1 == id).map_or("", |t| t.2);
             return owned(NSString::from_str(name));
@@ -229,6 +315,9 @@ pub unsafe extern "C-unwind" fn CFCopyTypeIDDescription(type_id: CFTypeID) -> *m
     owned(NSString::from_str(&name))
 }
 
+/// Print a description to stderr: a string's text, other objects'
+/// descriptions, with characters past ASCII as `\u` escapes of their
+/// UTF-16 units, as CoreFoundation prints them.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn CFShow(cf: *const c_void) {
     if cf.is_null() {
@@ -236,8 +325,56 @@ pub unsafe extern "C-unwind" fn CFShow(cf: *const c_void) {
         return;
     }
     // SAFETY: the caller passes a live object.
-    let text: Retained<NSString> = unsafe { msg_send![object(cf), description] };
-    eprintln!("{text}");
+    let object = unsafe { object(cf) };
+    let text = match object.downcast_ref::<NSString>() {
+        Some(string) => string.to_string(),
+        // SAFETY: -description returns a string.
+        None => {
+            let description: Option<Retained<NSString>> = unsafe { msg_send![object, description] };
+            description.map_or(String::new(), |d| d.to_string())
+        }
+    };
+    let mut out = String::with_capacity(text.len());
+    for unit in text.encode_utf16() {
+        match char::from_u32(u32::from(unit)) {
+            Some(c) if c.is_ascii() => out.push(c),
+            _ => out.push_str(&format!("\\u{unit:04x}")),
+        }
+    }
+    eprintln!("{out}");
+}
+
+/// Print a string's particulars to stdout, as CoreFoundation's debugging
+/// aid does: its length, whether its text fits in eight bits, whether it
+/// can change, and where it is.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn CFShowStr(cf: *const c_void) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    if cf.is_null() {
+        let _ = writeln!(out, "(null)");
+        return;
+    }
+    // SAFETY: the caller passes a string.
+    let string = unsafe { object(cf) };
+    let text = super::string::text(string);
+    let length: usize = text.encode_utf16().count();
+    let eight_bit = text.is_ascii();
+    // SAFETY: strings answer -isKindOfClass:.
+    let mutable: bool = unsafe { msg_send![string, isKindOfClass: objc2_foundation::NSMutableString::class()] };
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Length {length}");
+    let _ = writeln!(out, "IsEightBit {}", u8::from(eight_bit));
+    let _ = writeln!(out, "HasLengthByte 0");
+    let _ = writeln!(out, "HasNullByte {}", u8::from(eight_bit));
+    let _ = writeln!(out, "InlineContents {}", u8::from(!mutable && length > 0));
+    let _ = writeln!(out, "Allocator SystemDefault");
+    let _ = writeln!(out, "Mutable {}", u8::from(mutable));
+    if mutable {
+        let _ = writeln!(out, "CurrentCapacity {length}");
+        let _ = writeln!(out, "DesiredCapacity {length}");
+    }
+    let _ = writeln!(out, "Contents {cf:p}");
 }
 
 #[unsafe(no_mangle)]
@@ -290,6 +427,11 @@ pub static kCFAllocatorMallocZone: ObjectRef = MALLOC_ZONE.object_ref();
 pub static kCFAllocatorNull: ObjectRef = NULL_ALLOCATOR.object_ref();
 #[unsafe(no_mangle)]
 pub static kCFAllocatorUseContext: ObjectRef = USE_CONTEXT.object_ref();
+
+/// `kCFAllocatorSystemDefault`'s address, which descriptions show.
+pub(crate) fn system_default_allocator() -> *const c_void {
+    SYSTEM_DEFAULT.as_object().cast_const().cast()
+}
 
 /// Whether an allocator is `kCFAllocatorNull`, which frees nothing.
 pub(crate) fn is_null_allocator(allocator: *const c_void) -> bool {

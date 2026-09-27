@@ -73,6 +73,9 @@ pub(crate) struct Shared {
     /// The loop's common modes. The owner keeps a copy in its state; this
     /// one lets other threads register items in the common modes.
     pub(crate) common: Mutex<ModeSet>,
+    /// Every mode something was registered or run in
+    /// (`CFRunLoopCopyAllModes`, which any thread may ask).
+    known: Mutex<ModeSet>,
 }
 
 /// Work other threads leave for a loop.
@@ -94,7 +97,18 @@ impl Shared {
             mode: AtomicU32::new(NOT_RUNNING),
             stop: AtomicBool::new(false),
             common: Mutex::new(ModeSet::of(Mode::DEFAULT)),
+            known: Mutex::new(ModeSet::of(Mode::DEFAULT)),
         }
+    }
+
+    /// Remember that the loop has something in `modes`.
+    pub(crate) fn note_modes(&self, modes: &ModeSet) {
+        lock(&self.known).extend(modes);
+    }
+
+    /// Every mode the loop has had something in or run in.
+    pub(crate) fn known_modes(&self) -> Vec<Mode> {
+        lock(&self.known).iter().collect()
     }
 
     /// A loop for a thread that hasn't started yet, which [`adopt`]s it.
@@ -289,8 +303,6 @@ pub(crate) struct State {
     pub(crate) shared: Arc<Shared>,
     /// The owner's copy of the common set.
     pub(crate) common: ModeSet,
-    /// Every mode something was registered in (`CFRunLoopCopyAllModes`).
-    pub(crate) known: ModeSet,
     pub(crate) timers: BTreeMap<TimerKey, TimerEntry>,
     /// Sorted by (order, seq).
     pub(crate) observers: Vec<ObserverEntry>,
@@ -322,7 +334,6 @@ impl State {
             perform_source: None,
             shared,
             common: ModeSet::of(Mode::DEFAULT),
-            known: ModeSet::of(Mode::DEFAULT),
             timers: BTreeMap::new(),
             observers: Vec::new(),
             sources: Vec::new(),
@@ -378,7 +389,7 @@ impl State {
             return;
         }
         self.common.insert(mode);
-        self.known.insert(mode);
+        self.shared.note_modes(&ModeSet::of(mode));
         for entry in self.timers.values_mut() {
             let mut sched = lock(&entry.timer.ivars().sched);
             if sched.reg.common {
@@ -411,7 +422,7 @@ impl State {
         for &mode in modes {
             reg.add(mode, &self.common);
         }
-        self.known.extend(&reg.modes);
+        self.shared.note_modes(&reg.modes);
         let flag = match &self.perform_source {
             Some(flag) => flag.clone(),
             None => {
@@ -677,7 +688,7 @@ impl Frame {
     fn enter(shared: &Arc<Shared>, mode: Mode) -> Frame {
         let depth = with_state(|s| {
             s.stack.push(mode);
-            s.known.insert(mode);
+            s.shared.note_modes(&ModeSet::of(mode));
             s.stack.len()
         });
         shared.mode.store(mode.0, Ordering::Release);

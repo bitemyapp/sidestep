@@ -67,7 +67,7 @@ impl State {
             sched.owner = None;
             return;
         }
-        self.known.extend(&sched.reg.modes);
+        self.shared.note_modes(&sched.reg.modes);
         let key = (sched.due, self.next_seq());
         sched.key = Some(key);
         self.timers.insert(key, TimerEntry { timer: timer.clone(), modes: sched.reg.modes.clone() });

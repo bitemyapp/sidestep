@@ -366,3 +366,7 @@ pub extern "C-unwind" fn CGBitmapContextCreateImage(context: Option<&CGContext>)
     }
     super::image::new_image(layout, provider).map(super::owned)
 }
+
+// The option adaptive bitmap contexts take (CGBitmapContextCreateAdaptive
+// isn't declared for Linux; the key is), with macOS's value.
+sidestep_foundation::constant_string!(kCGAdaptiveMaximumBitDepth = "kCGAdaptiveMaximumBitDepth");

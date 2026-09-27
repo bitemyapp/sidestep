@@ -274,7 +274,7 @@ pub(crate) fn fast_value(obj: &AnyObject) -> Option<Number> {
         // SAFETY: an instance of exactly NSNumberImpl.
         Some(*unsafe { &*(obj as *const AnyObject).cast::<NSNumberImpl>() }.ivars())
     } else {
-        boolean_value(obj).copied()
+        static_value(obj).copied()
     }
 }
 
@@ -437,33 +437,69 @@ pub static kCFBooleanTrue: ObjectRef = TRUE.object_ref();
 #[unsafe(no_mangle)]
 pub static kCFBooleanFalse: ObjectRef = FALSE.object_ref();
 
+// CoreFoundation's other number constants, `kCFNumberNaN` and the
+// infinities: doubles, static the same way, of another private subclass.
+
+sidestep_runtime::static_class!(pub(crate) NUMBER_CONSTANT_CLASS, NUMBER_CONSTANT_META = "_SidestepNumberConstant", || {
+    let _ = NumberConstantImpl::class();
+});
+
+define_class!(
+    /// The class of CoreFoundation's NaN and infinity constants.
+    #[unsafe(super(NSNumber, NSValue, objc2::runtime::NSObject))]
+    #[name = "_SidestepNumberConstant"]
+    struct NumberConstantImpl;
+);
+
+static NAN: StaticObject<()> = StaticObject::new(&NUMBER_CONSTANT_CLASS, ());
+static POSITIVE_INFINITY: StaticObject<()> = StaticObject::new(&NUMBER_CONSTANT_CLASS, ());
+static NEGATIVE_INFINITY: StaticObject<()> = StaticObject::new(&NUMBER_CONSTANT_CLASS, ());
+static NAN_VALUE: Number = Number::Double(f64::NAN);
+static POSITIVE_INFINITY_VALUE: Number = Number::Double(f64::INFINITY);
+static NEGATIVE_INFINITY_VALUE: Number = Number::Double(f64::NEG_INFINITY);
+
+#[unsafe(no_mangle)]
+pub static kCFNumberNaN: ObjectRef = NAN.object_ref();
+#[unsafe(no_mangle)]
+pub static kCFNumberPositiveInfinity: ObjectRef = POSITIVE_INFINITY.object_ref();
+#[unsafe(no_mangle)]
+pub static kCFNumberNegativeInfinity: ObjectRef = NEGATIVE_INFINITY.object_ref();
+
 fn boolean(value: bool) -> &'static StaticObject<()> {
     if value { &TRUE } else { &FALSE }
 }
 
 /// Whether `obj` is one of the boolean constants.
 pub(crate) fn is_boolean(obj: &AnyObject) -> bool {
-    boolean_value(obj).is_some()
+    let obj = (obj as *const AnyObject).cast_mut().cast();
+    obj == TRUE.as_object() || obj == FALSE.as_object()
 }
 
-/// The value of one of the boolean constants; `None` for other objects.
+/// The value of one of the static numbers (the booleans and the
+/// NaN and infinity constants); `None` for other objects.
 #[inline]
-fn boolean_value(obj: &AnyObject) -> Option<&'static Number> {
+fn static_value(obj: &AnyObject) -> Option<&'static Number> {
     let obj = (obj as *const AnyObject).cast_mut().cast();
     if obj == TRUE.as_object() {
         Some(&TRUE_VALUE)
     } else if obj == FALSE.as_object() {
         Some(&FALSE_VALUE)
+    } else if obj == NAN.as_object() {
+        Some(&NAN_VALUE)
+    } else if obj == POSITIVE_INFINITY.as_object() {
+        Some(&POSITIVE_INFINITY_VALUE)
+    } else if obj == NEGATIVE_INFINITY.as_object() {
+        Some(&NEGATIVE_INFINITY_VALUE)
     } else {
         None
     }
 }
 
 impl NSNumberImpl {
-    /// The number's value: its ivars, or a boolean constant's.
+    /// The number's value: its ivars, or a static number's.
     #[inline]
     fn number(&self) -> &Number {
-        match boolean_value(self) {
+        match static_value(self) {
             Some(value) => value,
             None => self.ivars(),
         }

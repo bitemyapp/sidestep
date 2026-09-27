@@ -207,7 +207,7 @@ impl State {
             sched.owner = None;
             return;
         }
-        self.known.extend(&sched.reg.modes);
+        self.shared.note_modes(&sched.reg.modes);
         let seq = match sched.seq {
             Some(seq) => seq,
             None => *sched.seq.insert(self.next_seq()),
@@ -236,7 +236,7 @@ impl State {
         for &mode in modes {
             reg.add(mode, &self.common);
         }
-        self.known.extend(&reg.modes);
+        self.shared.note_modes(&reg.modes);
         let seq = self.next_seq();
         let target = ObserverTarget::Closure { id: seq, f, valid: Rc::new(Cell::new(true)) };
         self.insert_observer(ObserverEntry { order, seq, activities: activities.0, reg, target });

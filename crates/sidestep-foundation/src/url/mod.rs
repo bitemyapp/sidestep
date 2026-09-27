@@ -457,7 +457,7 @@ impl NSURLImpl {
     }
 
     /// Whether the file a file URL names exists.
-    fn reachable(&self) -> Result<(), Retained<NSError>> {
+    pub(crate) fn reachable(&self) -> Result<(), Retained<NSError>> {
         if !self.is_file() {
             let info = [(&crate::error::URL, as_url(self.retain()).into())];
             return Err(crate::error::cocoa(crate::error::code::FILE_READ_UNSUPPORTED_SCHEME, &info));
@@ -483,6 +483,11 @@ impl NSURLImpl {
             (resolved.into_boxed_str(), parts)
         });
         (s, p)
+    }
+
+    /// The URL's own string and parts, without its base's.
+    pub(crate) fn own(&self) -> (&str, &Parts) {
+        (&self.ivars().string, &self.ivars().parts)
     }
 
     pub(crate) fn has_base(&self) -> bool {

@@ -30,5 +30,6 @@ objc2-foundation.workspace = true
 objc2-app-kit.workspace = true
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std"] }
 objc2-image-io.workspace = true
+objc2-core-graphics.workspace = true
 objc2-core-text.workspace = true
 objc2-quartz-core.workspace = true

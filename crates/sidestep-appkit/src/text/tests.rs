@@ -400,6 +400,90 @@ fn a_joiner_before_a_control_character_lays_out() {
     }
 }
 
+#[test]
+fn a_tab_wrapped_onto_a_line_of_its_own_holds_no_text() {
+    // The tab's box reaches past the line's end, so parley puts it on a
+    // line of its own, with no text run: the line holds no text, where the
+    // box stands. Truncating that line, the last that fits, used to take
+    // it to start past the end of the text.
+    let mut a = Attrs::new(sans(13.0));
+    a.paragraph.line_break = LineBreak::WordWrap;
+    a.paragraph.head_indent = 7.0;
+    a.paragraph.direction = Direction::LeftToRight;
+    let text = "  👨‍👩‍👧\u{1b}x\u{301}\t  \u{E0067}#";
+    let tab = text.find('\t').unwrap() + 1;
+    let opts = Options { width: 40.0, height: 30.0, all_lines: true, truncate_last: true, ..Options::UNBOUNDED };
+    let runs = [Run { start: 0, end: text.len(), attrs: 0 }];
+    let req = layout::Req { clusters: true, ..layout::Req::lines(true, Direction::LeftToRight) };
+    let lines = super::with_ctx(|ctx| {
+        let unbounded = Options { height: f32::INFINITY, ..opts };
+        layout::segment_lines(ctx, text, std::slice::from_ref(&a), &runs, &a.paragraph, req, &unbounded)
+    });
+    let ranges: Vec<_> = lines.iter().map(|l| (l.text_start, l.text_end)).collect();
+    assert!(ranges.contains(&(tab, tab)), "{ranges:?}");
+    assert_lines_partition(text, &lines);
+    assert_eq!(ranges.last().map(|r| r.1), Some(text.len()));
+    let line = lay("x", a.clone(), Options::UNBOUNDED).height;
+    let laid = lay(text, a.clone(), opts);
+    assert_eq!(laid.height, line * 2.0);
+    // The second line, the tab's, is the last that fits: the rest of the
+    // paragraph follows on it, and fits without an ellipsis.
+    let hash = glyphs(&lay("#", a.clone(), Options::UNBOUNDED));
+    assert_eq!(glyphs(&laid).last(), hash.last());
+}
+
+/// Each line's range goes on from where the line before ended, on
+/// character boundaries, and holds its clusters.
+fn assert_lines_partition(text: &str, lines: &[layout::LaidLine]) {
+    let ranges: Vec<_> = lines.iter().map(|l| (l.text_start, l.text_end)).collect();
+    let mut prev = 0;
+    for l in lines {
+        assert!(prev <= l.text_start && l.text_start <= l.text_end && l.text_end <= text.len(), "{ranges:?}");
+        assert!(text.is_char_boundary(l.text_start) && text.is_char_boundary(l.text_end), "{ranges:?}");
+        for c in &l.clusters {
+            assert!(l.text_start <= c.start && c.start <= c.end && c.end <= l.text_end, "{c:?} in {ranges:?}");
+            assert!(text.is_char_boundary(c.start) && text.is_char_boundary(c.end), "{c:?}");
+        }
+        prev = l.text_end;
+    }
+}
+
+#[test]
+fn an_emoji_sequence_cut_by_attributes_in_right_to_left_text_lays_out() {
+    // A family emoji whose attributes change inside it, in a paragraph
+    // the Hebrew makes right to left: parley shapes the first part into
+    // clusters inside characters and gives the line a range ending before
+    // it starts. Truncating that line used to slice the text inside the
+    // first emoji.
+    let text = "👨\u{200d}👩\u{200d}👧שלוםa🏳\u{fe0f}\u{200d}🌈Hello\u{e0067}  שלום\0";
+    let mut a = Attrs::new(sans(13.0));
+    let mut b = Attrs { kern: Some(1.0), baseline_offset: 2.0, ..Attrs::new(sans(20.0)) };
+    a.paragraph.line_break = LineBreak::WordWrap;
+    a.paragraph.head_indent = 14.0;
+    a.paragraph.tail_indent = -9.0;
+    b.paragraph.line_break = LineBreak::CharWrap;
+    b.paragraph.head_indent = 7.0;
+    b.paragraph.direction = Direction::RightToLeft;
+    let runs = [Run { start: 0, end: 11, attrs: 0 }, Run { start: 11, end: text.len(), attrs: 1 }];
+    let opts = Options {
+        width: 40.0,
+        height: 30.0,
+        all_lines: true,
+        font_leading: true,
+        truncate_last: true,
+        attachments_as_glyphs: true,
+    };
+    let attrs = [a, b];
+    let req = layout::Req { clusters: true, ..layout::Req::lines(true, Direction::Natural) };
+    let unbounded = Options { height: f32::INFINITY, ..opts };
+    let lines =
+        super::with_ctx(|ctx| layout::segment_lines(ctx, text, &attrs, &runs, &attrs[0].paragraph, req, &unbounded));
+    assert!(lines.len() > 2);
+    assert_lines_partition(text, &lines);
+    let laid = layout::lay_out(text, &attrs, &runs, &opts);
+    assert!(laid.height > 0.0 && laid.height <= 30.0);
+}
+
 /// A small generator, so that the cases are the same every run.
 struct Rng(u64);
 
@@ -464,10 +548,14 @@ fn text_of_every_kind_lays_out_without_panicking() {
         LineBreak::TruncateTail,
         LineBreak::TruncateMiddle,
     ];
-    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+    // SIDESTEP_LAYOUT_SEED and SIDESTEP_LAYOUT_CASES run other and more
+    // cases (debug builds check for overflow).
+    let env = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<u64>().ok());
+    let seed = env("SIDESTEP_LAYOUT_SEED").unwrap_or(0x9e37_79b9_7f4a_7c15).max(1);
+    let mut rng = Rng(seed);
     let base = Attrs::new(sans(13.0));
     let other = Attrs { kern: Some(1.0), baseline_offset: 2.0, ..Attrs::new(sans(20.0)) };
-    for case in 0..1500 {
+    for case in 0..env("SIDESTEP_LAYOUT_CASES").unwrap_or(1500) {
         let text: String = (0..rng.next() % 12).map(|_| *rng.pick(PIECES)).collect();
         let mut attrs = [base.clone(), other.clone()];
         for a in &mut attrs {
@@ -492,8 +580,23 @@ fn text_of_every_kind_lays_out_without_panicking() {
             // Not drawn from `rng`, which would change every case.
             attachments_as_glyphs: case % 2 == 0,
         };
-        let laid = layout::lay_out(&text, &attrs, &runs, &opts);
-        assert!(laid.width.is_finite() && laid.height.is_finite() && laid.height > 0.0, "case {case}: {text:?}");
+        // A panic names the case, to run it again.
+        let laid =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| layout::lay_out(&text, &attrs, &runs, &opts)))
+                .unwrap_or_else(|_| {
+                    let paragraphs: Vec<_> = attrs
+                        .iter()
+                        .map(|a| {
+                            let p = &a.paragraph;
+                            (p.line_break, p.head_indent, p.tail_indent, p.direction)
+                        })
+                        .collect();
+                    panic!("seed {seed}, case {case}: {text:?} {runs:?} {paragraphs:?} {opts:?} panicked")
+                });
+        assert!(
+            laid.width.is_finite() && laid.height.is_finite() && laid.height > 0.0,
+            "seed {seed}, case {case}: {text:?}"
+        );
     }
 }
 

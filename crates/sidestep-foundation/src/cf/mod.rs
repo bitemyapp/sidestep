@@ -8,12 +8,29 @@
 //! is all it takes. Functions take `*const c_void`-like raw pointers where
 //! the bindings pass `Option<&T>`, which has the same representation.
 
-mod attributed_string;
+mod attributed;
 mod base;
+mod bundle;
+mod calendar;
+mod charset;
 mod collections;
 mod data;
+pub(crate) mod locale;
+pub(crate) mod locale_data;
+mod locale_exemplars;
+mod ports;
 mod preferences;
 mod runloop;
+mod set;
+mod stream;
 pub(crate) mod string;
+mod string_edit;
+mod string_encoding;
+mod string_transform;
 pub(crate) mod types;
 mod url;
+mod url_parts;
+mod url_resources;
+mod value_array;
+
+pub(crate) use ports::new_file_security as file_security;

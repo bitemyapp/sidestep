@@ -101,6 +101,45 @@ pub unsafe extern "C-unwind" fn CFDataGetBytes(cf: *const c_void, range: CFRange
     }
 }
 
+/// Where `find`'s bytes first (or, backwards, last) occur within the
+/// range, or at its start (or end) only, anchored; `{kCFNotFound, 0}` if
+/// they don't.
+///
+/// # Safety
+///
+/// `cf` and `find` are data objects.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn CFDataFind(
+    cf: *const c_void,
+    find: *const c_void,
+    range: CFRange,
+    flags: usize,
+) -> CFRange {
+    const BACKWARDS: usize = 1;
+    const ANCHORED: usize = 2;
+    let not_found = CFRange { location: -1, length: 0 };
+    if find.is_null() {
+        return not_found;
+    }
+    // SAFETY: nothing mutates either while they are read.
+    let (haystack, needle) = unsafe { (crate::data::bytes(data(cf)), crate::data::bytes(data(find))) };
+    let (Ok(start), Ok(length)) = (usize::try_from(range.location), usize::try_from(range.length)) else {
+        return not_found;
+    };
+    let Some(within) = haystack.get(start..start.saturating_add(length).min(haystack.len())) else { return not_found };
+    if needle.is_empty() || needle.len() > within.len() {
+        return not_found;
+    }
+    let last = within.len() - needle.len();
+    let at = match (flags & BACKWARDS != 0, flags & ANCHORED != 0) {
+        (false, false) => within.windows(needle.len()).position(|w| w == needle),
+        (true, false) => within.windows(needle.len()).rposition(|w| w == needle),
+        (false, true) => within.starts_with(needle).then_some(0),
+        (true, true) => within.ends_with(needle).then_some(last),
+    };
+    at.map_or(not_found, |at| CFRange { location: (start + at) as CFIndex, length: needle.len() as CFIndex })
+}
+
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn CFDataCreateMutable(_alloc: *const c_void, _capacity: CFIndex) -> *mut c_void {
     owned(NSMutableData::new())
@@ -246,6 +285,42 @@ pub unsafe extern "C-unwind" fn CFErrorCreate(
         msg_send![this, initWithDomain: object(domain), code: code, userInfo: info]
     };
     owned(error)
+}
+
+/// # Safety
+///
+/// `domain` is a string; `keys` and `values` point to `count` objects.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn CFErrorCreateWithUserInfoKeysAndValues(
+    alloc: *const c_void,
+    domain: *const c_void,
+    code: CFIndex,
+    keys: *const *const c_void,
+    values: *const *const c_void,
+    count: CFIndex,
+) -> *mut c_void {
+    let empty: [*const c_void; 0] = [];
+    let (keys, values, count) = if count <= 0 || keys.is_null() || values.is_null() {
+        (empty.as_ptr(), empty.as_ptr(), 0)
+    } else {
+        (keys, values, count)
+    };
+    // SAFETY: per this function's contract.
+    let info = unsafe {
+        super::collections::CFDictionaryCreate(
+            alloc,
+            keys,
+            values,
+            count,
+            &super::collections::kCFTypeDictionaryKeyCallBacks,
+            &super::collections::kCFTypeDictionaryValueCallBacks,
+        )
+    };
+    // SAFETY: as above; the error retains the dictionary.
+    let error = unsafe { CFErrorCreate(alloc, domain, code, info) };
+    // SAFETY: the +1 reference CFDictionaryCreate returned.
+    unsafe { super::base::CFRelease(info) };
+    error
 }
 
 fn error<'a>(cf: *const c_void) -> &'a NSError {

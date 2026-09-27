@@ -14,6 +14,7 @@ use objc2::ClassType;
 
 mod attributed;
 mod base64;
+mod bidi;
 mod bundle;
 mod cf;
 mod charset;

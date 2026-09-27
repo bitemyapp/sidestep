@@ -1,4 +1,4 @@
-//! Every extern static and function objc2-image-io declare under the
+//! Every extern static and function objc2-image-io declares under the
 //! features Sidestep's crates enable, referenced so a Linux build links
 //! each: one Sidestep stops exporting fails this test's link. The known
 //! gaps (docs/abi.md) are left out. Written by `scripts/link-closure`;

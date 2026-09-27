@@ -1141,14 +1141,21 @@ pub(crate) fn segment_lines(
     break_and_tab(&mut layout, text, shift, para, right, first_indent, rest_indent);
     let avail = right - first_indent;
     if more || (truncates && content_width(&layout) > avail + 0.01) {
-        let clusters = clusters(&layout, shift);
+        let clusters = clusters(&layout, text, shift);
         for extra in 0..4 {
             let (short, short_runs, cut) = elide(ctx, text, attrs, runs, &clusters, avail, mode, extra, &settings);
             let (mut short_layout, short_shift) = build(ctx, &short, attrs, &short_runs, &settings);
             break_and_tab(&mut short_layout, &short, short_shift, para, right, first_indent, rest_indent);
             if content_width(&short_layout) <= avail + 0.01 || extra == 3 {
                 short_layout.align(alignment(para.alignment), AlignmentOptions::default());
-                let mut lines = extract(&short_layout, short_shift, attrs, runs[0].attrs, para, opts, req.clusters);
+                let mut lines = extract(
+                    Laid { layout: &short_layout, text: &short, shift: short_shift },
+                    attrs,
+                    runs[0].attrs,
+                    para,
+                    opts,
+                    req.clusters,
+                );
                 // Positions in the text refer to the original text.
                 for line in &mut lines {
                     line.text_start = cut.original(line.text_start);
@@ -1166,7 +1173,7 @@ pub(crate) fn segment_lines(
         }
     }
     layout.align(alignment(para.alignment), AlignmentOptions::default());
-    let mut lines = extract(&layout, shift, attrs, runs[0].attrs, para, opts, req.clusters);
+    let mut lines = extract(Laid { layout: &layout, text, shift }, attrs, runs[0].attrs, para, opts, req.clusters);
     ctx.scratch = layout;
     // AppKit counts indents in the width only of text that wraps, and no
     // line reaches past the tail indent. Justified lines, all but the
@@ -1730,15 +1737,23 @@ fn content_width(layout: &Layout<Brush>) -> f32 {
 }
 
 /// Clusters in logical order: byte range in the original text and advance
-/// (an attachment's character's with its box's width).
-fn clusters(layout: &Layout<Brush>, shift: usize) -> Vec<(usize, usize, f32)> {
+/// (an attachment's character's with its box's width). A cluster parley
+/// puts inside characters (see `line_text`) is widened to their
+/// boundaries.
+fn clusters(layout: &Layout<Brush>, text: &str, shift: usize) -> Vec<(usize, usize, f32)> {
     let mut out = Vec::new();
     for line in layout.lines() {
         for run in line.runs() {
             for cluster in run.clusters() {
                 let range = cluster.text_range();
                 if range.start >= shift {
-                    out.push((range.start - shift, range.end - shift, cluster.advance()));
+                    // A backwards cluster's end may reach into the marks.
+                    let (mut start, mut end) =
+                        (range.start - shift, range.end.saturating_sub(shift).max(range.start - shift));
+                    if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+                        (start, end) = (floor_char_boundary(text, start), ceil_char_boundary(text, end));
+                    }
+                    out.push((start, end, cluster.advance()));
                 }
             }
         }
@@ -1944,20 +1959,30 @@ struct Pending {
     glyphs: Arc<[Glyph]>,
 }
 
+/// A broken and aligned layout, the text it laid out, and how many bytes
+/// of that text are the direction mark before the paragraph's own.
+struct Laid<'a> {
+    layout: &'a Layout<Brush>,
+    text: &'a str,
+    shift: usize,
+}
+
 /// The lines of a broken and aligned layout. `base` names the attributes
 /// whose font sizes a line with no glyphs; `clusters` asks for each line's
 /// clusters.
 fn extract(
-    layout: &Layout<Brush>,
-    shift: usize,
+    laid: Laid<'_>,
     attrs: &[Attrs],
     base: u32,
     para: &Paragraph,
     opts: &Options,
     clusters: bool,
 ) -> Vec<LaidLine> {
+    let Laid { layout, text, shift } = laid;
     let mut lines = Vec::with_capacity(layout.len());
     let mut pending: Vec<Pending> = Vec::new();
+    // Where the line before ended.
+    let mut prev = 0;
     for line in layout.lines() {
         let m = line.metrics();
         let (mut ascent, mut descent, mut leading) = (0.0f32, 0.0f32, 0.0f32);
@@ -2051,6 +2076,8 @@ fn extract(
         }
         let height = line_height(ascent, descent, leading, para, opts);
         let baseline = height - descent;
+        let range = line_text(&line, text, shift, prev);
+        prev = range.end;
         let mut out = LaidLine {
             height,
             descent,
@@ -2070,14 +2097,14 @@ fn extract(
                     PlacedAttachment { rect: [x, bottom - a.height, x + a.width.max(0.0), bottom], byte, attrs: index }
                 })
                 .collect(),
-            text_start: line.text_range().start.saturating_sub(shift),
-            text_end: line.text_range().end.saturating_sub(shift),
+            text_start: range.start,
+            text_end: range.end,
             clusters: Vec::new(),
             elided: None,
             forced: line.break_reason() == parley::BreakReason::Emergency,
         };
         if clusters {
-            out.clusters = line_clusters(layout, &line, shift);
+            out.clusters = line_clusters(layout, &line, text, shift, range);
         }
         // The spaces between words, which by-word decorations skip.
         let spaces = if by_word { spaces(&line) } else { Vec::new() };
@@ -2138,6 +2165,42 @@ fn extract(
     lines
 }
 
+/// The bytes of `text` (the segment's) that `line` holds, `prev` being
+/// where the line before it ended. parley's range goes on from there, as
+/// a rule; where it doesn't, it's repaired to: from `prev` to as far as
+/// the range or the line's clusters reach (the next character boundary
+/// on). parley gives a line without a text run, which holds only a box
+/// (such as a tab's, reaching past the line's end, which it moves to a
+/// line of its own), a range from `usize::MAX`; and some right-to-left
+/// emoji sequences cut by a change of attributes clusters inside
+/// characters, and lines ending before they start.
+fn line_text(line: &parley::Line<'_, Brush>, text: &str, shift: usize, prev: usize) -> std::ops::Range<usize> {
+    let range = line.text_range();
+    let (start, end) = (range.start.saturating_sub(shift), range.end.saturating_sub(shift));
+    if prev <= start && start <= end && end <= text.len() && text.is_char_boundary(start) && text.is_char_boundary(end)
+    {
+        return start..end;
+    }
+    let reach = line
+        .runs()
+        .filter_map(|run| run.visual_clusters().map(|c| c.text_range().end).max())
+        .max()
+        .unwrap_or(0)
+        .saturating_sub(shift);
+    prev..ceil_char_boundary(text, end.max(reach).max(prev))
+}
+
+/// `at`, or the first character boundary of `text` after it; at most the
+/// text's length.
+fn ceil_char_boundary(text: &str, at: usize) -> usize {
+    (at.min(text.len())..=text.len()).find(|&i| text.is_char_boundary(i)).unwrap_or(text.len())
+}
+
+/// `at`, or the last character boundary of `text` before it.
+fn floor_char_boundary(text: &str, at: usize) -> usize {
+    (0..=at.min(text.len())).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0)
+}
+
 /// Which of `run`'s glyphs, in visual order, draw the direction marks that
 /// the text was given in front (its first `shift` bytes): invisible
 /// glyphs, but ones that a line laid out from anywhere else wouldn't have.
@@ -2158,7 +2221,13 @@ pub(super) fn mark_glyphs(run: &parley::Run<'_, Brush>, shift: usize) -> std::op
 /// The clusters of `line` in visual order, left to right, placed from the
 /// container's left. The box after a tab widens the tab's cluster, and an
 /// attachment's box its character's.
-fn line_clusters(layout: &Layout<Brush>, line: &parley::Line<'_, Brush>, shift: usize) -> Vec<ByteCluster> {
+fn line_clusters(
+    layout: &Layout<Brush>,
+    line: &parley::Line<'_, Brush>,
+    text: &str,
+    shift: usize,
+    within: std::ops::Range<usize>,
+) -> Vec<ByteCluster> {
     let m = line.metrics();
     // Boxes on the line: where each is, how wide, and its character's
     // byte (a tab's comes before its box, an attachment's after).
@@ -2192,7 +2261,18 @@ fn line_clusters(layout: &Layout<Brush>, line: &parley::Line<'_, Brush>, shift: 
             let range = cluster.text_range();
             let advance = cluster.advance();
             if range.start >= shift {
-                out.push(ByteCluster { start: range.start - shift, end: range.end - shift, x: pen, advance, rtl });
+                // A backwards cluster's end may reach into the marks.
+                let (mut start, mut end) = (range.start - shift, range.end.saturating_sub(shift));
+                // A cluster stays within its line and on character
+                // boundaries (see `line_text`).
+                if start < within.start || end > within.end || start > end {
+                    start = start.clamp(within.start, within.end);
+                    end = end.clamp(start, within.end);
+                }
+                if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+                    (start, end) = (floor_char_boundary(text, start), ceil_char_boundary(text, end));
+                }
+                out.push(ByteCluster { start, end, x: pen, advance, rtl });
             }
             pen += advance;
         }

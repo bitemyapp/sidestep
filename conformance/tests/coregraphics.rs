@@ -2217,3 +2217,11 @@ fn radial_gradients_after_their_end() {
     assert_px(&c, 0, 0, [243, 93, 0, 255], 12);
     assert_px(&c, 1, 0, [205, 168, 0, 255], 12);
 }
+
+/// Two constants with macOS's values: the default HDR image content
+/// headroom, and the adaptive bit depth option's name.
+#[test]
+fn hdr_and_adaptive_constants() {
+    assert_eq!(unsafe { kCGDefaultHDRImageContentHeadroom }.to_bits(), 0x409d_a2ae);
+    assert_eq!(unsafe { kCGAdaptiveMaximumBitDepth }.to_string(), "kCGAdaptiveMaximumBitDepth");
+}

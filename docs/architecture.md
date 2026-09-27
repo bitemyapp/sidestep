@@ -593,7 +593,24 @@ from the start: the two numbers `+numberWithBool:` and `initWithBool:`
 hand out (as macOS's do), of C type `c` and of a private subclass of
 `NSNumber` whose instances have no storage of their own (NSNumber's
 methods read a boolean's value by its address). `kCFNull` is `NSNull`'s
-instance.
+instance. Types with no Foundation class of their own in Sidestep
+(`CFCalendar`, `CFReadStream`, `CFWriteStream`, `CFFileSecurity`) are
+objects of private classes (`_SidestepCFCalendar`, …) with type IDs of
+their own; a Get function that hands out an object its argument must keep
+(`CFLocaleGetIdentifier`, `CFBundleGetInfoDictionary`, …) keeps the first
+one made in a dictionary associated with the argument. Data macOS gets
+from ICU or its own tables (locale names, currencies, separators,
+exemplar characters, default scripts, week rules, encodings' names) is in
+tables measured on macOS (`cf/locale_data.rs`, `cf/locale_exemplars.rs`,
+`cf/string_encoding.rs`), which `conformance/tests/cf_*.rs` check against
+it. A stream's client hears of events through the run loops it is
+scheduled on (`RunLoop::perform` in the modes it was scheduled for).
+An array made with other callbacks than `kCFTypeArrayCallBacks` (or
+none), and the array of ranges `CFStringCreateArrayWithFindResults`
+returns, is an object of a private `NSArray` or `NSMutableArray` subclass
+(`cf/value_array.rs`) holding the caller's pointers and callbacks: the
+array functions retain, release, compare and describe its values through
+them, as CoreFoundation does, and never treat a value as an object.
 
 ## AppKit: a main thread and a render thread
 

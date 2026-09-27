@@ -128,7 +128,7 @@ pub(crate) fn decode(bytes: &[u8], encoding: CFStringEncoding, external: bool) -
 }
 
 /// A character's bytes in an encoding; `None` if it can't be encoded.
-fn encode_char(c: char, encoding: CFStringEncoding, out: &mut Vec<u8>) -> bool {
+pub(crate) fn encode_char(c: char, encoding: CFStringEncoding, out: &mut Vec<u8>) -> bool {
     match encoding {
         encoding::UTF8 => {
             let mut buf = [0; 4];
@@ -253,6 +253,13 @@ impl Iterator for Units<'_> {
     }
 }
 
+/// The text of a range of a string's UTF-16 units, if the range lies
+/// within it.
+pub(crate) fn substring(string: &AnyObject, range: CFRange) -> Option<String> {
+    let text = text(string);
+    range_units(&text, length_of(string), range).map(Units::into_string)
+}
+
 fn make(text: &str) -> *mut c_void {
     owned(NSString::from_str(text))
 }
@@ -262,7 +269,7 @@ fn make(text: &str) -> *mut c_void {
 /// # Safety
 ///
 /// `bytes` came from `malloc` unless the deallocator is `kCFAllocatorNull`.
-unsafe fn free_contents(bytes: *const c_void, deallocator: *const c_void) {
+pub(crate) unsafe fn free_contents(bytes: *const c_void, deallocator: *const c_void) {
     if !is_null_allocator(deallocator) {
         // SAFETY: per this function's contract.
         unsafe { libc::free(bytes.cast_mut()) };

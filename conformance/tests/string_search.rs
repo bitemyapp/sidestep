@@ -87,6 +87,14 @@ fn compare_options() {
     assert_eq!(cmp("resume", "résumé", DIACRITIC), 0);
     assert_eq!(cmp("A", "\u{FF21}", 0), -1);
     assert_eq!(cmp("A", "\u{FF21}", WIDTH), 0);
+    // A literal comparison still folds what it is asked to (CoreFoundation's
+    // comparisons are literal unless asked otherwise).
+    assert_eq!(cmp("résumé", "resume", LITERAL | DIACRITIC), 0);
+    assert_eq!(cmp("\u{FF21}", "A", LITERAL | WIDTH), 0);
+    assert_eq!(cmp("é", "É", LITERAL | CI), 0);
+    assert_eq!(cmp("\u{e9}", "e\u{301}", LITERAL), 1);
+    assert_eq!(cmp("\u{e9}", "e\u{301}", LITERAL | DIACRITIC), 0);
+    assert_eq!(find("résumé", "e", LITERAL | DIACRITIC), Some((1, 1)));
     // Full case folding.
     assert_eq!(cmp("straße", "STRASSE", CI), 0);
     assert_eq!(cmp("strasse", "straße", CI), 0);

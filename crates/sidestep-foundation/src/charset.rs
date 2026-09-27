@@ -22,7 +22,7 @@ use icu_properties::props::{GeneralCategory, GeneralCategoryGroup};
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyClass, AnyObject, NSObject, NSObjectProtocol};
 use objc2::{ClassType, DefinedClass, define_class, msg_send, sel};
-use objc2_foundation::{NSCharacterSet, NSMutableCharacterSet, NSRange, NSString, NSUInteger, NSZone};
+use objc2_foundation::{NSCharacterSet, NSData, NSMutableCharacterSet, NSRange, NSString, NSUInteger, NSZone};
 
 use crate::string::view::view;
 use crate::string::wtf8;
@@ -656,6 +656,17 @@ define_class!(
             theirs.intersection(&mine) == theirs
         }
 
+        #[unsafe(method_id(bitmapRepresentation))]
+        fn bitmap_representation(&self) -> Retained<NSData> {
+            NSData::with_bytes(&bitmap(self))
+        }
+
+        #[unsafe(method_id(characterSetWithBitmapRepresentation:))]
+        fn with_bitmap_representation(data: &NSData) -> Retained<NSCharacterSet> {
+            // SAFETY: an instance of NSCharacterSet.
+            unsafe { Retained::cast_unchecked(with_bitmap(NSCharacterSet::class(), data)) }
+        }
+
         #[unsafe(method(hasMemberInPlane:))]
         fn has_member_in_plane(&self, plane: u8) -> bool {
             let (lo, hi) = (u32::from(plane) << 16, (u32::from(plane) << 16) | 0xFFFF);
@@ -714,6 +725,71 @@ fn finish(this: Allocated<NSCharacterSetImpl>, set: CharSet) -> Retained<NSChara
     let this = this.set_ivars(SetIvars { set: RefCell::new(set), frozen });
     // SAFETY: NSObject's initializer.
     unsafe { msg_send![super(this), init] }
+}
+
+/// The bytes of a bitmap for a plane: bit `c & 7` of byte `(c & 0xFFFF) >> 3`
+/// for each member `c` in it.
+const PLANE_BYTES: usize = 8192;
+
+/// `-bitmapRepresentation`: the Basic Multilingual Plane's bitmap, then,
+/// for each other plane with members, its number and its bitmap.
+pub(crate) fn bitmap(set: &AnyObject) -> Vec<u8> {
+    let ranges = ranges_of(set);
+    let mut planes: Vec<Vec<u8>> = vec![vec![0; PLANE_BYTES]; 17];
+    for &(lo, hi) in &ranges.ranges {
+        for c in lo..=hi.min(MAX) {
+            planes[(c >> 16) as usize][((c & 0xFFFF) >> 3) as usize] |= 1 << (c & 7);
+        }
+    }
+    let mut out = std::mem::take(&mut planes[0]);
+    for (plane, bits) in planes.iter().enumerate().skip(1) {
+        if bits.iter().any(|&b| b != 0) {
+            out.push(plane as u8);
+            out.extend_from_slice(bits);
+        }
+    }
+    out
+}
+
+/// The set a bitmap from [`bitmap`] describes; a shorter first plane
+/// leaves the rest of it empty.
+pub(crate) fn from_bitmap(bytes: &[u8]) -> CharSet {
+    let mut set = RangeSet::default();
+    let mut add_plane = |plane: u32, bits: &[u8]| {
+        let mut run: Option<u32> = None;
+        for c in 0..(bits.len() as u32 * 8) {
+            let member = bits[(c >> 3) as usize] & (1 << (c & 7)) != 0;
+            match (member, run) {
+                (true, None) => run = Some(c),
+                (false, Some(start)) => {
+                    set.insert((plane << 16) | start, (plane << 16) | (c - 1));
+                    run = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(start) = run {
+            set.insert((plane << 16) | start, (plane << 16) | (bits.len() as u32 * 8 - 1));
+        }
+    };
+    let (first, mut rest) = bytes.split_at(bytes.len().min(PLANE_BYTES));
+    add_plane(0, first);
+    while let Some((&plane, after)) = rest.split_first() {
+        let (bits, next) = after.split_at(after.len().min(PLANE_BYTES));
+        if (1..=16).contains(&plane) {
+            add_plane(u32::from(plane), bits);
+        }
+        rest = next;
+    }
+    CharSet::Ranges(set)
+}
+
+/// A new set of `class` holding what a bitmap describes, for
+/// `+characterSetWithBitmapRepresentation:`.
+pub(crate) fn with_bitmap(class: &AnyClass, data: &NSData) -> Retained<AnyObject> {
+    // SAFETY: nothing changes the data while it is read.
+    let bytes = unsafe { crate::data::bytes(data) };
+    make(class, from_bitmap(bytes))
 }
 
 /// The members of a set of another class, asked one by one.
@@ -850,6 +926,12 @@ define_class!(
         #[unsafe(method_id(characterSetWithRange:))]
         fn with_range(range: NSRange) -> Retained<NSMutableCharacterSet> {
             mutable(from_range(range))
+        }
+
+        #[unsafe(method_id(characterSetWithBitmapRepresentation:))]
+        fn with_bitmap_representation(data: &NSData) -> Retained<NSMutableCharacterSet> {
+            // SAFETY: an instance of NSMutableCharacterSet.
+            unsafe { Retained::cast_unchecked(with_bitmap(NSMutableCharacterSet::class(), data)) }
         }
 
         #[unsafe(method_id(characterSetWithCharactersInString:))]

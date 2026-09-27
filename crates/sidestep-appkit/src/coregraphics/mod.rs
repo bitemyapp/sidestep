@@ -53,9 +53,13 @@
 //! callbacks, but a pattern color isn't made and setting a pattern leaves
 //! the color as it was); conic gradients; the path set operations
 //! (`CGPathCreateCopyByUnioningPath` and its kin, and
-//! `CGPathCreateCopyByNormalizing`); CMYK and 5-bit bitmap contexts
-//! (refused); and CGEvent, CGDisplay and CGWindow, which belong to the
-//! window server.
+//! `CGPathCreateCopyByNormalizing`); color spaces as property lists or
+//! from platform (ColorSync) objects; HDR content light levels
+//! (`CGImage…ContentAverageLightLevel…`, `…CalculatedHDRStats`); CMYK and
+//! 5-bit bitmap contexts (refused); and CGEvent, CGDisplay and CGWindow,
+//! which belong to the window server. `scripts/link-closure` lists these
+//! as known gaps, so `crates/sidestep/tests/link_closure_coregraphics.rs`
+//! links everything else objc2-core-graphics declares.
 
 pub(crate) mod bitmap;
 pub(crate) mod color;

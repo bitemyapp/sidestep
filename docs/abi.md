@@ -24,7 +24,7 @@ at the end, which `tools/objc2-overlay` applies; other versions are untested.
 | Class symbols | `._OBJC_CLASS_<Name>` and `._OBJC_METACLASS_<Name>` for `NSObject` and `NSProxy` (runtime) and each Foundation, AppKit and QuartzCore class, each also listed in the `sidestep_classes` linker section |
 | Categories | `._SIDESTEP_CATEGORY_<Class>_<Name>` for each category a framework links, also listed in the `sidestep_categories` linker section |
 | libdispatch | `dispatch_get_global_queue`, `_dispatch_main_q`, `_dispatch_queue_attr_concurrent`, `dispatch_queue_create(_with_target)`, `dispatch_queue_attr_make_*`, `dispatch_(barrier_)async(_f)`, `dispatch_(barrier_)sync(_f)`, `dispatch_(barrier_)async_and_wait(_f)`, `dispatch_apply(_f)`, `dispatch_after(_f)`, `dispatch_once(_f)`, `dispatch_group_*`, `dispatch_semaphore_*`, `dispatch_source_*` (data add/or/replace, timer, vnode), `dispatch_time`, `dispatch_walltime`, `dispatch_retain`/`release`/`suspend`/`resume`/`activate`, `dispatch_set_context`/`get_context`/`set_finalizer_f`/`set_target_queue`, `dispatch_queue_set_specific`/`get_specific`, `dispatch_assert_queue*`, `dispatch_main` |
-| CoreFoundation | Retain/release/equality (`CFRetain`, `CFRelease`, `CFAutorelease`, `CFEqual`, `CFHash`, `CFGetTypeID`, `CFCopyDescription`, `CFShow`); the run loop (`CFRunLoop*`, `CFRunLoopTimer*`, `CFRunLoopObserver*`, `kCFRunLoopDefaultMode`, `kCFRunLoopCommonModes`); and toll-free `CFString`, `CFData`, `CFDate`, `CFError`, `CFURL`, `CFDictionary` and `CFArray` (mutable ones too), `CFNumber`, `CFPreferences`; the `kCFAllocator*` constants and the `kCFType…CallBacks` |
+| CoreFoundation | Retain/release/equality (`CFRetain`, `CFRelease`, `CFAutorelease`, `CFEqual`, `CFHash`, `CFGetTypeID`, `CFCopyDescription`, `CFCopyTypeIDDescription`, `CFShow`, `CFShowStr`); the run loop (`CFRunLoop*` with `CFRunLoopCopyAllModes`, `CFRunLoopTimer*`, `CFRunLoopObserver*`, `kCFRunLoopDefaultMode`, `kCFRunLoopCommonModes`); and toll-free `CFString` (editing, searching, comparing with a locale, case, folding, normalization, transforms, encodings and their names, external, file system and Pascal representations), `CFAttributedString` (bidi levels too), `CFCharacterSet` (bitmap representations too), `CFData` (`CFDataFind`), `CFDate`, `CFError`, `CFURL` (its parts as CoreFoundation sees them, bytes and byte ranges, percent escapes, resource properties and keys, file reference and path URLs, security-scoped access, bookmarks), `CFDictionary`, `CFArray` (with any callbacks, or none) and `CFSet` (mutable ones too, with the apply, search, sort and count functions), `CFNumber` (`kCFNumberNaN` and the infinities), `CFLocale`, `CFCalendar`, `CFBundle`, `CFReadStream` and `CFWriteStream` (files, memory, buffers, bound pairs, TCP sockets, clients on run loops), `CFFileSecurity`, `CFMachPort` and `CFMessagePort` (see the known gaps), `CFPreferences`; the `kCFAllocator*` constants and the `kCFType…CallBacks` |
 | Foundation functions | `NSUnionRange`, `NSIntersectionRange`, `NSStringFromRange`, `NSRangeFromString`; the `NSGeometry` functions (`NSEqualRects`, `NSInsetRect`, `NSIntegralRectWithOptions`, `NSDivideRect`, `NSPointInRect`, `NSStringFromRect`, `NSRectFromString` and the rest objc2-foundation declares); `NSHomeDirectory(ForUser)`, `NSTemporaryDirectory`, `NSUserName`, `NSFullUserName`, `NSOpenStepRootDirectory`, `NSSearchPathForDirectoriesInDomains`, `NSClassFromString`, `NSStringFromClass`, `NSSelectorFromString`, `NSStringFromSelector`, `NSProtocolFromString`, `NSStringFromProtocol`; zones (`NSDefaultMallocZone`, `NSZoneMalloc` and the rest: one default zone over `malloc`), pages (`NSPageSize`, `NSAllocateMemoryPages`, …), `NSGetSizeAndAlignment`, `NSAllocateObject`, `NSCopyObject`, `NSDeallocateObject`, the extra reference count (`NSIncrementExtraRefCount`, `NSDecrementExtraRefCountWasZero`, `NSExtraRefCount`), `NSSetUncaughtExceptionHandler` and `NSGetUncaughtExceptionHandler` |
 | Foundation constants | Every string constant objc2-foundation declares under the features Sidestep's crates enable, with macOS's value (run-loop modes, error domains and keys, file attribute and URL resource keys, defaults domains, notification names, exception names, locale keys, …); `NSZeroPoint`, `NSZeroSize`, `NSZeroRect`, `NSEdgeInsetsZero`, `NSFoundationVersionNumber` (macOS 26's); `kCFBooleanTrue`, `kCFBooleanFalse` and `kCFNull`, `kCFAbsoluteTimeIntervalSince1970` and `…1904` |
 | AppKit | `NSApp`; every string constant objc2-app-kit declares under Sidestep's features, with macOS's value (accessibility attributes, roles, notifications and keys, image names, document types and attributes, workspace keys, pasteboard types, …), `NSAppKitVersionNumber` (macOS 26's) and the other numbers; `NSApplicationMain`, `NSApplicationLoad`, `NSAccessibilityPostNotification(WithUserInfo)`, the drawing functions (`NSRectFill…`, `NSFrameRect…`, `NSDrawTiledRects`, `NSDrawColorTiledRects`, `NSDrawThreePartImage`, `NSDrawNinePartImage`, …), window depths (`NSBestDepth` and the rest), the window list (`NSCountWindows`, `NSWindowList`), typed file pasteboard types (`NSCreateFilenamePboardType`, `NSGetFileType`, …; the two `Create` functions return autoreleased strings, as measured on macOS, which objc2-app-kit 0.3.2's wrappers took ownership of until the objc2 fork's fix below), the services functions (no Services menu on Linux) and the rest objc2-app-kit declares under Sidestep's features, but for the known gaps below |
@@ -54,14 +54,20 @@ function that objc2-foundation, objc2-app-kit, objc2-core-foundation,
 objc2-core-text and objc2-quartz-core declare under the features Sidestep's
 crates enable, but for the known gaps below, so a symbol that stops being
 exported fails a Linux build of the test; `scripts/link-closure` writes it
-from the overlay's crates when the features or the exports change.
-CoreFoundation's functions count as declared by the features
-sidestep-foundation enables (`CFRunLoop`, `CFDate`, `CFAttributedString`,
-`CFDictionary`): the ones AppKit's crates turn on for the types their
-bindings name (CoreGraphics' and CoreText's) don't add to them (see Known
-gaps). `conformance/tests/constants.rs`, `conformance/tests/coretext.rs`
-and `conformance/tests/quartzcore.rs` check the string constants' values
-against macOS's.
+from the overlay's crates when the features or the exports change. The
+script works out those features as cargo resolves them for Linux (default
+features, `dep:` entries, `name/feature` entries with the feature they
+imply, weak `name?/feature` entries, optional dependencies' implicit
+features, target-specific dependencies), whichever of Sidestep's crates
+turns them on, and reads each item's `cfg` attributes as rustc evaluates
+them for `x86_64`/`aarch64-unknown-linux-gnu` (`all`, `any`, `not`,
+`feature`, `target_os`, `target_vendor`, `target_family`, `target_env`,
+`unix`, …), so nothing a Linux build can't declare is referenced. CI's
+lint job runs the script and fails if the files it writes differ from
+the checked-in ones or are new. `conformance/tests/constants.rs`,
+`conformance/tests/coretext.rs` and `conformance/tests/quartzcore.rs`
+check the string constants' values against macOS's, and
+`conformance/tests/cf_*.rs` the CoreFoundation functions' behaviour.
 
 dispatch2 links `-ldispatch` on Linux (objc2-foundation 0.3.2 doesn't
 depend on dispatch2; objc2-core-foundation and objc2-core-graphics do
@@ -72,7 +78,7 @@ succeeds, and the symbols above come from Sidestep itself.
 The blocks runtime follows Clang's published Block Implementation
 Specification.
 
-The CoreGraphics functions (349, and 53 constants) come from
+The CoreGraphics functions (349, and 55 constants) come from
 sidestep-appkit's `coregraphics` module, with the signatures
 objc2-core-graphics 0.3.2 declares; [architecture.md](architecture.md#coregraphics)
 describes them. Their objects are Objective-C objects of Sidestep-private
@@ -89,7 +95,8 @@ and 114). `crates/sidestep/tests/link_closure_imageio.rs`, which
 constant objc2-image-io declares under Sidestep's features, but for the
 known gaps below, as `link_closure.rs` does Foundation's, AppKit's and
 CoreFoundation's; `conformance/tests/imageio.rs` runs them against
-macOS's.
+macOS's. `crates/sidestep/tests/link_closure_coregraphics.rs` does the
+same for objc2-core-graphics (333 functions and 55 constants today).
 
 The CoreText functions (200, and 129 constants: all that objc2-core-text
 0.3.2 declares) come from sidestep-appkit's `coretext` module, with the
@@ -221,6 +228,80 @@ The QuartzCore functions (16, and 83 constants) come from sidestep-appkit's
   functions (`CFGregorianDateIsValid`, `CFAbsoluteTimeGetGregorianDate`,
   …), run loop sources (`CFRunLoopSourceCreate`, `CFRunLoopAddSource`, …)
   and the observer and timer `…GetContext` functions.
+- CoreFoundation, where Linux or Sidestep's data differ from macOS:
+  - `CFCalendarCreateWithIdentifier` makes Gregorian and ISO 8601
+    calendars only (NULL for the others). A locale whose calendar is
+    another (`en_US@calendar=buddhist`) keeps its `kCFLocaleCalendarIdentifier`
+    but answers `kCFLocaleCalendar` with a Gregorian calendar, and every
+    region's default calendar is Gregorian (macOS's is Islamic Umm al-Qura
+    for `ar_SA`, Buddhist for `th_TH`, Persian for `fa_IR`).
+  - Locales: display names are English whatever the display locale; the
+    names, currencies, separators, quotation marks, exemplar characters,
+    default scripts and Windows codes are tables measured on macOS 26,
+    with holes: a region's currency symbol is English's where macOS gives
+    the language's own (`th_TH`'s is `THB`, macOS's `฿`; `ar_EG`'s `EGP`),
+    and `zh_Hant_TW` quotes with “” (macOS 「」). A `@currency=` keyword
+    gives its currency and that currency's English symbol; keywords other
+    than `currency`, `calendar` and `collation` are ignored.
+    `CFLocaleCreateCanonicalLanguageIdentifierFromString("zh_TW")` is
+    `zh-TW` (macOS `zh-Hant`). NSLocale keeps an identifier as given where
+    `CFLocaleCreate` makes it canonical (`zh_Hant_TW` is `zh_TW`), as
+    before.
+  - Case: `CFStringUppercase`, `CFStringLowercase` and
+    `CFStringCapitalize` ignore the locale (Turkish `i` uppercases to `I`,
+    not `İ`; Dutch `ij` capitalizes to `Ij`, not `IJ`).
+  - `CFStringTransform` does the transforms that need no transliteration
+    data (stripping marks and diacritics, XML hex, fullwidth to halfwidth,
+    hiragana to katakana, and back); the Latin and script
+    transliterations and Unicode names return false. No hyphenation
+    (`CFStringIsHyphenationAvailableForLocale` is false).
+  - String encodings: eleven (Mac Roman, Windows Latin 1, ISO Latin 1,
+    ASCII, UTF-8, and UTF-16 and UTF-32 in each byte order) have names,
+    IANA names and code pages, and convert; macOS lists 105. Shift JIS,
+    EUC-JP, GB 18030, Big 5, KOI8-R, ISO 8859-15, code page 437 and the
+    rest are unknown (no name, IANA name or code page).
+  - `CFErrorCopyDescription` of an error in `NSOSStatusErrorDomain` or
+    `NSMachErrorDomain` isn't macOS's text (which names the status or
+    Mach error).
+  - `CFAttributedStringGetAttributes` (and `…GetAttribute`) can give a
+    different effective range from macOS's where runs have equal
+    attributes: macOS joins runs whose values are equal but different
+    objects (Sidestep doesn't), and after an attribute is removed
+    throughout, Sidestep joins runs macOS keeps apart. The longest
+    effective range is the same.
+  - Bidi levels (`CFAttributedStringGetBidiLevelsAndResolvedDirections`)
+    follow the Unicode bidi algorithm with its explicit embeddings, where
+    macOS gives different levels for an RLO in a right-to-left paragraph
+    (1 throughout, Sidestep 3) and different statistical directions with
+    RLE.
+  - Collections: a `CFDictionary` or `CFSet` made with callbacks other
+    than the `kCFType…CallBacks` (or `kCFCopyString…CallBacks`) is NULL;
+    arrays take any callbacks, or none, as on macOS.
+  - `CFMachPortCreate` and `CFMessagePortCreateLocal` return NULL (no Mach
+    ports, no bootstrap server), `CFMessagePortCreateRemote` finds no
+    port, and the other port functions take ports that can't exist.
+  - `CFFileSecurity` objects hold no owner, group, mode or ACL (the
+    functions setting them aren't declared for Linux); a file URL's
+    `kCFURLFileSecurityKey` is such an object.
+  - Streams: socket streams are plain TCP (SSL and SOCKS properties are
+    kept, not used); `CFReadStreamGetBuffer` gives a memory stream's
+    bytes only.
+  - Bundles: `CFBundleGetPlugIn` is NULL and resource maps don't open;
+    executables are ELF files, loaded with `dlopen`.
+  - URLs: no file reference URLs (a file URL of an existing item is its
+    own reference); bookmarks are Sidestep's own data, not macOS's;
+    security-scoped access always succeeds for file URLs; no volume
+    resource keys (`kCFURLVolumeNameKey` and the rest have no value).
+    `CFURLCreateAbsoluteURLWithBytes` in compatibility mode resolves as
+    macOS does against a base with a scheme and `//` (`http:`, `file:`);
+    against others (a relative base, `mailto:`) it resolves as without
+    the mode. Without it, resolution is `NSURL`'s, which differs from
+    macOS's at the edges: macOS keeps `.` and `..` segments against a base
+    with no path (`http://h`), gives `..` at the root as `/..` (Sidestep
+    `/../`), and keeps the base's fragment for an empty reference.
+  - `CFCharacterSetCreateWithCharactersInString` with characters outside
+    the BMP beside BMP ones keeps them whole (macOS keeps only their low
+    16 bits).
 - `NSFontIdentityMatrix` is a pointer to the six numbers, as objc2
   declares it (C declares the array itself).
 - Protocol objects have a null `isa`, so retaining one (which
@@ -246,14 +327,6 @@ The QuartzCore functions (16, and 83 constants) come from sidestep-appkit's
   `CGImageSourceCopyAuxiliaryDataInfoAtIndex` return NULL. HEIC, AVIF and
   the other types the codecs lack are read as ImageIO reads a type it
   doesn't know (a source of no type and no images).
-- CoreFoundation's feature groups that only AppKit's crates enable (for
-  the types CoreGraphics' and CoreText's bindings name: `CFArray`,
-  `CFBase`, `CFCGTypes`, `CFData`, `CFString`, `CFURL`) declare 234
-  functions and statics nobody exports (133 `CFURL` resource keys, 60
-  mutable `CFString` functions and string keys, 27 more `CFURL`
-  functions, 8 `CFArray` functions, and a few others), and 76 more that
-  Sidestep exports but the link closure doesn't check, since it takes
-  CoreFoundation's features from sidestep-foundation alone.
 - CoreText: `CTFontCopyAvailableTables` puts the tags in the array as
   `NSNumber`s (CoreText's array holds the bare tags, which Foundation's
   arrays of objects can't: a program reading them as integers gets the

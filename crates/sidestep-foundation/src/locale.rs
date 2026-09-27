@@ -258,19 +258,25 @@ impl NSLocaleImpl {
             "kCFLocaleVariantCodeKey" => p.variant.and_then(text),
             "kCFLocaleDecimalSeparatorKey" => text(separators(id).0),
             "kCFLocaleGroupingSeparatorKey" => text(separators(id).1),
-            _ => None,
+            other => {
+                // SAFETY: an NSLocaleImpl is an NSLocale.
+                let locale = unsafe { &*(self as *const Self).cast::<NSLocale>() };
+                crate::cf::locale::extra_value(locale, id, other).flatten()
+            }
         }
     }
 }
 
-/// Decimal and grouping separators, for the languages that differ from
-/// English.
+/// Decimal and grouping separators: the identifier's (language and
+/// region), else its language's, else English's, as macOS has them.
 fn separators(identifier: &str) -> (&'static str, &'static str) {
-    match parts(identifier).language {
-        "de" | "es" | "it" | "nl" | "pt" | "da" | "id" | "tr" => (",", "."),
-        "fr" | "ru" | "pl" | "cs" | "sv" | "fi" | "nb" | "uk" => (",", "\u{a0}"),
-        _ => (".", ","),
-    }
+    let p = parts(identifier);
+    let table = crate::cf::locale_data::SEPARATORS;
+    let find = |key: &str| table.binary_search_by(|(k, _, _)| (*k).cmp(key)).ok().map(|i| (table[i].1, table[i].2));
+    p.region
+        .and_then(|region| find(&format!("{}_{region}", p.language)))
+        .or_else(|| find(p.language))
+        .unwrap_or((".", ","))
 }
 
 /// A locale's identifier.

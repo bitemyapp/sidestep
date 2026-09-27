@@ -26,7 +26,9 @@ use objc2::runtime::{AnyClass, AnyObject, NSObject};
 use objc2::{ClassType, define_class};
 use objc2_foundation::{NSComparisonResult, NSRange, NSString, NSStringCompareOptions};
 
-use super::fold::{self, CASE_INSENSITIVE, FORCED_ORDERING, LITERAL, NUMERIC};
+use super::fold::{
+    self, CASE_INSENSITIVE, DIACRITIC_INSENSITIVE, FORCED_ORDERING, LITERAL, NUMERIC, WIDTH_INSENSITIVE,
+};
 use super::index::Text;
 use super::view::view;
 use super::wtf8;
@@ -173,13 +175,17 @@ pub(crate) fn compare_literal(a: &[u8], b: &[u8]) -> Ordering {
     }
 }
 
+/// What a literal comparison still folds or compares by value, as on
+/// macOS: case, diacritics, width and digit runs, when asked.
+const LITERAL_FOLDS: usize = CASE_INSENSITIVE | NUMERIC | DIACRITIC_INSENSITIVE | WIDTH_INSENSITIVE;
+
 /// `compare:options:` on two texts.
 pub(crate) fn compare(a: &Text, b: &Text, options: usize) -> Ordering {
     let numeric = options & NUMERIC != 0;
-    let (order, tie) = if options & LITERAL != 0 && options & (CASE_INSENSITIVE | NUMERIC) == 0 {
+    let (order, tie) = if options & LITERAL != 0 && options & LITERAL_FOLDS == 0 {
         (compare_literal(a.bytes, b.bytes), Ordering::Equal)
     } else {
-        let options = if options & LITERAL != 0 { options & (CASE_INSENSITIVE | NUMERIC) } else { options };
+        let options = if options & LITERAL != 0 { options & LITERAL_FOLDS } else { options };
         let p = common_start(a.bytes, b.bytes, numeric);
         compare_points(Folding::new(&a.bytes[p..], options), Folding::new(&b.bytes[p..], options), numeric)
     };
@@ -402,10 +408,14 @@ mod tests {
             }
             ((a.len() - i).cmp(&(b.len() - j)), tie)
         }
-        if options & LITERAL != 0 && options & (CASE_INSENSITIVE | NUMERIC) == 0 {
+        if options & LITERAL != 0 && options & LITERAL_FOLDS == 0 {
             return wtf8::units(a).cmp(wtf8::units(b));
         }
-        let fold_options = if options & LITERAL != 0 { options & CASE_INSENSITIVE } else { options };
+        let fold_options = if options & LITERAL != 0 {
+            options & (CASE_INSENSITIVE | DIACRITIC_INSENSITIVE | WIDTH_INSENSITIVE)
+        } else {
+            options
+        };
         let (order, tie) =
             points(&fold::fold_text(a, fold_options), &fold::fold_text(b, fold_options), options & NUMERIC != 0);
         if order != Ordering::Equal || options & FORCED_ORDERING == 0 {

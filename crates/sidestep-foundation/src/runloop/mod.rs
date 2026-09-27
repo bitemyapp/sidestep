@@ -202,7 +202,7 @@ impl RunLoop {
             for &mode in modes {
                 reg.add(mode, &s.common);
             }
-            s.known.extend(&reg.modes);
+            s.shared.note_modes(&reg.modes);
             let seq = s.next_seq();
             let entry = SourceEntry { order, seq, reg, flag: flag.clone(), perform: Rc::new(perform) };
             let at = s.sources.partition_point(|e| (e.order, e.seq) <= (order, seq));
@@ -221,7 +221,7 @@ impl RunLoop {
             if let Some(entry) = sources.iter_mut().find(|e| Arc::ptr_eq(&e.flag, &signal.flag)) {
                 entry.reg.add(mode, common);
                 let modes = entry.reg.modes.clone();
-                s.known.extend(&modes);
+                s.shared.note_modes(&modes);
             }
         });
     }

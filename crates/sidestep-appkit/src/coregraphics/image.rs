@@ -947,6 +947,11 @@ fn same_layout(a: &Layout, b: &Layout) -> bool {
         && a.decode == b.decode
 }
 
+/// The headroom CoreGraphics assumes for HDR content that doesn't state
+/// its own, as macOS gives it.
+#[unsafe(no_mangle)]
+pub static kCGDefaultHDRImageContentHeadroom: f32 = 4.926_108_4;
+
 // The file types CoreGraphics names images of files by.
 sidestep_foundation::constant_string!(
     #[doc(hidden)]

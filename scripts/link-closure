@@ -3,18 +3,22 @@
 extern static and function objc2-foundation, objc2-app-kit,
 objc2-core-foundation, objc2-core-text and objc2-quartz-core declare under
 the features Sidestep's crates enable on Linux, except the known gaps below
-(docs/abi.md, "Known gaps"); and crates/sidestep/tests/link_closure_imageio.rs,
-the same for objc2-image-io. A symbol Sidestep stops exporting then fails
-the test's link.
+(docs/abi.md, "Known gaps"); and the same for other frameworks' crates, a
+file each: link_closure_imageio.rs (objc2-image-io) and
+link_closure_coregraphics.rs (objc2-core-graphics). A symbol Sidestep stops
+exporting then fails the test's link.
 
 Run from the checkout after tools/objc2-overlay has written .objc2-overlay/:
 
-    scripts/link-closure                          # both files
+    scripts/link-closure                          # every file
     scripts/link-closure link_closure_imageio.rs  # the files named
 
 It reads the overlay's crates (their Cargo.toml features and the item
 declarations in src/generated, which are names and types only) and
-Sidestep's own manifests; it writes names only.
+Sidestep's own manifests; it writes names only. Features are resolved as
+cargo resolves them, and each item's cfg attributes evaluated as rustc
+evaluates them for Linux: an item appears only if a Linux build declares
+it.
 """
 import re
 import sys
@@ -35,6 +39,9 @@ GROUPS = {
     },
     "link_closure_imageio.rs": {
         "objc2-image-io": "objc2_image_io",
+    },
+    "link_closure_coregraphics.rs": {
+        "objc2-core-graphics": "objc2_core_graphics",
     },
 }
 CRATES = {crate: module for group in GROUPS.values() for crate, module in group.items()}
@@ -69,11 +76,33 @@ KNOWN_GAPS = [
     # ImageIO's metadata, a destination's source and auxiliary data.
     "CGImageDestinationAddImageAndMetadata", "CGImageDestinationCopyImageSource",
     "CGImageDestinationAddAuxiliaryDataInfo",
+    # CoreGraphics' window-server side (displays, their modes, the mouse),
+    # conic gradients, path set operations, color spaces as property lists
+    # or platform (ColorSync) objects, and HDR content light levels.
+    "CGDisplay*", "kCGDisplay*", "CGMainDisplayID", "CGOpenGLDisplayMaskToDisplayID", "CGGetLastMouseDelta",
+    "CGContextDrawConicGradient", "CGPathCreateCopyByNormalizing", "CGPathCreateCopyByUnioningPath",
+    "CGPathCreateCopyByIntersectingPath", "CGPathCreateCopyBySubtractingPath",
+    "CGPathCreateCopyBySymmetricDifferenceOfPath", "CGPathCreateCopyOfLineBySubtractingPath",
+    "CGPathCreateCopyOfLineByIntersectingPath", "CGPathCreateSeparateComponents", "CGPathIntersectsPath",
+    "CGColorSpaceCopyPropertyList", "CGColorSpaceCreateWithPropertyList",
+    "CGColorSpaceCreateWithPlatformColorSpace", "CGImageGetContentAverageLightLevel",
+    "CGImageCalculateContentAverageLightLevel", "CGImageCreateCopyWithContentAverageLightLevel",
+    "CGImageCreateCopyWithCalculatedHDRStats",
 ]
 
 
 def is_gap(name):
-    return any(name.endswith(g[1:]) if g.startswith("*") else name == g for g in KNOWN_GAPS)
+    """Whether a name is a known gap: listed, or matching a listed
+    `*suffix` or `prefix*`."""
+
+    def matches(gap):
+        if gap.startswith("*"):
+            return name.endswith(gap[1:])
+        if gap.endswith("*"):
+            return name.startswith(gap[:-1])
+        return name == gap
+
+    return any(matches(g) for g in KNOWN_GAPS)
 
 
 def overlay_dir(crate):
@@ -84,105 +113,322 @@ def overlay_dir(crate):
 
 
 def enabled_features():
-    enabled = {c: set() for c in CRATES}
-    for manifest in MANIFESTS:
-        doc = tomllib.loads((ROOT / manifest / "Cargo.toml").read_text())
+    """The features each of the overlay's crates is built with for Linux
+    when Sidestep's crates are, as cargo resolves them: what Sidestep's
+    normal dependencies ask for (default features unless turned off, the
+    workspace's entry's too), then all that implies. A feature's list
+    enables features (`name`), optional dependencies (`dep:name`) and
+    dependencies' features (`name/feature`, which also turns on the
+    feature called `name` if there is one, explicit or implicit; and
+    `name?/feature` only once something else enables `name`); an optional
+    dependency that no `dep:` entry names gets an implicit feature of its
+    own name; a dependency, once built, gets the features its declaration
+    names. Dependencies for other targets (a cfg that doesn't hold for
+    Linux) don't count."""
+    manifests = {d.name.rsplit("-", 1)[0]: tomllib.loads((d / "Cargo.toml").read_text()) for d in OVERLAY.glob("*-*")}
+    enabled = {c: set() for c in manifests}
+    built, deps_on, weak = set(), {c: set() for c in manifests}, {c: set() for c in manifests}
+
+    def dependencies(doc):
+        found = dict(doc.get("dependencies", {}))
         for key, table in doc.get("target", {}).items():
-            if "apple" in key and "not" not in key:
-                continue
-            for name, spec in table.get("dependencies", {}).items():
-                # CoreFoundation's functions are Foundation's to export: the
-                # features other crates enable for the types their bindings
-                # name (AppKit's CoreGraphics and CoreText) don't add to them.
-                if name == "objc2-core-foundation" and manifest != "crates/sidestep-foundation":
-                    continue
-                if name in enabled and isinstance(spec, dict):
-                    enabled[name].update(spec.get("features", []))
-    tables = {c: tomllib.loads((overlay_dir(c) / "Cargo.toml").read_text()).get("features", {}) for c in CRATES}
-    changed = True
-    while changed:
-        changed = False
-        for crate in CRATES:
-            for feature in list(enabled[crate]):
-                for implied in tables[crate].get(feature, []):
-                    dep, _, feat = implied.partition("/")
-                    dep, feat = (dep.rstrip("?"), feat) if feat else (crate, dep)
-                    # CoreText's features pull in the CoreFoundation types its
-                    # declarations name (character sets, sets, bundles); which
-                    # CoreFoundation functions are exported is up to the
-                    # CoreFoundation features Sidestep's crates enable.
-                    if crate == "objc2-core-text" and dep != crate:
-                        continue
-                    if dep in enabled and not feat.startswith("dep:") and feat not in enabled[dep]:
-                        enabled[dep].add(feat)
-                        changed = True
+            if target_holds(key):
+                found.update(table.get("dependencies", {}))
+        return found
+
+    def request(crate, features, default):
+        if crate not in manifests:
+            return
+        if crate not in built:
+            built.add(crate)
+            for name, spec in dependencies(manifests[crate]).items():
+                if not (isinstance(spec, dict) and spec.get("optional")):
+                    enable_dep(crate, name)
+        if default:
+            enable(crate, "default")
+        for feature in features:
+            enable(crate, feature)
+
+    def enable(crate, feature):
+        if feature in enabled[crate]:
+            return
+        enabled[crate].add(feature)
+        table = manifests[crate].get("features", {})
+        if feature not in table:
+            if feature in dependencies(manifests[crate]):
+                enable_dep(crate, feature)
+            return
+        for entry in table[feature]:
+            if entry.startswith("dep:"):
+                enable_dep(crate, entry[4:])
+            elif "/" in entry:
+                dep, feat = entry.split("/", 1)
+                if dep.endswith("?"):
+                    dep = dep[:-1]
+                    weak[crate].add((dep, feat))
+                    if dep in deps_on[crate]:
+                        forward(crate, dep, feat)
+                else:
+                    # Cargo turns on the feature named after the
+                    # dependency too, when there is one.
+                    if dep in table or implicit(crate, dep):
+                        enable(crate, dep)
+                    enable_dep(crate, dep)
+                    forward(crate, dep, feat)
+            else:
+                enable(crate, entry)
+
+    def implicit(crate, dep):
+        """Whether `dep` is an optional dependency with an implicit feature
+        of its name: one no `dep:` entry of the crate's features names."""
+        spec = dependencies(manifests[crate]).get(dep)
+        if not (isinstance(spec, dict) and spec.get("optional")):
+            return False
+        entries = manifests[crate].get("features", {}).values()
+        return all(entry != "dep:" + dep for listed in entries for entry in listed)
+
+    def enable_dep(crate, dep):
+        if dep in deps_on[crate]:
+            return
+        spec = dependencies(manifests[crate]).get(dep)
+        if spec is None:
+            return
+        deps_on[crate].add(dep)
+        spec = spec if isinstance(spec, dict) else {}
+        request(spec.get("package", dep), spec.get("features", []), spec.get("default-features", True))
+        for d, feat in list(weak[crate]):
+            if d == dep:
+                forward(crate, dep, feat)
+
+    def forward(crate, dep, feat):
+        spec = dependencies(manifests[crate]).get(dep)
+        package = spec.get("package", dep) if isinstance(spec, dict) else dep
+        if package in manifests:
+            enable(package, feat)
+
+    workspace = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["dependencies"]
+    for manifest in MANIFESTS:
+        for name, spec in dependencies(tomllib.loads((ROOT / manifest / "Cargo.toml").read_text())).items():
+            spec = spec if isinstance(spec, dict) else {"version": spec}
+            features, default = list(spec.get("features", [])), spec.get("default-features", True)
+            if spec.get("workspace"):
+                shared = workspace.get(name, {})
+                shared = shared if isinstance(shared, dict) else {}
+                features += shared.get("features", [])
+                default = shared.get("default-features", True)
+            request(spec.get("package", name), features, default)
     return enabled
 
 
-def split_args(text):
-    out, depth, cur = [], 0, ""
-    for ch in text:
-        depth += ch == "("
-        depth -= ch == ")"
-        if ch == "," and depth == 0:
-            out.append(cur)
-            cur = ""
-        else:
-            cur += ch
-    return [a for a in out + [cur] if a.strip()]
+def target_holds(key):
+    """Whether a `[target.…]` table's key (a `cfg(…)` or a target triple)
+    applies to Sidestep's Linux targets."""
+    toks = list(tokens(key))
+    if toks[:2] == ["cfg", "("] and toks[-1] == ")":
+        return cfg_holds(toks[2:-1], set())
+    return key in ("aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu")
+
+
+# Rust source as tokens: comments and whitespace left out, strings and
+# char literals whole (so that no bracket inside one counts).
+TOKEN = re.compile(
+    r"""
+      (?P<space>\s+)
+    | (?P<comment>//[^\n]*|/\*.*?\*/)
+    | (?P<string>b?r(?P<hashes>\#*)".*?"(?P=hashes)|b?"(?:\\.|[^"\\])*")
+    | (?P<char>b?'(?:\\.|[^'\\])')
+    | (?P<word>'?[A-Za-z_][A-Za-z0-9_]*|\d[\w.]*)
+    | (?P<punct>::|->|=>|.)
+    """,
+    re.S | re.X,
+)
+
+
+def tokens(source):
+    for m in TOKEN.finditer(source):
+        if m.lastgroup not in ("space", "comment", "hashes"):
+            yield m.group()
+
+
+# What rustc sets for the Linux targets Sidestep builds for (aarch64 and
+# x86_64-unknown-linux-gnu): the names and values the overlay's crates test.
+# Anything else is an error, so that a cfg this script doesn't know can't
+# silently decide what the tests name.
+TARGET = {
+    "target_os": {"linux"},
+    "target_vendor": {"unknown"},
+    "target_family": {"unix"},
+    "target_env": {"gnu"},
+    "target_endian": {"little"},
+    "target_pointer_width": {"64"},
+}
+FLAGS = {"unix": True, "windows": False, "doc": False, "docsrs": False, "test": False, "miri": False}
 
 
 def cfg_holds(expr, features):
-    expr = expr.strip()
-    if m := re.fullmatch(r'feature\s*=\s*"([^"]+)"', expr):
-        return m.group(1) in features
-    if m := re.fullmatch(r'target_os\s*=\s*"([^"]+)"', expr):
-        return m.group(1) == "linux"
-    if m := re.fullmatch(r'(all|any|not)\((.*)\)', expr, re.S):
-        values = [cfg_holds(a, features) for a in split_args(m.group(2))]
-        return {"all": all, "any": any, "not": lambda v: not v[0]}[m.group(1)](values)
-    # target_vendor = "apple", test, debug_assertions, doc, …
-    return False
+    """Whether a cfg predicate, as tokens (the inside of `cfg(…)`), holds for
+    Linux with `features`, as rustc evaluates it."""
+    value, rest = cfg_predicate(list(expr), features)
+    if rest:
+        sys.exit(f"link-closure: can't read cfg({' '.join(expr)})")
+    return value
+
+
+def cfg_predicate(toks, features):
+    if not toks:
+        sys.exit("link-closure: an empty cfg predicate")
+    name, rest = toks[0], toks[1:]
+    if name in ("all", "any", "not") and rest[:1] == ["("]:
+        values, rest = [], rest[1:]
+        while rest[:1] != [")"]:
+            value, rest = cfg_predicate(rest, features)
+            values.append(value)
+            if rest[:1] == [","]:
+                rest = rest[1:]
+            elif rest[:1] != [")"]:
+                sys.exit(f"link-closure: can't read cfg list at {' '.join(rest[:5])}")
+        rest = rest[1:]
+        if name == "not":
+            if len(values) != 1:
+                sys.exit("link-closure: not() takes one predicate")
+            return not values[0], rest
+        return (all if name == "all" else any)(values), rest
+    if rest[:1] == ["="]:
+        literal = rest[1] if len(rest) > 1 and rest[1].startswith('"') else None
+        if literal is None:
+            sys.exit(f"link-closure: can't read cfg {name} = …")
+        literal = literal[1:-1]
+        if name == "feature":
+            return literal in features, rest[2:]
+        if name in TARGET:
+            return literal in TARGET[name], rest[2:]
+        sys.exit(f"link-closure: cfg {name} = \"{literal}\" isn't known here (target_arch differs between the targets)")
+    if name in FLAGS:
+        return FLAGS[name], rest
+    sys.exit(f"link-closure: cfg {name} isn't known here")
+
+
+class Item:
+    """An item of a Rust file: its outer attributes' cfgs (each a token
+    list), the cfgs of the items around it, the path attribute's value and
+    its tokens up to its body or `;`."""
+
+    def __init__(self, cfgs, outer, path, head):
+        self.cfgs, self.outer, self.path, self.head = cfgs, outer, path, head
+
+    def holds(self, features):
+        return all(cfg_holds(c, features) for c in self.outer + self.cfgs)
+
+    def name(self, *kinds):
+        """The item's name if it is one of `kinds` ("fn", "static", "mod"),
+        after its visibility and qualifiers."""
+        head = self.head
+        while head and head[0] in ("pub", "unsafe", "safe", "extern", "const", "async") or (
+            head and head[0].startswith('"')
+        ):
+            head = head[1:]
+            if head[:1] == ["("]:
+                head = head[head.index(")") + 1 :]
+        if head[:1] and head[0] in kinds:
+            head = head[1:]
+            if head[:1] == ["mut"]:
+                head = head[1:]
+            return head[0] if head else None
+        return None
+
+
+def items(source):
+    """The items of a Rust file ending in `;`: each with the cfgs that gate
+    it and whether it sits in an `extern "C"` block. Attributes on
+    parameters and fields (inside parentheses or brackets) aren't an item's;
+    a scope (a block, a function's body) keeps the cfgs of the item it is
+    the body of."""
+    toks = list(tokens(source))
+    out = []
+    # Brace scopes: (cfgs, whether an extern block); brackets: the open ones.
+    scopes, brackets = [([], False)], []
+    pending, path, head = [], None, []
+    i = 0
+    while i < len(toks):
+        tok = toks[i]
+        if tok == "#" and toks[i + 1 : i + 2] in (["["], ["!"]):
+            inner = toks[i + 1] == "!"
+            j = i + (2 if inner else 1)
+            depth, k = 0, j
+            while True:
+                depth += toks[k] in ("(", "[", "{")
+                depth -= toks[k] in (")", "]", "}")
+                k += 1
+                if depth == 0:
+                    break
+            attr = toks[j + 1 : k - 1]
+            i = k
+            if brackets and brackets[-1] != "{":
+                continue
+            if attr[:2] == ["cfg", "("]:
+                cfg = attr[2:-1]
+                if inner:
+                    scopes[-1][0].append(cfg)
+                else:
+                    pending.append(cfg)
+            elif attr[:2] == ["path", "="] and not inner:
+                path = attr[2][1:-1]
+            continue
+        i += 1
+        if tok in ("(", "["):
+            brackets.append(tok)
+            head.append(tok)
+        elif tok in (")", "]"):
+            if brackets:
+                brackets.pop()
+            head.append(tok)
+        elif tok == "{":
+            extern = [t for t in head if t != "unsafe"][:2]
+            is_extern = len(extern) == 2 and extern[0] == "extern" and extern[1].startswith('"C')
+            if brackets and brackets[-1] != "{":
+                brackets.append(tok)
+                scopes.append(([], False))
+            else:
+                brackets.append(tok)
+                scopes.append((pending, is_extern))
+            pending, path, head = [], None, []
+        elif tok == "}":
+            if brackets:
+                brackets.pop()
+            if len(scopes) > 1:
+                scopes.pop()
+            pending, path, head = [], None, []
+        elif tok == ";" and (not brackets or brackets[-1] == "{"):
+            outer = [c for scope, _ in scopes for c in scope]
+            out.append((Item(pending, outer, path, head), scopes[-1][1]))
+            pending, path, head = [], None, []
+        else:
+            head.append(tok)
+    return out
 
 
 def declarations(crate, features):
     """(kind, name) of each extern item the enabled features declare."""
     generated = overlay_dir(crate) / "src/generated"
-    modules = (generated / "mod.rs").read_text()
+    modules = items((generated / "mod.rs").read_text())
     # What the crate re-exports by name (C functions wrapped as methods,
     # such as the `…GetTypeID`s, aren't).
     public = {
-        name
-        for cfg, name in re.findall(r'(?:#\[cfg\((.*)\)\]\n)?pub use self::__\w+::(\w+);', modules)
-        if not cfg or cfg_holds(cfg, features)
+        item.head[-1]
+        for item, _ in modules
+        if item.head[:4] == ["pub", "use", "self", "::"] and len(item.head) == 7 and item.holds(features)
     }
     found = []
-    for feature, path in re.findall(r'#\[cfg\(feature = "([^"]+)"\)\]\s*#\[path = "([^"]+)"\]', modules):
-        if feature not in features:
+    for module, _ in modules:
+        if module.name("mod") is None or module.path is None or not module.holds(features):
             continue
-        scopes, pending = [([], False)], []
-        for line in (generated / path).read_text().splitlines():
-            text = line.strip()
-            if text.startswith("//"):
+        for item, extern in items((generated / module.path).read_text()):
+            if not extern:
                 continue
-            if m := re.match(r'#\[cfg\((.*)\)\]$', text):
-                pending.append(m.group(1))
-                continue
-            if text.startswith("#["):
-                continue
-            if any(extern for _, extern in scopes):
-                item = re.match(r'(?:pub\s+)?(static|fn)\s+(\w+)\s*[:(]', text)
-                cfgs = [c for scope, _ in scopes for c in scope] + pending
-                if item and item.group(2) in public and all(cfg_holds(c, features) for c in cfgs):
-                    found.append((item.group(1), item.group(2)))
-            opens, closes = text.count("{"), text.count("}")
-            if opens > closes:
-                scopes.append((pending, bool(re.match(r'(?:unsafe\s+)?extern\s+"C(-unwind)?"\s*\{', text))))
-                scopes.extend(([], False) for _ in range(opens - closes - 1))
-            for _ in range(closes - opens):
-                if len(scopes) > 1:
-                    scopes.pop()
-            pending = []
+            for kind in ("fn", "static"):
+                name = item.name(kind)
+                if name and name in public and item.holds(features):
+                    found.append((kind, name))
     return found
 
 
@@ -204,11 +450,12 @@ def write(file, crates, features):
             seen.add(name)
             (statics if kind == "static" else functions).append(f"{module}::{name}")
     listed = list(crates)
+    verb = "declare" if len(listed) > 1 else "declares"
     listed = ", ".join(listed[:-1]) + " and " + listed[-1] if len(listed) > 1 else listed[0]
     body = "\n".join(
         [
             *textwrap.wrap(
-                f"Every extern static and function {listed} declare under the features Sidestep's crates"
+                f"Every extern static and function {listed} {verb} under the features Sidestep's crates"
                 " enable, referenced so a Linux build links each: one Sidestep stops exporting fails this"
                 " test's link. The known gaps (docs/abi.md) are left out. Written by `scripts/link-closure`;"
                 " run it again when the features or the exports change.",

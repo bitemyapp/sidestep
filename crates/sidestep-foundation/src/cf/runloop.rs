@@ -103,6 +103,16 @@ pub unsafe extern "C-unwind" fn CFRunLoopCopyCurrentMode(rl: *const CFRunLoop) -
     }
 }
 
+/// The names of the modes the loop has had timers, observers, sources or
+/// blocks in, or run in: the default mode at least.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn CFRunLoopCopyAllModes(rl: *const CFRunLoop) -> *mut c_void {
+    // SAFETY: the caller passes a run loop.
+    let modes = unsafe { shared(rl) }.known_modes();
+    let names: Vec<&NSString> = modes.into_iter().filter(|&m| m != Mode::COMMON).map(Mode::name).collect();
+    Retained::into_raw(objc2_foundation::NSArray::from_slice(&names)).cast()
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn CFRunLoopAddCommonMode(rl: *const CFRunLoop, mode_name: *const NSString) {
     // SAFETY: the caller passes a run loop and a mode.

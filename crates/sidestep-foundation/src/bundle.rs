@@ -15,10 +15,13 @@
 //! dictionary is empty and `bundleIdentifier` is nil.
 //!
 //! Resources are looked up in the resource directory (or the named
-//! subdirectory of it), then in `Base.lproj` and `en.lproj`. Bundles are
-//! made once per path and live for the rest of the process.
-//! `localizedStringForKey:value:table:` returns the value, or the key when
-//! the value is nil or empty.
+//! subdirectory of it), then in `Base.lproj`, the preferred localization's
+//! `.lproj` and the development region's; a lookup for a localization
+//! named looks in the resource directory and that localization's alone.
+//! Bundles are made once per path and live for the rest of the process.
+//! `localizedStringForKey:value:table:` looks the key up in the table's
+//! `.strings` files; when it isn't there, it returns the value, or the
+//! key when the value is nil or empty.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -168,9 +171,9 @@ define_class!(
             name: Option<&NSString>,
             ext: Option<&NSString>,
             directory: Option<&NSString>,
-            _localization: Option<&NSString>,
+            localization: Option<&NSString>,
         ) -> Option<Retained<NSString>> {
-            self.find(name, ext, directory).map(|p| path_string(&p))
+            self.find_localized(name, ext, directory, localization).map(|p| path_string(&p))
         }
 
         #[unsafe(method_id(URLForResource:withExtension:))]
@@ -194,9 +197,9 @@ define_class!(
             name: Option<&NSString>,
             ext: Option<&NSString>,
             directory: Option<&NSString>,
-            _localization: Option<&NSString>,
+            localization: Option<&NSString>,
         ) -> Option<Retained<NSURL>> {
-            self.find(name, ext, directory).as_deref().and_then(crate::url::file_url)
+            self.find_localized(name, ext, directory, localization).as_deref().and_then(crate::url::file_url)
         }
 
         #[unsafe(method_id(pathsForResourcesOfType:inDirectory:))]
@@ -214,11 +217,17 @@ define_class!(
         }
 
         #[unsafe(method_id(localizedStringForKey:value:table:))]
-        fn localized_string(&self, key: &NSString, value: Option<&NSString>, _table: Option<&NSString>) -> Retained<NSString> {
-            match value.map(|v| v.to_string()).filter(|v| !v.is_empty()) {
-                Some(value) => NSString::from_str(&value),
-                None => NSString::from_str(&key.to_string()),
-            }
+        fn localized_string_for_key(
+            &self,
+            key: &NSString,
+            value: Option<&NSString>,
+            table: Option<&NSString>,
+        ) -> Retained<NSString> {
+            // SAFETY: an NSBundleImpl is an NSBundle.
+            let bundle = unsafe { &*(self as *const Self).cast::<objc2_foundation::NSBundle>() };
+            let value = value.map(|v| v.to_string());
+            let table = table.map(|t| t.to_string());
+            NSString::from_str(&localized_string(bundle, &key.to_string(), value.as_deref(), table.as_deref(), None))
         }
 
         #[unsafe(method(load))]
@@ -306,6 +315,24 @@ impl NSBundleImpl {
         None
     }
 
+    fn find_localized(
+        &self,
+        name: Option<&NSString>,
+        ext: Option<&NSString>,
+        directory: Option<&NSString>,
+        localization: Option<&NSString>,
+    ) -> Option<PathBuf> {
+        // SAFETY: an NSBundleImpl is an NSBundle.
+        let bundle = unsafe { &*(self as *const Self).cast::<objc2_foundation::NSBundle>() };
+        let (name, ext, directory, localization) = (
+            name.map(|n| n.to_string()),
+            ext.map(|e| e.to_string()),
+            directory.map(|d| d.to_string()),
+            localization.map(|l| l.to_string()),
+        );
+        find_resource(bundle, name.as_deref(), ext.as_deref(), directory.as_deref(), localization.as_deref())
+    }
+
     fn find_all(&self, ext: Option<&NSString>, directory: Option<&NSString>) -> Vec<PathBuf> {
         let ext = extension(ext);
         let directory = directory.map(|d| d.to_string());
@@ -314,13 +341,373 @@ impl NSBundleImpl {
 
     /// The directories a resource may be in, in search order.
     fn search_dirs(&self, directory: Option<&str>) -> Vec<PathBuf> {
+        self.search_dirs_for(directory, None)
+    }
+
+    /// The directories a resource may be in, in search order, as measured
+    /// on macOS: for a localization asked for, the resource directory and
+    /// that localization's `.lproj` alone; else the resource directory,
+    /// `Base.lproj`, the preferred localization's, then the development
+    /// region's (English's under either of its names, `en` and `English`).
+    fn search_dirs_for(&self, directory: Option<&str>, localization: Option<&str>) -> Vec<PathBuf> {
         let resources = &self.ivars().layout.resources;
         let sub = |base: PathBuf| match directory {
             Some(d) if !d.is_empty() => base.join(d),
             _ => base,
         };
-        vec![sub(resources.clone()), sub(resources.join("Base.lproj")), sub(resources.join("en.lproj"))]
+        let names: Vec<String> = match localization {
+            Some(localization) => vec![localization.to_string()],
+            None => {
+                let mut names = vec!["Base".to_string()];
+                let chosen = [Some(preferred_localization(self)), self.info_string("CFBundleDevelopmentRegion")];
+                for name in chosen.into_iter().flatten() {
+                    let other = match name.as_str() {
+                        "en" => Some("English"),
+                        "English" => Some("en"),
+                        _ => None,
+                    };
+                    for name in std::iter::once(name.as_str()).chain(other) {
+                        if !names.iter().any(|n| n == name) {
+                            names.push(name.to_string());
+                        }
+                    }
+                }
+                names
+            }
+        };
+        std::iter::once(sub(resources.clone()))
+            .chain(names.iter().map(|name| sub(resources.join(format!("{name}.lproj")))))
+            .collect()
     }
+}
+
+/// A bundle's parts.
+pub(crate) fn layout(bundle: &objc2_foundation::NSBundle) -> &Layout {
+    // SAFETY: every NSBundle is an instance of NSBundleImpl.
+    &unsafe { &*(bundle as *const objc2_foundation::NSBundle).cast::<NSBundleImpl>() }.ivars().layout
+}
+
+fn imp(bundle: &objc2_foundation::NSBundle) -> &NSBundleImpl {
+    // SAFETY: every NSBundle is an instance of NSBundleImpl.
+    unsafe { &*(bundle as *const objc2_foundation::NSBundle).cast::<NSBundleImpl>() }
+}
+
+/// A bundle's `Info.plist`, as it is.
+pub(crate) fn info(bundle: &objc2_foundation::NSBundle) -> Option<plist::Dictionary> {
+    imp(bundle).info().cloned()
+}
+
+/// The first resource named `name` (or the first of the type) for a
+/// localization.
+pub(crate) fn find_resource(
+    bundle: &objc2_foundation::NSBundle,
+    name: Option<&str>,
+    ext: Option<&str>,
+    directory: Option<&str>,
+    localization: Option<&str>,
+) -> Option<PathBuf> {
+    let ext = ext.map(|e| e.trim_start_matches('.').to_string()).unwrap_or_default();
+    for dir in imp(bundle).search_dirs_for(directory, localization) {
+        match name.filter(|n| !n.is_empty()) {
+            Some(name) => {
+                let candidate = dir.join(if ext.is_empty() { name.to_string() } else { format!("{name}.{ext}") });
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+            }
+            None => {
+                if let Some(first) = files_with_extension(&dir, &ext).into_iter().next() {
+                    return Some(first);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Every resource of a type for a localization.
+pub(crate) fn find_resources(
+    bundle: &objc2_foundation::NSBundle,
+    ext: Option<&str>,
+    directory: Option<&str>,
+    localization: Option<&str>,
+) -> Vec<PathBuf> {
+    let ext = ext.map(|e| e.trim_start_matches('.').to_string()).unwrap_or_default();
+    imp(bundle)
+        .search_dirs_for(directory, localization)
+        .iter()
+        .flat_map(|dir| files_with_extension(dir, &ext))
+        .collect()
+}
+
+/// The localizations a bundle has: its `.lproj` directories' names.
+pub(crate) fn localizations_in(resources: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(resources) else { return Vec::new() };
+    let mut out: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().to_str().and_then(|n| n.strip_suffix(".lproj")).map(str::to_string))
+        .collect();
+    out.sort();
+    out
+}
+
+/// Of `available`, the one the user prefers most (their preferred
+/// languages matched whole, then by language), or the first.
+pub(crate) fn preferred_of(available: &[String], preferred: &[String]) -> Option<String> {
+    let language = |id: &str| id.split(['-', '_']).next().unwrap_or("").to_ascii_lowercase();
+    for want in preferred {
+        let want_dashed = want.replace('_', "-");
+        if let Some(found) = available.iter().find(|a| a.replace('_', "-").eq_ignore_ascii_case(&want_dashed)) {
+            return Some(found.clone());
+        }
+        if let Some(found) = available.iter().find(|a| language(a) == language(want)) {
+            return Some(found.clone());
+        }
+    }
+    available.first().cloned()
+}
+
+/// The user's preferred languages.
+pub(crate) fn preferred_languages() -> Vec<String> {
+    objc2_foundation::NSLocale::preferredLanguages().iter().map(|l| l.to_string()).collect()
+}
+
+/// The localization a bundle's resources are looked up in: the user's
+/// preferred one of those it has, else its development region, else
+/// English.
+fn preferred_localization(bundle: &NSBundleImpl) -> String {
+    let available = localizations_in(&bundle.ivars().layout.resources);
+    let preferred = preferred_languages();
+    let chosen = available.iter().any(|a| a != "Base").then(|| {
+        let real: Vec<String> = available.iter().filter(|a| *a != "Base").cloned().collect();
+        preferred_of(&real, &preferred)
+    });
+    chosen.flatten().or_else(|| bundle.info_string("CFBundleDevelopmentRegion")).unwrap_or_else(|| "en".to_string())
+}
+
+/// The strings of a `.strings` table (`Localizable` without one) for a
+/// localization, from its `.lproj`, then `Base.lproj`: an old-style
+/// property list of strings (UTF-8, or UTF-16 with a byte-order mark), or
+/// an XML or binary one.
+pub(crate) fn strings_table(
+    bundle: &objc2_foundation::NSBundle,
+    table: Option<&str>,
+    localization: Option<&str>,
+) -> HashMap<String, String> {
+    let imp = imp(bundle);
+    let table = table.filter(|t| !t.is_empty()).unwrap_or("Localizable");
+    let localization = localization.map_or_else(|| preferred_localization(imp), str::to_string);
+    let resources = &imp.ivars().layout.resources;
+    let mut out = HashMap::new();
+    // A table outside every .lproj counts for every localization, below
+    // the localized ones.
+    for dir in [resources.clone(), resources.join("Base.lproj"), resources.join(format!("{localization}.lproj"))] {
+        if let Ok(bytes) = std::fs::read(dir.join(format!("{table}.strings"))) {
+            out.extend(parse_strings(&bytes));
+        }
+    }
+    out
+}
+
+/// The pairs of a strings file.
+pub(crate) fn parse_strings(bytes: &[u8]) -> Vec<(String, String)> {
+    if bytes.starts_with(b"bplist") || bytes.starts_with(b"<?xml") {
+        let Some((plist::Value::Dictionary(dict), _)) = crate::plist::parse(bytes) else { return Vec::new() };
+        return dict.into_iter().filter_map(|(k, v)| Some((k, v.into_string()?))).collect();
+    }
+    let text = match bytes {
+        [0xff, 0xfe, rest @ ..] => String::from_utf16_lossy(
+            &rest.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect::<Vec<_>>(),
+        ),
+        [0xfe, 0xff, rest @ ..] => String::from_utf16_lossy(
+            &rest.as_chunks::<2>().0.iter().map(|c| u16::from_be_bytes(*c)).collect::<Vec<_>>(),
+        ),
+        _ => String::from_utf8_lossy(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes)).into_owned(),
+    };
+    let mut tokens = StringsTokens { chars: text.chars().peekable() };
+    let mut out = Vec::new();
+    while let Some(Token::Text(key)) = tokens.next_token() {
+        match tokens.next_token() {
+            Some(Token::Equals) => {
+                let Some(Token::Text(value)) = tokens.next_token() else { break };
+                out.push((key, value));
+                // The `;` after the pair.
+                if tokens.next_token() != Some(Token::Semicolon) {
+                    break;
+                }
+            }
+            // `"key";` stands for `"key" = "key";`.
+            Some(Token::Semicolon) => out.push((key.clone(), key)),
+            _ => break,
+        }
+    }
+    out
+}
+
+/// A token of a `.strings` file.
+#[derive(PartialEq)]
+enum Token {
+    /// A quoted string's text (escapes resolved) or a bare word.
+    Text(String),
+    Equals,
+    Semicolon,
+}
+
+/// What octal escapes from `\200` to `\377` stand for (NEXTSTEP's
+/// characters), as measured on macOS; the last two are NUL there.
+const NEXTSTEP_HIGH: [u16; 128] = [
+    0xa0, 0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc7, 0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf, 0xd0, 0xd1, 0xd2,
+    0xd3, 0xd4, 0xd5, 0xd6, 0xd9, 0xda, 0xdb, 0xdc, 0xdd, 0xde, 0xb5, 0xd7, 0xf7, 0xa9, 0xa1, 0xa2, 0xa3, 0x2044, 0xa5,
+    0x192, 0xa7, 0xa4, 0x2019, 0x201c, 0xab, 0x2039, 0x203a, 0xfb01, 0xfb02, 0xae, 0x2013, 0x2020, 0x2021, 0xb7, 0xa6,
+    0xb6, 0x2022, 0x201a, 0x201e, 0x201d, 0xbb, 0x2026, 0x2030, 0xac, 0xbf, 0xb9, 0x2cb, 0xb4, 0x2c6, 0x2dc, 0xaf,
+    0x2d8, 0x2d9, 0xa8, 0xb2, 0x2da, 0xb8, 0xb3, 0x2dd, 0x2db, 0x2c7, 0x2014, 0xb1, 0xbc, 0xbd, 0xbe, 0xe0, 0xe1, 0xe2,
+    0xe3, 0xe4, 0xe5, 0xe7, 0xe8, 0xe9, 0xea, 0xeb, 0xec, 0xc6, 0xed, 0xaa, 0xee, 0xef, 0xf0, 0xf1, 0x141, 0xd8, 0x152,
+    0xba, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xe6, 0xf9, 0xfa, 0xfb, 0x131, 0xfc, 0xfd, 0x142, 0xf8, 0x153, 0xdf, 0xfe,
+    0xff, 0, 0,
+];
+
+struct StringsTokens<I: Iterator<Item = char>> {
+    chars: std::iter::Peekable<I>,
+}
+
+impl<I: Iterator<Item = char>> StringsTokens<I> {
+    /// The next token, comments and white space skipped.
+    fn next_token(&mut self) -> Option<Token> {
+        loop {
+            match self.chars.peek()? {
+                c if c.is_whitespace() => {
+                    self.chars.next();
+                }
+                '/' => {
+                    self.chars.next();
+                    match self.chars.next()? {
+                        '/' => while self.chars.next().is_some_and(|c| c != '\n') {},
+                        '*' => {
+                            let mut last = ' ';
+                            for c in self.chars.by_ref() {
+                                if last == '*' && c == '/' {
+                                    break;
+                                }
+                                last = c;
+                            }
+                        }
+                        _ => return None,
+                    }
+                }
+                _ => break,
+            }
+        }
+        let c = self.chars.next()?;
+        match c {
+            '=' => Some(Token::Equals),
+            ';' => Some(Token::Semicolon),
+            '"' | '\'' => self.quoted(c).map(Token::Text),
+            c if bare(c) => {
+                let mut out = c.to_string();
+                while let Some(&c) = self.chars.peek().filter(|&&c| bare(c)) {
+                    out.push(c);
+                    self.chars.next();
+                }
+                Some(Token::Text(out))
+            }
+            _ => None,
+        }
+    }
+
+    /// A quoted string's text, after its opening `quote`, as macOS reads
+    /// it: `\a`, `\b`, `\f`, `\n`, `\r`, `\t` and `\v`; one to three
+    /// octal digits (NEXTSTEP's characters from `\200`); `\U` and one to
+    /// four hex digits, a UTF-16 unit (two make a surrogate pair); any
+    /// other character escaped is itself.
+    fn quoted(&mut self, quote: char) -> Option<String> {
+        let mut units: Vec<u16> = Vec::new();
+        let push = |units: &mut Vec<u16>, c: char| units.extend(c.encode_utf16(&mut [0; 2]).iter());
+        loop {
+            match self.chars.next()? {
+                c if c == quote => return Some(String::from_utf16_lossy(&units)),
+                '\\' => match self.chars.next()? {
+                    'a' => units.push(7),
+                    'b' => units.push(8),
+                    'f' => units.push(12),
+                    'n' => units.push(10),
+                    'r' => units.push(13),
+                    't' => units.push(9),
+                    'v' => units.push(11),
+                    d @ '0'..='7' => {
+                        let mut value = d.to_digit(8)?;
+                        for _ in 0..2 {
+                            match self.chars.peek().and_then(|c| c.to_digit(8)) {
+                                Some(digit) => {
+                                    value = value * 8 + digit;
+                                    self.chars.next();
+                                }
+                                None => break,
+                            }
+                        }
+                        let value = value & 0xff;
+                        units.push(if value < 0x80 { value as u16 } else { NEXTSTEP_HIGH[value as usize - 0x80] });
+                    }
+                    'U' => {
+                        let mut value = 0u32;
+                        for _ in 0..4 {
+                            match self.chars.peek().and_then(|c| c.to_digit(16)) {
+                                Some(digit) => {
+                                    value = value * 16 + digit;
+                                    self.chars.next();
+                                }
+                                None => break,
+                            }
+                        }
+                        units.push(value as u16);
+                    }
+                    other => push(&mut units, other),
+                },
+                c => push(&mut units, c),
+            }
+        }
+    }
+}
+
+/// Whether a character may be in an unquoted word.
+fn bare(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "_$+/:.-".contains(c)
+}
+
+/// A bundle's strings looked up: the table's value for `key`, else
+/// `value` if it isn't empty, else the key.
+pub(crate) fn localized_string(
+    bundle: &objc2_foundation::NSBundle,
+    key: &str,
+    value: Option<&str>,
+    table: Option<&str>,
+    localization: Option<&str>,
+) -> String {
+    match strings_table(bundle, table, localization).remove(key) {
+        Some(found) => found,
+        None => value.filter(|v| !v.is_empty()).unwrap_or(key).to_string(),
+    }
+}
+
+/// The bundles made so far, the main one first.
+pub(crate) fn all() -> Vec<Retained<objc2_foundation::NSBundle>> {
+    let main = shared_main();
+    let mut out: Vec<Retained<objc2_foundation::NSBundle>> = vec![unsafe { Retained::cast_unchecked(main.clone()) }];
+    for ptr in cached_bundles() {
+        if ptr != Retained::as_ptr(&main) as usize {
+            // SAFETY: bundles in the table are never released.
+            if let Some(bundle) = unsafe { Retained::retain(ptr as *mut objc2_foundation::NSBundle) } {
+                out.push(bundle);
+            }
+        }
+    }
+    out
+}
+
+/// The bundle at a directory, made once.
+pub(crate) fn at_path(path: &Path) -> Option<Retained<objc2_foundation::NSBundle>> {
+    // SAFETY: NSBundleImpl is NSBundle's class.
+    with_path(&path.to_string_lossy()).map(|b| unsafe { Retained::cast_unchecked(b) })
 }
 
 /// A resource type without a leading dot; empty for none.
@@ -400,9 +787,15 @@ fn make(layout: Layout, main: bool) -> Retained<NSBundleImpl> {
     }
 }
 
+static BUNDLES: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+
+/// The bundles made so far, in no order.
+fn cached_bundles() -> Vec<usize> {
+    crate::thread::lock(BUNDLES.get_or_init(Default::default)).values().copied().collect()
+}
+
 /// Bundles live for the rest of the process, one per path.
 fn cached(key: &str, make_bundle: impl FnOnce() -> Option<Retained<NSBundleImpl>>) -> Option<Retained<NSBundleImpl>> {
-    static BUNDLES: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
     let mut bundles = crate::thread::lock(BUNDLES.get_or_init(Default::default));
     let ptr = match bundles.get(key) {
         Some(&ptr) => ptr,

@@ -226,7 +226,8 @@ fn each_find(h: &Text, loc: usize, len: usize, n: &Text, options: usize, mut f: 
         each_ascii_needle(w, n.bytes, options, &mut g);
     } else {
         let per_char = options & LITERAL != 0;
-        let fold_options = if per_char { options & CASE_INSENSITIVE } else { options };
+        // A literal search still folds what it is asked to, as on macOS.
+        let fold_options = if per_char { options & folding } else { options };
         let needle = fold::fold_text(n.bytes, fold_options);
         if needle.is_empty() {
             return;
@@ -1006,7 +1007,8 @@ mod tests {
             });
             return out;
         }
-        let fold_options = if per_char { options & CASE_INSENSITIVE } else { options };
+        let fold_options =
+            if per_char { options & (CASE_INSENSITIVE | DIACRITIC_INSENSITIVE | WIDTH_INSENSITIVE) } else { options };
         let hay = fold::Folded::new(w, fold_options, per_char);
         let needle = fold::fold_text(needle, fold_options);
         let n = needle.len();
