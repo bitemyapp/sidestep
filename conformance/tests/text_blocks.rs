@@ -29,7 +29,12 @@ const ABS: NSTextBlockValueType = NSTextBlockValueType::AbsoluteValueType;
 const PCT: NSTextBlockValueType = NSTextBlockValueType::PercentageValueType;
 const EDGES: [NSRectEdge; 4] = [NSRectEdge::MinX, NSRectEdge::MinY, NSRectEdge::MaxX, NSRectEdge::MaxY];
 
+/// The font the tests lay out with, made one test at a time: on CI's
+/// macOS runner, AppKit once gave no font to one of several test threads
+/// asking for it at once.
 fn font() -> Retained<NSFont> {
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     NSFont::monospacedSystemFontOfSize_weight(12.0, unsafe { NSFontWeightRegular })
 }
 
