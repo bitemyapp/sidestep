@@ -26,8 +26,8 @@ harness = false
 
 # Input, windows and pasteboards (appkit_input).
 [dev-dependencies]
-objc2-app-kit = { workspace = true, features = ["NSEvent", "NSWindow", "NSGraphics", "NSGraphicsContext", "NSPasteboard", "NSResponder", "NSView", "NSCursor", "NSColor", "NSTrackingArea", "NSTextInputClient", "NSTextInputContext", "NSWindowScripting", "NSApplication", "block2", "objc2-core-foundation", "NSImageRep", "NSBitmapImageRep", "NSColorSpace", "NSBezierPath", "NSAffineTransform", "NSAppearance", "NSImage", "NSGradient", "NSShadow", "NSAnimation", "NSAnimationContext", "NSCustomImageRep", "NSColorList", "NSVisualEffectView", "NSCell", "NSFontDescriptor", "NSRunningApplication", "NSPanel", "NSViewController", "NSWindowController", "NSStoryboard", "NSNib"] }
-objc2-foundation = { workspace = true, features = ["NSRange", "NSAttributedString", "NSAffineTransform", "NSData", "NSArray", "NSValue"] }
+objc2-app-kit = { workspace = true, features = ["NSEvent", "NSWindow", "NSGraphics", "NSGraphicsContext", "NSPasteboard", "NSResponder", "NSView", "NSCursor", "NSColor", "NSTrackingArea", "NSTextInputClient", "NSTextInputContext", "NSWindowScripting", "NSApplication", "block2", "objc2-core-foundation", "NSImageRep", "NSBitmapImageRep", "NSColorSpace", "NSBezierPath", "NSAffineTransform", "NSAppearance", "NSImage", "NSGradient", "NSShadow", "NSAnimation", "NSAnimationContext", "NSCustomImageRep", "NSColorList", "NSVisualEffectView", "NSCell", "NSFontDescriptor", "NSRunningApplication", "NSPanel", "NSViewController", "NSWindowController", "NSStoryboard", "NSNib", "NSPasteboardItem", "NSDragging", "NSScreen", "NSControl", "NSActionCell", "NSButton", "NSButtonCell", "NSTextField", "NSTextFieldCell", "NSSecureTextField", "NSSearchField", "NSSearchFieldCell", "NSBox", "NSProgressIndicator", "NSSegmentedControl", "NSSegmentedCell", "NSStepper", "NSStepperCell", "NSSlider", "NSSliderCell", "NSSwitch", "NSLayoutConstraint", "NSUserInterfaceLayout", "NSText", "NSParagraphStyle", "NSAccessibilityConstants", "NSAccessibilityProtocols", "NSUserInterfaceItemIdentification", "NSScrollView", "NSClipView", "NSLayoutAnchor", "NSLayoutGuide", "NSStackView", "NSSplitView", "NSTabView", "NSTabViewItem", "NSTableView", "NSTableColumn", "NSTableRowView", "NSTableCellView", "NSTableHeaderView", "NSTextStorage", "NSTextStorageScripting", "NSLayoutManager", "NSTextContainer", "NSTextView", "NSTextTable", "NSFont", "NSAttributedString", "NSScroller", "NSMenu", "NSMenuItem", "NSUserInterfaceValidation", "NSPopUpButton", "NSPopUpButtonCell", "NSMenuItemCell", "NSAlert", "NSSavePanel", "NSOpenPanel", "NSWorkspace", "NSAccessibility", "libc", "NSImageView", "NSImageCell", "NSStringDrawing"] }
+objc2-foundation = { workspace = true, features = ["NSRange", "NSAttributedString", "NSAffineTransform", "NSData", "NSArray", "NSValue", "NSGeometry", "NSIndexSet", "NSNotification", "NSUserDefaults", "NSUndoManager", "NSInvocation", "NSMethodSignature", "NSRunLoop", "NSDate", "NSString", "NSDictionary", "NSURL", "NSError"] }
 
 [[test]]
 name = "appkit_input"
@@ -85,12 +85,7 @@ harness = false
 name = "defaults"
 harness = false
 
-# Pasteboards, drag and drop, screens and controls. A table of its own, so
-# the features merge with the ones above.
-[target.'cfg(all())'.dev-dependencies]
-objc2-app-kit = { workspace = true, features = ["NSPasteboard", "NSPasteboardItem", "NSDragging", "NSScreen", "NSGraphics", "NSControl", "NSCell", "NSActionCell", "NSButton", "NSButtonCell", "NSTextField", "NSTextFieldCell", "NSSecureTextField", "NSSearchField", "NSSearchFieldCell", "NSBox", "NSProgressIndicator", "NSSegmentedControl", "NSSegmentedCell", "NSStepper", "NSStepperCell", "NSSlider", "NSSliderCell", "NSSwitch", "NSLayoutConstraint", "NSUserInterfaceLayout", "NSText", "NSParagraphStyle", "NSAccessibilityConstants", "NSAccessibilityProtocols"] }
-objc2-foundation = { workspace = true, features = ["NSData", "NSArray"] }
-
+# Pasteboards, drag and drop, screens and controls.
 [[test]]
 name = "drag_defaults"
 harness = false
@@ -120,11 +115,7 @@ harness = false
 
 # Containers: the view contract, Auto Layout, stack, split, tab and table
 # views (appkit_views, appkit_autolayout, appkit_stack, appkit_split,
-# appkit_tab, appkit_table). A table of its own, so the features merge.
-[target.'cfg(not(any()))'.dev-dependencies]
-objc2-app-kit = { workspace = true, features = ["NSGraphics", "NSUserInterfaceItemIdentification", "NSScrollView", "NSClipView", "NSWindow", "NSLayoutConstraint", "NSLayoutAnchor", "NSLayoutGuide", "NSStackView", "NSSplitView", "NSTabView", "NSTabViewItem", "NSTableView", "NSTableColumn", "NSTableRowView", "NSTableCellView", "NSTableHeaderView", "NSControl", "NSUserInterfaceLayout", "NSCell", "NSTextStorage", "NSTextStorageScripting", "NSLayoutManager", "NSTextContainer", "NSTextView", "NSText", "NSTextTable", "NSTextInputClient", "NSColor", "NSFont", "NSParagraphStyle", "NSAttributedString", "NSPasteboard", "NSEvent"] }
-objc2-foundation = { workspace = true, features = ["NSGeometry", "NSIndexSet", "NSNotification", "NSUserDefaults", "NSUndoManager", "NSValue", "NSArray", "NSInvocation", "NSMethodSignature", "NSRunLoop", "NSDate"] }
-
+# appkit_tab, appkit_table).
 [[test]]
 name = "appkit_views"
 harness = false
@@ -165,14 +156,8 @@ harness = false
 name = "text_view"
 harness = false
 
-
 # Scroll views, clip views and scrollers (appkit_scroll); menus, pop-up
-# buttons, alerts and panels (menus, popup_button, alert, panels). A table
-# of its own, so the features merge.
-[target.'cfg(any(all()))'.dev-dependencies]
-objc2-app-kit = { workspace = true, features = ["NSScroller", "NSScrollView", "NSClipView", "NSControl", "NSCell", "NSEvent", "NSColor", "NSCursor", "NSWindow", "NSGraphics", "NSGraphicsContext", "NSImageRep", "NSBitmapImageRep", "NSMenu", "NSMenuItem", "NSUserInterfaceValidation", "NSPopUpButton", "NSPopUpButtonCell", "NSMenuItemCell", "NSButton", "NSButtonCell", "NSAlert", "NSImage", "NSApplication", "NSView", "NSResponder", "NSActionCell", "NSSavePanel", "NSOpenPanel", "NSWorkspace", "NSRunningApplication", "NSPanel", "NSAccessibility", "libc"] }
-objc2-foundation = { workspace = true, features = ["NSNotification", "NSGeometry", "NSString", "NSDictionary", "NSValue", "NSArray", "NSAttributedString", "NSURL", "NSError"] }
-
+# buttons, alerts and panels (menus, popup_button, alert, panels).
 [[test]]
 name = "appkit_scroll"
 harness = false
@@ -193,12 +178,7 @@ harness = false
 name = "panels"
 harness = false
 
-# Image views and images in controls (image_views, control_images). A
-# table of its own, so the features merge.
-[target.'cfg(all(all()))'.dev-dependencies]
-objc2-app-kit = { workspace = true, features = ["NSImageView", "NSImageCell", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSAppearance", "NSControl", "NSCell", "NSButton", "NSButtonCell", "NSGraphics", "NSGraphicsContext", "NSColor", "NSColorSpace", "NSEvent", "NSLayoutConstraint", "NSUserInterfaceLayout", "NSDragging", "NSPasteboard", "NSApplication", "NSWindow", "NSText", "NSFont", "NSStringDrawing", "NSAttributedString", "NSAccessibility", "NSAccessibilityConstants", "NSAccessibilityProtocols"] }
-objc2-foundation = { workspace = true, features = ["NSValue", "NSGeometry", "NSString", "NSArray", "NSDictionary"] }
-
+# Image views and images in controls (image_views, control_images).
 [[test]]
 name = "image_views"
 harness = false

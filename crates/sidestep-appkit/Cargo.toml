@@ -12,8 +12,8 @@ sidestep-runtime.workspace = true
 sidestep-foundation.workspace = true
 objc2 = { workspace = true, features = ["gnustep-2-1"] }
 block2 = { workspace = true, features = ["gnustep-2-1"] }
-objc2-foundation = { workspace = true, features = ["gnustep-2-1", "NSObject", "NSString", "NSDictionary", "NSGeometry", "NSNotification", "NSTimer", "NSDate", "NSZone", "NSRange", "block2", "NSArray", "NSData", "NSValue", "NSAffineTransform", "NSURL", "objc2-core-foundation", "NSRunLoop", "NSUserDefaults", "NSBundle", "NSObjCRuntime", "NSIndexSet", "NSEnumerator"] }
-objc2-app-kit = { workspace = true, features = ["gnustep-2-1", "NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics", "NSColor", "NSFont", "NSFontDescriptor", "NSBezierPath", "NSStringDrawing", "NSAttributedString", "NSEvent", "NSScrollView", "NSClipView", "NSRunningApplication", "objc2-core-foundation", "NSPasteboard", "NSText", "NSCursor", "NSTrackingArea", "NSTextInputContext", "NSParagraphStyle", "NSCell", "NSPasteboardItem", "NSDragging", "NSDraggingItem", "NSScreen", "block2", "NSGraphicsContext", "NSImageRep", "NSBitmapImageRep", "NSCustomImageRep", "NSColorSpace", "NSAppearance", "NSAffineTransform", "NSColorList", "NSImage", "NSGradient", "NSShadow", "NSAnimation", "NSAnimationContext", "NSControl", "NSImageView", "NSVisualEffectView", "NSPanel", "NSViewController", "NSWindowController", "NSNib", "NSUserInterfaceItemIdentification", "NSUserInterfaceLayout", "NSLayoutConstraint", "NSLayoutAnchor", "NSLayoutGuide", "NSStackView", "NSSplitView", "NSTabView", "NSTabViewItem", "NSTableView", "NSTableColumn", "NSTableRowView", "NSTableCellView", "NSTableHeaderView", "NSTextStorage", "NSLayoutManager", "NSTextContainer", "NSTextView", "NSTextTable", "NSTextInputClient", "objc2-core-graphics", "objc2-quartz-core", "objc2-core-text"] }
+objc2-foundation = { workspace = true, features = ["gnustep-2-1", "NSObject", "NSString", "NSDictionary", "NSGeometry", "NSNotification", "NSTimer", "NSDate", "NSZone", "NSRange", "block2", "NSArray", "NSData", "NSValue", "NSAffineTransform", "NSURL", "objc2-core-foundation", "NSRunLoop", "NSUserDefaults", "NSBundle", "NSObjCRuntime", "NSIndexSet", "NSEnumerator", "NSAttributedString", "NSLocale", "NSError"] }
+objc2-app-kit = { workspace = true, features = ["gnustep-2-1", "NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics", "NSColor", "NSFont", "NSFontDescriptor", "NSBezierPath", "NSStringDrawing", "NSAttributedString", "NSEvent", "NSScrollView", "NSClipView", "NSRunningApplication", "objc2-core-foundation", "NSPasteboard", "NSText", "NSCursor", "NSTrackingArea", "NSTextInputContext", "NSParagraphStyle", "NSCell", "NSPasteboardItem", "NSDragging", "NSDraggingItem", "NSScreen", "block2", "NSGraphicsContext", "NSImageRep", "NSBitmapImageRep", "NSCustomImageRep", "NSColorSpace", "NSAppearance", "NSAffineTransform", "NSColorList", "NSImage", "NSGradient", "NSShadow", "NSAnimation", "NSAnimationContext", "NSControl", "NSImageView", "NSVisualEffectView", "NSPanel", "NSViewController", "NSWindowController", "NSNib", "NSUserInterfaceItemIdentification", "NSUserInterfaceLayout", "NSLayoutConstraint", "NSLayoutAnchor", "NSLayoutGuide", "NSStackView", "NSSplitView", "NSTabView", "NSTabViewItem", "NSTableView", "NSTableColumn", "NSTableRowView", "NSTableCellView", "NSTableHeaderView", "NSTextStorage", "NSLayoutManager", "NSTextContainer", "NSTextView", "NSTextTable", "NSTextInputClient", "objc2-core-graphics", "objc2-quartz-core", "objc2-core-text", "NSActionCell", "NSButton", "NSButtonCell", "NSTextField", "NSTextFieldCell", "NSSecureTextField", "NSSearchField", "NSSearchFieldCell", "NSBox", "NSProgressIndicator", "NSSegmentedControl", "NSSegmentedCell", "NSStepper", "NSStepperCell", "NSSlider", "NSSliderCell", "NSSwitch", "NSAccessibilityConstants", "NSScroller", "NSMenu", "NSMenuItem", "NSUserInterfaceValidation", "NSPopUpButton", "NSPopUpButtonCell", "NSMenuItemCell", "NSAlert", "NSHelpManager", "NSSavePanel", "NSOpenPanel", "NSWorkspace", "NSImageCell"] }
 # CoreGraphics, QuartzCore, CoreText and ImageIO, with the features apps use.
 # They build off Apple with objc2's fork (tools/objc2-overlay), and AppKit's
 # methods with their types (NSColor's CGColor, NSView's layer and so on) come
@@ -75,23 +75,6 @@ harness = false
 name = "linux_events"
 harness = false
 
-# Controls (src/controls): the control and cell classes' bindings, and the
-# Foundation types their values use. A table of its own; Cargo unifies these
-# features with the ones above.
-[target.'cfg(all(not(target_vendor = "apple")))'.dependencies]
-objc2-foundation = { workspace = true, features = ["NSValue", "NSAttributedString", "NSArray", "NSObjCRuntime", "NSLocale"] }
-objc2-app-kit = { workspace = true, features = ["NSControl", "NSActionCell", "NSButton", "NSButtonCell", "NSTextField", "NSTextFieldCell", "NSSecureTextField", "NSSearchField", "NSSearchFieldCell", "NSBox", "NSProgressIndicator", "NSSegmentedControl", "NSSegmentedCell", "NSStepper", "NSStepperCell", "NSSlider", "NSSliderCell", "NSSwitch", "NSUserInterfaceLayout", "NSLayoutConstraint", "NSAccessibilityConstants"] }
-
-# Scroll views and their scrollers (src/scroll.rs, src/scroller.rs).
-[target.'cfg(any(not(target_vendor = "apple")))'.dependencies]
-objc2-app-kit = { workspace = true, features = ["NSScroller", "NSScrollView", "NSClipView", "NSTrackingArea"] }
-
-# Menus, pop-up buttons, alerts, panels and the workspace. A table of its
-# own; Cargo unifies these features with the ones above.
-[target.'cfg(any(all(not(target_vendor = "apple"))))'.dependencies]
-objc2-app-kit = { workspace = true, features = ["NSMenu", "NSMenuItem", "NSUserInterfaceValidation", "NSImage", "NSPopUpButton", "NSPopUpButtonCell", "NSMenuItemCell", "NSAlert", "NSButton", "NSHelpManager", "NSSavePanel", "NSOpenPanel", "NSWorkspace", "NSRunningApplication"] }
-objc2-foundation = { workspace = true, features = ["NSError", "NSURL", "NSDate", "NSNotification", "NSArray"] }
-
 # Menus tracked through the null render thread, and panels and the
 # workspace with stand-ins for the desktop (see the files).
 [[test]]
@@ -101,12 +84,6 @@ harness = false
 [[test]]
 name = "panels"
 harness = false
-
-# Image views and images in controls (src/controls/image_view.rs). A
-# table of its own; Cargo unifies these features with the ones above.
-[target.'cfg(all(any(not(target_vendor = "apple"))))'.dependencies]
-objc2-app-kit = { workspace = true, features = ["NSImageView", "NSImageCell", "NSDragging", "NSPasteboard", "NSPasteboardItem"] }
-objc2-foundation = { workspace = true, features = ["NSTimer", "NSRunLoop", "NSValue"] }
 
 # The theme's reference images (src/theme/golden).
 [target.'cfg(not(target_vendor = "apple"))'.dev-dependencies]
