@@ -44,8 +44,8 @@ use objc2::rc::{Allocated, Retained, Weak};
 use objc2::runtime::{AnyObject, NSObjectProtocol, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSActionCell, NSCell, NSColor, NSControl, NSEvent, NSLineBreakMode, NSResponder, NSTextAlignment, NSTextField,
-    NSTextFieldBezelStyle, NSTextFieldCell, NSView,
+    NSActionCell, NSBackgroundStyle, NSCell, NSColor, NSControl, NSEvent, NSLineBreakMode, NSResponder,
+    NSTextAlignment, NSTextField, NSTextFieldBezelStyle, NSTextFieldCell, NSView,
 };
 use objc2_foundation::{
     NSAttributedString, NSCopying, NSDictionary, NSNotification, NSPoint, NSRect, NSSize, NSString, NSZone,
@@ -231,6 +231,19 @@ define_class!(
         #[unsafe(method(drawingRectForBounds:))]
         fn drawing_rect_for_bounds(&self, bounds: NSRect) -> NSRect {
             field_title_rect(self, bounds)
+        }
+
+        /// A field that draws its own background (a bezel, or a background
+        /// color) keeps its text as it is on any background; a label's
+        /// text is on its superview's, as on macOS
+        /// (`conformance/tests/cell_backgrounds.rs`, `interior_styles`).
+        #[unsafe(method(interiorBackgroundStyle))]
+        fn interior_background_style(&self) -> NSBackgroundStyle {
+            if self.base().has(Flags::BEZELED) || self.ivars().draws_background.get() {
+                NSBackgroundStyle::Normal
+            } else {
+                cell::as_cell(self.base()).backgroundStyle()
+            }
         }
 
         #[unsafe(method(drawWithFrame:inView:))]
@@ -470,19 +483,32 @@ fn draw_field_frame(cell: &NSTextFieldCellImpl, frame: NSRect, _view: &NSView) {
     }
 }
 
+/// Draw the text, or the placeholder, in the title rect. On an emphasized
+/// background (a label in a selected row of the key window's focused
+/// table) the label colors in the text color and in an attributed value's
+/// runs turn light, and so does a text color with the label color's value,
+/// while other colors and the placeholder stay, as on macOS
+/// (`conformance/tests/cell_backgrounds.rs`, `emphasized_text`).
 fn draw_field_text(cell: &NSTextFieldCellImpl, title: NSRect, _view: &NSView) {
     if !theme::paint::recording() {
         return;
     }
     let p = theme::palette();
     let base = cell.base();
+    let placeholder = shows_placeholder(cell);
+    let emphasized = !placeholder && cell::draws_on_emphasis(base);
     let text_color = cell.ivars().text_color.borrow().clone();
-    let mut color =
-        if shows_placeholder(cell) { p.tertiary_label } else { text_color.as_deref().map_or(p.label, theme::color_of) };
+    let mut color = match text_color.as_deref() {
+        _ if placeholder => p.tertiary_label,
+        Some(c) if emphasized => crate::color::resolve_emphasized_text(c),
+        Some(c) => theme::color_of(c),
+        None if emphasized => theme::emphasized_color(crate::palette::System::Label),
+        None => p.label,
+    };
     if !base.has(Flags::ENABLED) {
         color = theme::palette::dimmed(color);
     }
-    let styled = field_styled(cell, color);
+    let styled = crate::color::with_emphasis(emphasized, || field_styled(cell, color));
     let r = NSRect::new(
         NSPoint::new(title.origin.x + metrics::TEXT_PADDING, title.origin.y),
         NSSize::new(title.size.width - 2.0 * metrics::TEXT_PADDING, title.size.height),

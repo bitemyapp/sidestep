@@ -1537,6 +1537,42 @@ pub(crate) fn resolve(c: &NSColor) -> Color {
 
 thread_local!(static DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) });
 
+thread_local!(static EMPHASIS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
+
+/// Run `f` with the catalog colors resolving as they do on an emphasized
+/// background (`palette::emphasized`) if `on`, as they don't if not: how
+/// the built-in cells style their text for a selected row. Only catalog
+/// colors themselves change; colors made from them (a system effect, a
+/// dynamic provider's answer, one given another alpha) stay, as on macOS
+/// (`conformance/tests/cell_backgrounds.rs`, `emphasized_text`).
+pub(crate) fn with_emphasis<R>(on: bool, f: impl FnOnce() -> R) -> R {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            EMPHASIS.with(|e| e.set(self.0));
+        }
+    }
+    let _restore = Restore(EMPHASIS.with(|e| e.replace(on)));
+    f()
+}
+
+/// A text field's text color `c` as it draws on an emphasized background:
+/// the label color's value, whatever made it (the catalog color, a dynamic
+/// provider answering it, its components), becomes the text color for
+/// selections; any other color is resolved as [`with_emphasis`] does, so
+/// only the catalog colors themselves change. macOS matches the label
+/// color by value there, and only there: not in attributed runs, and not
+/// the other label colors (`conformance/tests/cell_backgrounds.rs`,
+/// `emphasized_text`).
+pub(crate) fn resolve_emphasized_text(c: &NSColor) -> Color {
+    let look = crate::appearance::current_look();
+    let bytes = |v: Color| v.map(|x| (x.clamp(0.0, 1.0) * 255.0).round() as u8);
+    if bytes(with_emphasis(false, || resolve(c))) == bytes(palette::get(System::Label, look)) {
+        return palette::get_on(System::Label, look, true);
+    }
+    with_emphasis(true, || resolve(c))
+}
+
 fn resolve_impl(c: &NSColorImpl) -> Color {
     match &c.ivars().repr {
         // Drawing takes what sRGB can show.
@@ -1545,7 +1581,8 @@ fn resolve_impl(c: &NSColorImpl) -> Color {
             [r, g, b, c[space.components()]].map(|v| v.clamp(0.0, 1.0) as f32)
         }
         Repr::Catalog { color, alpha } => {
-            let mut v = palette::get(*color, crate::appearance::current_look());
+            let emphasized = alpha.is_none() && EMPHASIS.with(std::cell::Cell::get);
+            let mut v = palette::get_on(*color, crate::appearance::current_look(), emphasized);
             if let Some(a) = alpha {
                 v[3] = *a as f32;
             }
@@ -1558,12 +1595,17 @@ fn resolve_impl(c: &NSColorImpl) -> Color {
             let mut v = if depth > 8 {
                 [0.0, 0.0, 0.0, 1.0]
             } else {
-                let appearance = crate::appearance::get(crate::appearance::current());
-                let got = provider.call((NonNull::from(&*appearance),));
-                // SAFETY: the provider returns a color it keeps alive (as
-                // an autoreleased return value) at least until we retain it.
-                let color = unsafe { Retained::retain(got.as_ptr()) }.expect("a color");
-                resolve(&color)
+                // The provider, and the color it answers, see no emphasis:
+                // macOS doesn't map a label color a provider answers.
+                with_emphasis(false, || {
+                    let appearance = crate::appearance::get(crate::appearance::current());
+                    let got = provider.call((NonNull::from(&*appearance),));
+                    // SAFETY: the provider returns a color it keeps alive
+                    // (as an autoreleased return value) at least until we
+                    // retain it.
+                    let color = unsafe { Retained::retain(got.as_ptr()) }.expect("a color");
+                    resolve(&color)
+                })
             };
             DEPTH.with(|d| d.set(depth));
             if let Some(a) = alpha {
@@ -1571,7 +1613,9 @@ fn resolve_impl(c: &NSColorImpl) -> Color {
             }
             v
         }
-        Repr::Effect { base, effect } => with_effect(resolve(base), *effect, crate::appearance::current_look().dark()),
+        Repr::Effect { base, effect } => {
+            with_effect(with_emphasis(false, || resolve(base)), *effect, crate::appearance::current_look().dark())
+        }
         // Patterns fill with their image's average; tiling comes with
         // pattern paints.
         Repr::Pattern(..) => [0.5, 0.5, 0.5, 1.0],

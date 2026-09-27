@@ -3,10 +3,16 @@
 //! cell with an object value and outlets for a text field and an image),
 //! and `NSTableHeaderView`, a shell until scroll views place headers.
 //!
-//! A row view gives its subviews its `interiorBackgroundStyle`, so a cell
-//! can draw light on a strong selection: each subview as it's added, and,
-//! in a table, all of them when the row is selected or emphasized, as
-//! AppKit does.
+//! **Background styles.** A row view gives its subviews its
+//! `interiorBackgroundStyle` (emphasized while it's selected in the key
+//! window's focused table, unless it's a group row or the table highlights
+//! nothing), so that cells draw light on a strong selection: each subview
+//! as it's added, and all of them before the row next draws (or the table
+//! hands out one of its cell views) after a change, once however many
+//! changes there were. A cell view takes the style and passes it down to
+//! the cells of the controls under it, as the row view does for views
+//! that aren't cell views; other views aren't told. All as measured on
+//! macOS (`conformance/tests/cell_backgrounds.rs`).
 
 use std::cell::{Cell, RefCell};
 
@@ -14,11 +20,12 @@ use objc2::rc::{Allocated, Retained, Weak};
 use objc2::runtime::{AnyObject, NSObject};
 use objc2::{ClassType, DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
-    NSBackgroundStyle, NSBezierPath, NSColor, NSResponder, NSTableView, NSTableViewRowSizeStyle,
-    NSTableViewSelectionHighlightStyle, NSView,
+    NSBackgroundStyle, NSBezierPath, NSColor, NSControl, NSResponder, NSTableCellView, NSTableView,
+    NSTableViewRowSizeStyle, NSTableViewSelectionHighlightStyle, NSTableViewStyle, NSView,
 };
 use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize};
 
+use crate::palette::System;
 use crate::views;
 
 // NSTableRowView
@@ -34,6 +41,9 @@ pub(crate) struct RowIvars {
     highlight: Cell<NSTableViewSelectionHighlightStyle>,
     background: RefCell<Option<Retained<NSColor>>>,
     indentation: Cell<f64>,
+    /// Something the interior style follows changed since the subviews
+    /// were last given it.
+    restyle: Cell<bool>,
 }
 
 impl Default for RowIvars {
@@ -49,6 +59,7 @@ impl Default for RowIvars {
             highlight: Cell::new(NSTableViewSelectionHighlightStyle::Regular),
             background: RefCell::new(None),
             indentation: Cell::new(0.0),
+            restyle: Cell::new(false),
         }
     }
 }
@@ -81,7 +92,6 @@ define_class!(
         #[unsafe(method(setSelected:))]
         fn set_selected(&self, flag: bool) {
             if self.ivars().selected.replace(flag) != flag {
-                self.redraw();
                 self.restyle();
             }
         }
@@ -114,7 +124,6 @@ define_class!(
         #[unsafe(method(setEmphasized:))]
         fn set_emphasized(&self, flag: bool) {
             if self.ivars().emphasized.replace(flag) != flag {
-                self.redraw();
                 self.restyle();
             }
         }
@@ -126,6 +135,14 @@ define_class!(
             give_style(subview, self.as_row().interiorBackgroundStyle());
         }
 
+        /// Before drawing, the subviews learn the style they draw on.
+        #[unsafe(method(viewWillDraw))]
+        fn view_will_draw(&self) {
+            self.give_style_if_changed();
+            // SAFETY: NSView's viewWillDraw takes nothing.
+            let _: () = unsafe { msg_send![super(self), viewWillDraw] };
+        }
+
         #[unsafe(method(isGroupRowStyle))]
         fn is_group_row_style(&self) -> bool {
             self.ivars().group.get()
@@ -133,7 +150,9 @@ define_class!(
 
         #[unsafe(method(setGroupRowStyle:))]
         fn set_group_row_style(&self, flag: bool) {
-            self.ivars().group.set(flag);
+            if self.ivars().group.replace(flag) != flag {
+                self.restyle();
+            }
         }
 
         #[unsafe(method(isFloating))]
@@ -173,12 +192,20 @@ define_class!(
 
         #[unsafe(method(setSelectionHighlightStyle:))]
         fn set_selection_highlight_style(&self, style: NSTableViewSelectionHighlightStyle) {
-            self.ivars().highlight.set(style);
+            if self.ivars().highlight.replace(style) != style {
+                self.restyle();
+            }
         }
 
+        /// Emphasized on a strong selection: selected and emphasized,
+        /// highlighted (regularly or as a source list) and not a group
+        /// row, as on macOS (`conformance/tests/cell_backgrounds.rs`,
+        /// `row_interiors`).
         #[unsafe(method(interiorBackgroundStyle))]
         fn interior_background_style(&self) -> NSBackgroundStyle {
-            if self.ivars().selected.get() && self.ivars().emphasized.get() {
+            let x = self.ivars();
+            let highlighted = x.highlight.get() != NSTableViewSelectionHighlightStyle::None;
+            if x.selected.get() && x.emphasized.get() && highlighted && !x.group.get() {
                 NSBackgroundStyle::Emphasized
             } else {
                 NSBackgroundStyle::Normal
@@ -205,14 +232,29 @@ define_class!(
             }
         }
 
+        /// The accent while emphasized, a gray while not; rounded in the
+        /// inset and source list styles, whose rows stand apart from the
+        /// table's edges.
         #[unsafe(method(drawSelectionInRect:))]
         fn draw_selection_in_rect(&self, _dirty: NSRect) {
             if self.ivars().highlight.get() == NSTableViewSelectionHighlightStyle::None {
                 return;
             }
-            let (r, g, b) = if self.ivars().emphasized.get() { (0.2, 0.45, 0.85) } else { (0.85, 0.85, 0.85) };
-            NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.0).setFill();
-            NSBezierPath::fillRect(self.as_view().bounds());
+            let color = if self.ivars().emphasized.get() {
+                crate::color::catalog(System::SelectedContentBackground)
+            } else {
+                crate::color::catalog(System::UnemphasizedSelectedContentBackground)
+            };
+            color.setFill();
+            let bounds = self.as_view().bounds();
+            let table = views::superview_of(views::imp(self.as_view())).and_then(|t| {
+                views::as_view(t).downcast_ref::<NSTableView>().map(|t| t.effectiveStyle())
+            });
+            if matches!(table, Some(NSTableViewStyle::Inset | NSTableViewStyle::SourceList)) {
+                NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(bounds, 5.0, 5.0).fill();
+            } else {
+                NSBezierPath::fillRect(bounds);
+            }
         }
 
         #[unsafe(method(drawSeparatorInRect:))]
@@ -262,11 +304,17 @@ impl NSTableRowViewImpl {
         self.as_view().setNeedsDisplay(true);
     }
 
-    /// In a table, give the subviews the row's style after a change.
+    /// Something the look and the interior style follow changed: redraw,
+    /// and give the subviews the style before then.
     fn restyle(&self) {
-        let in_table = views::superview_of(views::imp(self.as_view()))
-            .is_some_and(|t| views::as_view(t).isKindOfClass(NSTableView::class()));
-        if in_table {
+        self.ivars().restyle.set(true);
+        self.redraw();
+    }
+
+    /// Give the subviews the row's style, if it may have changed since
+    /// they were given it.
+    fn give_style_if_changed(&self) {
+        if self.ivars().restyle.replace(false) {
             let style = self.as_row().interiorBackgroundStyle();
             for sub in views::subviews(views::imp(self.as_view())) {
                 give_style(&sub, style);
@@ -275,11 +323,33 @@ impl NSTableRowViewImpl {
     }
 }
 
-/// Give a view a background style, if it takes one.
+/// Bring `row`'s subviews up to date with its style (the table does before
+/// handing out one of them).
+pub(crate) fn give_style_if_changed(row: &NSView) {
+    if let Some(row) = row.downcast_ref::<objc2_app_kit::NSTableRowView>() {
+        // SAFETY: NSTableRowView is NSTableRowViewImpl's class; subclasses
+        // share its layout.
+        let row = unsafe { &*(row as *const objc2_app_kit::NSTableRowView).cast::<NSTableRowViewImpl>() };
+        row.give_style_if_changed();
+    }
+}
+
+/// Give `view` a background style as AppKit's row and cell views do: a
+/// cell view takes it (and passes it on), a control's cell takes it, and
+/// any other view passes it to its subviews. Nothing else is told, even a
+/// view that has a `setBackgroundStyle:` of its own.
 fn give_style(view: &NSView, style: NSBackgroundStyle) {
-    if view.respondsToSelector(objc2::sel!(setBackgroundStyle:)) {
-        // SAFETY: setBackgroundStyle: takes an NSBackgroundStyle.
+    if view.isKindOfClass(NSTableCellView::class()) {
+        // SAFETY: a cell view's setBackgroundStyle: takes the style.
         let _: () = unsafe { msg_send![view, setBackgroundStyle: style] };
+    } else if let Some(control) = view.downcast_ref::<NSControl>() {
+        if let Some(cell) = control.cell() {
+            cell.setBackgroundStyle(style);
+        }
+    } else {
+        for sub in views::subviews(views::imp(view)) {
+            give_style(&sub, style);
+        }
     }
 }
 
@@ -357,9 +427,16 @@ define_class!(
             self.ivars().background.get()
         }
 
+        /// Taken, and passed down to the controls' cells under the cell
+        /// view (and any cell views there), every time, as on macOS.
         #[unsafe(method(setBackgroundStyle:))]
         fn set_background_style(&self, style: NSBackgroundStyle) {
             self.ivars().background.set(style);
+            // SAFETY: a cell view is an NSView.
+            let view = unsafe { &*(self as *const Self).cast::<NSView>() };
+            for sub in views::subviews(views::imp(view)) {
+                give_style(&sub, style);
+            }
         }
 
         #[unsafe(method(rowSizeStyle))]

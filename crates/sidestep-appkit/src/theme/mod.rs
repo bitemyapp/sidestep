@@ -68,3 +68,11 @@ pub(crate) fn system_color(sel: Sel, fallback: impl FnOnce(&Palette) -> Color) -
 pub(crate) fn color_of(color: &NSColor) -> Color {
     crate::color::resolve(color)
 }
+
+/// A system color as it is on an emphasized background (a selected row of
+/// the key window's focused table): the light text for selections for the
+/// label colors, the color itself for the rest (see
+/// `palette::emphasized`).
+pub(crate) fn emphasized_color(c: crate::palette::System) -> Color {
+    crate::palette::get_on(c, crate::appearance::current_look(), true)
+}

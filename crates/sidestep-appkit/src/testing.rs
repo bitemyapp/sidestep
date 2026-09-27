@@ -58,6 +58,30 @@ pub enum Seen {
     },
 }
 
+/// A run of text the main thread asked the null render thread to paint.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PaintedText {
+    pub window: u32,
+    /// Straight sRGB red, green, blue and alpha, 0 to 1.
+    pub color: [f32; 4],
+    /// Where the run starts on its baseline, in the points of what it was
+    /// painted into: the window's content, or the document of a scroll
+    /// view (whose content is painted into tiles of its own).
+    pub x: f32,
+    pub y: f32,
+}
+
+/// Start (or stop) writing down the text painted, for
+/// [`take_painted_text`].
+pub fn note_painted_text(on: bool) {
+    *null::TEXT.lock().unwrap_or_else(|e| e.into_inner()) = on.then(Vec::new);
+}
+
+/// The text painted since the last call, while noting it.
+pub fn take_painted_text() -> Vec<PaintedText> {
+    null::TEXT.lock().unwrap_or_else(|e| e.into_inner()).as_mut().map(std::mem::take).unwrap_or_default()
+}
+
 /// Use the null render thread. Call before the first window is shown.
 pub fn use_null_backend() {
     null::request();

@@ -44,6 +44,7 @@ use objc2_app_kit::{
 use objc2_foundation::{NSAttributedString, NSCopying, NSPoint, NSRect, NSSize, NSString, NSZone};
 
 use super::value::{self, Value};
+use crate::palette::System;
 use crate::protocol::Color;
 use crate::text::layout::{Align, Attrs, LineBreak, Options, Paragraph, Run};
 use crate::theme::{self, metrics, parts};
@@ -1107,8 +1108,16 @@ define_class!(
             }
             // SAFETY: titleRectForBounds: takes and returns a rect.
             let title: NSRect = unsafe { msg_send![self, titleRectForBounds: frame] };
-            let p = theme::palette();
-            let color = if self.has(Flags::ENABLED) { p.label } else { p.tertiary_label };
+            let enabled = self.has(Flags::ENABLED);
+            // The label color, or the tertiary one when disabled; light on
+            // an emphasized background, as on macOS
+            // (`conformance/tests/cell_backgrounds.rs`, `generic_cells`).
+            let color = if draws_on_emphasis(self) {
+                theme::emphasized_color(if enabled { System::Label } else { System::TertiaryLabel })
+            } else {
+                let p = theme::palette();
+                if enabled { p.label } else { p.tertiary_label }
+            };
             draw_text(self, title, color, view.isFlipped());
         }
 
@@ -1357,6 +1366,31 @@ pub(crate) fn redraw(cell: &NSCellImpl) {
     } else {
         view.setNeedsDisplay(true);
     }
+}
+
+/// Whether `cell` draws its content on an emphasized background: its
+/// `interiorBackgroundStyle` (asked by message, so a subclass's answer
+/// counts) is the emphasized one, as a selected row of the key window's
+/// focused table gives it.
+pub(crate) fn draws_on_emphasis(cell: &NSCellImpl) -> bool {
+    // SAFETY: interiorBackgroundStyle takes nothing and returns the style.
+    let style: NSBackgroundStyle = unsafe { msg_send![cell, interiorBackgroundStyle] };
+    style == NSBackgroundStyle::Emphasized
+}
+
+/// **Hook for image cells** (`NSImageCell`, and `NSButtonCell`'s image once
+/// images draw in buttons): the color to draw a template image or a symbol
+/// in, in a cell whose `interiorBackgroundStyle` (for a button, its
+/// `backgroundStyle`) is `style`, where `normal` is the color it would
+/// have anywhere else (its content tint, or the default). On an emphasized
+/// background a template is the light text color for selections whatever
+/// its tint, as macOS draws both tinted and untinted templates there (in
+/// image views and borderless buttons alike, measured for
+/// `conformance/tests/cell_backgrounds.rs`, whose notes say so); images
+/// that aren't templates keep their own colors, so aren't tinted at all.
+#[allow(dead_code)] // Until image cells and button images land.
+pub(crate) fn template_ink(style: NSBackgroundStyle, normal: Color) -> Color {
+    if style == NSBackgroundStyle::Emphasized { theme::emphasized_color(System::Label) } else { normal }
 }
 
 /// A named system color for text, as `NSColor` answers it (see

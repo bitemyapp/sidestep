@@ -31,7 +31,6 @@ impl Look {
         matches!(self, Look::Dark | Look::DarkContrast)
     }
 
-    #[cfg(test)]
     pub fn contrast(self) -> bool {
         matches!(self, Look::LightContrast | Look::DarkContrast)
     }
@@ -347,6 +346,51 @@ pub(crate) fn get(c: System, look: Look) -> Color {
     p.tables[look.index()][c as usize]
 }
 
+/// What `c` turns into on an emphasized background (a selected row of a
+/// key window's focused table, a selected source-list item), where cells
+/// draw light on the accent: the label colors, and the text colors that
+/// stand in for them, become the text color for selections at their own
+/// strength, and the disabled text color an opaque light gray; every other
+/// color stays (`None`). macOS maps the same set, by the color itself: a
+/// color made from one of them, by a dynamic provider or as components,
+/// isn't mapped (`conformance/tests/cell_backgrounds.rs`,
+/// `emphasized_text`). The strengths are Sidestep's.
+pub(crate) fn emphasized(c: System, look: Look) -> Option<Color> {
+    use System::*;
+    let contrast = look.contrast();
+    let ink = get(AlternateSelectedControlText, look);
+    // The alpha in the usual looks, and in the high-contrast ones.
+    let (plain, strong) = match c {
+        Label
+        | ControlText
+        | HeaderText
+        | WindowFrameText
+        | SelectedControlText
+        | AlternateSelectedControlText
+        | SelectedMenuItemText => (1.0, 1.0),
+        SecondaryLabel => (0.75, 0.85),
+        TertiaryLabel => (0.45, 0.65),
+        QuaternaryLabel => (0.25, 0.45),
+        QuinaryLabel => (0.12, 0.25),
+        // Opaque, and a little toward gray from the ink (white ink comes
+        // to about macOS's 82%).
+        DisabledControlText => {
+            let t = if contrast { 0.2 } else { 0.36 };
+            let v = ink.map(|x| x + (0.5 - x) * t);
+            return Some([v[0], v[1], v[2], 1.0]);
+        }
+        _ => return None,
+    };
+    Some([ink[0], ink[1], ink[2], if contrast { strong } else { plain }])
+}
+
+/// `c` in `look`, as it is on an emphasized background if `emphasized`
+/// (see [`emphasized`]).
+pub(crate) fn get_on(c: System, look: Look, emphasized: bool) -> Color {
+    let mapped = if emphasized { self::emphasized(c, look) } else { None };
+    mapped.unwrap_or_else(|| get(c, look))
+}
+
 /// The desktop's accent changed (or was first read); `None` for the
 /// default.
 pub(crate) fn set_accent(accent: Option<Color>) -> bool {
@@ -414,6 +458,27 @@ mod tests {
                     get(WindowBackground, normal),
                 );
                 assert!(contrasts[1] > plain, "{look:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn emphasized_labels_stand_out_on_the_selection_and_keep_their_hierarchy() {
+        use System::*;
+        for look in LOOKS {
+            let bg = get(SelectedContentBackground, look);
+            let hierarchy = [Label, SecondaryLabel, TertiaryLabel, QuaternaryLabel, QuinaryLabel];
+            let on: Vec<Color> = hierarchy.iter().map(|&c| emphasized(c, look).expect("a label maps")).collect();
+            let contrasts: Vec<f32> = on.iter().map(|&c| contrast(over(c, bg), bg)).collect();
+            assert!(contrasts.windows(2).all(|w| w[0] > w[1]), "{look:?}: {contrasts:?}");
+            assert_eq!(emphasized(ControlText, look), emphasized(Label, look));
+            // Disabled text is opaque there, and weaker than a label.
+            let disabled = emphasized(DisabledControlText, look).expect("disabled text maps");
+            assert_eq!(disabled[3], 1.0, "{look:?}");
+            assert!(contrast(disabled, bg) < contrasts[0], "{look:?}");
+            // Colors that aren't text for labels stay.
+            for c in [Text, PlaceholderText, Link, Red, ControlAccent, WindowBackground] {
+                assert_eq!(emphasized(c, look), None, "{c:?}");
             }
         }
     }

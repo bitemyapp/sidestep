@@ -847,6 +847,7 @@ pub(crate) fn display_in(view: &crate::views::NSViewImpl, rect: NSRect, context:
 }
 
 fn draw_view_into(view: &crate::views::NSViewImpl, rect: NSRect, ctx: Retained<NSGraphicsContext>) {
+    crate::view_layout::prepare_to_draw(view);
     // The view's rectangle to the context's layer (points, top-left
     // origin): the rectangle's corner nearest the view's origin goes to
     // the layer's corner.

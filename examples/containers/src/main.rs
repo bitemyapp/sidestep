@@ -4,7 +4,8 @@
 //!
 //! SCENARIO: split (three panes, the middle one split again), stack (rows
 //! in each distribution), tabs (a tab view on its second page), table
-//! (1000 rows in a scroll view, one selected), autolayout (a header,
+//! (1000 rows of labels in a scroll view, one selected: light on the
+//! accent while the table has the focus), autolayout (a header,
 //! sidebar, content and footer placed by constraints; the default), or
 //! the scroll views:
 //!
@@ -40,11 +41,11 @@ use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_se
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSAutoresizingMaskOptions, NSBackingStoreType,
     NSBezierPath, NSBitmapFormat, NSBitmapImageRep, NSColor, NSControlTextEditingDelegate, NSDeviceRGBColorSpace,
-    NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSLayoutAttribute, NSLayoutConstraint, NSResponder,
-    NSScrollView, NSSplitView, NSSplitViewDividerStyle, NSStackView, NSStackViewDistribution, NSStringDrawing,
-    NSTabView, NSTabViewItem, NSTableCellView, NSTableColumn, NSTableView, NSTableViewDataSource, NSTableViewDelegate,
-    NSTableViewStyle, NSUserInterfaceItemIdentification, NSUserInterfaceLayoutOrientation, NSView, NSWindow,
-    NSWindowStyleMask,
+    NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSLayoutAttribute, NSLayoutConstraint,
+    NSLineBreakMode, NSResponder, NSScrollView, NSSplitView, NSSplitViewDividerStyle, NSStackView,
+    NSStackViewDistribution, NSStringDrawing, NSTabView, NSTabViewItem, NSTableCellView, NSTableColumn, NSTableView,
+    NSTableViewDataSource, NSTableViewDelegate, NSTableViewStyle, NSTextField, NSUserInterfaceItemIdentification,
+    NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSArray, NSDictionary, NSIndexSet, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
@@ -141,25 +142,36 @@ fn sizable() -> NSAutoresizingMaskOptions {
 
 // The table's cells and data.
 
-define_class!(
-    /// A cell that draws its object value.
-    #[unsafe(super(NSTableCellView, NSView, NSResponder, NSObject))]
-    #[thread_kind = MainThreadOnly]
-    #[name = "ContainersCell"]
-    struct TextCell;
-
-    impl TextCell {
-        #[unsafe(method(drawRect:))]
-        fn draw_rect(&self, _dirty: NSRect) {
-            // SAFETY: a cell view's objectValue returns an object or nil.
-            let value: Option<Retained<AnyObject>> = unsafe { msg_send![self, objectValue] };
-            if let Some(text) = value.and_then(|v| v.downcast::<NSString>().ok()) {
-                // SAFETY: the attributes hold a font and a color.
-                unsafe { text.drawAtPoint_withAttributes(NSPoint::new(2.0, 3.0), Some(&attributes())) };
-            }
-        }
+/// A cell's text: a name, a size and an age.
+fn cell_text(column: Option<&NSTableColumn>, row: isize) -> String {
+    let id = column.map(|c| c.identifier().to_string()).unwrap_or_default();
+    match id.as_str() {
+        "name" => format!("Item {row}"),
+        "size" => format!("{} KB", (row * 37) % 1000),
+        _ => format!("{} days ago", row % 30),
     }
-);
+}
+
+/// A cell view holding a label, the usual way: on a selected row of the
+/// focused table the label turns light, as its cell is given the row's
+/// background style. Names are in the label color, the rest in the
+/// secondary one.
+fn text_cell(mtm: MainThreadMarker, id: &NSString) -> Retained<NSView> {
+    let cell = NSTableCellView::initWithFrame(NSTableCellView::alloc(mtm), rect(0.0, 0.0, 100.0, 24.0));
+    let label = NSTextField::labelWithString(&NSString::new(), mtm);
+    label.setFrame(rect(2.0, 4.0, 96.0, 16.0));
+    label.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+    label.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+    if id.to_string() != "name" {
+        label.setTextColor(Some(&NSColor::secondaryLabelColor()));
+    }
+    cell.addSubview(&label);
+    // SAFETY: the label is the cell's subview, which outlives its use.
+    unsafe { cell.setTextField(Some(&label)) };
+    let view: Retained<NSView> = Retained::into_super(cell);
+    view.setIdentifier(Some(id));
+    view
+}
 
 define_class!(
     #[unsafe(super(NSObject))]
@@ -182,13 +194,7 @@ define_class!(
             column: Option<&NSTableColumn>,
             row: isize,
         ) -> Option<Retained<AnyObject>> {
-            let id = column.map(|c| c.identifier().to_string()).unwrap_or_default();
-            let text = match id.as_str() {
-                "name" => format!("Item {row}"),
-                "size" => format!("{} KB", (row * 37) % 1000),
-                _ => format!("{} days ago", row % 30),
-            };
-            Some(Retained::into_super(Retained::into_super(NSString::from_str(&text))))
+            Some(Retained::into_super(Retained::into_super(NSString::from_str(&cell_text(column, row)))))
         }
     }
 
@@ -196,18 +202,19 @@ define_class!(
 
     unsafe impl NSTableViewDelegate for Source {
         #[unsafe(method_id(tableView:viewForTableColumn:row:))]
-        fn view(&self, table: &NSTableView, column: Option<&NSTableColumn>, _row: isize) -> Option<Retained<NSView>> {
+        fn view(&self, table: &NSTableView, column: Option<&NSTableColumn>, row: isize) -> Option<Retained<NSView>> {
             let id = column.map(|c| c.identifier()).unwrap_or_else(|| NSString::from_str("cell"));
             // SAFETY: there is no owner to connect outlets to.
             let reused = unsafe { table.makeViewWithIdentifier_owner(&id, None) };
-            Some(reused.unwrap_or_else(|| {
-                // SAFETY: the class's initializer.
-                let cell: Retained<TextCell> =
-                    unsafe { msg_send![TextCell::alloc(MainThreadMarker::from(table)), initWithFrame: NSRect::ZERO] };
-                let view: Retained<NSView> = Retained::into_super(Retained::into_super(cell));
-                view.setIdentifier(Some(&id));
-                view
-            }))
+            let view = reused.unwrap_or_else(|| text_cell(MainThreadMarker::from(table), &id));
+            let label = view.downcast_ref::<NSTableCellView>().and_then(|c| {
+                // SAFETY: the outlet is the cell's own label.
+                unsafe { c.textField() }
+            });
+            if let Some(label) = label {
+                label.setStringValue(&NSString::from_str(&cell_text(column, row)));
+            }
+            Some(view)
         }
     }
 );

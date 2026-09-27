@@ -149,6 +149,11 @@ harness = false
 name = "appkit_table"
 harness = false
 
+# Cells and table rows honouring background styles (cell_backgrounds).
+[[test]]
+name = "cell_backgrounds"
+harness = false
+
 # Text editing: text storage and layout run on any thread (text_storage,
 # text_layout use the default harness); undo and text views need the main
 # thread.

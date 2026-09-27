@@ -165,7 +165,21 @@ The platform layer since (`examples/appkit-input` shows it):
   view-based `NSTableView` (the plain, inset, full-width and source list
   styles' geometry; views only for rows near the visible ones, reused by
   identifier; variable heights; selection following rows; column
-  notifications; clicks).
+  notifications; clicks; selections emphasized in the key window's
+  focused table and gray elsewhere).
+- Cells on a table's selection, as AppKit's: row views give their interior
+  background style to cell views and to the cells of the controls under
+  them (as subviews are added, and before the row next draws after a
+  change), cell views pass theirs down, and controls answer their cell's;
+  interior styles follow each cell's own background (a bezeled field's or
+  a push button's content is on its bezel, a borderless button's on the
+  row); on an emphasized background text fields turn the label colors
+  light, in their text color and attributed runs alike (and a text color
+  with the label color's value, however it was made), while other
+  colors and the placeholder stay, plain cells and buttons draw their
+  titles light (a content tint too), and push buttons' bezels take a
+  light wash. Snapshots lay out and send `viewWillDraw` first, as macOS
+  does.
 - Scroll views (`examples/containers` shows them: `SCENARIO=overlay`,
   `transparent`, `nested`, `hscroll`, `fling`, `stream`, `idle`):
   `NSClipView` (document rectangles, content insets, constraining,
@@ -299,7 +313,10 @@ Next:
 - Containers: the visual format language; bounds scaling in drawing, hit
   testing and conversion; the table's header in its scroll view, column
   dragging and resizing from the header, hidden rows, type select, drag
-  and drop;
+  and drop; row views' `previousRowSelected`/`nextRowSelected` and group
+  rows' own look; template images and symbols tinted light on an
+  emphasized background (the hook, `controls::cell::template_ink`, waits
+  for `NSImageView`/`NSImageCell` and images in buttons);
   `NSOutlineView`, `NSCollectionView`; changing a constraint's constant
   in place and removing constraints without scanning the solver (kasuari
   needs ways to), or a solver per independent group of views; a window's

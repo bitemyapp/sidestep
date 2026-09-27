@@ -872,6 +872,16 @@ pub(crate) fn run(window: &NSWindowImpl) {
     }
 }
 
+/// Before `view` is drawn outside the display pass, into a snapshot
+/// (`cacheDisplayInRect:toBitmapImageRep:`, `displayRectIgnoringOpacity:…`):
+/// its subtree laid out where it needs it (hidden views too), then
+/// `viewWillDraw`, as macOS does (`conformance/tests/cell_backgrounds.rs`,
+/// `snapshots_prepare`).
+pub(crate) fn prepare_to_draw(view: &NSViewImpl) {
+    lay_out(view, true);
+    views::as_view(view).viewWillDraw();
+}
+
 /// `display`, `displayIfNeeded` and the like: draw now if the window can,
 /// else lay out and prepare as AppKit does for a window off screen.
 fn display_now(view: &NSViewImpl) {

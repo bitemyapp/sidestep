@@ -24,8 +24,8 @@ use objc2::rc::{Allocated, Retained, Weak};
 use objc2::runtime::{AnyClass, AnyObject, NSObjectProtocol, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSCell, NSControl, NSControlSize, NSEvent, NSEventMask, NSFont, NSLineBreakMode, NSResponder,
-    NSTextAlignment, NSView, NSWritingDirection,
+    NSApplication, NSBackgroundStyle, NSCell, NSControl, NSControlSize, NSEvent, NSEventMask, NSFont, NSLineBreakMode,
+    NSResponder, NSTextAlignment, NSView, NSWritingDirection,
 };
 use objc2_foundation::{NSAttributedString, NSCopying, NSPoint, NSRect, NSSize, NSString};
 
@@ -297,6 +297,15 @@ define_class!(
             if let Some(c) = self.the_cell() {
                 c.setControlSize(size);
             }
+        }
+
+        /// The cell's, as on macOS, where a control answers
+        /// `backgroundStyle` but has no setter: whoever gives a control a
+        /// background style gives it to the cell
+        /// (`conformance/tests/cell_backgrounds.rs`, `who_takes_styles`).
+        #[unsafe(method(backgroundStyle))]
+        fn background_style(&self) -> NSBackgroundStyle {
+            self.the_cell().map_or(NSBackgroundStyle::Normal, |c| c.backgroundStyle())
         }
 
         #[unsafe(method_id(formatter))]

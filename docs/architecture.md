@@ -1403,6 +1403,32 @@ table is the first responder of the key window (the window tells it,
 through a hook, when that changes). Columns point back to their table
 weakly.
 
+**Background styles** tell cells what they draw on. A row view's interior
+style is emphasized while it's selected and emphasized (unless the table
+highlights nothing or it's a group row; the source list style brings its
+own highlight, which counts); it gives the style to each
+subview as it's added, and after a change marks itself and gives it to
+all of them once, in its `viewWillDraw` (or when the table hands out one
+of its cell views), however many changes came first, as AppKit does. The
+giving walks the subtree: a cell view takes the style (and passes it down
+the same way), a control's cell takes it, other views pass it to their
+subviews, and nothing else is told. A cell draws on its
+`interiorBackgroundStyle`: a label's is its background style, a bezeled
+field's or a push button's the bezel's own (normal). On an emphasized
+one a text field styles its text inside `color::with_emphasis`, under
+which catalog colors resolve to their counterparts on the selection
+(`palette::emphasized`: the label colors, and the text colors that stand
+in for them, turn to the text color for selections at their own
+strength, and disabled text to an opaque light gray); everything else,
+and colors derived from catalog ones (a dynamic provider's answer, a
+system effect, another alpha, components), resolve as usual. The field's
+own text color gets one more rule, macOS's: a color with the label
+color's value turns light whatever made it
+(`color::resolve_emphasized_text`). So a text field's own color and its
+attributed runs change, while the placeholder, explicit colors and
+whatever a program draws itself don't, as on macOS. Snapshots lay out
+and send `viewWillDraw` before drawing, so they see what a frame would.
+
 Scrolling a million-row table a page at a time and laying it out takes
 8 µs (118 µs on macOS). Appending a row to 10,000 whose delegate sizes
 them takes 34 µs (31 µs). Solving 1200 constraints in a row of 300 views

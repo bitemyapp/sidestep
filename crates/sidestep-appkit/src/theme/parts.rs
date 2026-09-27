@@ -92,6 +92,11 @@ pub(crate) enum Emphasis {
     Destructive,
     /// A color the program set (`bezelColor`).
     Tinted(Color),
+    /// The usual wash on an emphasized background (a selected row of the
+    /// key window's focused table): light, as the text there is. macOS
+    /// washes with white at about 13%, and 30% pressed
+    /// (`conformance/tests/cell_backgrounds.rs`, `button_titles`).
+    OnSelection,
 }
 
 /// A button's rounded bezel filling `r`.
@@ -102,8 +107,11 @@ pub(crate) fn button_bezel(p: &Palette, r: NSRect, radius: Radii, emphasis: Emph
         Emphasis::Default => p.accent,
         Emphasis::Destructive => p.destructive,
         Emphasis::Tinted(c) => c,
+        Emphasis::OnSelection if s.pressed || s.on => faded(p.accent_text_on, 0.3),
+        Emphasis::OnSelection => faded(p.accent_text_on, 0.13),
     };
-    let fill = if s.pressed && emphasis != Emphasis::Normal { darker(fill) } else { fill };
+    let washed = matches!(emphasis, Emphasis::Normal | Emphasis::OnSelection);
+    let fill = if s.pressed && !washed { darker(fill) } else { fill };
     paint::fill_round_rect(r, radius, state_color(fill, s));
 }
 

@@ -5,11 +5,13 @@
 //! new window is configured at the size asked for, at scale 1, and a new
 //! toplevel gets the keyboard; an activation request gives the window the
 //! keyboard; a resize, maximize or full-screen request is configured; each
-//! present is shown at once (a frame). Drawing is dropped. Everything else
-//! the main thread asks is written down for tests to read
-//! (`testing::take_render_log`), and input comes only from tests, which
-//! add messages to the main thread's inbox directly (`testing`), so a test
-//! decides exactly what the program sees and when.
+//! present is shown at once (a frame). Drawing is dropped, but for the
+//! colors and places of the text painted while a test asks for them
+//! (`testing::note_painted_text`). Everything else the main thread asks is
+//! written down for tests to read (`testing::take_render_log`), and input
+//! comes only from tests, which add messages to the main thread's inbox
+//! directly (`testing`), so a test decides exactly what the program sees
+//! and when.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -19,8 +21,8 @@ use smithay_client_toolkit::reexports::calloop::channel::{self, Channel};
 
 use super::Backend;
 use crate::event_loop::MainSender;
-use crate::protocol::{FromRender, ToRender, WindowId, WindowRequest, WindowState};
-use crate::testing::Seen;
+use crate::protocol::{FromRender, Op, ToRender, WindowId, WindowRequest, WindowState};
+use crate::testing::{PaintedText, Seen};
 use sidestep_foundation::runloop::SourceSignal;
 
 /// Asked for by a test, before the render thread started.
@@ -45,6 +47,9 @@ pub(crate) fn sending() {
 
 /// What the main thread asked for, oldest first.
 pub(crate) static LOG: Mutex<Vec<Seen>> = Mutex::new(Vec::new());
+
+/// The text painted, oldest first, while a test notes it.
+pub(crate) static TEXT: Mutex<Option<Vec<PaintedText>>> = Mutex::new(None);
 
 pub(crate) fn request() {
     REQUESTED.store(true, Ordering::Relaxed);
@@ -149,6 +154,15 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
             ToRender::SetCursor { window, cursor } => note(Seen::Cursor { window, name: cursor.name().into() }),
             ToRender::HideCursor { hidden, until_moved } => note(Seen::CursorHidden { hidden, until_moved }),
             ToRender::SetParent { window, parent } => note(Seen::Parent { window, parent }),
+            ToRender::Paint { window, ops, .. } => {
+                if let Some(text) = TEXT.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                    let runs = ops.iter().filter_map(|op| match op {
+                        Op::Glyphs(run) => Some(PaintedText { window, color: run.color, x: run.x, y: run.y }),
+                        _ => None,
+                    });
+                    text.extend(runs);
+                }
+            }
             ToRender::MenuBar { window, height, .. } => {
                 if let Some(win) = windows.get_mut(&window).filter(|w| w.bar != height) {
                     win.bar = height;

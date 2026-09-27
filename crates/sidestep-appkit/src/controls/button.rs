@@ -47,6 +47,7 @@ use super::control;
 use super::half_up;
 use super::value::{self, Value};
 use crate::protocol::Color;
+use crate::palette::System;
 use crate::theme::{self, metrics, parts};
 
 /// The look a bezel style and button type come to.
@@ -618,6 +619,11 @@ define_class!(
         #[unsafe(method(imageRectForBounds:))]
         fn image_rect_for_bounds(&self, bounds: NSRect) -> NSRect {
             image_rect(self, bounds)
+        }
+
+        #[unsafe(method(interiorBackgroundStyle))]
+        fn interior_background_style(&self) -> NSBackgroundStyle {
+            interior_style(self)
         }
 
         // Drawing.
@@ -1336,9 +1342,33 @@ fn emphasis(cell: &NSButtonCellImpl) -> parts::Emphasis {
         parts::Emphasis::Destructive
     } else if cell.is_default() {
         parts::Emphasis::Default
+    } else if on_selection(cell) {
+        parts::Emphasis::OnSelection
     } else {
         parts::Emphasis::Normal
     }
+}
+
+/// Whether the button is on an emphasized background: its
+/// `backgroundStyle` (asked by message, so a subclass's answer counts).
+/// macOS draws every title but a badge's light there, whatever
+/// the interior style says (`conformance/tests/cell_backgrounds.rs`,
+/// `button_titles`).
+fn on_selection(cell: &NSButtonCellImpl) -> bool {
+    cell.ivars().bezel.get() != NSBezelStyle::Badge && cell.as_cell().backgroundStyle() == NSBackgroundStyle::Emphasized
+}
+
+/// `interiorBackgroundStyle`: what a button draws its content on. A
+/// badge is always dark; a borderless button's content is on its
+/// superview's background; a bezel, a check box's or a radio button's is
+/// the button's own. Measured on macOS
+/// (`conformance/tests/cell_backgrounds.rs`, `interior_styles`).
+fn interior_style(cell: &NSButtonCellImpl) -> NSBackgroundStyle {
+    if cell.ivars().bezel.get() == NSBezelStyle::Badge {
+        return NSBackgroundStyle::Emphasized;
+    }
+    let boxed = matches!(cell.look(), Look::Check | Look::Radio);
+    if boxed || cell.base().has(Flags::BORDERED) { NSBackgroundStyle::Normal } else { cell.as_cell().backgroundStyle() }
 }
 
 fn draw_bezel(cell: &NSButtonCellImpl, frame: NSRect, view: &NSView) {
@@ -1396,7 +1426,14 @@ fn draw_title(cell: &NSButtonCellImpl, title: Option<&NSAttributedString>, frame
     let base = cell.base();
     let bordered_push = base.has(Flags::BORDERED) && !matches!(cell.look(), Look::Check | Look::Radio);
     let mut color = if bordered_push { parts::button_text(p, emphasis(cell), s) } else { p.label };
-    if !bordered_push {
+    if !bordered_push && on_selection(cell) {
+        // Light on the selection, the content tint too; dimmed there when
+        // disabled, as anywhere else.
+        color = theme::emphasized_color(System::Label);
+        if s.disabled {
+            color = theme::palette::dimmed(color);
+        }
+    } else if !bordered_push {
         let tint = cell.ivars().content_tint.borrow().clone();
         if let Some(tint) = tint {
             color = theme::color_of(&tint);

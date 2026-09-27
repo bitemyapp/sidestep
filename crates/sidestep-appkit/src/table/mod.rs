@@ -441,8 +441,24 @@ define_class!(
             self.ivars().style.get()
         }
 
+        /// The source list style brings the source list's highlight, and
+        /// the other styles but the automatic one take it away again, as
+        /// on macOS (`conformance/tests/cell_backgrounds.rs`,
+        /// `source_lists`).
         #[unsafe(method(setStyle:))]
         fn set_style(&self, style: NSTableViewStyle) {
+            #[allow(deprecated)]
+            let source_list = NSTableViewSelectionHighlightStyle::SourceList;
+            let highlight = self.ivars().highlight.get();
+            let wanted = match style {
+                NSTableViewStyle::SourceList => source_list,
+                NSTableViewStyle::Automatic => highlight,
+                _ if highlight == source_list => NSTableViewSelectionHighlightStyle::Regular,
+                _ => highlight,
+            };
+            if wanted != highlight {
+                self.set_highlight(wanted);
+            }
             if self.ivars().style.replace(style) != style {
                 self.heights_changed();
             }
@@ -463,10 +479,7 @@ define_class!(
         #[unsafe(method(setSelectionHighlightStyle:))]
         fn set_selection_highlight_style(&self, style: NSTableViewSelectionHighlightStyle) {
             let before = self.resolved_style();
-            self.ivars().highlight.set(style);
-            for row in self.row_views() {
-                row.setSelectionHighlightStyle(style);
-            }
+            self.set_highlight(style);
             if self.resolved_style() != before {
                 self.heights_changed();
             }
@@ -972,9 +985,16 @@ define_class!(
 
         // Views.
 
+        /// The cell view, brought up to date with its row's background
+        /// style first, as on macOS (`conformance/tests/cell_backgrounds.rs`,
+        /// `when_rows_restyle`).
         #[unsafe(method_id(viewAtColumn:row:makeIfNecessary:))]
         fn view_at_column(&self, column: isize, row: isize, make: bool) -> Option<Retained<NSView>> {
-            self.cell_at(column, row, make)
+            let cell = self.cell_at(column, row, make);
+            if let Some(row) = cell.as_deref().and_then(|c| views::superview_of(views::imp(c))) {
+                row::give_style_if_changed(views::as_view(row));
+            }
+            cell
         }
 
         #[unsafe(method_id(rowViewAtRow:makeIfNecessary:))]
@@ -1137,6 +1157,16 @@ impl NSTableViewImpl {
 
     fn metrics(&self) -> Metrics {
         Metrics::of(self.resolved_style())
+    }
+
+    /// The selection highlight, for the table and its rows: for
+    /// `setSelectionHighlightStyle:`, and for `setStyle:`, which changes it
+    /// without sending that, as on macOS.
+    fn set_highlight(&self, style: NSTableViewSelectionHighlightStyle) {
+        self.ivars().highlight.set(style);
+        for row in self.row_views() {
+            row.setSelectionHighlightStyle(style);
+        }
     }
 
     /// The realized rows' views.
@@ -1488,6 +1518,9 @@ impl NSTableViewImpl {
             unsafe { msg_send![&*d, tableView: table, isGroupRow: r as isize] }
         });
         row_view.setGroupRowStyle(group);
+        // Whatever the row holds already learns its style now; the cells
+        // learn it as they're added.
+        row::give_style_if_changed(&row_view);
         let columns = self.ivars().columns.borrow().clone();
         let mut cells: Vec<Option<Retained<NSView>>> = vec![None; columns.len()];
         if group {
