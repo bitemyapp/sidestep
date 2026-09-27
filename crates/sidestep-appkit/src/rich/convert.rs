@@ -17,17 +17,18 @@ use objc2::runtime::AnyObject;
 use objc2::{AnyThread, Message};
 #[allow(deprecated)] // NSObliqueness and NSExpansion, which rich text carries.
 use objc2_app_kit::{
-    NSBackgroundColorAttributeName, NSBaselineOffsetAttributeName, NSColor, NSColorSpace, NSColorSpaceModel,
-    NSColorType, NSExpansionAttributeName, NSFont, NSFontAttributeName, NSFontDescriptorSymbolicTraits,
-    NSForegroundColorAttributeName, NSKernAttributeName, NSLigatureAttributeName, NSLinkAttributeName,
-    NSMutableParagraphStyle, NSObliquenessAttributeName, NSParagraphStyle, NSParagraphStyleAttributeName, NSShadow,
-    NSShadowAttributeName, NSStrikethroughColorAttributeName, NSStrikethroughStyleAttributeName,
-    NSStrokeColorAttributeName, NSStrokeWidthAttributeName, NSSuperscriptAttributeName, NSTextAlignment, NSTextTab,
-    NSTextTabType, NSUnderlineColorAttributeName, NSUnderlineStyleAttributeName, NSWritingDirection,
+    NSAttachmentAttributeName, NSBackgroundColorAttributeName, NSBaselineOffsetAttributeName, NSColor, NSColorSpace,
+    NSColorSpaceModel, NSColorType, NSExpansionAttributeName, NSFont, NSFontAttributeName,
+    NSFontDescriptorSymbolicTraits, NSForegroundColorAttributeName, NSKernAttributeName, NSLigatureAttributeName,
+    NSLinkAttributeName, NSMutableParagraphStyle, NSObliquenessAttributeName, NSParagraphStyle,
+    NSParagraphStyleAttributeName, NSShadow, NSShadowAttributeName, NSStrikethroughColorAttributeName,
+    NSStrikethroughStyleAttributeName, NSStrokeColorAttributeName, NSStrokeWidthAttributeName,
+    NSSuperscriptAttributeName, NSTextAlignment, NSTextAttachment, NSTextTab, NSTextTabType,
+    NSUnderlineColorAttributeName, NSUnderlineStyleAttributeName, NSWritingDirection,
 };
 use objc2_foundation::{
-    NSArray, NSAttributedString, NSDictionary, NSMutableAttributedString, NSNumber, NSRange, NSSize, NSString, NSURL,
-    NSValue,
+    NSArray, NSAttributedString, NSData, NSDictionary, NSFileWrapper, NSMutableAttributedString, NSNumber, NSRange,
+    NSSize, NSString, NSURL, NSValue,
 };
 
 use super::keys;
@@ -75,6 +76,19 @@ pub(crate) fn to_attributed(doc: &Doc) -> Retained<NSMutableAttributedString> {
     for (range, dict) in pieces {
         // SAFETY: the dictionary holds attribute values of the right kinds.
         unsafe { string.setAttributes_range(Some(&dict), range) };
+    }
+    // Each attachment on its character: an attachment of its file.
+    for a in &doc.attachments {
+        let Some(at) = doc.text.get(..a.at).map(|t| t.encode_utf16().count()) else { continue };
+        let wrapper =
+            NSFileWrapper::initRegularFileWithContents(NSFileWrapper::alloc(), &NSData::with_bytes(&a.contents));
+        if !a.name.is_empty() {
+            wrapper.setPreferredFilename(Some(&NSString::from_str(&a.name)));
+        }
+        let attachment = NSTextAttachment::initWithFileWrapper(NSTextAttachment::alloc(), Some(&wrapper));
+        // SAFETY: the key is a constant string AppKit exports; an
+        // attachment is its value.
+        unsafe { string.addAttribute_value_range(NSAttachmentAttributeName, &attachment, NSRange::new(at, 1)) };
     }
     string
 }
@@ -316,7 +330,63 @@ pub(crate) fn from_attributed(string: &NSAttributedString, range: NSRange) -> Do
     } else {
         string.attributedSubstringFromRange(range)
     };
-    sidestep_foundation::with_runs(&part, |text, refs| {
+    let mut doc = doc_of(&part);
+    doc.attachments = attachments_of(&part, &doc.text);
+    doc
+}
+
+/// The attachments of `string` (whose text is `text`): each U+FFFC with an
+/// attachment whose file wrapper holds a file, as that file (named
+/// uniquely), at the size the attachment lays out at.
+fn attachments_of(string: &NSAttributedString, text: &str) -> Vec<super::model::Attachment> {
+    let mut out: Vec<super::model::Attachment> = Vec::new();
+    let mut unit = 0;
+    let mut from = 0;
+    for (at, _) in text.match_indices('\u{FFFC}') {
+        unit += text[from..at].encode_utf16().count();
+        from = at;
+        // SAFETY: the key is a constant string AppKit exports; an index in
+        // the string.
+        let value =
+            unsafe { string.attribute_atIndex_effectiveRange(NSAttachmentAttributeName, unit, std::ptr::null_mut()) };
+        let Some(value) = value else { continue };
+        let Some(attachment) = value.downcast_ref::<NSTextAttachment>() else { continue };
+        let Some(wrapper) = attachment.fileWrapper().filter(|w| w.isRegularFile()) else { continue };
+        let Some(contents) = wrapper.regularFileContents() else { continue };
+        let name = wrapper
+            .preferredFilename()
+            .or_else(|| wrapper.filename())
+            .map_or_else(|| "Attachment".into(), |n| n.to_string());
+        let name = unique_name(&name, |n| out.iter().any(|a| a.name == n));
+        let metrics = crate::attachment::at_index(unit, || crate::attachment::metrics(&value, None, 0.0, 0.0));
+        let size = metrics.map_or((0.0, 0.0), |m| (f64::from(m.width), f64::from(m.height)));
+        out.push(super::model::Attachment {
+            at,
+            name,
+            contents: sidestep_foundation::data::to_vec(&contents),
+            width: size.0,
+            height: size.1,
+        });
+    }
+    out
+}
+
+/// `name`, or with a number after its stem (`Attachment 2.png`) if `taken`
+/// says it is.
+fn unique_name(name: &str, taken: impl Fn(&str) -> bool) -> String {
+    if !taken(name) {
+        return name.to_owned();
+    }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem, format!(".{ext}")),
+        _ => (name, String::new()),
+    };
+    (2..).map(|n| format!("{stem} {n}{ext}")).find(|n| !taken(n)).unwrap_or_else(|| name.to_owned())
+}
+
+/// The runs and paragraphs of `part`, as a document.
+fn doc_of(part: &NSAttributedString) -> Doc {
+    sidestep_foundation::with_runs(part, |text, refs| {
         let mut styles: HashMap<*const Dict, (CharStyle, Option<ParaStyle>)> = HashMap::new();
         let mut runs: Vec<(usize, CharStyle)> = Vec::new();
         // Where each run starts, and its paragraph style.
@@ -339,7 +409,7 @@ pub(crate) fn from_attributed(string: &NSAttributedString, range: NSRange) -> Do
         if runs.is_empty() {
             runs.push((0, CharStyle::default()));
         }
-        Doc { text: text.to_owned(), runs, paras, attrs: DocAttrs::default() }
+        Doc { text: text.to_owned(), runs, paras, attrs: DocAttrs::default(), attachments: Vec::new() }
     })
 }
 

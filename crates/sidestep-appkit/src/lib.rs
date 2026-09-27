@@ -30,6 +30,7 @@ pub(crate) fn load_shell<T: ClassType>() {
 
 mod accessibility;
 mod app;
+mod attachment;
 mod autolayout;
 mod backend;
 mod clipboard;
@@ -60,6 +61,7 @@ mod effect_view;
 mod gradient;
 mod image;
 mod image_rep;
+mod imageio;
 mod inputcontext;
 mod keybindings;
 mod keycodes;

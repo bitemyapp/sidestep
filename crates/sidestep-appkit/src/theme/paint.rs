@@ -196,6 +196,19 @@ pub(crate) fn text_runs(text: &str, attrs: &[Attrs], runs: &[Run], r: NSRect) {
     string_drawing::draw(text, attrs, runs, Place::Rect(r));
 }
 
+/// Draw text with attribute runs into `r`, and the attachments of the
+/// attributes that have them (`string_drawing::Attachments`) into their
+/// boxes.
+pub(crate) fn text_with_attachments(
+    text: &str,
+    attrs: &[Attrs],
+    runs: &[Run],
+    r: NSRect,
+    attachments: &string_drawing::Attachments,
+) {
+    string_drawing::draw_with(text, attrs, runs, Place::Rect(r), attachments);
+}
+
 /// Run `f` with drawing clipped to `r` (view coordinates) as well.
 pub(crate) fn with_clip(r: NSRect, f: impl FnOnce()) {
     let mut saved = None;

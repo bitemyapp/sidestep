@@ -23,9 +23,10 @@ default = ["appkit"]
 # AppKit: windows, views and events, drawn through Wayland.
 appkit = ["dep:sidestep-appkit"]
 
-# tests/link_closure.rs names the symbols through objc2's declarations; the
+# tests/link_closure*.rs name the symbols through objc2's declarations; the
 # features come from Sidestep's crates.
 [target.'cfg(not(target_vendor = "apple"))'.dev-dependencies]
 objc2-foundation.workspace = true
 objc2-app-kit.workspace = true
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std"] }
+objc2-image-io.workspace = true

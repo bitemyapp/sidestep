@@ -67,12 +67,21 @@ pub(crate) fn is_rtf(data: &[u8]) -> bool {
 }
 
 /// Read `data` as RTF.
+#[cfg(test)]
 pub(crate) fn read(data: &[u8]) -> Result<Doc, Error> {
+    read_with(data, &[])
+}
+
+/// Read `data` as the RTF of an RTFD package holding `files`: each
+/// attachment (`\NeXTGraphic`) whose file the package has becomes a U+FFFC
+/// and an attachment of the document; one whose file it lacks (in plain
+/// RTF, all of them) is left out.
+pub(crate) fn read_with(data: &[u8], files: &[(String, Vec<u8>)]) -> Result<Doc, Error> {
     let start = data.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(data.len());
     if !is_rtf(&data[start..]) {
         return Err(Error::NotRtf);
     }
-    let mut r = Reader::new(&data[start..]);
+    let mut r = Reader::new(&data[start..], files);
     r.run()?;
     Ok(r.finish())
 }
@@ -189,6 +198,9 @@ enum Dest {
     InfoField(InfoField),
     /// A field's instruction, to the field of this index.
     FieldInstruction(usize),
+    /// An attachment's graphic (RTFD's `\NeXTGraphic`): its file's name
+    /// and size.
+    Graphic,
     /// Skipped, with everything in it.
     Skip,
 }
@@ -406,6 +418,12 @@ struct Reader<'a> {
     resolved: Option<(Chr, CharStyle)>,
     /// The paragraph formatting the document ended in.
     last_para: Option<Para>,
+    /// The files of the RTFD package being read, by name.
+    files: &'a [(String, Vec<u8>)],
+    /// The attachment being read: its file's name, width and height (in
+    /// twips).
+    graphic: (Vec<u8>, Option<i32>, Option<i32>),
+    attachments: Vec<super::model::Attachment>,
 }
 
 fn twips(n: i32) -> f64 {
@@ -417,7 +435,7 @@ fn flag(param: Option<i32>) -> bool {
 }
 
 impl<'a> Reader<'a> {
-    fn new(data: &'a [u8]) -> Reader<'a> {
+    fn new(data: &'a [u8], files: &'a [(String, Vec<u8>)]) -> Reader<'a> {
         Reader {
             lexer: Lexer { data, at: 0 },
             stack: Vec::new(),
@@ -437,6 +455,9 @@ impl<'a> Reader<'a> {
             high: None,
             resolved: None,
             last_para: None,
+            files,
+            graphic: (Vec::new(), None, None),
+            attachments: Vec::new(),
         }
     }
 
@@ -501,6 +522,7 @@ impl<'a> Reader<'a> {
         match closing.dest {
             // A font table entry's group, or the table's.
             Dest::FontTable => self.end_font(),
+            Dest::Graphic if outer != Some(Dest::Graphic) => self.end_graphic(),
             Dest::InfoField(field) if outer != Some(closing.dest) => {
                 let text = std::mem::take(&mut self.info).trim().to_owned();
                 self.set_info(field, text);
@@ -511,6 +533,28 @@ impl<'a> Reader<'a> {
             // The document ends in the formatting of its outermost group.
             self.flush_high();
             self.last_para = Some(closing.para);
+        }
+    }
+
+    /// An attachment's graphic read: its character and attachment, if the
+    /// package has its file.
+    fn end_graphic(&mut self) {
+        let (name, width, height) = std::mem::take(&mut self.graphic);
+        let name = String::from_utf8_lossy(&name).trim().to_owned();
+        let Some((_, contents)) = self.files.iter().find(|(n, _)| *n == name) else { return };
+        if self.stack.is_empty() || self.state().dest != Dest::Text {
+            return;
+        }
+        let at = self.out.len();
+        self.push_str("\u{FFFC}");
+        if self.out.len() > at {
+            self.attachments.push(super::model::Attachment {
+                at,
+                name,
+                contents: contents.clone(),
+                width: width.map_or(0.0, twips),
+                height: height.map_or(0.0, twips),
+            });
         }
     }
 
@@ -582,7 +626,8 @@ impl<'a> Reader<'a> {
                 if n >= 2 {
                     self.stack[n - 2].after_attachment = true;
                 }
-                Some(Dest::Skip)
+                self.graphic = (Vec::new(), None, None);
+                Some(Dest::Graphic)
             }
             // The text of a list item's marker, for readers without lists.
             b"listtext" | b"pntext" => Some(Dest::Text),
@@ -661,6 +706,14 @@ impl<'a> Reader<'a> {
         let ignorable = std::mem::take(&mut self.state().ignorable);
         let dest = self.state().dest;
         if dest == Dest::Skip {
+            return;
+        }
+        if dest == Dest::Graphic {
+            match word {
+                b"width" => self.graphic.1 = param,
+                b"height" => self.graphic.2 = param,
+                _ => {}
+            }
             return;
         }
         if self.destination(word) {
@@ -954,6 +1007,7 @@ impl<'a> Reader<'a> {
         let dest = self.state().dest;
         match dest {
             Dest::Skip | Dest::Info => {}
+            Dest::Graphic => self.graphic.0.extend_from_slice(bytes),
             Dest::FontTable => {
                 if self.font.is_none() {
                     // A name without `\f`: the first entry, numbered 0.
@@ -1184,6 +1238,7 @@ impl<'a> Reader<'a> {
         attrs.default_tab_interval = Some(default_tab);
         let mut doc = self.out.finish(last.as_ref());
         doc.attrs = attrs;
+        doc.attachments = self.attachments;
         doc
     }
 }

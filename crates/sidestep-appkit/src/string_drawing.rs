@@ -38,11 +38,12 @@ use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
 use objc2::{ClassType, DefinedClass, define_class, msg_send, sel};
 #[allow(deprecated)] // NSObliqueness, which TextKit 2 leaves out and string drawing draws.
 use objc2_app_kit::{
-    NSBackgroundColorAttributeName, NSBaselineOffsetAttributeName, NSColor, NSFont, NSFontAttributeName,
-    NSForegroundColorAttributeName, NSKernAttributeName, NSLigatureAttributeName, NSObliquenessAttributeName,
-    NSParagraphStyle, NSParagraphStyleAttributeName, NSShadowAttributeName, NSStrikethroughColorAttributeName,
-    NSStrikethroughStyleAttributeName, NSStringDrawingContext, NSStringDrawingOptions, NSStrokeColorAttributeName,
-    NSStrokeWidthAttributeName, NSUnderlineColorAttributeName, NSUnderlineStyleAttributeName,
+    NSAttachmentAttributeName, NSBackgroundColorAttributeName, NSBaselineOffsetAttributeName, NSColor, NSFont,
+    NSFontAttributeName, NSForegroundColorAttributeName, NSKernAttributeName, NSLigatureAttributeName,
+    NSObliquenessAttributeName, NSParagraphStyle, NSParagraphStyleAttributeName, NSShadowAttributeName,
+    NSStrikethroughColorAttributeName, NSStrikethroughStyleAttributeName, NSStringDrawingContext,
+    NSStringDrawingOptions, NSStrokeColorAttributeName, NSStrokeWidthAttributeName, NSUnderlineColorAttributeName,
+    NSUnderlineStyleAttributeName,
 };
 use objc2_foundation::{NSAttributedString, NSDictionary, NSPoint, NSRect, NSSize, NSString};
 
@@ -71,10 +72,23 @@ pub(crate) enum Place {
     WithRect(NSRect, NSStringDrawingOptions),
 }
 
+/// An attributed string's attachments: for each of its attributes (by
+/// index), the dictionary of the attributes with an attachment box (its
+/// `NSAttachmentAttributeName` value is the attachment).
+pub(crate) type Attachments = [Option<Retained<Attributes>>];
+
 /// Draw text with attribute runs into the view being drawn. Text laid out
 /// before is recorded at once; other text waits for the end of the pass,
 /// when it is laid out together (see `text::pool`).
 pub(crate) fn draw(text: &str, attrs: &[Attrs], runs: &[Run], place: Place) {
+    draw_with(text, attrs, runs, place, &[]);
+}
+
+/// [`draw`], drawing the attachments `objects` holds (see [`Attachments`])
+/// into their boxes. Text with attachments is laid out at once, so that
+/// they are drawn with it, in order.
+pub(crate) fn draw_with(text: &str, attrs: &[Attrs], runs: &[Run], place: Place, objects: &Attachments) {
+    let setting = || crate::attachment::Setting::drawing(width_of(place));
     let opts = match place {
         Place::Point(_) => Options::UNBOUNDED,
         // An empty rectangle shows nothing.
@@ -86,6 +100,24 @@ pub(crate) fn draw(text: &str, attrs: &[Attrs], runs: &[Run], place: Place) {
         Place::WithRect(r, o) => options(r.size, o),
     };
     if !graphics::recording() {
+        return;
+    }
+    if objects.iter().any(Option::is_some) {
+        let laid = layout::lay_out(text, attrs, runs, &opts);
+        let mut boxes = Vec::new();
+        let mut shown = NSRect::ZERO;
+        with_recorder(|rec| {
+            let (left, top, clip) = placement(rec.xf, rec.clip, place, &laid);
+            emit(&mut rec.ops, &laid, left, top, clip);
+            shown = rec.xf.inverse_rect(clip);
+            for a in &laid.attachments {
+                let r = Rect::new(left + a.rect[0], top + a.rect[1], left + a.rect[2], top + a.rect[3]);
+                if !clip.intersect(&r).is_empty() {
+                    boxes.push((rec.xf.inverse_rect(r), a.byte, a.attrs));
+                }
+            }
+        });
+        draw_attachments(&boxes, shown, |byte| text[..byte].encode_utf16().count(), objects, &setting());
         return;
     }
     let recorded = layout::with_cached(text, attrs, runs, &opts, |laid| {
@@ -107,6 +139,39 @@ pub(crate) fn draw(text: &str, attrs: &[Attrs], runs: &[Run], place: Place) {
             let job = rec.pending.job_for(text, attrs, runs, opts, hash);
             rec.pending.places.push(Deferred { at: rec.ops.len(), job, xf: rec.xf, clip: rec.clip, place });
         }),
+    }
+}
+
+/// Draw the attachments of `boxes` (their rects in user space, bytes and
+/// attributes' indexes), clipped to `shown`; `index` turns a byte into the
+/// UTF-16 index the attachments are told.
+fn draw_attachments(
+    boxes: &[(NSRect, usize, u32)],
+    shown: NSRect,
+    index: impl Fn(usize) -> usize,
+    objects: &Attachments,
+    setting: &crate::attachment::Setting,
+) {
+    if boxes.is_empty() {
+        return;
+    }
+    objc2_app_kit::NSGraphicsContext::saveGraphicsState_class();
+    crate::context::NSRectClip(shown);
+    for &(rect, byte, attrs) in boxes {
+        let Some(Some(dict)) = objects.get(attrs as usize) else { continue };
+        // SAFETY: the key is a constant this crate exports.
+        let Some(object) = dict.objectForKey(unsafe { NSAttachmentAttributeName }) else { continue };
+        let at = crate::attachment::Drawn { rect, index: index(byte), attributes: Some(dict), view: None };
+        crate::attachment::draw(&object, &at, setting, None);
+    }
+    objc2_app_kit::NSGraphicsContext::restoreGraphicsState_class();
+}
+
+/// The width text drawn at `place` is laid out in, if it has one.
+fn width_of(place: Place) -> Option<f64> {
+    match place {
+        Place::Point(_) => None,
+        Place::Rect(r) | Place::WithRect(r, _) => Some(r.size.width),
     }
 }
 
@@ -236,6 +301,7 @@ fn options(size: NSSize, o: NSStringDrawingOptions) -> Options {
         all_lines,
         font_leading: o.contains(NSStringDrawingOptions::UsesFontLeading),
         truncate_last: o.contains(NSStringDrawingOptions::TruncatesLastVisibleLine),
+        attachments_as_glyphs: false,
     }
 }
 
@@ -325,6 +391,25 @@ pub(crate) fn record_line(line: &Line, origin: NSPoint, backgrounds: bool) {
     });
 }
 
+/// The attachments' boxes of a laid-out line whose left edge and top are
+/// at `origin` in the view being drawn (as [`record_line`] takes it): each
+/// one's rectangle in the view's space, for drawing it, and the box.
+pub(crate) fn line_boxes(line: &Line, origin: NSPoint) -> Vec<(NSRect, crate::text::lines::LineAttachment)> {
+    if line.attachments.is_empty() {
+        return Vec::new();
+    }
+    let Some(xf) = crate::context::with_state(|st| st.rec.xf) else { return Vec::new() };
+    let (x, y) = xf.point(origin.x, origin.y);
+    let (left, top) = (x as f32, y as f32);
+    line.attachments
+        .iter()
+        .map(|a| {
+            let r = Rect::new(left + a.rect[0], top + a.rect[1], left + a.rect[2], top + a.rect[3]);
+            (xf.inverse_rect(r), *a)
+        })
+        .collect()
+}
+
 /// Record `lines`, the first's top at `top`: those in the clip.
 #[cfg_attr(not(test), allow(dead_code))]
 fn record_lines(ops: &mut Vec<Op>, lines: &[Line], left: f32, top: f32, clip: Rect) {
@@ -408,6 +493,12 @@ pub(crate) fn attrs_of(dict: Option<&Attributes>) -> Attrs {
         let obliqueness = NSObliquenessAttributeName;
         attrs.obliqueness = get(obliqueness).and_then(|v| number(&v)).unwrap_or(0.0) as f32;
         attrs.shadow = get(NSShadowAttributeName).and_then(|v| shadow_of(&v));
+        if let Some(value) = get(NSAttachmentAttributeName) {
+            let (fm, size) = (&attrs.font.face.metrics, attrs.font.size);
+            let ascent = f64::from((fm.ascent * size).round());
+            let line = ascent + f64::from((-fm.descent * size).round());
+            attrs.attachment = crate::attachment::metrics(&value, Some(dict), ascent, line);
+        }
     }
     attrs
 }
@@ -465,9 +556,24 @@ fn whole(text: &str) -> [Run; 1] {
     [Run { start: 0, end: text.len(), attrs: 0 }]
 }
 
+/// `dict`, if its attributes have an attachment's box (see
+/// [`Attachments`]).
+pub(crate) fn attachment_in(dict: Option<&Attributes>, attrs: &Attrs) -> [Option<Retained<Attributes>>; 1] {
+    [attrs.attachment.and(dict).map(objc2::Message::retain)]
+}
+
+/// A string's attributes, worked out for text laid out `width` wide (for
+/// what an attachment's methods are told), its first character's.
+fn attrs_in(dict: Option<&Attributes>, width: Option<f64>) -> Attrs {
+    let setting = crate::attachment::Setting::drawing(width);
+    crate::attachment::in_setting(setting, || crate::attachment::at_index(0, || attrs_of(dict)))
+}
+
 fn draw_string<T>(this: &T, attrs: Option<&Attributes>, place: Place) {
     let text = this_string(this);
-    draw(&text, &[attrs_of(attrs)], &whole(&text), place);
+    let resolved = attrs_in(attrs, width_of(place));
+    let objects = attachment_in(attrs, &resolved);
+    draw_with(&text, &[resolved], &whole(&text), place, &objects);
 }
 
 define_class!(
@@ -495,9 +601,10 @@ define_class!(
             context: Option<&NSStringDrawingContext>,
         ) {
             let text = this_string(self);
-            let attrs = [attrs_of(attrs)];
-            draw(&text, &attrs, &whole(&text), Place::WithRect(rect, options));
-            report(context, || measure(&text, &attrs, &whole(&text), Some((rect.size, options))));
+            let resolved = [attrs_in(attrs, Some(rect.size.width))];
+            let objects = attachment_in(attrs, &resolved[0]);
+            draw_with(&text, &resolved, &whole(&text), Place::WithRect(rect, options), &objects);
+            report(context, || measure(&text, &resolved, &whole(&text), Some((rect.size, options))));
         }
 
         #[unsafe(method(drawWithRect:options:attributes:))]
@@ -508,7 +615,7 @@ define_class!(
         #[unsafe(method(sizeWithAttributes:))]
         fn size_with_attributes(&self, attrs: Option<&Attributes>) -> NSSize {
             let text = this_string(self);
-            measure(&text, &[attrs_of(attrs)], &whole(&text), None).size
+            measure(&text, &[attrs_in(attrs, None)], &whole(&text), None).size
         }
 
         #[unsafe(method(boundingRectWithSize:options:attributes:context:))]
@@ -520,7 +627,7 @@ define_class!(
             context: Option<&NSStringDrawingContext>,
         ) -> NSRect {
             let text = this_string(self);
-            let bounds = measure(&text, &[attrs_of(attrs)], &whole(&text), Some((size, options)));
+            let bounds = measure(&text, &[attrs_in(attrs, Some(size.width))], &whole(&text), Some((size, options)));
             report(context, || bounds);
             bounds
         }
@@ -533,7 +640,7 @@ define_class!(
             attrs: Option<&Attributes>,
         ) -> NSRect {
             let text = this_string(self);
-            measure(&text, &[attrs_of(attrs)], &whole(&text), Some((size, options)))
+            measure(&text, &[attrs_in(attrs, Some(size.width))], &whole(&text), Some((size, options)))
         }
     }
 );
@@ -552,37 +659,49 @@ pub(crate) struct Parts {
     pub text: String,
     pub attrs: Vec<Attrs>,
     pub runs: Vec<Run>,
+    /// The attachments of the attributes with one (see [`Attachments`]).
+    pub attachments: Vec<Option<Retained<Attributes>>>,
 }
 
 /// The parts of `string`, read through its primitives (so a subclass with
-/// text of its own, such as a text storage, is read as it answers).
-pub(crate) fn attributed_parts(string: &NSAttributedString) -> Parts {
+/// text of its own, such as a text storage, is read as it answers), for
+/// string drawing given `width` or none (what attachments are told).
+pub(crate) fn attributed_parts(string: &NSAttributedString, width: Option<f64>) -> Parts {
+    crate::attachment::in_setting(crate::attachment::Setting::drawing(width), || parts_of(string))
+}
+
+fn parts_of(string: &NSAttributedString) -> Parts {
     sidestep_foundation::with_runs(string, |text, refs| {
         let mut attrs: Vec<Attrs> = Vec::new();
+        let mut attachments = Vec::new();
         let mut seen: HashMap<*const Attributes, u32, FxBuild> = HashMap::default();
         let mut runs = Vec::with_capacity(refs.len());
         for r in refs.iter().filter(|r| !r.utf8.is_empty()) {
             let index = *seen.entry(Retained::as_ptr(&r.attrs)).or_insert_with(|| {
-                attrs.push(attrs_of(Some(&r.attrs)));
+                let a = crate::attachment::at_index(r.utf16.start, || attrs_of(Some(&r.attrs)));
+                let [object] = attachment_in(Some(&r.attrs), &a);
+                attrs.push(a);
+                attachments.push(object);
                 attrs.len() as u32 - 1
             });
             runs.push(Run { start: r.utf8.start, end: r.utf8.end, attrs: index });
         }
         if runs.is_empty() {
             attrs.push(attrs_of(None));
+            attachments.push(None);
             runs.push(Run { start: 0, end: text.len(), attrs: 0 });
         }
-        Parts { text: text.to_owned(), attrs, runs }
+        Parts { text: text.to_owned(), attrs, runs, attachments }
     })
 }
 
-fn this_attributed<T>(this: &T) -> Parts {
-    attributed_parts(crate::rich::receiver(this))
+fn this_attributed<T>(this: &T, width: Option<f64>) -> Parts {
+    attributed_parts(crate::rich::receiver(this), width)
 }
 
 impl Parts {
     fn draw(&self, place: Place) {
-        draw(&self.text, &self.attrs, &self.runs, place);
+        draw_with(&self.text, &self.attrs, &self.runs, place, &self.attachments);
     }
 
     fn measure(&self, bounds: Option<(NSSize, NSStringDrawingOptions)>) -> NSRect {
@@ -598,29 +717,29 @@ define_class!(
     impl AttributedStringDrawing {
         #[unsafe(method(size))]
         fn size(&self) -> NSSize {
-            this_attributed(self).measure(None).size
+            this_attributed(self, None).measure(None).size
         }
 
         #[unsafe(method(drawAtPoint:))]
         fn draw_at_point(&self, point: NSPoint) {
-            this_attributed(self).draw(Place::Point(point));
+            this_attributed(self, None).draw(Place::Point(point));
         }
 
         #[unsafe(method(drawInRect:))]
         fn draw_in_rect(&self, rect: NSRect) {
-            this_attributed(self).draw(Place::Rect(rect));
+            this_attributed(self, Some(rect.size.width)).draw(Place::Rect(rect));
         }
 
         #[unsafe(method(drawWithRect:options:context:))]
         fn draw_with_rect(&self, rect: NSRect, options: NSStringDrawingOptions, context: Option<&NSStringDrawingContext>) {
-            let parts = this_attributed(self);
+            let parts = this_attributed(self, Some(rect.size.width));
             parts.draw(Place::WithRect(rect, options));
             report(context, || parts.measure(Some((rect.size, options))));
         }
 
         #[unsafe(method(drawWithRect:options:))]
         fn draw_with_rect_no_context(&self, rect: NSRect, options: NSStringDrawingOptions) {
-            this_attributed(self).draw(Place::WithRect(rect, options));
+            this_attributed(self, Some(rect.size.width)).draw(Place::WithRect(rect, options));
         }
 
         #[unsafe(method(boundingRectWithSize:options:context:))]
@@ -630,14 +749,14 @@ define_class!(
             options: NSStringDrawingOptions,
             context: Option<&NSStringDrawingContext>,
         ) -> NSRect {
-            let bounds = this_attributed(self).measure(Some((size, options)));
+            let bounds = this_attributed(self, Some(size.width)).measure(Some((size, options)));
             report(context, || bounds);
             bounds
         }
 
         #[unsafe(method(boundingRectWithSize:options:))]
         fn bounding_rect_no_context(&self, size: NSSize, options: NSStringDrawingOptions) -> NSRect {
-            this_attributed(self).measure(Some((size, options)))
+            this_attributed(self, Some(size.width)).measure(Some((size, options)))
         }
     }
 );
@@ -1139,7 +1258,7 @@ mod tests {
         let string = NSMutableAttributedString::from_nsstring(&NSString::from_str("aé😀 plain red"));
         // SAFETY: a constant key and a color, over a range in the text.
         unsafe { string.addAttribute_value_range(NSForegroundColorAttributeName, &red, NSRange::new(11, 3)) };
-        let parts = attributed_parts(&string);
+        let parts = attributed_parts(&string, None);
         assert_eq!(parts.text, "aé😀 plain red");
         // One set of attributes per dictionary, the runs over bytes.
         assert_eq!(parts.attrs.len(), 2);
@@ -1150,7 +1269,7 @@ mod tests {
         // Drawn, the red run is red; empty text still has a run.
         let ops = record(|| parts.draw(Place::Point(NSPoint::new(0.0, 0.0))));
         assert!(glyph_runs(&ops).iter().any(|r| r.color == [1.0, 0.0, 0.0, 1.0]));
-        let empty = attributed_parts(&NSMutableAttributedString::from_nsstring(&NSString::from_str("")));
+        let empty = attributed_parts(&NSMutableAttributedString::from_nsstring(&NSString::from_str("")), None);
         assert_eq!((empty.runs.len(), empty.attrs.len()), (1, 1));
         assert_eq!(empty.measure(None).size.height, parts.measure(None).size.height);
     }

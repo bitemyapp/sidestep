@@ -264,6 +264,20 @@ impl DocAttrs {
     }
 }
 
+/// An attachment: the file an RTFD package holds for one of the text's
+/// U+FFFC, and the size it shows at.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Attachment {
+    /// The U+FFFC's byte in the text.
+    pub at: usize,
+    /// The file's name in the package.
+    pub name: String,
+    pub contents: Vec<u8>,
+    /// In points.
+    pub width: f64,
+    pub height: f64,
+}
+
 /// Rich text: UTF-8 text, character runs and paragraphs.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Doc {
@@ -274,6 +288,8 @@ pub(crate) struct Doc {
     /// if it has one; in order, covering the text.
     pub paras: Vec<(usize, Option<ParaStyle>)>,
     pub attrs: DocAttrs,
+    /// The attachments, in order; only RTFD holds them.
+    pub attachments: Vec<Attachment>,
 }
 
 impl Doc {

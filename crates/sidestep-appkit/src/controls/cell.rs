@@ -1527,29 +1527,41 @@ pub(crate) struct Styled {
     pub text: String,
     pub attrs: Vec<Attrs>,
     pub runs: Vec<Run>,
+    /// The attachments of an attributed string's runs, by their attributes
+    /// (`string_drawing::Attachments`); empty for text without.
+    pub attachments: Vec<Option<Retained<objc2_foundation::NSDictionary<NSString, AnyObject>>>>,
 }
 
 impl Styled {
     pub fn plain(text: String, attrs: Attrs) -> Styled {
         let runs = vec![Run { start: 0, end: text.len(), attrs: 0 }];
-        Styled { text, attrs: vec![attrs], runs }
+        Styled { text, attrs: vec![attrs], runs, attachments: Vec::new() }
     }
 
     /// An attributed string over `base`: attributes it doesn't set are
     /// `base`'s.
     pub fn attributed(string: &NSAttributedString, base: &Attrs) -> Styled {
-        sidestep_foundation::with_runs(string, |text, runs| {
-            let mut attrs = Vec::with_capacity(runs.len());
-            let mut out = Vec::with_capacity(runs.len());
-            for (i, run) in runs.iter().enumerate() {
-                attrs.push(merged(&run.attrs, base));
-                out.push(Run { start: run.utf8.start, end: run.utf8.end, attrs: i as u32 });
-            }
-            if out.is_empty() {
-                attrs.push(base.clone());
-                out.push(Run { start: 0, end: text.len(), attrs: 0 });
-            }
-            Styled { text: text.to_string(), attrs, runs: out }
+        let setting = crate::attachment::Setting::drawing(None);
+        crate::attachment::in_setting(setting, || {
+            sidestep_foundation::with_runs(string, |text, runs| {
+                let mut attrs = Vec::with_capacity(runs.len());
+                let mut attachments = Vec::new();
+                let mut out = Vec::with_capacity(runs.len());
+                for (i, run) in runs.iter().enumerate() {
+                    let a = crate::attachment::at_index(run.utf16.start, || merged(&run.attrs, base));
+                    if a.attachment.is_some() {
+                        attachments.resize(i, None);
+                        attachments.push(Some(run.attrs.clone()));
+                    }
+                    attrs.push(a);
+                    out.push(Run { start: run.utf8.start, end: run.utf8.end, attrs: i as u32 });
+                }
+                if out.is_empty() {
+                    attrs.push(base.clone());
+                    out.push(Run { start: 0, end: text.len(), attrs: 0 });
+                }
+                Styled { text: text.to_string(), attrs, runs: out, attachments }
+            })
         })
     }
 
@@ -1569,9 +1581,12 @@ impl Styled {
         NSSize::new(f64::from(laid.width), f64::from(laid.height))
     }
 
-    /// Draw into `r`, clipped to it.
+    /// Draw into `r`, clipped to it, with its attachments.
     pub fn draw(&self, r: NSRect) {
         match self.attrs.as_slice() {
+            _ if !self.attachments.is_empty() => {
+                theme::paint::text_with_attachments(&self.text, &self.attrs, &self.runs, r, &self.attachments);
+            }
             [one] if self.runs.len() == 1 => theme::paint::text(&self.text, one, r),
             _ => theme::paint::text_runs(&self.text, &self.attrs, &self.runs, r),
         }

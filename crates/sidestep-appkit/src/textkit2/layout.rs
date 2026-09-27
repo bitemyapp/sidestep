@@ -102,14 +102,15 @@ pub(crate) fn storage_text(
         .map(|(r, id)| Span {
             start: (r.start - range.start) as u32,
             end: (r.end - range.start) as u32,
-            attrs: resolved.index(Some(table.dict(id))),
+            attrs: crate::attachment::at_index(r.start, || resolved.index(Some(table.dict(id)))),
         })
         .collect();
     Some(Text { text: s, spans })
 }
 
-/// The text of an attributed string, read through its methods.
-pub(crate) fn attributed_text(a: &NSAttributedString, resolved: &mut Resolved) -> Text {
+/// The text of an attributed string, read through its methods; its first
+/// character is at `start` in the document (for what attachments are told).
+pub(crate) fn attributed_text(a: &NSAttributedString, start: usize, resolved: &mut Resolved) -> Text {
     let string: Retained<NSString> = a.string();
     let len = string.length();
     let mut spans = Vec::new();
@@ -119,7 +120,8 @@ pub(crate) fn attributed_text(a: &NSAttributedString, resolved: &mut Resolved) -
         // SAFETY: an index inside the string, and a valid out-parameter.
         let d: Retained<Dict> = unsafe { msg_send![a, attributesAtIndex: i, effectiveRange: &mut r] };
         let end = (r.location + r.length).min(len).max(i + 1);
-        spans.push(Span { start: i as u32, end: end as u32, attrs: resolved.index(Some(&d)) });
+        let attrs = crate::attachment::at_index(start + i, || resolved.index(Some(&d)));
+        spans.push(Span { start: i as u32, end: end as u32, attrs });
         i = end;
     }
     Text { text: string.to_string(), spans }
@@ -190,7 +192,7 @@ pub(crate) fn lay_out(
     (first, last, open): (bool, bool, bool),
     extra: Option<&Attrs>,
 ) -> Laid {
-    let container = Container { width: g.width, max_lines: 0, truncation: None, font_leading: g.font_leading };
+    let container = Container { width: g.width, font_leading: g.font_leading, ..Container::UNBOUNDED };
     let styled = Styled { text: &text.text, attrs, spans: &text.spans };
     let mut paras: Vec<Para> = Vec::new();
     let mut byte = 0usize;

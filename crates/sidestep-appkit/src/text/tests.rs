@@ -489,6 +489,8 @@ fn text_of_every_kind_lays_out_without_panicking() {
             all_lines: !rng.next().is_multiple_of(4),
             font_leading: rng.next().is_multiple_of(2),
             truncate_last: rng.next().is_multiple_of(2),
+            // Not drawn from `rng`, which would change every case.
+            attachments_as_glyphs: case % 2 == 0,
         };
         let laid = layout::lay_out(&text, &attrs, &runs, &opts);
         assert!(laid.width.is_finite() && laid.height.is_finite() && laid.height > 0.0, "case {case}: {text:?}");
@@ -548,4 +550,75 @@ fn decorations_run_straight_through_fallback_fonts() {
     assert!(lines.iter().all(|r| (r[1], r[3]) == (lines[0][1], lines[0][3])), "{lines:?}");
     lines.sort_by(|a, b| a[0].total_cmp(&b[0]));
     assert!(lines.windows(2).all(|w| (w[1][0] - w[0][2]).abs() < 0.01), "end to end: {lines:?}");
+}
+
+/// "a", an attachment's box `width` × 30 reaching 5 below the baseline,
+/// and "b", laid out in `opts`.
+fn with_box(width: f32, opts: Options) -> (Arc<TextLayout>, Attrs) {
+    let a = Attrs::new(sans(13.0));
+    let boxed = Attrs { attachment: Some(layout::Attachment { width, height: 30.0, y: -5.0 }), ..a.clone() };
+    let text = "a\u{FFFC}b";
+    let runs =
+        [Run { start: 0, end: 1, attrs: 0 }, Run { start: 1, end: 4, attrs: 1 }, Run { start: 4, end: 5, attrs: 0 }];
+    (layout::lay_out(text, &[a.clone(), boxed], &runs, &opts), a)
+}
+
+#[test]
+fn attachments_take_their_boxes_room() {
+    let (laid, a) = with_box(40.0, Options::UNBOUNDED);
+    let (wa, wb) = (width("a", a.clone()), width("b", a.clone()));
+    assert_eq!(laid.attachments.len(), 1);
+    let placed = laid.attachments[0];
+    assert_eq!((placed.byte, placed.attrs), (1, 1), "the U+FFFC's byte and its attributes");
+    let [x0, y0, x1, y1] = placed.rect;
+    assert!((x0 - wa).abs() < 0.01 && (x1 - x0 - 40.0).abs() < 0.01, "{:?}", placed.rect);
+    assert!((y1 - y0 - 30.0).abs() < 0.01, "{:?}", placed.rect);
+    assert!((laid.width - (wa + 40.0 + wb)).abs() < 0.05, "the character itself takes no room: {}", laid.width);
+    // Its top and bottom are the line's: 25 above the baseline, 5 below.
+    let plain = lay("ab", a, Options::UNBOUNDED);
+    assert!(laid.height > plain.height && laid.height >= 30.0, "{} vs {}", laid.height, plain.height);
+    assert!(y0 >= 0.0 && y1 <= laid.height, "{:?} in {}", placed.rect, laid.height);
+    assert!(laid.first_descent >= 5.0, "{}", laid.first_descent);
+    assert!((laid.height - laid.first_descent + 5.0 - y1).abs() < 0.01, "the box's bottom 5 below the baseline");
+}
+
+#[test]
+fn attachments_too_wide_for_the_line_start_the_next() {
+    let (one, a) = with_box(40.0, Options::UNBOUNDED);
+    let wa = width("a", a.clone());
+    let (laid, _) = with_box(40.0, in_width(wa + 20.0));
+    let [x0, y0, ..] = laid.attachments[0].rect;
+    assert!(x0.abs() < 0.01, "at the start of the second line: {:?}", laid.attachments[0].rect);
+    assert!(y0 > 0.0 && laid.height > one.height, "below the first line");
+
+    // A box wider than the line still goes on one, alone.
+    let (laid, _) = with_box(100.0, in_width(50.0));
+    assert_eq!(laid.attachments.len(), 1);
+    let [x0, _, x1, _] = laid.attachments[0].rect;
+    assert!(x0.abs() < 0.01 && (x1 - 100.0).abs() < 0.01, "{:?}", laid.attachments[0].rect);
+}
+
+#[test]
+fn baseline_offsets_move_attachments() {
+    let a = Attrs::new(sans(13.0));
+    let text = "a\u{FFFC}b";
+    let runs =
+        [Run { start: 0, end: 1, attrs: 0 }, Run { start: 1, end: 4, attrs: 1 }, Run { start: 4, end: 5, attrs: 0 }];
+    for glyphs in [false, true] {
+        let opts = Options { attachments_as_glyphs: glyphs, ..Options::UNBOUNDED };
+        let with_offset = |offset: f32| {
+            let attachment = Some(layout::Attachment { width: 20.0, height: 30.0, y: 0.0 });
+            let boxed = Attrs { attachment, baseline_offset: offset, ..a.clone() };
+            layout::lay_out(text, &[a.clone(), boxed], &runs, &opts)
+        };
+        let (flat, raised) = (with_offset(0.0), with_offset(6.0));
+        let above = |l: &TextLayout| l.height - l.first_descent - l.attachments[0].rect[3];
+        // Drawn 6 points higher over the baseline either way.
+        assert!((above(&raised) - above(&flat) - 6.0).abs() < 0.01, "TextKit 1: {glyphs}");
+        // The line makes room for the box as it is in string drawing (it
+        // overhangs the top), and as it's drawn in TextKit 1.
+        let grown = raised.height - flat.height;
+        let want = if glyphs { 6.0 } else { 0.0 };
+        assert!((grown - want).abs() < 0.01, "TextKit 1: {glyphs}: grew {grown}");
+    }
 }

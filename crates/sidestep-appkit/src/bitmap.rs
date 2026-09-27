@@ -206,7 +206,7 @@ struct Frames {
     file: Arc<[u8]>,
     info: crate::codec::Frames,
     current: usize,
-    decoder: Option<crate::codec::GifFrames>,
+    decoder: Option<crate::codec::Animation>,
 }
 
 impl Clone for Frames {
@@ -1082,7 +1082,7 @@ impl NSBitmapImageRepImpl {
                 return;
             }
             let file = f.file.clone();
-            let decoder = f.decoder.get_or_insert_with(|| crate::codec::GifFrames::new(file));
+            let decoder = f.decoder.get_or_insert_with(|| crate::codec::Animation::gif(file));
             let Some(frame) = decoder.frame(i as usize) else { return };
             f.current = i as usize;
             frame

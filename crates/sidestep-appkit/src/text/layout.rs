@@ -386,6 +386,40 @@ pub(crate) struct Shadow {
     pub color: Color,
 }
 
+/// A text attachment's box (`NSAttachmentAttributeName` on U+FFFC): its
+/// size in points and where its bottom is from the baseline (below it when
+/// negative), as its bounds give them. Each U+FFFC of a run with one is laid
+/// out as the box, as wide as it is, and drawn by whoever knows the
+/// attachment (the layout hands out where each box went), raised or lowered
+/// by the run's baseline offset. The line makes room for it as AppKit does
+/// (measured), in one of two ways:
+///
+/// - String drawing and TextKit 2: the line's ascent reaches the box's top
+///   and its descent the box's bottom, as the box is before any baseline
+///   offset (unrounded); the character's font counts as text does, the
+///   offset with it. A box moved past the line's top or bottom by an offset
+///   overhangs it.
+/// - TextKit 1 ([`Options::attachments_as_glyphs`]): the box counts as a
+///   glyph with its top as the ascent and its bottom as the descent, the
+///   offset raising the first or lowering the second as text's does; the
+///   character's font counts by its size alone.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Attachment {
+    pub width: f32,
+    pub height: f32,
+    pub y: f32,
+}
+
+/// Where an attachment's box went: its rectangle (x0, y0, x1, y1), from
+/// the layout's top left (a line's, for a laid line); the byte of its
+/// U+FFFC in the text; and the attributes it has.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PlacedAttachment {
+    pub rect: [f32; 4],
+    pub byte: usize,
+    pub attrs: u32,
+}
+
 /// The attributes of a run of text.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Attrs {
@@ -405,6 +439,9 @@ pub(crate) struct Attrs {
     /// angle), right for positive values.
     pub obliqueness: f32,
     pub shadow: Option<Shadow>,
+    /// The box each U+FFFC of the run is laid out as, if the run has an
+    /// attachment.
+    pub attachment: Option<Attachment>,
     pub paragraph: Paragraph,
 }
 
@@ -422,6 +459,7 @@ impl Attrs {
             stroke: Stroke::default(),
             obliqueness: 0.0,
             shadow: None,
+            attachment: None,
             paragraph: Paragraph::default(),
         }
     }
@@ -437,7 +475,12 @@ impl Attrs {
         // One word for the rarer attributes, which equality compares in
         // full: this runs for every string drawn.
         let rare = u64::from(self.stroke.width.to_bits()) | u64::from(self.obliqueness.to_bits()) << 32;
-        h.write_u64(rare ^ u64::from(self.shadow.is_some()));
+        let boxed = self.attachment.map_or(0, |a| {
+            u64::from(a.width.to_bits())
+                ^ u64::from(a.height.to_bits()).rotate_left(21)
+                ^ u64::from(a.y.to_bits()) << 42
+        });
+        h.write_u64(rare ^ u64::from(self.shadow.is_some()) ^ boxed.rotate_left(1));
         self.paragraph.hash_into(h);
     }
 
@@ -494,6 +537,8 @@ pub(crate) struct Options {
     pub font_leading: bool,
     /// Truncate the last line that fits if some don't.
     pub truncate_last: bool,
+    /// Make room for attachments as TextKit 1 does (see [`Attachment`]).
+    pub attachments_as_glyphs: bool,
 }
 
 impl Options {
@@ -503,10 +548,12 @@ impl Options {
         all_lines: true,
         font_leading: false,
         truncate_last: false,
+        attachments_as_glyphs: false,
     };
 
     fn hash_into(&self, h: &mut impl Hasher) {
-        (self.width.to_bits(), self.height.to_bits(), self.all_lines, self.font_leading, self.truncate_last).hash(h);
+        let flags = (self.all_lines, self.font_leading, self.truncate_last, self.attachments_as_glyphs);
+        (self.width.to_bits(), self.height.to_bits(), flags).hash(h);
     }
 }
 
@@ -540,6 +587,8 @@ pub(crate) struct TextLayout {
     pub first_descent: f32,
     pub runs: Vec<PlacedRun>,
     pub fills: Vec<PlacedFill>,
+    /// The attachments' boxes, bytes into the text.
+    pub attachments: Vec<PlacedAttachment>,
 }
 
 /// Lay `text` out, or find it in this thread's cache. `runs` cover the text
@@ -861,6 +910,8 @@ pub(crate) struct LaidLine {
     pub trailing: f32,
     pub runs: Vec<PlacedRun>,
     pub fills: Vec<PlacedFill>,
+    /// The attachments' boxes, bytes into the segment.
+    pub attachments: Vec<PlacedAttachment>,
     /// Where the line's text starts and ends in the segment.
     pub text_start: usize,
     pub text_end: usize,
@@ -887,6 +938,7 @@ struct Placed {
     top: f32,
     runs: usize,
     fills: usize,
+    attachments: usize,
 }
 
 /// The direction to lay out the paragraph whose segments start at
@@ -967,10 +1019,11 @@ pub(crate) fn compute(ctx: &mut Ctx, text: &str, attrs: &[Attrs], runs: &[Run], 
                 top,
                 runs: out.runs.len(),
                 fills: out.fills.len(),
+                attachments: out.attachments.len(),
             });
             rights.push(line.right);
             bottom = top + line.height;
-            place(&mut out, line, top);
+            place(&mut out, line, top, seg.start);
             previous = Some(para);
             if !opts.all_lines {
                 break 'segments;
@@ -1005,9 +1058,10 @@ pub(crate) fn compute(ctx: &mut Ctx, text: &str, attrs: &[Attrs], runs: &[Run], 
         if let Some(line) = lines.into_iter().next() {
             out.runs.truncate(p.runs);
             out.fills.truncate(p.fills);
+            out.attachments.truncate(p.attachments);
             rights.pop();
             rights.push(line.right);
-            place(&mut out, line, p.top);
+            place(&mut out, line, p.top, start);
         }
     }
     out.height = bottom;
@@ -1015,12 +1069,20 @@ pub(crate) fn compute(ctx: &mut Ctx, text: &str, attrs: &[Attrs], runs: &[Run], 
     out
 }
 
-fn place(out: &mut TextLayout, line: LaidLine, top: f32) {
+/// Put `line` in `out` at `top`, its text starting at byte `start` of the
+/// layout's.
+fn place(out: &mut TextLayout, line: LaidLine, top: f32, start: usize) {
     out.runs.extend(line.runs.into_iter().map(|r| PlacedRun { y: r.y + top, ..r }));
     out.fills.extend(line.fills.into_iter().map(|mut f| {
         f.rect[1] += top;
         f.rect[3] += top;
         f
+    }));
+    out.attachments.extend(line.attachments.into_iter().map(|mut a| {
+        a.rect[1] += top;
+        a.rect[3] += top;
+        a.byte += start;
+        a
     }));
 }
 
@@ -1094,6 +1156,9 @@ pub(crate) fn segment_lines(
                     for c in &mut line.clusters {
                         (c.start, c.end) = cut.cluster(c.start, c.end);
                     }
+                    for a in &mut line.attachments {
+                        a.byte = cut.original(a.byte);
+                    }
                     line.elided = Some((cut.head, cut.tail_from));
                 }
                 return lines;
@@ -1155,9 +1220,27 @@ fn build(ctx: &mut Ctx, text: &str, attrs: &[Attrs], runs: &[Run], settings: &Se
     // missing-glyph boxes; after each tab, a box reaches the next tab stop
     // (see `break_and_tab`).
     let controls = text.bytes().any(|b| b < 0x20 || b == 0x7f);
-    let full: Cow<'_, str> = match (mark.is_empty(), controls) {
-        (true, false) => Cow::Borrowed(text),
-        _ => Cow::Owned(mark.chars().chain(text.chars().map(|c| if c.is_ascii_control() { ' ' } else { c })).collect()),
+    // Each U+FFFC of a run with an attachment: its byte and attributes. A
+    // box of the attachment's width goes in before it (so that a box too
+    // wide for what's left of a line takes the character with it to the
+    // next: parley breaks just before a box that doesn't fit), and it is
+    // shaped as a zero-width space (as long in UTF-8), which takes no room
+    // and, as U+FFFC, lets a line break after it but not before.
+    let mut boxes: Vec<(usize, u32)> = Vec::new();
+    for run in runs.iter().filter(|r| attrs[r.attrs as usize].attachment.is_some()) {
+        let Some(slice) = text.get(run.start..run.end) else { continue };
+        boxes.extend(slice.match_indices('\u{FFFC}').map(|(i, _)| (run.start + i, run.attrs)));
+    }
+    let full: Cow<'_, str> = if mark.is_empty() && !controls && boxes.is_empty() {
+        Cow::Borrowed(text)
+    } else {
+        let mut owned: String =
+            mark.chars().chain(text.chars().map(|c| if c.is_ascii_control() { ' ' } else { c })).collect();
+        for &(at, _) in &boxes {
+            let at = at + mark.len();
+            owned.replace_range(at..at + '\u{FFFC}'.len_utf8(), "\u{200B}");
+        }
+        Cow::Owned(owned)
     };
     let full = &*full;
     let shift = mark.len();
@@ -1279,9 +1362,28 @@ fn build(ctx: &mut Ctx, text: &str, attrs: &[Attrs], runs: &[Run], settings: &Se
             });
         }
     }
+    for (n, &(at, index)) in boxes.iter().enumerate() {
+        let width = attrs[index as usize].attachment.map_or(0.0, |a| a.width.max(0.0));
+        builder.push_inline_box(InlineBox {
+            id: ATTACHMENT_BOX | u64::from(index) << 32 | n as u64,
+            kind: InlineBoxKind::InFlow,
+            index: at + shift,
+            width,
+            height: 0.0,
+        });
+    }
     let mut layout = std::mem::take(&mut ctx.scratch);
     builder.build_into(&mut layout, full);
     (layout, shift)
+}
+
+/// The bit an attachment's box id has; the attributes' index is the next
+/// 31 bits, and the box's number the low 32 (a tab's box id is its number).
+const ATTACHMENT_BOX: u64 = 1 << 63;
+
+/// The attributes an attachment's box has, if `id` is one's.
+fn box_attachment(id: u64) -> Option<u32> {
+    (id & ATTACHMENT_BOX != 0).then_some(((id & !ATTACHMENT_BOX) >> 32) as u32)
 }
 
 /// The most text parley shapes as one run here. It keeps a cluster's place
@@ -1455,7 +1557,7 @@ fn break_and_tab(
     rest_indent: f32,
 ) {
     break_lines(layout, right, first_indent, rest_indent);
-    if layout.inline_boxes().is_empty() {
+    if !layout.inline_boxes().iter().any(|b| box_attachment(b.id).is_none()) {
         return;
     }
     let stops = tab_stops(para);
@@ -1520,7 +1622,9 @@ fn tab_position(layout: &Layout<Brush>, id: u64) -> Option<(f32, f32)> {
         for item in line.items() {
             match (item, found) {
                 (PositionedLayoutItem::InlineBox(b), None) if b.id == id => found = Some(b.x),
-                (PositionedLayoutItem::InlineBox(b), Some(x)) => return Some((x, b.x)),
+                (PositionedLayoutItem::InlineBox(b), Some(x)) if box_attachment(b.id).is_none() => {
+                    return Some((x, b.x));
+                }
                 _ => {}
             }
         }
@@ -1600,7 +1704,8 @@ fn content_width(layout: &Layout<Brush>) -> f32 {
     layout.lines().map(|l| l.metrics().advance - l.metrics().trailing_whitespace).fold(0.0, f32::max)
 }
 
-/// Clusters in logical order: byte range in the original text and advance.
+/// Clusters in logical order: byte range in the original text and advance
+/// (an attachment's character's with its box's width).
 fn clusters(layout: &Layout<Brush>, shift: usize) -> Vec<(usize, usize, f32)> {
     let mut out = Vec::new();
     for line in layout.lines() {
@@ -1614,6 +1719,11 @@ fn clusters(layout: &Layout<Brush>, shift: usize) -> Vec<(usize, usize, f32)> {
         }
     }
     out.sort_unstable_by_key(|c| c.0);
+    for b in layout.inline_boxes().iter().filter(|b| box_attachment(b.id).is_some()) {
+        if let Some(i) = b.index.checked_sub(shift).and_then(|at| out.binary_search_by_key(&at, |c| c.0).ok()) {
+            out[i].2 += b.width;
+        }
+    }
     out
 }
 
@@ -1772,6 +1882,7 @@ fn empty_line(attrs: &Attrs, para: &Paragraph, opts: &Options) -> LaidLine {
         trailing: 0.0,
         runs: Vec::new(),
         fills: Vec::new(),
+        attachments: Vec::new(),
         text_start: 0,
         text_end: 0,
         clusters: Vec::new(),
@@ -1847,9 +1958,11 @@ fn extract(
             let a = &attrs[index as usize];
             let rm = *run.metrics();
             // Raised text makes room above, lowered text below: whole
-            // points of the font's, and the offset as it is.
-            ascent = ascent.max(rm.ascent.round() + a.baseline_offset.max(0.0));
-            descent = descent.max(rm.descent.round() - a.baseline_offset.min(0.0));
+            // points of the font's, and the offset as it is (but for an
+            // attachment's character in TextKit 1: see `Attachment`).
+            let offset = if opts.attachments_as_glyphs && a.attachment.is_some() { 0.0 } else { a.baseline_offset };
+            ascent = ascent.max(rm.ascent.round() + offset.max(0.0));
+            descent = descent.max(rm.descent.round() - offset.min(0.0));
             leading = leading.max(rm.leading);
             by_word |= (a.underline.style | a.strikethrough.style) & underline::BY_WORD != 0;
             let mut pen = 0.0;
@@ -1888,6 +2001,29 @@ fn extract(
             descent = (-fm.descent * a.font.size).round();
             leading = fm.leading * a.font.size;
         }
+        // Attachments' boxes: each raises the ascent to its top and the
+        // descent to its bottom, unrounded, before its baseline offset or
+        // (in TextKit 1) with it as text's (see `Attachment`).
+        let boxes: Vec<(f32, Attachment, u32, usize)> = if layout.inline_boxes().is_empty() {
+            Vec::new()
+        } else {
+            line.items()
+                .filter_map(|item| match item {
+                    PositionedLayoutItem::InlineBox(b) => {
+                        let index = box_attachment(b.id)?;
+                        let a = attrs.get(index as usize)?.attachment?;
+                        let at = layout.inline_boxes().iter().find(|ib| ib.id == b.id)?.index.checked_sub(shift)?;
+                        Some((b.x, a, index, at))
+                    }
+                    PositionedLayoutItem::GlyphRun(_) => None,
+                })
+                .collect()
+        };
+        for &(_, a, index, _) in &boxes {
+            let offset = if opts.attachments_as_glyphs { attrs[index as usize].baseline_offset } else { 0.0 };
+            ascent = ascent.max(a.height + a.y + offset.max(0.0));
+            descent = descent.max(-a.y - offset.min(0.0));
+        }
         let height = line_height(ascent, descent, leading, para, opts);
         let baseline = height - descent;
         let mut out = LaidLine {
@@ -1902,6 +2038,13 @@ fn extract(
             trailing: m.trailing_whitespace,
             runs: Vec::new(),
             fills: Vec::new(),
+            attachments: boxes
+                .iter()
+                .map(|&(x, a, index, byte)| {
+                    let bottom = baseline - attrs[index as usize].baseline_offset - a.y;
+                    PlacedAttachment { rect: [x, bottom - a.height, x + a.width.max(0.0), bottom], byte, attrs: index }
+                })
+                .collect(),
             text_start: line.text_range().start.saturating_sub(shift),
             text_end: line.text_range().end.saturating_sub(shift),
             clusters: Vec::new(),
@@ -1988,10 +2131,12 @@ fn mark_glyphs(run: &parley::Run<'_, Brush>, shift: usize) -> std::ops::Range<us
 }
 
 /// The clusters of `line` in visual order, left to right, placed from the
-/// container's left. The box after a tab widens the tab's cluster.
+/// container's left. The box after a tab widens the tab's cluster, and an
+/// attachment's box its character's.
 fn line_clusters(layout: &Layout<Brush>, line: &parley::Line<'_, Brush>, shift: usize) -> Vec<ByteCluster> {
     let m = line.metrics();
-    // Tab boxes on the line: where each is, how wide, and its tab's byte.
+    // Boxes on the line: where each is, how wide, and its character's
+    // byte (a tab's comes before its box, an attachment's after).
     let boxes: Vec<(f32, f32, usize)> = if layout.inline_boxes().is_empty() {
         Vec::new()
     } else {
@@ -1999,7 +2144,8 @@ fn line_clusters(layout: &Layout<Brush>, line: &parley::Line<'_, Brush>, shift: 
             .filter_map(|item| match item {
                 PositionedLayoutItem::InlineBox(b) => {
                     let index = layout.inline_boxes().iter().find(|ib| ib.id == b.id)?.index;
-                    Some((b.x, b.width, index.checked_sub(1 + shift)?))
+                    let before = if box_attachment(b.id).is_some() { 0 } else { 1 };
+                    Some((b.x, b.width, index.checked_sub(before + shift)?))
                 }
                 PositionedLayoutItem::GlyphRun(_) => None,
             })
@@ -2026,8 +2172,9 @@ fn line_clusters(layout: &Layout<Brush>, line: &parley::Line<'_, Brush>, shift: 
             pen += advance;
         }
     }
-    // Each box widens its tab's cluster where they touch: the box follows
-    // the tab on the right, or on the left in right-to-left text.
+    // Each box widens its character's cluster where they touch, on either
+    // side (a tab's box follows it on the right, or on the left in
+    // right-to-left text; an attachment's goes before its character).
     for &(x, width, tab) in &boxes {
         let Some(c) = out.iter_mut().find(|c| c.start == tab) else { continue };
         if (c.x + c.advance - x).abs() < 0.01 {

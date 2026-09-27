@@ -230,10 +230,10 @@ fn read(data: &[u8], options: Option<&Dict>, source: Source) -> Read {
     };
     let encoding = convert::number_value(options, keys::CHARACTER_ENCODING).map(|e| e as i64 as u32);
     let (doc, plain_encoding) = match format {
-        Format::Rtf => (read_rtf(data)?, None),
+        Format::Rtf => (read_rtf(data, &[])?, None),
         Format::Rtfd => {
-            let rtf = rtfd::read(data).ok_or(FILE_READ_UNKNOWN)?;
-            (read_rtf(rtf)?, None)
+            let package = rtfd::read(data).ok_or(FILE_READ_UNKNOWN)?;
+            (read_rtf(package.rtf, &package.files)?, None)
         }
         Format::Html => {
             let explicit = encoding.and_then(html_encoding).or_else(|| {
@@ -279,8 +279,8 @@ fn read(data: &[u8], options: Option<&Dict>, source: Source) -> Read {
     Ok((string, attrs))
 }
 
-fn read_rtf(data: &[u8]) -> Result<Doc, isize> {
-    rtf_read::read(data).map_err(|e| match e {
+fn read_rtf(data: &[u8], files: &[(String, Vec<u8>)]) -> Result<Doc, isize> {
+    rtf_read::read_with(data, files).map_err(|e| match e {
         rtf_read::Error::NotRtf => FILE_READ_UNKNOWN,
         rtf_read::Error::Truncated => FILE_READ_CORRUPT,
     })
@@ -379,7 +379,11 @@ fn write(string: &NSAttributedString, range: NSRange, format: Format, attrs: Opt
     doc.attrs = convert::doc_attrs_of(attrs);
     match format {
         Format::Rtf => rtf_write::write(&doc),
-        Format::Rtfd => rtfd::write(&rtf_write::write(&doc), now()),
+        Format::Rtfd => {
+            let files: Vec<(String, Vec<u8>)> =
+                doc.attachments.iter().map(|a| (a.name.clone(), a.contents.clone())).collect();
+            rtfd::write(&rtf_write::write_rtfd(&doc), &files, now())
+        }
         Format::Html => html_write::write(&doc),
         Format::Plain => {
             let encoding = convert::number_value(attrs, keys::CHARACTER_ENCODING).map(|e| e as i64 as u32);
@@ -475,8 +479,19 @@ fn file_data(url: &NSURL) -> Option<(Vec<u8>, Option<Format>)> {
         _ => None,
     };
     if format == Some(Format::Rtfd) && std::path::Path::new(&path).is_dir() {
-        // An RTFD package: its text is its TXT.rtf.
-        return std::fs::read(std::path::Path::new(&path).join("TXT.rtf")).ok().map(|d| (d, Some(Format::Rtf)));
+        // An RTFD package: its TXT.rtf, and its other files for the
+        // attachments the text names, read as the flat RTFD they'd make.
+        let dir = std::path::Path::new(&path);
+        let rtf = std::fs::read(dir.join("TXT.rtf")).ok()?;
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name != "TXT.rtf" && entry.file_type().is_ok_and(|t| t.is_file()) {
+                files.push((name, std::fs::read(entry.path()).ok()?));
+            }
+        }
+        files.sort();
+        return Some((rtfd::write(&rtf, &files, 0), Some(Format::Rtfd)));
     }
     std::fs::read(&path).ok().map(|d| (d, format))
 }

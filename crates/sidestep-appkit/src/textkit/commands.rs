@@ -22,7 +22,7 @@ use std::cell::RefCell;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, Sel};
 use objc2::{ClassType, DefinedClass, define_class, msg_send, sel};
-use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString, NSTextStorage};
+use objc2_app_kit::{NSAttributedStringKitAdditions, NSPasteboard, NSPasteboardTypeString, NSTextStorage};
 use objc2_foundation::{NSArray, NSPoint, NSRange, NSString};
 
 use super::edit::Kind;
@@ -1050,9 +1050,11 @@ enum Flavor {
     Text,
 }
 
-/// What a rich text view reads, best first; a plain one reads the text
+/// What a rich text view reads, best first (RTFD first in one that takes
+/// graphics, so attachments come with the text); a plain one reads the text
 /// first, and rich text as text.
 const RICH_READABLE: [Flavor; 4] = [Flavor::Rtf, Flavor::Rtfd, Flavor::Html, Flavor::Text];
+const GRAPHICS_READABLE: [Flavor; 4] = [Flavor::Rtfd, Flavor::Rtf, Flavor::Html, Flavor::Text];
 const PLAIN_READABLE: [Flavor; 4] = [Flavor::Text, Flavor::Rtf, Flavor::Rtfd, Flavor::Html];
 
 impl Flavor {
@@ -1103,12 +1105,22 @@ fn names(flavors: &[Flavor]) -> Retained<NSArray<NSString>> {
 /// What the selection is written as: nothing when there is none (as
 /// AppKit's list is empty then), rich text and text from a rich view (RTF
 /// and text, as AppKit writes, and HTML, for the Linux programs that read
-/// no RTF), text from a plain one.
+/// no RTF; RTFD first when the selection holds attachments, as AppKit
+/// writes it), text from a plain one.
 fn writable(v: &NSTextViewImpl) -> Vec<Flavor> {
     if v.selection().length == 0 || v.is_secure() {
         return Vec::new();
     }
-    if v.as_text_view().isRichText() { vec![Flavor::Rtf, Flavor::Html, Flavor::Text] } else { vec![Flavor::Text] }
+    if !v.as_text_view().isRichText() {
+        return vec![Flavor::Text];
+    }
+    let sel = v.selection();
+    let attachments = storage(v).is_some_and(|ts| ts.containsAttachmentsInRange(sel));
+    if attachments {
+        vec![Flavor::Rtfd, Flavor::Rtf, Flavor::Html, Flavor::Text]
+    } else {
+        vec![Flavor::Rtf, Flavor::Html, Flavor::Text]
+    }
 }
 
 fn can_write(v: &NSTextViewImpl, f: Flavor) -> bool {
@@ -1116,7 +1128,14 @@ fn can_write(v: &NSTextViewImpl, f: Flavor) -> bool {
 }
 
 fn readable(v: &NSTextViewImpl) -> &'static [Flavor] {
-    if v.as_text_view().isRichText() { &RICH_READABLE } else { &PLAIN_READABLE }
+    let tv = v.as_text_view();
+    if tv.importsGraphics() {
+        &GRAPHICS_READABLE
+    } else if tv.isRichText() {
+        &RICH_READABLE
+    } else {
+        &PLAIN_READABLE
+    }
 }
 
 /// Write the selected text to `pb` as the view writes it.

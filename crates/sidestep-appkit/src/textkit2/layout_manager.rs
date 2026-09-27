@@ -1476,9 +1476,22 @@ impl NSTextLayoutManagerImpl {
         Some(height)
     }
 
+    /// What attachments laid out here are told: TextKit 2, the text
+    /// container and the lines' width.
+    pub(crate) fn attachment_setting(&self) -> crate::attachment::Setting {
+        // SAFETY: textContainer takes nothing.
+        let container: Option<Retained<AnyObject>> = unsafe { msg_send![self, textContainer] };
+        // Asked when drawing too, where a borrow held elsewhere would leave
+        // the width unknown rather than fail.
+        let width = self.ivars().state.try_borrow().map_or(f32::INFINITY, |st| st.geometry.width);
+        let width = f64::from(width);
+        crate::attachment::Setting::textkit(crate::attachment::Engine::TextKit2, container, width)
+    }
+
     /// Lay out `element`'s text over `range` of the document.
     fn lay_out_element(&self, element: &AnyObject, range: Range<usize>, first: bool, last: bool) -> Option<Laid> {
-        let text = self.element_text(element, range.clone());
+        let setting = self.attachment_setting();
+        let text = crate::attachment::in_setting(setting, || self.element_text(element, range.clone()));
         let open = last && ends_in_separator(element, &text);
         let extra = if open { self.extra_attrs(&text) } else { None };
         let mut st = self.ivars().state.borrow_mut();
@@ -1512,7 +1525,7 @@ impl NSTextLayoutManagerImpl {
         let text = element::text_of(element, content.as_deref());
         let mut resolved = std::mem::take(&mut self.ivars().state.borrow_mut().resolved);
         let t = match &text {
-            Some(a) => layout::attributed_text(a, &mut resolved),
+            Some(a) => layout::attributed_text(a, range.start, &mut resolved),
             None => layout::Text { text: String::new(), spans: Vec::new() },
         };
         self.ivars().state.borrow_mut().resolved = resolved;
@@ -1754,6 +1767,7 @@ impl NSTextLayoutManagerImpl {
                 max_lines: 0,
                 truncation: None,
                 font_leading: g.font_leading,
+                attachments_as_glyphs: false,
             };
             let empty = crate::text::lines::Styled { text: "", attrs: std::slice::from_ref(&extra), spans: &[] };
             let lines = crate::text::lines::lay_out_paragraph(empty, &container, 0);

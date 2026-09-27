@@ -31,9 +31,21 @@ use super::tables::CodePage;
 /// The Cocoa RTF version written: macOS 26's.
 pub(crate) const COCOA_VERSION: u32 = 2870;
 
-/// `doc` as RTF.
+/// `doc` as RTF, its attachments left out (plain RTF has no room for their
+/// files, and AppKit leaves them out of it).
 pub(crate) fn write(doc: &Doc) -> Vec<u8> {
+    write_as(doc, false)
+}
+
+/// `doc` as the RTF of an RTFD package: each attachment a `\NeXTGraphic`
+/// naming its file, as AppKit writes them.
+pub(crate) fn write_rtfd(doc: &Doc) -> Vec<u8> {
+    write_as(doc, true)
+}
+
+fn write_as(doc: &Doc, rtfd: bool) -> Vec<u8> {
     let mut w = Writer::new(doc);
+    w.rtfd = rtfd;
     w.header(&doc.attrs);
     if !doc.text.is_empty() {
         w.body(doc);
@@ -65,6 +77,8 @@ struct Writer {
     colors: Vec<Color>,
     /// Whether `\uc0` is in effect.
     uc0: bool,
+    /// Writing an RTFD package's RTF: attachments are written.
+    rtfd: bool,
 }
 
 /// The formatting written so far, to write only what changes.
@@ -131,7 +145,7 @@ fn class(generic: Generic) -> &'static str {
 
 impl Writer {
     fn new(doc: &Doc) -> Writer {
-        let mut w = Writer { out: String::new(), fonts: Vec::new(), colors: Vec::new(), uc0: false };
+        let mut w = Writer { out: String::new(), fonts: Vec::new(), colors: Vec::new(), uc0: false, rtfd: false };
         for (_, style) in doc.run_ranges() {
             w.font_index(&font_of(style));
             for c in [
@@ -364,7 +378,7 @@ impl Writer {
                         let r = &runs[i];
                         let stop = r.0.end.min(end);
                         self.format(r.1, &mut inner);
-                        self.text(&doc.text[pos..stop]);
+                        self.text_of(doc, pos..stop);
                         pos = stop;
                         i += 1;
                     }
@@ -374,7 +388,7 @@ impl Writer {
                 } else {
                     let stop = runs[run].0.end.min(body_end);
                     self.format(style, &mut written);
-                    self.text(&doc.text[at..stop]);
+                    self.text_of(doc, at..stop);
                     at = stop;
                 }
             }
@@ -599,6 +613,27 @@ impl Writer {
             w.ligature = style.ligature;
         }
         self.out.push_str(&words);
+    }
+
+    /// The text of `range` of `doc`, its attachments' characters as their
+    /// graphics (in RTFD) or left out.
+    fn text_of(&mut self, doc: &Doc, range: std::ops::Range<usize>) {
+        let mut at = range.start;
+        for a in doc.attachments.iter().filter(|a| range.contains(&a.at)) {
+            self.text(&doc.text[at..a.at]);
+            if self.rtfd {
+                self.out.push_str("{{\\NeXTGraphic ");
+                self.text(&a.name);
+                let _ = write!(
+                    self.out,
+                    " \\width{} \\height{} \\appleattachmentpadding0 \\appleembedtype0 \\appleaqc\n}}\\'ac}}",
+                    twips(a.width),
+                    twips(a.height)
+                );
+            }
+            at = a.at + '\u{FFFC}'.len_utf8();
+        }
+        self.text(&doc.text[at..range.end]);
     }
 
     /// Text, escaped: RTF's specials, characters beyond ASCII in

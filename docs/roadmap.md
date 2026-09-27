@@ -430,16 +430,22 @@ the viewport controller, selections and navigation, `NSTextRange` and
 countable locations; text views in TextKit 2 mode by default as on macOS
 (and the switch to TextKit 1 when a program asks for the layout manager),
 laying out and drawing their viewport: 11 MB, a scroll step and its
-layout in 0.1 ms. See [text.md](text.md).
+layout in 0.1 ms. Text attachments (`NSTextAttachment` with images,
+bounds, contents, file wrappers and cells, `NSTextAttachmentCell`) laid
+out as inline boxes and drawn in string drawing, TextKit 1 and TextKit 2,
+edited as one character, and carried in flat RTFD and on the pasteboard;
+`NSFileWrapper`. See [text.md](text.md).
 
 - `NSExpansion` (advances scaled before line breaking); shadow blur (a
   blurred glyph op); tabs in right-to-left paragraphs, measured from the
   right; descriptors' `fontAttributes` with numbers (`NSNumber`);
   `NSStringDrawingContext`'s `minimumScaleFactor` (text isn't shrunk to
   fit: `actualScaleFactor` is always 1).
-- Rich text still to do: attachments (`NSTextAttachment`: RTFD's other
-  files, `\NeXTGraphic`, pictures in RTF, `<img>`), then
-  `RTFDFileWrapperFromRange:` and file wrappers; Word, Word XML,
+- Rich text still to do: pictures in RTF (`\pict`) and HTML (`<img>`)
+  as attachments; `RTFDFileWrapperFromRange:` and
+  `initWithRTFDFileWrapper:` (attachments travel in flat RTFD and
+  packages read from URLs); file wrappers' serialized representations
+  (flat RTFD on macOS); Word, Word XML,
   OpenDocument and web archive documents; double-byte code pages in RTF
   (Shift-JIS, GBK, Big5, EUC-KR: text beside their `\u` escapes reads
   rightly); `NSTextList` for HTML lists (read as text with markers) and
@@ -461,7 +467,7 @@ layout in 0.1 ms. See [text.md](text.md).
   data).
 - Vertical text, hyphenation, `allowsDefaultTighteningForTruncation`.
 - Text editing still to do: the find bar and `NSTextFinder`, spelling and
-  substitutions, `NSTextList`, text attachments, several text containers,
+  substitutions, `NSTextList`, several text containers,
   text block height dimensions, vertical alignment, row spans and
   `hidesEmptyCells`, temporary attributes other than a background color
   drawn, `CGGlyphAtIndex:` and `getGlyphsInRange:…`, laying a long paragraph
@@ -471,8 +477,17 @@ layout in 0.1 ms. See [text.md](text.md).
   sometimes end between equal attributes where Sidestep's go on; the layout
   manager's copy of a subclass's text (one with text of its own) is still
   read whole through its primitives.
-- TextKit 2 still to do: text blocks, lists (`NSTextListElement`) and
-  attachment view providers in fragments; rendering attributes are kept,
+- Text attachments still to do: view providers
+  (`NSTextAttachmentViewProvider`: attachments are drawn, never views;
+  `allowsTextAttachmentView` and the provider registry are kept but
+  nothing asks them); clicks in a text view passed to an attachment's
+  cell (`wantsToTrackMouse`, `trackMouse:…`); `lineLayoutPadding` (kept,
+  not laid out); the glyph position a subclass's sizing method is told
+  (the line's start, where AppKit asks again with the pen's place: text
+  is measured once for each set of attributes, before anything is
+  placed); archiving (no keyed archiver yet).
+- TextKit 2 still to do: text blocks and lists (`NSTextListElement`) in
+  fragments; rendering attributes are kept,
   moved by edits and enumerated but not drawn, and the rendering
   attributes validator is kept but not called; elements the content
   storage's delegate filters out of enumeration are still laid out;
@@ -559,7 +574,11 @@ libobjc2 v2 ABI's `__objc_load` path) the runtime would then need to accept.
   on Linux, and sidestep-appkit depends on them. Supply the classes and
   functions behind them next, as CoreGraphics' are: CALayer and
   CADisplayLink, CTLine and CTFont (which CoreGraphics' text drawing
-  waits for), CGImageSource.
+  waits for). ImageIO's sources and destinations are done (see
+  [architecture.md](architecture.md#imageio)); still to do there:
+  `CGImageMetadata`, `CGAnimateImage…`, auxiliary data, TIFF pages, ICO
+  images and APNG frames past the first, metadata and profiles in files
+  written, and HEIC/AVIF (codecs the `image` crate lacks).
 - Ask objc2 to link objc2-core-services and -natural-language (and any
   framework crate without GNUstep support) to their frameworks only on
   Apple targets; needs the maintainer's go-ahead like the fork's commits.

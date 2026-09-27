@@ -485,8 +485,31 @@ define_class!(
 
         #[unsafe(method(propertyForGlyphAtIndex:))]
         fn property_for_glyph_at_index(&self, index: NSUInteger) -> NSGlyphProperty {
-            let null = self.with_text(|t| index < t.len() && (0xDC00..0xE000).contains(&t.unit_at(index))).unwrap_or(false);
-            if null { NSGlyphProperty::Null } else { NSGlyphProperty(0) }
+            let unit = self.with_text(|t| (index < t.len()).then(|| t.unit_at(index))).flatten();
+            match unit {
+                Some(0xDC00..0xE000) => NSGlyphProperty::Null,
+                // An attachment's glyph is a control glyph, as in AppKit.
+                Some(0xFFFC) if self.attachment_at(index).is_some() => NSGlyphProperty::ControlCharacter,
+                _ => NSGlyphProperty(0),
+            }
+        }
+
+        #[unsafe(method(attachmentSizeForGlyphAtIndex:))]
+        fn attachment_size_for_glyph_at_index(&self, index: NSUInteger) -> NSSize {
+            // AppKit's answer for a glyph that isn't an attachment's.
+            self.attachment_size(index).unwrap_or(NSSize::new(-1.0, -1.0))
+        }
+
+        /// Attachments take the size their attachment gives them: a size
+        /// set here isn't kept.
+        #[unsafe(method(setAttachmentSize:forGlyphRange:))]
+        fn set_attachment_size(&self, _size: NSSize, _range: NSRange) {}
+
+        #[unsafe(method(showAttachmentCell:inRect:characterIndex:))]
+        fn show_attachment_cell(&self, cell: &AnyObject, rect: NSRect, index: NSUInteger) {
+            let view = self.views().into_iter().next();
+            let view = view.as_deref().and_then(|v| v.downcast_ref::<objc2_app_kit::NSView>());
+            crate::attachment::show_cell(self.as_manager(), cell, rect, index, view);
         }
 
         #[unsafe(method(glyphRangeForCharacterRange:actualCharacterRange:))]
@@ -835,6 +858,13 @@ define_class!(
 
     unsafe impl NSObjectProtocol for NSLayoutManagerImpl {}
 );
+
+/// The attachment's box on `line` whose character is at `index` (from the
+/// paragraph's start), if there is one.
+fn attachment_on(line: &Line, index: u32) -> Option<crate::text::lines::LineAttachment> {
+    let at = index.checked_sub(line.range.start)?;
+    line.attachments.iter().find(|a| a.index == at).copied()
+}
 
 /// Store `r` through an out-parameter, when there is one.
 fn write_range(out: *mut NSRange, r: Range<usize>) {
@@ -1302,7 +1332,17 @@ impl NSLayoutManagerImpl {
     /// Work out the text engine's attributes for `ids`, sending messages
     /// with nothing borrowed.
     fn resolve(&self, ids: &[AttrId]) {
+        self.resolve_at(ids, &[]);
+    }
+
+    /// [`Self::resolve`], `firsts` giving the index of the first character
+    /// of some of the attributes (sorted by id), which attachments tell
+    /// their subclasses' methods. Attributes whose attachment's methods
+    /// were told an index made up (not given here) are worked out again
+    /// when next asked for.
+    fn resolve_at(&self, ids: &[AttrId], firsts: &[(AttrId, usize)]) {
         let Some(epoch) = self.with_table(|t| t.borrow().epoch()) else { return };
+        let mut setting = None;
         {
             let mut state = self.ivars().state.borrow_mut();
             if state.epoch != epoch {
@@ -1318,7 +1358,13 @@ impl NSLayoutManagerImpl {
                 continue;
             }
             let Some(dict) = self.with_table(|t| t.borrow().dict(id).clone()) else { return };
-            let attrs = crate::string_drawing::attrs_of(Some(&dict));
+            let first = firsts.binary_search_by_key(&id, |f| f.0).ok().map(|i| firsts[i].1);
+            let resolve = || crate::attachment::noting_guesses(|| crate::string_drawing::attrs_of(Some(&dict)));
+            let setting = setting.get_or_insert_with(|| self.attachment_setting()).clone();
+            let (attrs, guessed) = crate::attachment::in_setting(setting, || match first {
+                Some(i) => crate::attachment::at_index(i, resolve),
+                None => resolve(),
+            });
             // SAFETY: the key is a constant string AppKit exports.
             let style = dict.objectForKey(unsafe { objc2_app_kit::NSParagraphStyleAttributeName });
             let chain = style
@@ -1334,8 +1380,17 @@ impl NSLayoutManagerImpl {
             }
             state.resolved[i] = attrs;
             state.chains[i] = chain;
-            state.known[i] = true;
+            state.known[i] = !guessed;
         }
+    }
+
+    /// What attachments laid out here are told: TextKit 1, the first text
+    /// container and its width.
+    fn attachment_setting(&self) -> crate::attachment::Setting {
+        let container = self.ivars().containers.borrow().first().cloned();
+        let width = container.as_ref().map_or(f64::INFINITY, |c| c.size().width);
+        let container = container.map(|c| Retained::into_super(Retained::into_super(c)));
+        crate::attachment::Setting::textkit(crate::attachment::Engine::TextKit1, container, width)
     }
 
     /// The extra line fragment's attributes: the text view's typing
@@ -1414,7 +1469,8 @@ impl NSLayoutManagerImpl {
             objc2_app_kit::NSLineBreakMode::ByTruncatingMiddle => Some(LineBreak::TruncateMiddle),
             _ => None,
         };
-        Container { width, max_lines: 0, truncation, font_leading: self.ivars().font_leading.get() }
+        let font_leading = self.ivars().font_leading.get();
+        Container { width, max_lines: 0, truncation, font_leading, attachments_as_glyphs: true }
     }
 
     /// Lay out the paragraphs among `paras` that aren't laid out, at most
@@ -1582,20 +1638,27 @@ impl NSLayoutManagerImpl {
         }
     }
 
-    /// Resolve the attributes of every run of paragraphs `ps`.
+    /// Resolve the attributes of every run of paragraphs `ps`, knowing
+    /// where each first is among them.
     fn resolve_runs(&self, ps: &[usize]) {
-        let ids = self.with_text(|t| {
-            let mut ids: Vec<AttrId> = Vec::new();
+        let firsts = self.with_text(|t| {
+            let mut firsts: Vec<(AttrId, usize)> = Vec::new();
             for &p in ps {
                 let at = t.locate_paragraph(p);
-                ids.extend(t.para(at).runs().iter().map(|r| r.attrs));
+                let mut start = at.start;
+                for r in t.para(at).runs() {
+                    firsts.push((r.attrs, start));
+                    start += r.len as usize;
+                }
             }
-            ids.sort_unstable();
-            ids.dedup();
-            ids
+            // By id, each at its first character.
+            firsts.sort_unstable();
+            firsts.dedup_by_key(|f| f.0);
+            firsts
         });
-        if let Some(ids) = ids {
-            self.resolve(&ids);
+        if let Some(firsts) = firsts {
+            let ids: Vec<AttrId> = firsts.iter().map(|f| f.0).collect();
+            self.resolve_at(&ids, &firsts);
         }
     }
 
@@ -2016,7 +2079,21 @@ impl NSLayoutManagerImpl {
         let (x, _) = line.caret_x((index - l.start) as u32);
         let (top, _) = l.fragment_span();
         let x = self.padding() + f64::from(x);
-        NSPoint::new(x, l.line_top() - top + f64::from(line.baseline))
+        // An attachment's glyph is where its box's bottom is, as AppKit
+        // places the cell drawn from there.
+        let y = match attachment_on(line, (index - l.start) as u32) {
+            Some(a) => a.rect[3],
+            None => line.baseline,
+        };
+        NSPoint::new(x, l.line_top() - top + f64::from(y))
+    }
+
+    /// The size of the attachment's box at glyph `index`, if its character
+    /// is an attachment's.
+    fn attachment_size(&self, index: usize) -> Option<NSSize> {
+        let l = self.line_at(index, false)?;
+        let a = attachment_on(l.line(), (index - l.start) as u32)?;
+        Some(NSSize::new(f64::from(a.rect[2] - a.rect[0]), f64::from(a.rect[3] - a.rect[1])))
     }
 
     /// The rects that show `range` selected (container points): the
@@ -2237,12 +2314,50 @@ impl NSLayoutManagerImpl {
         if backgrounds && let (Some(first), Some(last)) = (lines.first(), lines.last()) {
             self.draw_blocks(first.para..last.para + 1, origin);
         }
+        let mut boxes = Vec::new();
         for l in &lines {
             let left = NSPoint::new(origin.x + p + l.left, origin.y + l.line_top());
             crate::string_drawing::record_line(l.line(), left, backgrounds);
+            if !backgrounds {
+                let line_start = l.start + l.line().range.start as usize;
+                boxes.extend(
+                    crate::string_drawing::line_boxes(l.line(), left)
+                        .into_iter()
+                        .map(|(rect, a)| (rect, line_start + a.index as usize)),
+                );
+            }
         }
         if backgrounds {
             self.draw_temporary(&lines, origin);
+        }
+        self.draw_attachments(boxes);
+    }
+
+    /// The `NSAttachmentAttributeName` value of the character at `index`
+    /// and its attributes.
+    pub(crate) fn attachment_at(&self, index: usize) -> Option<(Retained<AnyObject>, Retained<Dict>)> {
+        let id = self.with_text(|t| (index < t.len()).then(|| t.attrs_at(index, false).0)).flatten()?;
+        let dict = self.with_table(|t| t.borrow().dict(id).clone())?;
+        // SAFETY: the key is a constant this crate exports.
+        let value = dict.objectForKey(unsafe { objc2_app_kit::NSAttachmentAttributeName })?;
+        Some((value, dict))
+    }
+
+    /// Draw the attachments of `boxes` (their rects in the view's space and
+    /// their characters), those with cells through
+    /// `showAttachmentCell:inRect:characterIndex:`.
+    fn draw_attachments(&self, boxes: Vec<(NSRect, usize)>) {
+        if boxes.is_empty() {
+            return;
+        }
+        let view = self.views().into_iter().next();
+        let view = view.as_deref().and_then(|v| v.downcast_ref::<objc2_app_kit::NSView>());
+        let setting = self.attachment_setting();
+        for (rect, index) in boxes {
+            if let Some((object, dict)) = self.attachment_at(index) {
+                let at = crate::attachment::Drawn { rect, index, attributes: Some(&dict), view };
+                crate::attachment::draw(&object, &at, &setting, Some(self.as_manager()));
+            }
         }
     }
 
@@ -2328,13 +2443,23 @@ impl NSLayoutManagerImpl {
     pub(crate) fn draw_rect(&self, y0: f64, y1: f64, origin: NSPoint, backgrounds: bool) {
         let p = self.padding();
         let lines = self.lines_in_y(y0, y1);
+        let mut boxes = Vec::new();
         for l in &lines {
             let left = NSPoint::new(origin.x + p + l.left, origin.y + l.line_top());
             crate::string_drawing::record_line(l.line(), left, backgrounds);
+            if !backgrounds {
+                let line_start = l.start + l.line().range.start as usize;
+                boxes.extend(
+                    crate::string_drawing::line_boxes(l.line(), left)
+                        .into_iter()
+                        .map(|(rect, a)| (rect, line_start + a.index as usize)),
+                );
+            }
         }
         if backgrounds {
             self.draw_temporary(&lines, origin);
         }
+        self.draw_attachments(boxes);
     }
 }
 

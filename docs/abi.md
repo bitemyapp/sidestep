@@ -46,6 +46,7 @@ checks the string constants' values against macOS's.
 | CoreGraphics: gradients and shadings | `CGGradient…`: `GetTypeID`, `CreateWithColorComponents`, `CreateWithContentHeadroom`, `CreateWithColors`, `GetContentHeadroom`; `CGFunction…`: `GetTypeID`, `Create`; `CGShading…`: `GetTypeID`, `CreateAxial`, `CreateAxialWithContentHeadroom`, `CreateRadial`, `CreateRadialWithContentHeadroom`, `GetContentHeadroom` |
 | CoreGraphics: fonts | `CGFont…`: `GetTypeID`, `CreateWithDataProvider`, `CreateWithFontName`, `CreateCopyWithVariations`, `CreateWithPlatformFont`, `GetNumberOfGlyphs`, `GetUnitsPerEm`, `CopyPostScriptName`, `CopyFullName`, `GetAscent`, `GetDescent`, `GetLeading`, `GetCapHeight`, `GetXHeight`, `GetFontBBox`, `GetItalicAngle`, `GetStemV`, `CopyVariationAxes`, `CopyVariations`, `GetGlyphAdvances`, `GetGlyphBBoxes`, `GetGlyphWithGlyphName`, `CopyGlyphNameForGlyph`, `CanCreatePostScriptSubset`, `CopyTableTags`, `CopyTableForTag` |
 | CoreGraphics: constants | `CGPointZero`, `CGSizeZero`, `CGRectZero`, `CGRectNull`, `CGRectInfinite`, `CGAffineTransformIdentity`, `kCGColorWhite`, `kCGColorBlack`, `kCGColorClear`, `kCGFontVariationAxisName`, `…MinValue`, `…MaxValue`, `…DefaultValue`, and the color space names `kCGColorSpace…`: `GenericGray`, `GenericRGB`, `GenericCMYK`, `DisplayP3`, `GenericRGBLinear`, `AdobeRGB1998`, `SRGB`, `GenericGrayGamma2_2`, `GenericXYZ`, `GenericLab`, `ACESCGLinear`, `ITUR_709`, `ITUR_709_PQ`, `ITUR_709_HLG`, `ITUR_2020`, `ITUR_2020_sRGBGamma`, `ROMMRGB`, `DCIP3`, `LinearITUR_2020`, `ExtendedITUR_2020`, `ExtendedLinearITUR_2020`, `LinearDisplayP3`, `ExtendedDisplayP3`, `ExtendedLinearDisplayP3`, `ITUR_2100_PQ`, `ITUR_2100_HLG`, `DisplayP3_PQ`, `DisplayP3_HLG`, `ITUR_2020_PQ`, `ITUR_2020_HLG`, `DisplayP3_PQ_EOTF`, `ITUR_2020_PQ_EOTF`, `ExtendedSRGB`, `LinearSRGB`, `ExtendedLinearSRGB`, `ExtendedGray`, `LinearGray`, `ExtendedLinearGray`, `CoreMedia709`, `ExtendedRange` |
+| ImageIO | `CGImageSource…`: `GetTypeID`, `CopyTypeIdentifiers`, `CreateWithDataProvider`, `CreateWithData`, `CreateWithURL`, `GetType`, `GetCount`, `CopyProperties`, `CopyPropertiesAtIndex`, `CopyMetadataAtIndex`, `CreateImageAtIndex`, `RemoveCacheAtIndex`, `CreateThumbnailAtIndex`, `CreateIncremental`, `UpdateData`, `UpdateDataProvider`, `GetStatus`, `GetStatusAtIndex`, `GetPrimaryImageIndex`, `CopyAuxiliaryDataInfoAtIndex`, `SetAllowableTypes`; `CGImageDestination…`: `GetTypeID`, `CopyTypeIdentifiers`, `CreateWithDataConsumer`, `CreateWithData`, `CreateWithURL`, `SetProperties`, `AddImage`, `AddImageFromSource`, `Finalize`; every key and option constant objc2-image-io declares (750: `kCGImageProperty…`, `kCGImageSource…`, `kCGImageDestination…`, `kCGImageMetadata…`, `kCGImageAnimation…`, …), with macOS's values |
 
 dispatch2 links `-ldispatch` on Linux (objc2-foundation 0.3.2 doesn't
 depend on dispatch2; objc2-core-foundation and objc2-core-graphics do
@@ -62,6 +63,18 @@ objc2-core-graphics 0.3.2 declares; [architecture.md](architecture.md#coregraphi
 describes them. Their objects are Objective-C objects of Sidestep-private
 classes (`_SidestepCGColor`, …) with type IDs of their own, so the
 CoreFoundation functions above retain, release, compare and describe them.
+
+The ImageIO functions (30, and 750 constants) come from sidestep-appkit's
+`imageio` module, with the signatures objc2-image-io 0.3.2 declares;
+[architecture.md](architecture.md#imageio) describes them. Sources and
+destinations are objects of Sidestep-private classes
+(`_SidestepCGImageSource`, `_SidestepCGImageDestination`, type IDs 113
+and 114). `crates/sidestep/tests/link_closure_imageio.rs`, which
+`scripts/link-closure` also writes, references every ImageIO function and
+constant objc2-image-io declares under Sidestep's features, but for the
+known gaps below, as `link_closure.rs` does Foundation's, AppKit's and
+CoreFoundation's; `conformance/tests/imageio.rs` runs them against
+macOS's.
 
 ## Conventions
 
@@ -194,6 +207,15 @@ CoreFoundation functions above retain, release, compare and describe them.
   `CGDisplay`, `CGWindow` and the other window-server functions;
   objc2-core-graphics declares them, so an app calling one fails to link.
   `CGColorCreateWithPattern` returns NULL.
+- ImageIO: nothing for metadata (`CGImageMetadata…`, `CGImageMetadataTag…`,
+  `CGImageDestinationAddImageAndMetadata`), `CGImageDestinationCopyImageSource`,
+  `CGImageDestinationAddAuxiliaryDataInfo` or animation
+  (`CGAnimateImageAtURLWithBlock`, `CGAnimateImageDataWithBlock`);
+  objc2-image-io declares them, so an app calling one fails to link.
+  `CGImageSourceCopyMetadataAtIndex` and
+  `CGImageSourceCopyAuxiliaryDataInfoAtIndex` return NULL. HEIC, AVIF and
+  the other types the codecs lack are read as ImageIO reads a type it
+  doesn't know (a source of no type and no images).
 
 ## Fixed in the objc2 fork, pending upstream
 
@@ -242,7 +264,8 @@ The tool's README maps each patch and rule to its commit.
   of these rules follow `sidestep-main`'s version of the commit; the tag's
   generator emits no bridging and doesn't map malloc zones. Sidestep
   builds the four crates and AppKit's methods with their types on Linux,
-  and implements CoreGraphics (see Symbols) but not yet the other three.
+  and implements CoreGraphics and ImageIO (see Symbols) but not yet
+  QuartzCore and CoreText.
 - **`NSStringEncoding` on GNUstep** (commit 4). GNUstep declares it as a C
   enum without a fixed type: an `int`, which Clang encodes as `i`.
   objc2-foundation bound it as `NSUInteger` while objc2's own helpers used

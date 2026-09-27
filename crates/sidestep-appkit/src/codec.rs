@@ -55,7 +55,7 @@ pub(crate) struct Header {
     pub dpi: (f64, f64),
 }
 
-fn reader(bytes: &[u8]) -> Option<ImageReader<Cursor<&[u8]>>> {
+pub(crate) fn reader(bytes: &[u8]) -> Option<ImageReader<Cursor<&[u8]>>> {
     let reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format().ok()?;
     matches!(
         reader.format()?,
@@ -94,6 +94,27 @@ pub(crate) fn header(bytes: &[u8]) -> Option<Header> {
     }
     .unwrap_or((72.0, 72.0));
     Some(Header { width, height, alpha, orientation, dpi })
+}
+
+/// What ImageIO reports of a file beyond its header: its samples as
+/// stored, and the metadata blocks it carries (EXIF, as a TIFF structure,
+/// and an ICC profile).
+pub(crate) struct Described {
+    pub header: Header,
+    pub color: image::ExtendedColorType,
+    pub exif: Option<Vec<u8>>,
+    pub icc: Option<Vec<u8>>,
+}
+
+/// The header of an image file and what [`Described`] adds, or `None` if
+/// it isn't one the codecs read.
+pub(crate) fn describe(bytes: &[u8]) -> Option<Described> {
+    let header = header(bytes)?;
+    let mut decoder = reader(bytes)?.into_decoder().ok()?;
+    let color = decoder.original_color_type();
+    let exif = decoder.exif_metadata().ok().flatten();
+    let icc = decoder.icc_profile().ok().flatten();
+    Some(Described { header, color, exif, icc })
 }
 
 /// A PNG's `pHYs` density, in dots per inch, when given in meters.
@@ -212,28 +233,42 @@ pub(crate) fn gif_frames(bytes: &[u8]) -> Option<Frames> {
     (delays.len() > 1).then_some(Frames { delays, loops })
 }
 
-/// An animated GIF's frames as they show (each drawn over what the ones
-/// before left), decoded one at a time as they're asked for: a frame
-/// after the last one given decodes the ones between, and an earlier one
-/// starts again from the first. Only the decoder's own canvas is kept.
-pub(crate) struct GifFrames {
+/// An animated GIF's or WebP's frames as they show (each drawn over what
+/// the ones before left), decoded one at a time as they're asked for: a
+/// frame after the last one given decodes the ones between, and an earlier
+/// one starts again from the first. Only the decoder's own canvas is kept.
+pub(crate) struct Animation {
     file: Arc<[u8]>,
+    webp: bool,
     frames: Option<image::Frames<'static>>,
     /// The index of the frame `frames` gives next.
     next: usize,
 }
 
-impl GifFrames {
-    pub(crate) fn new(file: Arc<[u8]>) -> Self {
-        GifFrames { file, frames: None, next: 0 }
+impl Animation {
+    pub(crate) fn gif(file: Arc<[u8]>) -> Self {
+        Animation { file, webp: false, frames: None, next: 0 }
+    }
+
+    pub(crate) fn webp(file: Arc<[u8]>) -> Self {
+        Animation { file, webp: true, frames: None, next: 0 }
+    }
+
+    /// Whether this decodes `file` (the same bytes, not a copy).
+    pub(crate) fn decodes(&self, file: &Arc<[u8]>) -> bool {
+        Arc::ptr_eq(&self.file, file)
     }
 
     /// Frame `i`, straight RGBA the size of the file, if the file has it.
     pub(crate) fn frame(&mut self, i: usize) -> Option<Vec<u8>> {
         use image::AnimationDecoder;
         if self.frames.is_none() || i < self.next {
-            let decoder = image::codecs::gif::GifDecoder::new(Cursor::new(self.file.clone())).ok()?;
-            self.frames = Some(decoder.into_frames());
+            let file = Cursor::new(self.file.clone());
+            self.frames = Some(if self.webp {
+                image::codecs::webp::WebPDecoder::new(file).ok()?.into_frames()
+            } else {
+                image::codecs::gif::GifDecoder::new(file).ok()?.into_frames()
+            });
             self.next = 0;
         }
         let frames = self.frames.as_mut()?;
@@ -249,7 +284,7 @@ impl GifFrames {
 }
 
 /// A JPEG's JFIF density, in dots per inch.
-fn jfif_density(bytes: &[u8]) -> Option<(f64, f64)> {
+pub(crate) fn jfif_density(bytes: &[u8]) -> Option<(f64, f64)> {
     let mut at = 2;
     while at + 4 <= bytes.len() && bytes[at] == 0xff {
         let marker = bytes[at + 1];
@@ -412,7 +447,7 @@ mod tests {
         // One frame isn't an animation.
         assert!(gif_frames(&gif(&[100], Some(0))).is_none());
         // Frames decode in any order, one at a time.
-        let mut frames = GifFrames::new(gif(&[100, 200, 300], Some(0)).into());
+        let mut frames = Animation::gif(gif(&[100, 200, 300], Some(0)).into());
         let red = [255, 0, 0, 255];
         assert_eq!(frames.frame(1).expect("frame 1")[..4], [0, 0, 0, 255]);
         assert_eq!(frames.frame(2).expect("frame 2")[..4], red);

@@ -980,6 +980,22 @@ fn kind_of(file: &[u8]) -> Option<FileKind> {
 /// the file where it rasterizes (the render thread, for windows), and the
 /// provider when its bytes are asked for.
 pub(crate) fn from_file(file: Arc<[u8]>, upright: bool, interpolate: bool) -> Option<Retained<CGImageImpl>> {
+    let file_type: Option<&'static sidestep_runtime::ObjectRef> = match kind_of(&file) {
+        Some(FileKind::Png) => Some(&_SidestepUTTypePNG),
+        Some(FileKind::Jpeg) => Some(&_SidestepUTTypeJPEG),
+        None => None,
+    };
+    from_file_of_type(file, upright, interpolate, file_type)
+}
+
+/// [`from_file`], naming the file's type as `file_type` (for ImageIO,
+/// whose images name every type they come from).
+pub(crate) fn from_file_of_type(
+    file: Arc<[u8]>,
+    upright: bool,
+    interpolate: bool,
+    file_type: Option<&'static sidestep_runtime::ObjectRef>,
+) -> Option<Retained<CGImageImpl>> {
     let header = crate::codec::header(&file)?;
     let (mut w, mut h) = (header.width as usize, header.height as usize);
     if upright && header.orientation.swaps() {
@@ -999,11 +1015,6 @@ pub(crate) fn from_file(file: Arc<[u8]>, upright: bool, interpolate: bool) -> Op
     if !fits(&layout, &provider) {
         return None;
     }
-    let file_type: Option<&'static sidestep_runtime::ObjectRef> = match kind_of(&file) {
-        Some(FileKind::Png) => Some(&_SidestepUTTypePNG),
-        Some(FileKind::Jpeg) => Some(&_SidestepUTTypeJPEG),
-        None => None,
-    };
     let image = make(layout, Some(provider), Made { interpolate, file_type, ..Made::plain() });
     let data = ImageData {
         key: image.ivars().key,
@@ -1269,6 +1280,37 @@ pub extern "C-unwind" fn CGImageGetUTType(image: Option<&CGImage>) -> Option<Non
     // SAFETY: an ObjectRef is a pointer to an immortal object, laid out as
     // one.
     NonNull::new(unsafe { *(constant as *const sidestep_runtime::ObjectRef).cast::<*mut CFString>() })
+}
+
+/// A CGImage of pixels worked out already, in sRGB: 8-bit samples, 32 bits
+/// a pixel with alpha or padding first or last as `alpha` says (in the
+/// default byte order), `bytes` as its provider hands them out, and `rgba`
+/// the same pixels premultiplied, as drawing takes them.
+pub(crate) fn from_worked_out(
+    width: usize,
+    height: usize,
+    alpha: CGImageAlphaInfo,
+    bytes: Arc<[u8]>,
+    rgba: Arc<[u8]>,
+    file_type: Option<&'static sidestep_runtime::ObjectRef>,
+) -> Option<Retained<CGImageImpl>> {
+    let layout = Layout {
+        width,
+        height,
+        bpc: 8,
+        bpp: 32,
+        bpr: width.checked_mul(4)?,
+        space: Some(super::color::srgb()),
+        info: alpha.0,
+        decode: None,
+    };
+    let provider = super::data::of_bytes(bytes);
+    if !fits(&layout, &provider) || rgba.len() != width * height * 4 {
+        return None;
+    }
+    let image = make(layout, Some(provider), Made { file_type, ..Made::plain() });
+    let _ = image.ivars().rgba.set(Some(rgba));
+    Some(image)
 }
 
 /// The layout a CGImage of 8-bit premultiplied RGBA rows `width × 4` bytes

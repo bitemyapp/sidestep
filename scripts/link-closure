@@ -2,12 +2,14 @@
 """Write crates/sidestep/tests/link_closure.rs: a test that references every
 extern static and function objc2-foundation, objc2-app-kit and
 objc2-core-foundation declare under the features Sidestep's crates enable
-on Linux, except the known gaps below (docs/abi.md, "Known gaps"). A symbol
-Sidestep stops exporting then fails the test's link.
+on Linux, except the known gaps below (docs/abi.md, "Known gaps"); and
+crates/sidestep/tests/link_closure_imageio.rs, the same for objc2-image-io.
+A symbol Sidestep stops exporting then fails the test's link.
 
 Run from the checkout after tools/objc2-overlay has written .objc2-overlay/:
 
-    scripts/link-closure
+    scripts/link-closure                          # both files
+    scripts/link-closure link_closure_imageio.rs  # the files named
 
 It reads the overlay's crates (their Cargo.toml features and the item
 declarations in src/generated, which are names and types only) and
@@ -15,16 +17,24 @@ Sidestep's own manifests; it writes names only.
 """
 import re
 import sys
+import textwrap
 import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OVERLAY = ROOT / ".objc2-overlay"
-CRATES = {
-    "objc2-foundation": "objc2_foundation",
-    "objc2-app-kit": "objc2_app_kit",
-    "objc2-core-foundation": "objc2_core_foundation",
+# Each test file and the crates whose symbols it names.
+GROUPS = {
+    "link_closure.rs": {
+        "objc2-foundation": "objc2_foundation",
+        "objc2-app-kit": "objc2_app_kit",
+        "objc2-core-foundation": "objc2_core_foundation",
+    },
+    "link_closure_imageio.rs": {
+        "objc2-image-io": "objc2_image_io",
+    },
 }
+CRATES = {crate: module for group in GROUPS.values() for crate, module in group.items()}
 MANIFESTS = ["crates/sidestep-foundation", "crates/sidestep-appkit", "crates/sidestep"]
 
 # Declared but not exported (docs/abi.md, "Known gaps"), by name prefix or
@@ -53,6 +63,9 @@ KNOWN_GAPS = [
     "CFRunLoopSourceGetOrder", "CFRunLoopSourceInvalidate", "CFRunLoopSourceIsValid",
     "CFRunLoopSourceGetContext", "CFRunLoopSourceSignal", "CFRunLoopObserverGetContext",
     "CFRunLoopTimerGetContext",
+    # ImageIO's metadata, a destination's source and auxiliary data.
+    "CGImageDestinationAddImageAndMetadata", "CGImageDestinationCopyImageSource",
+    "CGImageDestinationAddAuxiliaryDataInfo",
 ]
 
 
@@ -161,21 +174,34 @@ def declarations(crate, features):
 
 def main():
     features = enabled_features()
+    names = sys.argv[1:] or list(GROUPS)
+    for name in names:
+        if name not in GROUPS:
+            sys.exit(f"link-closure: {name} isn't one of {', '.join(GROUPS)}")
+        write(name, GROUPS[name], features)
+
+
+def write(file, crates, features):
     seen, statics, functions = set(), [], []
-    for crate, module in CRATES.items():
+    for crate, module in crates.items():
         for kind, name in declarations(crate, features[crate]):
             if name in seen or is_gap(name):
                 continue
             seen.add(name)
             (statics if kind == "static" else functions).append(f"{module}::{name}")
+    listed = list(crates)
+    listed = ", ".join(listed[:-1]) + " and " + listed[-1] if len(listed) > 1 else listed[0]
     body = "\n".join(
         [
-            "//! Every extern static and function objc2-foundation, objc2-app-kit and",
-            "//! objc2-core-foundation declare under the features Sidestep's crates",
-            "//! enable, referenced so a Linux build links each: one Sidestep stops",
-            "//! exporting fails this test's link. The known gaps (docs/abi.md) are left",
-            "//! out. Written by `scripts/link-closure`; run it again when the features",
-            "//! or the exports change.",
+            *textwrap.wrap(
+                f"Every extern static and function {listed} declare under the features Sidestep's crates"
+                " enable, referenced so a Linux build links each: one Sidestep stops exporting fails this"
+                " test's link. The known gaps (docs/abi.md) are left out. Written by `scripts/link-closure`;"
+                " run it again when the features or the exports change.",
+                width=74,
+                initial_indent="//! ",
+                subsequent_indent="//! ",
+            ),
             '#![cfg(not(target_vendor = "apple"))]',
             "#![allow(deprecated, unused_unsafe, clippy::fn_to_numeric_cast_any)]",
             "",
@@ -208,7 +234,7 @@ def main():
             "",
         ]
     )
-    out = ROOT / "crates/sidestep/tests/link_closure.rs"
+    out = ROOT / "crates/sidestep/tests" / file
     out.write_text(body)
     print(f"link-closure: {len(statics)} statics, {len(functions)} functions -> {out.relative_to(ROOT)}")
 

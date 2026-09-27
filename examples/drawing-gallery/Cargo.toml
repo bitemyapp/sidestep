@@ -15,4 +15,4 @@ sidestep.workspace = true
 # For writing PNG files (GALLERY_PNG) and for make-image-fixtures, which
 # writes the conformance tests' image files (never made with Apple's
 # tools).
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "tiff"] }

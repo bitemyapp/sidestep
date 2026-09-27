@@ -78,11 +78,19 @@ pub(crate) struct Container {
     pub truncation: Option<LineBreak>,
     /// Add the fonts' leading to line heights (`usesFontLeading`).
     pub font_leading: bool,
+    /// Make room for attachments as TextKit 1 does
+    /// (`text::layout::Options::attachments_as_glyphs`).
+    pub attachments_as_glyphs: bool,
 }
 
 impl Container {
-    pub const UNBOUNDED: Container =
-        Container { width: f32::INFINITY, max_lines: 0, truncation: None, font_leading: false };
+    pub const UNBOUNDED: Container = Container {
+        width: f32::INFINITY,
+        max_lines: 0,
+        truncation: None,
+        font_leading: false,
+        attachments_as_glyphs: false,
+    };
 }
 
 /// Characters drawn as one: a character, a share of a ligature, an emoji
@@ -172,6 +180,18 @@ pub(crate) struct Line {
     /// line's top (a run's `y` is its baseline).
     pub runs: Arc<[PlacedRun]>,
     pub fills: Arc<[PlacedFill]>,
+    /// The attachments' boxes, for whoever draws the line to draw.
+    pub attachments: Arc<[LineAttachment]>,
+}
+
+/// An attachment's box on a line: its rectangle (x0, y0, x1, y1) from the
+/// container's left and the line's top, its U+FFFC's UTF-16 index from the
+/// line's start (so moving a line moves it too), and its attributes' index.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LineAttachment {
+    pub rect: [f32; 4],
+    pub index: u32,
+    pub attrs: u32,
 }
 
 impl Line {
@@ -421,6 +441,7 @@ fn paragraph_in(
         all_lines: true,
         font_leading: container.font_leading,
         truncate_last: false,
+        attachments_as_glyphs: container.attachments_as_glyphs,
     };
     let spacing = Spacing {
         line: para.line_spacing as f32,
@@ -550,6 +571,11 @@ fn line_of(l: LaidLine, start: usize, index: &Utf16, rtl: bool, separator: u8, t
         forced: l.forced,
         runs: l.runs.into(),
         fills: l.fills.into(),
+        attachments: l
+            .attachments
+            .iter()
+            .map(|a| LineAttachment { rect: a.rect, index: u(a.byte) - line_start, attrs: a.attrs })
+            .collect(),
     }
 }
 

@@ -14,8 +14,8 @@ What the classes do was measured on macOS, not read from Apple's headers
 or documentation: each behavior below that a program can see is checked
 by a conformance test that runs against AppKit first and Sidestep second
 (`conformance/tests/text_storage.rs`, `text_fixing.rs`, `text_layout.rs`,
-`text_blocks.rs`, `undo_manager.rs`, `text_view.rs`, `textkit2.rs`,
-`textkit2_view.rs`).
+`text_blocks.rs`, `text_attachments.rs`, `undo_manager.rs`,
+`text_view.rs`, `textkit2.rs`, `textkit2_view.rs`).
 
 ## Text storage
 
@@ -268,6 +268,91 @@ rows lays out in its first row, and later rows don't leave its columns),
 `hidesEmptyCells`, and a table's own automatic column widths beyond cells'
 content widths.
 
+## Text attachments
+
+An attachment is a U+FFFC whose `NSAttachmentAttributeName` is an
+`NSTextAttachment` (`attachment.rs`); `+[NSAttributedString
+attributedStringWithAttachment:]` makes that one-character string.
+Everything that lays text out lays it out as a box: string drawing and
+measuring, TextKit 1, TextKit 2 and so the text views. Measured on macOS
+(`conformance/tests/text_attachments.rs`):
+
+- **What an attachment holds.** An image, bounds (all zero unless set),
+  contents and their file type (`initWithData:ofType:`), a file wrapper
+  (`initWithFileWrapper:`, the file type taken from the wrapper's name) and
+  a cell. One made of nothing has an empty `NSTextAttachmentCell` of its
+  own and no image; one given an image or contents has no cell; one made
+  with a file wrapper has a cell of the wrapper's image. Asked for its file
+  wrapper, an attachment of contents or of an image makes one
+  (`Attachment.<extension>` of the contents, `Attachment.tiff` of the
+  image) and keeps it.
+- **Its size.** With a cell: the cell's frame (`cellFrameForTextContainer:…`,
+  the cell's size and baseline offset; at least a point wide). Without:
+  `attachmentBoundsForTextContainer:…`, which is the bounds unless they are
+  all zero, then the image's size (the image set, else one decoded from
+  the contents or the wrapper), else a 32-point square for a file's icon.
+  Both are sent as messages, so a subclass (or a cell of a program's)
+  sizes attachments its own way. The bounds' origin is where the box sits
+  from the baseline: a negative y lowers it below.
+- **What a subclass is asked.** String drawing and TextKit 2 send TextKit
+  2's methods (`attachmentBoundsForAttributes:location:textContainer:…`,
+  and `imageForBounds:attributes:location:textContainer:` to draw) where a
+  subclass has them, the bounds one even when the attachment has a cell;
+  otherwise, as TextKit 1 always does, the methods above. They are told
+  the text container (TextKit's; for string drawing given a width, a
+  container of that width; none for string drawing given none, cells
+  included), a proposed line fragment as wide as the lines may be
+  (TextKit 1: the container's width; TextKit 2: less the padding at each
+  end; string drawing: the width given, else 40000) and as tall as the
+  character's font's line, and the character's index (a location of it,
+  for TextKit 2's methods). The glyph position differs: AppKit asks
+  again with the pen's place once the text before is laid out, where
+  Sidestep, measuring each set of attributes once before placing
+  anything, tells the start of the line (x 0; y the font's ascent, or 0
+  in TextKit 1). An attachment laid out in TextKit 1 before its
+  character's index is known (an estimate) is asked again when it is.
+- **In a line** the box takes its width (the character itself none: it's
+  shaped as a zero-width space, the same length in UTF-8, and a parley
+  inline box goes before it). A baseline offset on its character raises
+  or lowers it where it's drawn. The line makes room for it two ways:
+  string drawing and TextKit 2 raise the line's ascent to the box's top
+  and its descent to its bottom as the box is before the offset
+  (unrounded), and the character's font counts as text's does, offset and
+  all, so a box moved past the line's top or bottom overhangs it; TextKit
+  1 counts the box as a glyph, the offset raising its top or lowering its
+  bottom as text's does, and the character's font by its size alone. A
+  box too wide for what's left of the line starts the next, and one wider
+  than the line has a line of its own.
+- **Drawing** draws the image (`imageForBounds:textContainer:characterIndex:`)
+  into the box, upright in flipped views and not, or has the cell draw
+  itself (`drawWithFrame:inView:characterIndex:layoutManager:`). String
+  drawing clips attachments to where the text is drawn, as it clips the
+  text. Controls draw them too: labels and text fields, button titles and
+  other cells showing an attributed string.
+- **Threads.** An attachment may be measured and drawn on any thread (an
+  attributed string drawn off the main thread): what it holds is behind a
+  lock. The cell an attachment of nothing or of a file wrapper has is
+  made when a program asks for it (`attachmentCell`) or a layout manager
+  shows it on the main thread; measured or drawn before that, it's its
+  image. A copied cell knows the same attachment.
+- **Archiving.** Sidestep has no keyed archiver, and attachments have no
+  `encodeWithCoder:`: `+supportsSecureCoding` answers NO (YES on macOS).
+- **TextKit 1.** The attachment's glyph has the control character property
+  (`propertyForGlyphAtIndex:`); `attachmentSizeForGlyphAtIndex:` is the
+  box's size ((-1, -1) for other glyphs); the glyph's location is the box's
+  bottom-left, from the line fragment; `characterIndexForPoint:` in the box
+  is the attachment's character; the layout manager draws cells through
+  `showAttachmentCell:inRect:characterIndex:`.
+- **TextKit 2.** A layout fragment's line fragments hold the attachment's
+  box, and `frameForTextAttachmentAtLocation:` is its frame in the
+  fragment. Attachment view providers (`NSTextAttachmentViewProvider`)
+  aren't made: attachments are drawn, never views.
+- **Editing.** In a text view an attachment is one character: moved over,
+  selected and deleted as one. Copying a selection that holds one writes
+  RTFD first (then RTF, HTML and text, as without); a view that
+  `importsGraphics` reads RTFD first, so pasting brings the attachments
+  back.
+
 ## The text view
 
 `NSTextView` (and the `NSText` API it inherits) is a view over the three
@@ -465,7 +550,17 @@ one Sidestep doesn't write, is error 66062).
   links as fields, text beyond Windows-1252 as `\uN`. Text without a font
   is written in Helvetica 12.
 - **RTFD** is flat RTFD with the RTF as its `TXT.rtf`, byte for byte as
-  AppKit writes it (attachments aren't written yet).
+  AppKit writes it, and each attachment's file beside it: the RTF names
+  it in a `\NeXTGraphic` group (with its width and height in twips) in
+  place of the U+FFFC, under its wrapper's preferred name (`name 2.png`
+  and so on where another took it; an attachment of an image alone is
+  `Attachment.tiff`, its wrapper's name). An attachment with no file
+  (a cell's alone) isn't written.
+  Reading gives each `\NeXTGraphic` the attachment of its file, a file
+  wrapper of the file's contents; files the package keeps page-aligned
+  are read too, and an RTFD package (a directory) read from its URL
+  brings its files as a flat one would. RTF alone has no attachments:
+  they're left out of it.
 - **HTML** is an HTML 4.01 document in UTF-8 shaped as AppKit's: a style
   sheet of paragraph and span classes (margins, indents, alignment, the
   paragraph's font; a run's font, color, background, decoration, baseline

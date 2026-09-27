@@ -858,6 +858,11 @@ fn contents_of_directory_at_url(url: &NSURL, options: NSUInteger) -> Result<Reta
     Ok(objc2_foundation::NSArray::from_retained_slice(&urls).into())
 }
 
+/// An item's attributes, as `attributesOfItemAtPath:error:` gives them.
+pub(crate) fn attributes_of_item(m: &std::fs::Metadata) -> Retained<AnyObject> {
+    attributes::of_item(m)
+}
+
 mod attributes {
     use super::*;
     use objc2_foundation::{NSDate, NSDictionary, NSNumber};

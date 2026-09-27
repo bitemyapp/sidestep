@@ -575,19 +575,16 @@ fn number<'a>(cf: *const c_void) -> &'a NSNumber {
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn CFNumberGetType(cf: *const c_void) -> isize {
     use number_type::*;
-    match crate::plist::number_value(number(cf)) {
-        plist::Value::Real(_) => FLOAT64,
-        _ => {
-            // SAFETY: -objCType returns a C string.
-            let kind = unsafe { std::ffi::CStr::from_ptr(number(cf).objCType().as_ptr()) }.to_bytes().first().copied();
-            match kind {
-                Some(b'c') => SINT8,
-                Some(b's') => SINT16,
-                Some(b'i') => SINT32,
-                Some(b'f') => FLOAT32,
-                _ => SINT64,
-            }
-        }
+    // SAFETY: -objCType returns a C string.
+    let kind = unsafe { std::ffi::CStr::from_ptr(number(cf).objCType().as_ptr()) }.to_bytes().first().copied();
+    match (crate::plist::number_value(number(cf)), kind) {
+        // A float stays one (as `+numberWithFloat:` makes on macOS).
+        (_, Some(b'f')) => FLOAT32,
+        (plist::Value::Real(_), _) => FLOAT64,
+        (_, Some(b'c')) => SINT8,
+        (_, Some(b's')) => SINT16,
+        (_, Some(b'i')) => SINT32,
+        _ => SINT64,
     }
 }
 

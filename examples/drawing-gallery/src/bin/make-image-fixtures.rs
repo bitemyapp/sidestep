@@ -115,6 +115,227 @@ fn main() {
 
     write("garbage.png", b"\x89PNG\r\n\x1a\nthis is not really a PNG file at all".to_vec());
     write("huge.tiff", huge_tiff());
+
+    // For ImageIO (conformance/tests/imageio.rs). In thirds, red, green and
+    // blue across: a 300 × 200 JPEG stored sideways (orientation 6) with an
+    // EXIF block of camera tags and a 30 × 20 green thumbnail (ImageIO
+    // passes over thumbnails of some files, of small ones among them; this
+    // one it uses), and a 48 × 32 plain JPEG.
+    let thirds = |w: u32, h: u32| RgbaImage::from_fn(w, h, |x, _| [RED, GREEN, BLUE][(x * 3 / w) as usize]);
+    let thumb = encode(&RgbaImage::from_pixel(30, 20, GREEN), ImageFormat::Jpeg);
+    write("exif-thumb.jpg", with_exif(&encode(&thirds(300, 200), ImageFormat::Jpeg), &camera_exif(&thumb)));
+    write("plain.jpg", encode(&thirds(48, 32), ImageFormat::Jpeg));
+    // 48 × 29, for thumbnails' rounding.
+    write("wide.png", encode(&thirds(48, 29), ImageFormat::Png));
+    // Gray, and 16-bit RGB, 4 × 2.
+    let gray = image::GrayImage::from_fn(4, 2, |x, _| image::Luma([x as u8 * 60]));
+    write("gray.png", encode_dynamic(image::DynamicImage::ImageLuma8(gray), ImageFormat::Png));
+    let rgb16 =
+        image::ImageBuffer::<image::Rgb<u16>, Vec<u16>>::from_fn(4, 2, |x, _| image::Rgb([x as u16 * 16000, 0, 0]));
+    write("rgb16.png", encode_dynamic(image::DynamicImage::ImageRgb16(rgb16), ImageFormat::Png));
+    // A PNG with gamma, sRGB and text chunks, 4 × 2 red.
+    write("text.png", png_with_chunks(&RgbaImage::from_pixel(4, 2, RED)));
+    // An animated WebP, 4 × 4: red for 0.1 seconds, blue for 0.25, looping
+    // forever.
+    let red = RgbaImage::from_pixel(4, 4, RED);
+    let blue = RgbaImage::from_pixel(4, 4, BLUE);
+    write("frames.webp", animated_webp(&[(red, 100), (blue, 250)], 0));
+}
+
+fn encode_dynamic(image: image::DynamicImage, format: ImageFormat) -> Vec<u8> {
+    let mut out = Cursor::new(Vec::new());
+    image.write_to(&mut out, format).expect("encoded");
+    out.into_inner()
+}
+
+/// `jpeg` with an APP1 EXIF segment holding the TIFF structure `tiff`,
+/// right after the start-of-image marker.
+fn with_exif(jpeg: &[u8], tiff: &[u8]) -> Vec<u8> {
+    let mut segment = vec![0xff, 0xe1];
+    segment.extend_from_slice(&((tiff.len() + 8) as u16).to_be_bytes());
+    segment.extend_from_slice(b"Exif\0\0");
+    segment.extend_from_slice(tiff);
+    let mut out = jpeg[..2].to_vec();
+    out.extend_from_slice(&segment);
+    out.extend_from_slice(&jpeg[2..]);
+    out
+}
+
+/// A TIFF value: SHORT, LONG, RATIONAL, ASCII or UNDEFINED.
+enum Tag {
+    Short(u16),
+    Long(u32),
+    Rational(u32, u32),
+    Ascii(&'static str),
+    Undefined(&'static [u8]),
+}
+
+/// A big-endian EXIF block (a TIFF structure, written from the EXIF 2.3
+/// specification): IFD0 with the image's description, maker, orientation 6
+/// and density, its EXIF directory with exposure tags, and IFD1 holding a
+/// JPEG `thumb`.
+fn camera_exif(thumb: &[u8]) -> Vec<u8> {
+    let ifd0 = vec![
+        (0x010e, Tag::Ascii("A test")),
+        (0x010f, Tag::Ascii("Sidestep")),
+        (0x0110, Tag::Ascii("Fixture")),
+        (0x0112, Tag::Short(6)),
+        (0x011a, Tag::Rational(300, 1)),
+        (0x011b, Tag::Rational(300, 1)),
+        (0x0128, Tag::Short(2)),
+        (0x0131, Tag::Ascii("make-image-fixtures")),
+    ];
+    let exif = vec![
+        (0x829a, Tag::Rational(1, 100)),
+        (0x829d, Tag::Rational(28, 10)),
+        (0x8827, Tag::Short(200)),
+        (0x9000, Tag::Undefined(b"0232")),
+        (0x9003, Tag::Ascii("2026:09:27 10:11:12")),
+        (0x920a, Tag::Rational(50, 1)),
+        (0xa001, Tag::Short(1)),
+        (0xa002, Tag::Long(300)),
+        (0xa003, Tag::Long(200)),
+    ];
+    // IFD0 (with the EXIF pointer), then the EXIF directory, then IFD1
+    // (compression 6, the thumbnail's offset and length), each followed by
+    // its values longer than four bytes, then the thumbnail.
+    let size = |t: &Tag| match t {
+        Tag::Short(_) => 2,
+        Tag::Long(_) => 4,
+        Tag::Rational(..) => 8,
+        Tag::Ascii(s) => s.len() + 1,
+        Tag::Undefined(b) => b.len(),
+    };
+    let extra = |tags: &[(u16, Tag)]| tags.iter().map(|(_, t)| if size(t) > 4 { size(t) } else { 0 }).sum::<usize>();
+    let ifd0_at = 8;
+    let exif_at = ifd0_at + 2 + 12 * (ifd0.len() + 1) + 4 + extra(&ifd0);
+    let ifd1_at = exif_at + 2 + 12 * exif.len() + 4 + extra(&exif);
+    let thumb_at = ifd1_at + 2 + 12 * 3 + 4;
+    let mut out = b"MM\0\x2a".to_vec();
+    out.extend_from_slice(&(ifd0_at as u32).to_be_bytes());
+    let directory = |out: &mut Vec<u8>, at: usize, tags: &[(u16, Tag)], pointer: Option<u32>, next: usize| {
+        let count = tags.len() + usize::from(pointer.is_some());
+        let mut data_at = at + 2 + 12 * count + 4;
+        let mut data = Vec::new();
+        out.extend_from_slice(&(count as u16).to_be_bytes());
+        let mut entries: Vec<(u16, u16, u32, Vec<u8>)> = tags
+            .iter()
+            .map(|(tag, t)| match t {
+                Tag::Short(v) => (*tag, 3, 1, v.to_be_bytes().to_vec()),
+                Tag::Long(v) => (*tag, 4, 1, v.to_be_bytes().to_vec()),
+                Tag::Rational(a, b) => (*tag, 5, 1, [a.to_be_bytes(), b.to_be_bytes()].concat()),
+                Tag::Ascii(s) => (*tag, 2, s.len() as u32 + 1, [s.as_bytes(), &[0]].concat()),
+                Tag::Undefined(b) => (*tag, 7, b.len() as u32, b.to_vec()),
+            })
+            .collect();
+        if let Some(p) = pointer {
+            entries.push((0x8769, 4, 1, p.to_be_bytes().to_vec()));
+            entries.sort_by_key(|e| e.0);
+        }
+        for (tag, kind, n, mut bytes) in entries {
+            out.extend_from_slice(&tag.to_be_bytes());
+            out.extend_from_slice(&kind.to_be_bytes());
+            out.extend_from_slice(&n.to_be_bytes());
+            if bytes.len() <= 4 {
+                bytes.resize(4, 0);
+                out.extend_from_slice(&bytes);
+            } else {
+                out.extend_from_slice(&(data_at as u32).to_be_bytes());
+                data_at += bytes.len();
+                data.extend_from_slice(&bytes);
+            }
+        }
+        out.extend_from_slice(&(next as u32).to_be_bytes());
+        out.extend_from_slice(&data);
+    };
+    directory(&mut out, ifd0_at, &ifd0, Some(exif_at as u32), ifd1_at);
+    directory(&mut out, exif_at, &exif, None, 0);
+    let ifd1 = [(0x0103, Tag::Short(6)), (0x0201, Tag::Long(thumb_at as u32)), (0x0202, Tag::Long(thumb.len() as u32))];
+    directory(&mut out, ifd1_at, &ifd1, None, 0);
+    assert_eq!(out.len(), thumb_at);
+    out.extend_from_slice(thumb);
+    out
+}
+
+/// A PNG of `image` with `gAMA`, `sRGB` and text chunks (a title, an author
+/// and an international description) after its header.
+fn png_with_chunks(image: &RgbaImage) -> Vec<u8> {
+    let mut bytes = encode(image, ImageFormat::Png);
+    let mut chunks = Vec::new();
+    for (kind, body) in [
+        (b"gAMA", &45455u32.to_be_bytes()[..]),
+        (b"sRGB", &[0][..]),
+        (b"tEXt", &b"Title\0A title"[..]),
+        (b"tEXt", &b"Author\0Someone"[..]),
+        (b"iTXt", &b"Description\0\0\0en\0\0Caf\xc3\xa9"[..]),
+    ] {
+        let mut named = kind.to_vec();
+        named.extend_from_slice(body);
+        chunks.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        chunks.extend_from_slice(&named);
+        chunks.extend_from_slice(&crc32(&named).to_be_bytes());
+    }
+    bytes.splice(33..33, chunks);
+    bytes
+}
+
+/// A RIFF chunk.
+fn riff_chunk(id: &[u8; 4], body: &[u8]) -> Vec<u8> {
+    let mut out = id.to_vec();
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(body);
+    if body.len() % 2 == 1 {
+        out.push(0);
+    }
+    out
+}
+
+fn u24(n: u32) -> [u8; 3] {
+    let b = n.to_le_bytes();
+    [b[0], b[1], b[2]]
+}
+
+/// An animated WebP (written from the WebP container specification) of
+/// whole frames, each a lossless still's image data shown for its
+/// milliseconds, played `loops` times (0 for ever).
+fn animated_webp(frames: &[(RgbaImage, u32)], loops: u16) -> Vec<u8> {
+    let (w, h) = frames[0].0.dimensions();
+    let mut body = b"WEBP".to_vec();
+    // Animation and alpha flags, then the canvas less one.
+    let mut vp8x = vec![0x02 | 0x10, 0, 0, 0];
+    vp8x.extend_from_slice(&u24(w - 1));
+    vp8x.extend_from_slice(&u24(h - 1));
+    body.extend(riff_chunk(b"VP8X", &vp8x));
+    let mut anim = vec![0, 0, 0, 0];
+    anim.extend_from_slice(&loops.to_le_bytes());
+    body.extend(riff_chunk(b"ANIM", &anim));
+    for (image, ms) in frames {
+        let still = encode(image, ImageFormat::WebP);
+        // The still file's image data chunks, after its RIFF header.
+        let mut at = 12;
+        let mut data = Vec::new();
+        while at + 8 <= still.len() {
+            let id = &still[at..at + 4];
+            let len = u32::from_le_bytes(still[at + 4..at + 8].try_into().expect("a length")) as usize;
+            if id == b"VP8L" || id == b"VP8 " || id == b"ALPH" {
+                data.extend_from_slice(&still[at..at + 8 + len + (len & 1)]);
+            }
+            at += 8 + len + (len & 1);
+        }
+        let mut anmf = Vec::new();
+        anmf.extend_from_slice(&u24(0));
+        anmf.extend_from_slice(&u24(0));
+        anmf.extend_from_slice(&u24(w - 1));
+        anmf.extend_from_slice(&u24(h - 1));
+        anmf.extend_from_slice(&u24(*ms));
+        anmf.push(0);
+        anmf.extend_from_slice(&data);
+        body.extend(riff_chunk(b"ANMF", &anmf));
+    }
+    let mut out = b"RIFF".to_vec();
+    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    out.extend_from_slice(&body);
+    out
 }
 
 /// Three whole frames, red, green and blue, shown for 10, 20 and 30

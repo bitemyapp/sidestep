@@ -27,6 +27,7 @@ mod dictionary;
 mod dispatch;
 mod error;
 mod file_manager;
+mod file_wrapper;
 mod functions;
 mod geometry;
 mod invocation;
@@ -102,14 +103,14 @@ pub mod __private {
     pub use sidestep_runtime::ObjectRef;
 }
 
-/// The CoreFoundation type IDs of CoreGraphics' types, for Sidestep's
-/// AppKit, which defines them (`CFGetTypeID` works them out from the
+/// The CoreFoundation type IDs of CoreGraphics' and ImageIO's types, for
+/// Sidestep's AppKit, which defines them (`CFGetTypeID` works them out from the
 /// object's class, by name).
 #[doc(hidden)]
 pub mod cf_type_ids {
     pub use crate::cf::types::id::{
         CG_COLOR, CG_COLOR_SPACE, CG_CONTEXT, CG_DATA_CONSUMER, CG_DATA_PROVIDER, CG_FONT, CG_FUNCTION, CG_GRADIENT,
-        CG_IMAGE, CG_PATH, CG_PATTERN, CG_SHADING,
+        CG_IMAGE, CG_IMAGE_DESTINATION, CG_IMAGE_SOURCE, CG_PATH, CG_PATTERN, CG_SHADING,
     };
 }
 

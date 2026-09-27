@@ -553,7 +553,12 @@ and RFC 3986 component ranges, with the resolved form and file-system
 representation cached; the parser is Sidestep's own, with macOS's
 departures from the RFC. File operations (`NSData`, `NSFileManager`,
 `NSURL`) report the Cocoa error codes macOS reports for each operation,
-with the POSIX error underneath. Search-path directories map to the XDG
+with the POSIX error underneath. `NSFileWrapper` holds a file, a
+directory of wrappers or a link in memory, read from disk whole (macOS
+reads a directory's children when first asked) and written back with its
+modification dates, so it matches what it wrote; a wrapper matches a file
+by kind and date, not contents, as on macOS
+(`conformance/tests/file_wrappers.rs`). Search-path directories map to the XDG
 base and user directories; trashing follows the freedesktop.org
 specification. `NSBundle.mainBundle` is an `.app` layout, then
 `<exe>/Resources`, then `<exe>/../share/<name>`, then the executable's
@@ -1338,7 +1343,8 @@ and out, which live with their classes and call in.
   and so are CoreGraphics': each type is a class with a Sidestep-private
   name (`_SidestepCGColor`, `_SidestepCGPath`, `_SidestepCGContext`, …).
   sidestep-foundation's `cf::types` knows the names and gives each its own
-  type ID (101 to 112, `cf_type_ids`), which `CGColorGetTypeID` and its
+  type ID (101 to 114, `cf_type_ids`; ImageIO's sources and destinations
+  are 113 and 114), which `CGColorGetTypeID` and its
   kin return, so `CFGetTypeID`, `CFCopyTypeIDDescription` and
   objc2-core-foundation's downcasts work. `CFRetain` and `CFRelease` are the
   runtime's retain and release; `CFEqual`, `CFHash` and `CFCopyDescription`
@@ -1527,6 +1533,102 @@ doesn't have (linear sRGB, say) to sRGB, where macOS keeps it;
 the path set operations (`CGPathCreateCopyByNormalizing` too), `CGLayer`
 and PDF aren't there (the functions making them return NULL, or aren't
 exported).
+
+### ImageIO
+
+ImageIO is a module tree beside CoreGraphics (`imageio/`): the functions
+objc2-image-io declares for image sources and destinations, exported with
+their signatures, and its 750 property and option key constants with
+macOS's values (`imageio/constants.rs`, generated from what macOS's
+ImageIO exports). Sources and destinations are Objective-C objects of
+Sidestep-private classes (`_SidestepCGImageSource`,
+`_SidestepCGImageDestination`) with type IDs of their own. The file types
+are the codecs' (`codec.rs`, the `image` crate's): PNG, JPEG, GIF, WebP,
+BMP, TIFF and ICO, by their type identifiers (`public.png`,
+`public.jpeg`, `com.compuserve.gif`, `org.webmproject.webp`,
+`com.microsoft.bmp`, `public.tiff`, `com.microsoft.ico`); what a file is
+comes from its bytes, never its name, as on macOS. Everything a program
+can see was measured on macOS with files the `image` crate makes
+(`conformance/tests/imageio.rs`).
+
+- **Sources** (`CGImageSourceCreateWithData`, `…WithURL`,
+  `…WithDataProvider`, `…Incremental` with `…UpdateData`) read a file's
+  headers and metadata once, when the data comes (`inspect.rs`, with
+  `exif.rs` reading TIFF directories), and keep them as plain data: the
+  type, the count and status, and the property dictionaries each copy
+  makes afresh. The top level has pixel size, depth, color model, alpha,
+  orientation, density and the profile's name; beside it the format's own
+  dictionary: `{PNG}` (interlacing, density, gamma, chromaticities,
+  rendering intent, text), `{JFIF}`, `{GIF}` and `{WebP}` (each frame's
+  delay, clamped and not; the file's canvas, frame count and loop count),
+  and `{TIFF}` and `{Exif}` from a TIFF's first directory or a JPEG's,
+  PNG's or WebP's EXIF block; ImageIO's `{IPTC}` made of those (a PNG's
+  title as its object name, a PNG's description or a TIFF directory's
+  image description as its caption), and a PNG's comment and copyright
+  listed as the EXIF user comment and TIFF copyright too. A BMP's density
+  is its pixels per meter in dots per inch, none under ten (72 or 96
+  within a twentieth of them, as ImageIO rounds them). An icon file whose
+  first icon is under 12 pixels either way isn't read (no type, invalid
+  data); one stored as a PNG has the PNG's `{PNG}`. Keys the file has no
+  value for are left out. Numbers have ImageIO's types (sizes `long
+  long`, densities `float`, delays `double`), which `CFNumberGetType`
+  reports.
+- **Images** (`CGImageSourceCreateImageAtIndex`) are `CGImage`s over the
+  codecs: the first image of a file keeps the file and is decoded where
+  it's drawn (the render thread, for a window), as `NSImage`'s are, so
+  making one costs no decoding on the main thread; the later frames of an
+  animated GIF or WebP are decoded when made, one decoder kept between
+  them. A source hands out the same image for an index while anything
+  holds it, and holds it itself while caching (`kCGImageSourceShouldCache`,
+  on unless said otherwise) until `CGImageSourceRemoveCacheAtIndex`;
+  `kCGImageSourceShouldCacheImmediately` decodes at once. A source's
+  lock is held only to read or record what it knows, never while pixels
+  are decoded (the frame decoder has its own), so a worker making a
+  thumbnail doesn't hold up the main thread asking for the count or the
+  properties.
+- **Thumbnails** (`CGImageSourceCreateThumbnailAtIndex`) follow ImageIO's
+  rules: no maximum size is the whole image; a size uses a JPEG's EXIF
+  thumbnail (made smaller to fit, never larger) unless
+  `kCGImageSourceCreateThumbnailFromImageAlways`, and without one makes
+  the thumbnail from the image, but a JPEG or TIFF asked without `…Always`
+  or `…IfAbsent` has none. The image is halved while half its longer side
+  (rounded down; to the nearest pixel from a JPEG) still reaches the size,
+  then scaled to it, the shorter side to the nearest pixel, ties to even
+  (315 of 318 PNG sizes and 188 of 198 JPEG ones measured on macOS agree;
+  the rest are a pixel off on the shorter side);
+  `kCGImageSourceCreateThumbnailWithTransform` turns it upright by the
+  EXIF orientation. Thumbnails are made on the caller's thread (a program
+  makes them on a worker, as on macOS).
+- **Destinations** (`CGImageDestinationCreateWithData`, `…WithURL`,
+  `…WithDataConsumer`) take images (and images from sources) and write
+  the file when finalized, with the `image` crate's encoders: PNG, JPEG
+  (quality from `kCGImageDestinationLossyCompressionQuality`, 0.9 by
+  default), TIFF and BMP of the first image, GIF of all of them, animated
+  with each image's delay and the loop count; densities, a maximum pixel
+  size and alpha where the type has it. Finalizing fails (writing nothing)
+  when the count promised wasn't added, and a second time.
+
+Not read or written: HEIC, AVIF, JPEG 2000, RAW and the other types the
+codecs lack (a source of one has no type and no images, and
+`CGImageSourceCreateImageAtIndex` gives NULL, as ImageIO does for a type
+it doesn't know; a destination of one isn't made); more than a TIFF's
+first page, an ICO's first image or an animated PNG's first frame;
+metadata trees (`CGImageSourceCopyMetadataAtIndex` gives NULL, and
+`CGImageMetadata…`, `CGImageDestinationAddImageAndMetadata`,
+`…CopyImageSource` and `CGAnimateImage…` aren't exported), auxiliary
+data, `kCGImageSourceSubsampleFactor` (ignored), and EXIF, orientation
+or color profiles in files written.
+
+Where Sidestep's sources differ from ImageIO's (measured): images are
+8-bit RGBA whatever the file stores, so a gray or 16-bit PNG's image
+reports `kCGImageAlphaNoneSkipLast` where ImageIO's, keeping the file's
+samples, reports `kCGImageAlphaNone`; an icon file's count is 1 where
+ImageIO counts each icon; `{IPTC}` has only what's made of other
+metadata (an IPTC block isn't read); a PNG with an sRGB chunk lists
+sRGB's chromaticities and a JPEG's density comes from its JFIF header
+when no EXIF resolution gives one, which ImageIO reports without saying
+where from; and an EXIF thumbnail is used only when it has the image's
+proportions, where ImageIO passes over some others too.
 
 ### Colors and appearance
 
@@ -1934,6 +2036,10 @@ measures on macOS:
   for the size), which invalidating clips to the view's bounds.
 - `orderWindow:relativeTo:` and `constrainFrameRect:toScreen:` (see
   [Windows and decorations](#windows-and-decorations)).
+- `attachmentCell`, `attachmentBoundsForTextContainer:proposedLineFragment:glyphPosition:characterIndex:`
+  and `imageForBounds:textContainer:characterIndex:` of a text attachment,
+  and a cell's `cellFrameForTextContainer:proposedLineFragment:glyphPosition:characterIndex:`,
+  wherever text with the attachment is laid out or drawn.
 
 The field editor's commands reach the field by message anyway (see
 [Controls](#controls)), and live resizes are sent to each view (see
@@ -2027,6 +2133,18 @@ positions in points. `crates/sidestep-appkit/src/text/` holds the stack.
   render thread draws them with swash and the glyph-run op didn't
   change. `NSExpansion` isn't drawn: it
   scales advances, which line breaking would have to know about.
+- **Attachments.** A U+FFFC with an `NSTextAttachment` is laid out as a
+  parley inline box of the attachment's width (its character shaped as a
+  zero-width space, which has the same UTF-8 length, so byte offsets
+  stay), and the box's height and offset from the baseline raise the
+  line's ascent and descent. The layout reports where each box went (by
+  the byte of its character and its attributes), and whoever draws the
+  text draws the attachment there (`attachment.rs`: its image, or its cell
+  through `drawWithFrame:inView:characterIndex:layoutManager:`): string
+  drawing, the layout manager, TextKit 2's fragments. What sizes and
+  draws an attachment is asked by message where a class overrides it, so
+  subclasses and cells of a program's work. [text.md](text.md#text-attachments)
+  has what macOS does.
 - **Lines for TextKit.** `text/lines.rs` lays text out as a layout
   manager needs it, on any thread: the input is the text, attributes and
   runs of them over UTF-16 units (as `NSString` counts), and the output,
@@ -2119,7 +2237,9 @@ positions in points. `crates/sidestep-appkit/src/text/` holds the stack.
   AppKit's. `convert` makes fonts (by name, then by family class, traits
   added through descriptors), colors in their spaces, paragraph styles,
   shadows and links, one dictionary per distinct style, and reads them
-  back. Single-byte code pages, CSS's named colors and HTML's character
+  back; attachments travel as files in flat RTFD, named in the RTF by
+  `\NeXTGraphic` groups, and come back as attachments of file wrappers.
+  Single-byte code pages, CSS's named colors and HTML's character
   references are tables in `rich/tables.rs`. No browser engine or other
   dependency is used. [text.md](text.md#rich-text) has what each format
   reads and writes.

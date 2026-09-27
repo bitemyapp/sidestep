@@ -373,8 +373,6 @@ impl Drop for CGDataConsumerImpl {
     }
 }
 
-// ImageIO's destinations write through consumers (they come next).
-#[allow(dead_code)]
 impl CGDataConsumerImpl {
     /// Hand `bytes` on; how many were taken.
     pub(crate) fn put(&self, bytes: &[u8]) -> usize {
@@ -410,7 +408,6 @@ impl CGDataConsumerImpl {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) fn consumer_imp(c: &CGDataConsumer) -> &CGDataConsumerImpl {
     // SAFETY: every CGDataConsumer is a CGDataConsumerImpl.
     unsafe { &*(c as *const CGDataConsumer).cast::<CGDataConsumerImpl>() }

@@ -59,10 +59,13 @@ pub(crate) mod id {
     pub const CG_SHADING: CFTypeID = 110;
     pub const CG_FUNCTION: CFTypeID = 111;
     pub const CG_PATTERN: CFTypeID = 112;
+    // ImageIO's, which Sidestep's AppKit defines too.
+    pub const CG_IMAGE_SOURCE: CFTypeID = 113;
+    pub const CG_IMAGE_DESTINATION: CFTypeID = 114;
 }
 
-/// CoreGraphics' types: their classes (Sidestep-private names, defined by
-/// Sidestep's AppKit, where CoreGraphics lives) and the names
+/// CoreGraphics' and ImageIO's types: their classes (Sidestep-private
+/// names, defined by Sidestep's AppKit, where both live) and the names
 /// `CFCopyTypeIDDescription` gives them.
 const CG_TYPES: &[(&str, CFTypeID, &str)] = &[
     ("_SidestepCGColorSpace", id::CG_COLOR_SPACE, "CGColorSpace"),
@@ -77,6 +80,8 @@ const CG_TYPES: &[(&str, CFTypeID, &str)] = &[
     ("_SidestepCGShading", id::CG_SHADING, "CGShading"),
     ("_SidestepCGFunction", id::CG_FUNCTION, "CGFunction"),
     ("_SidestepCGPattern", id::CG_PATTERN, "CGPattern"),
+    ("_SidestepCGImageSource", id::CG_IMAGE_SOURCE, "CGImageSource"),
+    ("_SidestepCGImageDestination", id::CG_IMAGE_DESTINATION, "CGImageDestination"),
 ];
 
 /// Class names with CoreFoundation counterparts.

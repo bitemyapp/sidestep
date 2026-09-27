@@ -34,6 +34,7 @@ use super::SharedWeak;
 use super::element;
 use super::layout::{Laid, Para};
 use super::location::{self, offset_of, span_of};
+use crate::attachment::{Drawn, Engine, Setting};
 
 sidestep_runtime::static_class!(pub(crate) NSTEXTLAYOUTFRAGMENT, NSTEXTLAYOUTFRAGMENT_META = "NSTextLayoutFragment", || {
     let _ = NSTextLayoutFragmentImpl::class();
@@ -210,7 +211,13 @@ define_class!(
                 }
             }
             let Some(laid) = self.ivars().laid.borrow().clone() else { return };
-            super::draw::with_context_state(cg, || draw_laid(&laid, point));
+            let element = self.ivars().element.borrow().clone();
+            let manager = self.ivars().manager.borrow().as_ref().and_then(SharedWeak::load);
+            let setting = manager.as_deref().and_then(super::layout_manager::imp).map(|m| m.attachment_setting());
+            let setting = setting.unwrap_or_else(|| Setting::textkit(Engine::TextKit2, None, f64::INFINITY));
+            let origin = self.element_span().map_or(0, |(a, _)| a);
+            let drawn = Drawing { element: element.as_deref(), setting: &setting, origin };
+            super::draw::with_context_state(cg, || draw_laid(&laid, point, &drawn));
         }
 
         #[unsafe(method_id(textAttachmentViewProviders))]
@@ -218,9 +225,11 @@ define_class!(
             NSArray::new()
         }
 
+        /// The attachment's box at `location`, from the fragment's frame
+        /// origin; none if no attachment is there.
         #[unsafe(method(frameForTextAttachmentAtLocation:))]
-        fn frame_for_text_attachment(&self, _location: &AnyObject) -> NSRect {
-            NSRect::ZERO
+        fn frame_for_text_attachment(&self, location: &AnyObject) -> NSRect {
+            self.attachment_frame(location).unwrap_or(NSRect::ZERO)
         }
     }
 
@@ -277,6 +286,21 @@ impl NSTextLayoutFragmentImpl {
 
     fn element_span(&self) -> Option<(usize, usize)> {
         self.ivars().span()
+    }
+
+    fn attachment_frame(&self, location: &AnyObject) -> Option<NSRect> {
+        let (a, _) = self.element_span()?;
+        let index = u32::try_from(offset_of(location)?.checked_sub(a)?).ok()?;
+        let laid = self.ivars().laid.borrow().clone()?;
+        let (para, i) = laid.line_at(index, false)?;
+        let l = &para.lines.lines[i];
+        let at = index.checked_sub(para.start + l.range.start)?;
+        let b = l.attachments.iter().find(|b| b.index == at)?;
+        let (x0, y0) = (f64::from(b.rect[0] - laid.min_x), f64::from(para.top + l.top + b.rect[1]));
+        Some(NSRect::new(
+            NSPoint::new(x0, y0),
+            NSSize::new(f64::from(b.rect[2] - b.rect[0]), f64::from(b.rect[3] - b.rect[1])),
+        ))
     }
 
     fn make_lines(&self) -> Retained<NSArray<NSTextLineFragment>> {
@@ -401,14 +425,62 @@ fn surface(laid: &Laid, size: NSSize) -> NSRect {
     NSRect::new(NSPoint::new(x0, y0), NSSize::new(x1 - x0, y1 - y0))
 }
 
+/// What a fragment's attachments are drawn with: its element, whose text
+/// they are in, what they're told, and where the element's text starts in
+/// the document.
+pub(crate) struct Drawing<'a> {
+    pub element: Option<&'a AnyObject>,
+    pub setting: &'a Setting,
+    pub origin: usize,
+}
+
 /// Record the lines of `laid` with the fragment's frame origin at `point`:
-/// their backgrounds, then their glyphs.
-pub(crate) fn draw_laid(laid: &Laid, point: NSPoint) {
+/// their backgrounds, then their glyphs, then the attachments of the
+/// element's text in them.
+pub(crate) fn draw_laid(laid: &Laid, point: NSPoint, drawing: &Drawing<'_>) {
+    let mut boxes = Vec::new();
     for backgrounds in [true, false] {
         for (para, i) in laid.lines() {
             let l = &para.lines.lines[i];
             let origin = NSPoint::new(point.x - f64::from(laid.min_x), point.y + f64::from(para.top + l.top));
             crate::string_drawing::record_line(l, origin, backgrounds);
+            if !backgrounds {
+                let start = (para.start + l.range.start) as usize;
+                boxes.extend(
+                    crate::string_drawing::line_boxes(l, origin)
+                        .into_iter()
+                        .map(|(rect, a)| (rect, start + a.index as usize)),
+                );
+            }
+        }
+    }
+    let element = drawing.element;
+    draw_attachments(boxes, || element.and_then(|e| element::text_of(e, None)), drawing.setting, drawing.origin);
+}
+
+/// Draw the attachments of `boxes` (their rects in the view's space and
+/// their characters' indexes in `text`'s), told they're `origin` further
+/// on in the document.
+fn draw_attachments(
+    boxes: Vec<(NSRect, usize)>,
+    text: impl FnOnce() -> Option<Retained<NSAttributedString>>,
+    setting: &Setting,
+    origin: usize,
+) {
+    if boxes.is_empty() {
+        return;
+    }
+    let Some(text) = text() else { return };
+    let len = text.length();
+    // SAFETY: the key is a constant this crate exports.
+    let key = unsafe { objc2_app_kit::NSAttachmentAttributeName };
+    for (rect, index) in boxes.into_iter().filter(|b| b.1 < len) {
+        // SAFETY: an index inside the text, and no range asked for.
+        let attributes: Retained<NSDictionary<NSString, AnyObject>> =
+            unsafe { msg_send![&*text, attributesAtIndex: index, effectiveRange: std::ptr::null_mut::<NSRange>()] };
+        if let Some(value) = attributes.objectForKey(key) {
+            let at = Drawn { rect, index: origin + index, attributes: Some(&attributes), view: None };
+            crate::attachment::draw(&value, &at, setting, None);
         }
     }
 }
@@ -497,12 +569,24 @@ define_class!(
         #[unsafe(method(drawAtPoint:inContext:))]
         fn draw_at_point(&self, point: NSPoint, cg: &CGContext) {
             let line = self.ivars().line.borrow().clone();
-            let Some((lines, i, _)) = line else { return };
+            let Some((lines, i, base)) = line else { return };
             super::draw::with_context_state(cg, || {
                 let l = &lines.lines[i];
                 let origin = NSPoint::new(point.x - f64::from(l.x), point.y);
                 crate::string_drawing::record_line(l, origin, true);
                 crate::string_drawing::record_line(l, origin, false);
+                let start = (base + l.range.start) as usize;
+                let boxes = crate::string_drawing::line_boxes(l, origin)
+                    .into_iter()
+                    .map(|(rect, a)| (rect, start + a.index as usize))
+                    .collect();
+                let setting = Setting::textkit(Engine::TextKit2, None, f64::INFINITY);
+                let text = || {
+                    // SAFETY: attributedString takes nothing.
+                    let text: Retained<NSAttributedString> = unsafe { msg_send![self, attributedString] };
+                    Some(text)
+                };
+                draw_attachments(boxes, text, &setting, 0);
             });
         }
 
