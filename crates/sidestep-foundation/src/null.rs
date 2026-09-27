@@ -7,11 +7,15 @@ use objc2::define_class;
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{NSObject, NSObjectProtocol};
 use objc2_foundation::{NSString, NSZone};
-use sidestep_runtime::StaticObject;
+use sidestep_runtime::{ObjectRef, StaticObject};
 
 /// The instance. NSNull has no instance variables, so the object is just
 /// its class pointer.
 static NULL: StaticObject<()> = StaticObject::new(&crate::NSNULL, ());
+
+/// CoreFoundation's name for the instance.
+#[unsafe(no_mangle)]
+pub static kCFNull: ObjectRef = NULL.object_ref();
 
 fn null() -> Retained<NSNullImpl> {
     // SAFETY: NULL is an immortal NSNull instance; retaining it is a no-op.

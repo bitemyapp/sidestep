@@ -25,7 +25,17 @@ at the end, which `tools/objc2-overlay` applies; other versions are untested.
 | Categories | `._SIDESTEP_CATEGORY_<Class>_<Name>` for each category a framework links, also listed in the `sidestep_categories` linker section |
 | libdispatch | `dispatch_get_global_queue`, `_dispatch_main_q`, `_dispatch_queue_attr_concurrent`, `dispatch_queue_create(_with_target)`, `dispatch_queue_attr_make_*`, `dispatch_(barrier_)async(_f)`, `dispatch_(barrier_)sync(_f)`, `dispatch_(barrier_)async_and_wait(_f)`, `dispatch_apply(_f)`, `dispatch_after(_f)`, `dispatch_once(_f)`, `dispatch_group_*`, `dispatch_semaphore_*`, `dispatch_source_*` (data add/or/replace, timer, vnode), `dispatch_time`, `dispatch_walltime`, `dispatch_retain`/`release`/`suspend`/`resume`/`activate`, `dispatch_set_context`/`get_context`/`set_finalizer_f`/`set_target_queue`, `dispatch_queue_set_specific`/`get_specific`, `dispatch_assert_queue*`, `dispatch_main` |
 | CoreFoundation | Retain/release/equality (`CFRetain`, `CFRelease`, `CFAutorelease`, `CFEqual`, `CFHash`, `CFGetTypeID`, `CFCopyDescription`, `CFShow`); the run loop (`CFRunLoop*`, `CFRunLoopTimer*`, `CFRunLoopObserver*`, `kCFRunLoopDefaultMode`, `kCFRunLoopCommonModes`); and toll-free `CFString`, `CFData`, `CFDate`, `CFError`, `CFURL`, `CFDictionary` and `CFArray` (mutable ones too), `CFNumber`, `CFPreferences`; the `kCFAllocator*` constants and the `kCFType…CallBacks` |
-| Foundation functions | `NSUnionRange`, `NSIntersectionRange`, `NSStringFromRange`, `NSRangeFromString`; the `NSGeometry` functions (`NSEqualRects`, `NSInsetRect`, `NSIntegralRectWithOptions`, `NSDivideRect`, `NSPointInRect`, `NSStringFromRect`, `NSRectFromString` and the rest objc2-foundation declares); `NSHomeDirectory(ForUser)`, `NSTemporaryDirectory`, `NSUserName`, `NSFullUserName`, `NSOpenStepRootDirectory`, `NSSearchPathForDirectoriesInDomains`, `NSClassFromString`, `NSStringFromClass`, `NSSelectorFromString`, `NSStringFromSelector`, `NSProtocolFromString`, `NSStringFromProtocol`, and the string constants (`NSDefaultRunLoopMode`, error domains and keys, file attribute and URL resource keys, defaults domains, notification names) |
+| Foundation functions | `NSUnionRange`, `NSIntersectionRange`, `NSStringFromRange`, `NSRangeFromString`; the `NSGeometry` functions (`NSEqualRects`, `NSInsetRect`, `NSIntegralRectWithOptions`, `NSDivideRect`, `NSPointInRect`, `NSStringFromRect`, `NSRectFromString` and the rest objc2-foundation declares); `NSHomeDirectory(ForUser)`, `NSTemporaryDirectory`, `NSUserName`, `NSFullUserName`, `NSOpenStepRootDirectory`, `NSSearchPathForDirectoriesInDomains`, `NSClassFromString`, `NSStringFromClass`, `NSSelectorFromString`, `NSStringFromSelector`, `NSProtocolFromString`, `NSStringFromProtocol`; zones (`NSDefaultMallocZone`, `NSZoneMalloc` and the rest: one default zone over `malloc`), pages (`NSPageSize`, `NSAllocateMemoryPages`, …), `NSGetSizeAndAlignment`, `NSAllocateObject`, `NSCopyObject`, `NSDeallocateObject`, the extra reference count (`NSIncrementExtraRefCount`, `NSDecrementExtraRefCountWasZero`, `NSExtraRefCount`), `NSSetUncaughtExceptionHandler` and `NSGetUncaughtExceptionHandler` |
+| Foundation constants | Every string constant objc2-foundation declares under the features Sidestep's crates enable, with macOS's value (run-loop modes, error domains and keys, file attribute and URL resource keys, defaults domains, notification names, exception names, locale keys, …); `NSZeroPoint`, `NSZeroSize`, `NSZeroRect`, `NSEdgeInsetsZero`, `NSFoundationVersionNumber` (macOS 26's); `kCFBooleanTrue`, `kCFBooleanFalse` and `kCFNull`, `kCFAbsoluteTimeIntervalSince1970` and `…1904` |
+| AppKit | `NSApp`; every string constant objc2-app-kit declares under Sidestep's features, with macOS's value (accessibility attributes, roles, notifications and keys, image names, document types and attributes, workspace keys, pasteboard types, …), `NSAppKitVersionNumber` (macOS 26's) and the other numbers; `NSApplicationMain`, `NSApplicationLoad`, `NSAccessibilityPostNotification(WithUserInfo)`, the drawing functions (`NSRectFill…`, `NSFrameRect…`, `NSDrawTiledRects`, `NSDrawColorTiledRects`, `NSDrawThreePartImage`, `NSDrawNinePartImage`, …), window depths (`NSBestDepth` and the rest), the window list (`NSCountWindows`, `NSWindowList`), typed file pasteboard types (`NSCreateFilenamePboardType`, `NSGetFileType`, …; the two `Create` functions return autoreleased strings, as measured on macOS, though objc2-app-kit 0.3.2's wrappers take ownership of them), the services functions (no Services menu on Linux) and the rest objc2-app-kit declares under Sidestep's features, but for the known gaps below |
+
+`crates/sidestep/tests/link_closure.rs` references every extern static and
+function that objc2-foundation, objc2-app-kit and objc2-core-foundation
+declare under the features Sidestep's crates enable, but for the known
+gaps below, so a symbol that stops being exported fails a Linux build of
+the test; `scripts/link-closure` writes it from the overlay's crates when
+the features or the exports change. `conformance/tests/constants.rs`
+checks the string constants' values against macOS's.
 
 dispatch2 links `-ldispatch` on Linux (objc2-foundation 0.3.2 doesn't
 depend on dispatch2; objc2-core-foundation and objc2-core-graphics do
@@ -77,6 +87,11 @@ Specification.
   Signatures compare as Foundation's do: an object type without a class
   name equals one with, and a block type without a signature one with.
 - The main thread is the one whose thread id equals the process id.
+- `NSApp` is a pointer-sized data symbol, nil until the application's
+  initializer runs, then the application, as on macOS.
+- Version numbers (`NSAppKitVersionNumber`, `NSFoundationVersionNumber`)
+  are those of the macOS release Sidestep's behaviour is measured against
+  (26), whatever the Linux system's version.
 
 ## Deliberate differences from libobjc2
 
@@ -136,8 +151,18 @@ Specification.
 - libdispatch: no `dispatch_io_*`, `dispatch_read`/`write`,
   `dispatch_data_*`, `dispatch_block_*` or workloops; dispatch2 declares
   them, so an app calling one fails to link.
-- `kCFBooleanTrue`, `kCFBooleanFalse` and `kCFNull` are not exported: they
-  are data symbols holding `NSNumber` and `NSNull` objects.
+- Declared by objc2 under Sidestep's features but not exported (a program
+  naming one doesn't link): the `NSHashTable` and `NSMapTable` C functions
+  (`NSCreateHashTable`, `NSMapInsert`, …) and their callback sets
+  (`NSObjectHashCallBacks`, …); `NXReadNSObjectFromCoder`; the old bezel
+  drawing functions (`NSDrawGrayBezel`, `NSDrawGroove`,
+  `NSDrawWhiteBezel`, `NSDrawButton`, `NSDrawDarkBezel`,
+  `NSDrawLightBezel`) and `NSReadPixel`; CoreFoundation's Gregorian date
+  functions (`CFGregorianDateIsValid`, `CFAbsoluteTimeGetGregorianDate`,
+  …), run loop sources (`CFRunLoopSourceCreate`, `CFRunLoopAddSource`, …)
+  and the observer and timer `…GetContext` functions.
+- `NSFontIdentityMatrix` is a pointer to the six numbers, as objc2
+  declares it (C declares the array itself).
 - Protocol objects have a null `isa`, so retaining one (which
   objc2-foundation's `NSProtocolFromString` wrapper does) crashes.
 

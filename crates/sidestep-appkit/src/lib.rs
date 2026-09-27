@@ -28,10 +28,12 @@ pub(crate) fn load_shell<T: ClassType>() {
     let _: &objc2::runtime::AnyClass = unsafe { objc2::msg_send![T::class(), class] };
 }
 
+mod accessibility;
 mod app;
 mod autolayout;
 mod backend;
 mod clipboard;
+mod constants;
 mod controllers;
 mod controls;
 mod cursor;
@@ -41,7 +43,11 @@ pub mod drag;
 mod event;
 mod event_loop;
 mod font;
+mod font_manager;
+mod functions;
+mod funnel;
 mod graphics;
+mod haptics;
 // Drawing and images.
 mod animation;
 mod appearance;
@@ -113,7 +119,9 @@ sidestep_runtime::static_class!(pub NSRESPONDER, NSRESPONDER_META = "NSResponder
 });
 
 sidestep_runtime::static_class!(pub NSVIEW, NSVIEW_META = "NSView", || {
-    controls::a11y::install(views::NSViewImpl::class());
+    let class = views::NSViewImpl::class();
+    controls::a11y::install(class);
+    views::SET_NEEDS_DISPLAY_IN_RECT.capture(class, objc2::sel!(setNeedsDisplayInRect:));
 });
 
 sidestep_runtime::static_class!(pub NSCLIPVIEW, NSCLIPVIEW_META = "NSClipView", || {
@@ -129,7 +137,9 @@ sidestep_runtime::static_class!(pub NSSCROLLER, NSSCROLLER_META = "NSScroller", 
 });
 
 sidestep_runtime::static_class!(pub NSWINDOW, NSWINDOW_META = "NSWindow", || {
-    let _ = window::NSWindowImpl::class();
+    let class = window::NSWindowImpl::class();
+    window::ORDER_WINDOW.capture(class, objc2::sel!(orderWindow:relativeTo:));
+    window::CONSTRAIN_FRAME.capture(class, objc2::sel!(constrainFrameRect:toScreen:));
 });
 
 sidestep_runtime::static_class!(pub NSVIEWCONTROLLER, NSVIEWCONTROLLER_META = "NSViewController", || {

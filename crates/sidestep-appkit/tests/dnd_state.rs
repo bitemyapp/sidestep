@@ -637,6 +637,33 @@ mod linux {
 
     type Test = (&'static str, fn(MainThreadMarker));
 
+    /// A new editable text view takes dropped text without registering
+    /// anything (its `registeredDraggedTypes` is empty, as on macOS);
+    /// made not editable, it doesn't; editable again, it does.
+    fn text_views_take_text(mtm: MainThreadMarker) {
+        let s = scene(mtm);
+        let tv = objc2_app_kit::NSTextView::initWithFrame(
+            objc2_app_kit::NSTextView::alloc(mtm),
+            rect(0.0, 0.0, 200.0, 100.0),
+        );
+        s.window.contentView().unwrap().addSubview(&tv);
+        assert_eq!(tv.registeredDraggedTypes().count(), 0);
+        let takes = || {
+            testing::enter(&s.window, 150.0, 50.0, &[TEXT], DND_COPY);
+            let replies = testing::take_replies();
+            testing::leave();
+            testing::take_replies();
+            take_log();
+            replies == [status(Some(TEXT), DND_COPY, DND_COPY)]
+        };
+        assert!(takes(), "a new text view takes text");
+        tv.setEditable(false);
+        assert!(!takes(), "not while it isn't editable");
+        tv.setEditable(true);
+        assert!(takes());
+        tv.removeFromSuperview();
+    }
+
     pub(crate) fn run() {
         let mtm = MainThreadMarker::new().expect("runs on the main thread");
         testing::capture_replies();
@@ -649,6 +676,7 @@ mod linux {
             ("periodic_updates", periodic_updates),
             ("url_drags_go_by_what_the_urls_are", url_drags_go_by_what_the_urls_are),
             ("drops_outlive_drags_in_nested_loops", drops_outlive_drags_in_nested_loops),
+            ("text_views_take_text", text_views_take_text),
         ];
         for (name, test) in tests {
             objc2::rc::autoreleasepool(|_| test(mtm));

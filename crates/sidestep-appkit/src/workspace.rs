@@ -18,8 +18,9 @@
 //! running.
 //!
 //! `NSRunningApplication` describes this program (`currentApplication`):
-//! its process, its executable's name and URL (it has no bundle
-//! identifier), and the application's state.
+//! its process, its executable's name and URL, its bundle identifier (the
+//! main bundle's, else the desktop entry it was launched from, else none),
+//! and the application's state.
 //!
 //! `NSBeep` makes no sound: the platform doesn't bind a bell.
 
@@ -487,6 +488,26 @@ fn config_ivars(configuration: &NSWorkspaceOpenConfiguration) -> &ConfigurationI
         .ivars()
 }
 
+fn bundle_identifier() -> Option<Retained<NSString>> {
+    // SAFETY: +mainBundle returns a bundle; -bundleIdentifier a string or
+    // nil.
+    let from_bundle: Option<Retained<NSString>> = unsafe {
+        let bundle: Retained<AnyObject> = msg_send![objc2_foundation::NSBundle::class(), mainBundle];
+        msg_send![&*bundle, bundleIdentifier]
+    };
+    from_bundle.or_else(|| {
+        // GLib's launchers name the entry a program was started from, and
+        // the process they started: children inherit both, and aren't it.
+        let pid = std::env::var("GIO_LAUNCHED_DESKTOP_FILE_PID").ok()?;
+        if pid.trim().parse::<u32>().ok()? != std::process::id() {
+            return None;
+        }
+        let entry = std::env::var_os("GIO_LAUNCHED_DESKTOP_FILE")?;
+        let name = std::path::Path::new(&entry).file_name()?.to_str()?.strip_suffix(".desktop")?.to_owned();
+        (!name.is_empty()).then(|| NSString::from_str(&name))
+    })
+}
+
 /// Whether the application is active (on the main thread; elsewhere, not
 /// knowable without it).
 fn active() -> bool {
@@ -581,9 +602,13 @@ define_class!(
             executable().and_then(|exe| exe.file_name().map(|n| NSString::from_str(&n.to_string_lossy())))
         }
 
+        /// The main bundle's identifier (`CFBundleIdentifier` in its
+        /// `Info.plist`); else, for a program the desktop launched from a
+        /// desktop entry, that entry's id; else nil, as for a bare
+        /// executable on macOS.
         #[unsafe(method_id(bundleIdentifier))]
         fn bundle_identifier(&self) -> Option<Retained<NSString>> {
-            None
+            bundle_identifier()
         }
 
         #[unsafe(method_id(bundleURL))]

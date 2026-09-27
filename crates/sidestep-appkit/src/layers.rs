@@ -804,14 +804,37 @@ pub(crate) fn record(view: &NSViewImpl, xf: Xf, clip: Rect, area: Rect, ring: Op
     let visible = clip.intersect(&xf.rect(views::bounds(view)));
     let target = visible.intersect(&area);
     let is_ring = ring.is_some_and(|r| std::ptr::eq(views::imp(r), view));
-    if !target.is_empty() {
+    // A view that doesn't clip to its bounds (`clipsToBounds`, off but for
+    // clip views, scrollers and table rows) draws, and lets its subviews
+    // draw, wherever its ancestors let it. It is still asked to draw only
+    // for damage to its bounds, and `drawRect:` gets that part, but its
+    // subviews may stick out of it, so they are visited as far as they
+    // reach (`views::reach`, kept as geometry changes): a subtree that
+    // reaches nothing damaged is passed over, as a view outside the damage
+    // is when it clips. A focus ring draws a little outside its view.
+    let clips = views::clips_to_bounds(view);
+    let (inside, draw_clip) = if clips {
+        (visible, target)
+    } else {
+        let mut reach = xf.rect(views::reach(view));
+        if ring.is_some() {
+            let out = crate::controls::focus::RING_REACH;
+            reach = Rect::new(reach.x0 - out, reach.y0 - out, reach.x1 + out, reach.y1 + out);
+        }
+        (clip, clip.intersect(&area).intersect(&reach))
+    };
+    if !draw_clip.is_empty() {
         // Its opacity, over its subviews too: nothing at 0, a group below 1.
-        let Some(_opacity) = crate::context::opacity(view, target) else { return };
-        // A fresh graphics state and the view's appearance for its drawRect:.
-        let mark = crate::context::begin_view(view, xf, target);
-        // SAFETY: drawRect: takes an NSRect.
-        unsafe { msg_send![view, drawRect: xf.inverse_rect(target)] }
-        crate::context::end_view(mark);
+        let Some(_opacity) = crate::context::opacity(view, draw_clip) else { return };
+        if !target.is_empty() {
+            // A fresh graphics state and the view's appearance for its
+            // drawRect:, which may draw outside its bounds if it doesn't
+            // clip.
+            let mark = crate::context::begin_view(view, xf, if clips { target } else { clip.intersect(&area) });
+            // SAFETY: drawRect: takes an NSRect.
+            unsafe { msg_send![view, drawRect: xf.inverse_rect(target)] }
+            crate::context::end_view(mark);
+        }
         // A promoted clip view's document is in its layer.
         if mode == Mode::Inline || !(views::is_clip(view) && promoted(view)) {
             let flipped = views::is_flipped(view);
@@ -821,7 +844,7 @@ pub(crate) fn record(view: &NSViewImpl, xf: Xf, clip: Rect, area: Rect, ring: Op
                     continue;
                 }
                 let sub_xf = views::step(sub, flipped, views::frame(sub)).then(&xf);
-                record(sub, sub_xf, visible, area, ring);
+                record(sub, sub_xf, inside, area, ring);
             }
         }
     }

@@ -391,3 +391,26 @@ fn retain_info(
         None => info,
     }
 }
+
+// The type IDs. (Run loop sources made with `CFRunLoopSourceCreate` aren't
+// supported: there are none to have one.)
+
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn CFRunLoopGetTypeID() -> super::types::CFTypeID {
+    super::types::id::RUN_LOOP
+}
+
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn CFRunLoopTimerGetTypeID() -> super::types::CFTypeID {
+    super::types::id::RUN_LOOP_TIMER
+}
+
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn CFRunLoopObserverGetTypeID() -> super::types::CFTypeID {
+    super::types::id::RUN_LOOP_OBSERVER
+}
+
+#[unsafe(no_mangle)]
+pub extern "C-unwind" fn CFRunLoopSourceGetTypeID() -> super::types::CFTypeID {
+    super::types::id::RUN_LOOP_SOURCE
+}

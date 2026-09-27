@@ -54,7 +54,7 @@ const QUALIFIERS: &[u8] = b"rnNoORVAj";
 
 /// The size and alignment of the first type in `enc`, by C's layout rules
 /// on this platform, and what follows it. `None` for malformed encodings.
-fn layout(enc: &[u8]) -> Option<(usize, usize, &[u8])> {
+pub(crate) fn layout(enc: &[u8]) -> Option<(usize, usize, &[u8])> {
     let skip = enc.iter().take_while(|b| QUALIFIERS.contains(b)).count();
     let (&first, rest) = enc[skip..].split_first()?;
     let scalar = |size: usize| Some((size, size, rest));

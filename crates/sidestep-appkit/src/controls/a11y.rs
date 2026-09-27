@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::ffi::CString;
 
 use objc2::encode::{EncodeArguments, EncodeReturn};
-use objc2::rc::Retained;
+use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyClass, AnyObject, Bool, Imp, MethodImplementation, Sel};
 use objc2::{Message, msg_send, sel};
 use objc2_app_kit as ak;
@@ -34,7 +34,7 @@ use objc2_app_kit::{
     NSSecureTextFieldCell, NSSegmentedCell, NSSliderCell, NSStepperCell, NSSwitch, NSTextField, NSTextFieldCell,
     NSView,
 };
-use objc2_foundation::{NSNumber, NSString};
+use objc2_foundation::{NSNumber, NSRect, NSString};
 
 use super::button::{self, Look};
 
@@ -57,6 +57,16 @@ pub(crate) struct Props {
     pub element: Option<bool>,
     pub hidden: Option<bool>,
     pub enabled: Option<bool>,
+    /// Kept as given (AppKit hands back the array it was set), as are the
+    /// custom actions.
+    pub children: Set<AnyObject>,
+    pub custom_actions: Set<AnyObject>,
+    /// Weak, as AppKit's: a parent holds its children.
+    pub parent: Option<Weak<AnyObject>>,
+    /// An element's frame in screen coordinates, or in its parent's space
+    /// (which the screen frame is then worked out from).
+    pub frame: Option<NSRect>,
+    pub frame_in_parent: Option<NSRect>,
 }
 
 thread_local! {
@@ -85,19 +95,21 @@ impl Drop for Node {
 fn node(this: &AnyObject) -> Option<&Node> {
     if let Some(view) = this.downcast_ref::<NSView>() {
         Some(crate::views::a11y_node(view))
+    } else if let Some(cell) = this.downcast_ref::<NSCell>() {
+        Some(super::cell::a11y_node(cell))
     } else {
-        this.downcast_ref::<NSCell>().map(super::cell::a11y_node)
+        crate::accessibility::element_node(this)
     }
 }
 
 /// Read one field of `this`'s record, if it has one.
-fn read<T>(this: &AnyObject, field: impl FnOnce(&Props) -> Option<T>) -> Option<T> {
+pub(crate) fn read<T>(this: &AnyObject, field: impl FnOnce(&Props) -> Option<T>) -> Option<T> {
     let key = this as *const AnyObject as usize;
     TABLE.with_borrow(|t| t.get(&key).and_then(field))
 }
 
 /// Change one field of `this`'s record, making the record if need be.
-fn write<T>(this: &AnyObject, field: impl FnOnce(&mut Props) -> &mut T, value: T) {
+pub(crate) fn write<T>(this: &AnyObject, field: impl FnOnce(&mut Props) -> &mut T, value: T) {
     let Some(node) = node(this) else { return };
     let key = this as *const AnyObject as usize;
     node.0.set(key);
@@ -240,7 +252,11 @@ fn default_subrole(this: &AnyObject) -> Option<&'static NSString> {
 }
 
 fn default_element(this: &AnyObject) -> bool {
-    if is::<NSCell>(this) || is::<NSProgressIndicator>(this) || is::<NSSwitch>(this) {
+    if is::<NSCell>(this)
+        || is::<NSProgressIndicator>(this)
+        || is::<NSSwitch>(this)
+        || crate::accessibility::is_element(this)
+    {
         true
     } else if let Some(b) = this.downcast_ref::<NSBox>() {
         b.boxType() != NSBoxType::Separator
@@ -333,7 +349,9 @@ fn none<T>(_: &AnyObject) -> Option<Retained<T>> {
     None
 }
 
-object_property!(role, set_role, role: NSString, |this| string(default_role(this)));
+object_property!(role, set_role, role: NSString, |this: &AnyObject| {
+    if crate::accessibility::is_element(this) { None } else { string(default_role(this)) }
+});
 object_property!(subrole, set_subrole, subrole: NSString, |this| default_subrole(this).and_then(string));
 object_property!(role_description, set_role_description, role_description: NSString, none);
 object_property!(label, set_label, label: NSString, default_label);
@@ -354,6 +372,60 @@ object_property!(placeholder, set_placeholder, placeholder: NSString, none);
 object_property!(value, set_value, value: AnyObject, default_value);
 object_property!(value_description, set_value_description, value_description: NSString, none);
 bool_property!(is_element, set_element, element, default_element);
+// The arrays themselves are kept, as AppKit keeps them (a copy would be
+// another object).
+object_property!(children, set_children, children: AnyObject, default_children);
+object_property!(custom_actions, set_custom_actions, custom_actions: AnyObject, none);
+
+/// A view's children until set: its subviews that are elements (the
+/// unignored ones AppKit lists), in an array of their own; nothing for
+/// other objects.
+fn default_children(this: &AnyObject) -> Option<Retained<AnyObject>> {
+    let view = this.downcast_ref::<NSView>()?;
+    let elements: Vec<Retained<NSView>> = view
+        .subviews()
+        .iter()
+        // SAFETY: isAccessibilityElement takes nothing and returns BOOL.
+        .filter(|v| unsafe { msg_send![&**v, isAccessibilityElement] })
+        .collect();
+    let array = objc2_foundation::NSMutableArray::from_retained_slice(&elements);
+    // SAFETY: every object is an AnyObject.
+    Some(unsafe { Retained::cast_unchecked::<AnyObject>(array) })
+}
+
+/// `accessibilityParent`: what was set, while it lives; until set, for a
+/// view in a window, its nearest superview that is an element, else its
+/// window; nothing otherwise (a view outside a window has none, as on
+/// macOS).
+extern "C-unwind" fn parent(this: &AnyObject, _: Sel) -> *mut AnyObject {
+    let value = match read(this, |p| p.parent.clone()) {
+        Some(weak) => weak.load(),
+        None => default_parent(this),
+    };
+    value.map_or(std::ptr::null_mut(), Retained::autorelease_return)
+}
+
+extern "C-unwind" fn set_parent(this: &AnyObject, _: Sel, value: Option<&AnyObject>) {
+    write(this, |p| &mut p.parent, Some(value.map_or_else(Weak::default, Weak::new)));
+}
+
+fn default_parent(this: &AnyObject) -> Option<Retained<AnyObject>> {
+    let view = this.downcast_ref::<NSView>()?;
+    let window = view.window()?;
+    // SAFETY: superview returns a view or nil.
+    let mut up = unsafe { view.superview() };
+    while let Some(v) = up {
+        // SAFETY: isAccessibilityElement takes nothing and returns BOOL.
+        if unsafe { msg_send![&*v, isAccessibilityElement] } {
+            // SAFETY: every object is an AnyObject.
+            return Some(unsafe { Retained::cast_unchecked::<AnyObject>(v) });
+        }
+        // SAFETY: as above.
+        up = unsafe { v.superview() };
+    }
+    // SAFETY: as above.
+    Some(unsafe { Retained::cast_unchecked::<AnyObject>(window) })
+}
 bool_property!(is_hidden, set_hidden, hidden, |_| false);
 bool_property!(is_enabled, set_enabled, enabled, default_enabled);
 
@@ -419,6 +491,12 @@ pub(crate) fn install(class: &AnyClass) {
         add(class, get_sel, get);
         add(class, set_sel, set);
     }
+    add(class, sel!(accessibilityChildren), children as Getter<AnyObject>);
+    add(class, sel!(setAccessibilityChildren:), set_children as Setter<AnyObject>);
+    add(class, sel!(accessibilityCustomActions), custom_actions as Getter<AnyObject>);
+    add(class, sel!(setAccessibilityCustomActions:), set_custom_actions as Setter<AnyObject>);
+    add(class, sel!(accessibilityParent), parent as Getter<AnyObject>);
+    add(class, sel!(setAccessibilityParent:), set_parent as Setter<AnyObject>);
 }
 
 // The roles and subroles, with macOS's values.

@@ -330,7 +330,7 @@ fn move_view(this: &NSViewImpl, view: &NSView, at: usize) {
     // Its effective appearance may have changed with its superview.
     crate::appearance::refresh(&view);
     // Drawn where it now is, in the window it is now in.
-    views::invalidate(v, views::bounds(v));
+    views::invalidate_reach(v);
 }
 
 /// Take `view` out of whatever superview it has, on its way to `to`, with

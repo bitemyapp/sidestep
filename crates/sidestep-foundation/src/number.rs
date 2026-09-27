@@ -29,6 +29,8 @@ use objc2::runtime::{AnyObject, NSObjectProtocol};
 use objc2::{AnyThread, ClassType, DefinedClass, Message, define_class, msg_send};
 use objc2_foundation::{NSComparisonResult, NSInteger, NSNumber, NSString, NSUInteger, NSValue, NSZone};
 
+use sidestep_runtime::{ObjectRef, StaticObject};
+
 use crate::util::is_exactly;
 
 /// A number's value and C type.
@@ -272,7 +274,7 @@ pub(crate) fn fast_value(obj: &AnyObject) -> Option<Number> {
         // SAFETY: an instance of exactly NSNumberImpl.
         Some(*unsafe { &*(obj as *const AnyObject).cast::<NSNumberImpl>() }.ivars())
     } else {
-        None
+        boolean_value(obj).copied()
     }
 }
 
@@ -406,6 +408,68 @@ fn other_value(other: &NSNumber) -> Number {
     value_of(other).unwrap_or(Number::Int(0, b'q'))
 }
 
+// The booleans: `kCFBooleanTrue` and `kCFBooleanFalse`, which
+// `+numberWithBool:` returns, as Foundation's does. They are numbers of C
+// type `c` whose class is a private subclass of NSNumber (so `[@YES class]`
+// tells a boolean from a `char`, as on macOS), living in static memory:
+// data symbols must point at objects before any code runs. Being static,
+// they have no storage for NSNumber's instance variables; NSNumber's
+// methods read their value through `number()`, which knows them.
+
+sidestep_runtime::static_class!(pub(crate) BOOLEAN_CLASS, BOOLEAN_META = "_SidestepBoolean", || {
+    let _ = BooleanImpl::class();
+});
+
+define_class!(
+    /// The class of the two boolean constants. NSNumber's methods serve it.
+    #[unsafe(super(NSNumber, NSValue, objc2::runtime::NSObject))]
+    #[name = "_SidestepBoolean"]
+    struct BooleanImpl;
+);
+
+static TRUE: StaticObject<()> = StaticObject::new(&BOOLEAN_CLASS, ());
+static FALSE: StaticObject<()> = StaticObject::new(&BOOLEAN_CLASS, ());
+static TRUE_VALUE: Number = Number::Int(1, b'c');
+static FALSE_VALUE: Number = Number::Int(0, b'c');
+
+#[unsafe(no_mangle)]
+pub static kCFBooleanTrue: ObjectRef = TRUE.object_ref();
+#[unsafe(no_mangle)]
+pub static kCFBooleanFalse: ObjectRef = FALSE.object_ref();
+
+fn boolean(value: bool) -> &'static StaticObject<()> {
+    if value { &TRUE } else { &FALSE }
+}
+
+/// Whether `obj` is one of the boolean constants.
+pub(crate) fn is_boolean(obj: &AnyObject) -> bool {
+    boolean_value(obj).is_some()
+}
+
+/// The value of one of the boolean constants; `None` for other objects.
+#[inline]
+fn boolean_value(obj: &AnyObject) -> Option<&'static Number> {
+    let obj = (obj as *const AnyObject).cast_mut().cast();
+    if obj == TRUE.as_object() {
+        Some(&TRUE_VALUE)
+    } else if obj == FALSE.as_object() {
+        Some(&FALSE_VALUE)
+    } else {
+        None
+    }
+}
+
+impl NSNumberImpl {
+    /// The number's value: its ivars, or a boolean constant's.
+    #[inline]
+    fn number(&self) -> &Number {
+        match boolean_value(self) {
+            Some(value) => value,
+            None => self.ivars(),
+        }
+    }
+}
+
 define_class!(
     #[unsafe(super(NSValue, objc2::runtime::NSObject))]
     #[name = "NSNumber"]
@@ -473,9 +537,10 @@ define_class!(
             returned(Number::Double(value))
         }
 
+        /// One of the two boolean constants, as in Foundation.
         #[unsafe(method(numberWithBool:))]
         fn with_bool(value: bool) -> *mut Self {
-            returned(Number::Int(value.into(), b'c'))
+            boolean(value).as_object().cast()
         }
 
         #[unsafe(method(numberWithInteger:))]
@@ -548,9 +613,13 @@ define_class!(
             init(this, Number::Double(value))
         }
 
+        /// One of the two boolean constants, as `+numberWithBool:`.
         #[unsafe(method_id(initWithBool:))]
         fn init_with_bool(this: Allocated<Self>, value: bool) -> Retained<Self> {
-            init(this, Number::Int(value.into(), b'c'))
+            drop(this);
+            // SAFETY: the constants are immortal numbers; retaining one is
+            // a no-op.
+            unsafe { Retained::retain(boolean(value).as_object().cast()) }.expect("static object")
         }
 
         #[unsafe(method_id(initWithInteger:))]
@@ -565,128 +634,128 @@ define_class!(
 
         #[unsafe(method(charValue))]
         fn char_value(&self) -> c_char {
-            self.ivars().as_i64() as c_char
+            self.number().as_i64() as c_char
         }
 
         #[unsafe(method(unsignedCharValue))]
         fn unsigned_char_value(&self) -> u8 {
-            self.ivars().as_i64() as u8
+            self.number().as_i64() as u8
         }
 
         #[unsafe(method(shortValue))]
         fn short_value(&self) -> i16 {
-            self.ivars().as_i64() as i16
+            self.number().as_i64() as i16
         }
 
         #[unsafe(method(unsignedShortValue))]
         fn unsigned_short_value(&self) -> u16 {
-            self.ivars().as_i64() as u16
+            self.number().as_i64() as u16
         }
 
         #[unsafe(method(intValue))]
         fn int_value(&self) -> i32 {
-            self.ivars().as_i64() as i32
+            self.number().as_i64() as i32
         }
 
         #[unsafe(method(unsignedIntValue))]
         fn unsigned_int_value(&self) -> u32 {
-            self.ivars().as_i64() as u32
+            self.number().as_i64() as u32
         }
 
         #[unsafe(method(longValue))]
         fn long_value(&self) -> c_long {
-            self.ivars().as_i64() as c_long
+            self.number().as_i64() as c_long
         }
 
         #[unsafe(method(unsignedLongValue))]
         fn unsigned_long_value(&self) -> c_ulong {
-            self.ivars().as_u64() as c_ulong
+            self.number().as_u64() as c_ulong
         }
 
         #[unsafe(method(longLongValue))]
         fn long_long_value(&self) -> i64 {
-            self.ivars().as_i64()
+            self.number().as_i64()
         }
 
         #[unsafe(method(unsignedLongLongValue))]
         fn unsigned_long_long_value(&self) -> u64 {
-            self.ivars().as_u64()
+            self.number().as_u64()
         }
 
         #[unsafe(method(floatValue))]
         fn float_value(&self) -> f32 {
-            self.ivars().as_f32()
+            self.number().as_f32()
         }
 
         #[unsafe(method(doubleValue))]
         fn double_value(&self) -> f64 {
-            self.ivars().as_f64()
+            self.number().as_f64()
         }
 
         #[unsafe(method(boolValue))]
         fn bool_value(&self) -> bool {
-            self.ivars().as_bool()
+            self.number().as_bool()
         }
 
         #[unsafe(method(integerValue))]
         fn integer_value(&self) -> NSInteger {
-            self.ivars().as_i64() as NSInteger
+            self.number().as_i64() as NSInteger
         }
 
         #[unsafe(method(unsignedIntegerValue))]
         fn unsigned_integer_value(&self) -> NSUInteger {
-            self.ivars().as_u64() as NSUInteger
+            self.number().as_u64() as NSUInteger
         }
 
         #[unsafe(method_id(stringValue))]
         fn string_value(&self) -> Retained<NSString> {
-            NSString::from_str(&self.ivars().to_string())
+            NSString::from_str(&self.number().to_string())
         }
 
         #[unsafe(method_id(description))]
         fn description(&self) -> Retained<NSString> {
-            NSString::from_str(&self.ivars().to_string())
+            NSString::from_str(&self.number().to_string())
         }
 
         /// Sidestep has no locales yet: numbers print as in the C locale.
         #[unsafe(method_id(descriptionWithLocale:))]
         fn description_with_locale(&self, _locale: Option<&AnyObject>) -> Retained<NSString> {
-            NSString::from_str(&self.ivars().to_string())
+            NSString::from_str(&self.number().to_string())
         }
 
         #[unsafe(method(compare:))]
         fn compare(&self, other: &NSNumber) -> NSComparisonResult {
-            comparison(self.ivars().compare(&other_value(other)))
+            comparison(self.number().compare(&other_value(other)))
         }
 
         #[unsafe(method(isEqualToNumber:))]
         fn is_equal_to_number(&self, other: &NSNumber) -> bool {
-            self.ivars().equals(&other_value(other))
+            self.number().equals(&other_value(other))
         }
 
         #[unsafe(method(isEqual:))]
         fn is_equal(&self, other: Option<&AnyObject>) -> bool {
-            other.and_then(value_of).is_some_and(|other| self.ivars().equals(&other))
+            other.and_then(value_of).is_some_and(|other| self.number().equals(&other))
         }
 
         #[unsafe(method(hash))]
         fn hash(&self) -> NSUInteger {
-            self.ivars().hash()
+            self.number().hash()
         }
 
         #[unsafe(method(objCType))]
         fn objc_type(&self) -> NonNull<c_char> {
-            NonNull::new(self.ivars().objc_type().as_ptr().cast_mut()).expect("static string")
+            NonNull::new(self.number().objc_type().as_ptr().cast_mut()).expect("static string")
         }
 
         #[unsafe(method(getValue:))]
         fn get_value(&self, value: NonNull<c_void>) {
-            self.ivars().write_to(value.as_ptr());
+            self.number().write_to(value.as_ptr());
         }
 
         #[unsafe(method(getValue:size:))]
         fn get_value_size(&self, value: NonNull<c_void>, size: NSUInteger) {
-            let number = self.ivars();
+            let number = self.number();
             if size != number.size() {
                 panic!(
                     "Cannot get value with size {size}. The type encoded as {} is expected to be {} bytes",
@@ -725,7 +794,7 @@ define_class!(
         /// values compare.
         #[unsafe(method(isEqualToValue:))]
         fn is_equal_to_value(&self, other: &NSValue) -> bool {
-            let number = self.ivars();
+            let number = self.number();
             match value_of(other) {
                 Some(other) => number.equals(&other),
                 None => {

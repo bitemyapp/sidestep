@@ -866,6 +866,32 @@ fn registry_feature(kind: i64, selector: i64) -> Option<([u8; 4], u16)> {
     }
 }
 
+// For the font manager (`font_manager`).
+
+/// What `font` was made from.
+pub(crate) fn spec_of(font: &NSFont) -> FontSpec {
+    imp(font).ivars().spec.clone()
+}
+
+/// The face `font` resolved to.
+pub(crate) fn face_of(font: &NSFont) -> Arc<Face> {
+    imp(font).ivars().face.clone()
+}
+
+/// A font made from `spec`, with `like`'s default size.
+pub(crate) fn font_like(like: &NSFont, spec: FontSpec) -> Retained<NSFont> {
+    let made = font_with_zero(spec, imp(like).ivars().zero);
+    load::<NSFont>();
+    // SAFETY: NSFontImpl is NSFont's implementation.
+    unsafe { Retained::cast_unchecked(made) }
+}
+
+/// The font `name` names, at `size`, if the system has it (as
+/// `fontWithName:size:` finds it).
+pub(crate) fn named(name: &str, size: f64) -> Option<FontSpec> {
+    fonts::spec_named(name, size)
+}
+
 #[cfg(test)]
 mod tests {
     use objc2::DefinedClass;

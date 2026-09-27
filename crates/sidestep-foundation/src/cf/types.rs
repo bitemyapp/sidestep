@@ -45,6 +45,7 @@ pub(crate) mod id {
     pub(crate) const RUN_LOOP_OBSERVER: CFTypeID = 45;
     pub(crate) const LOCALE: CFTypeID = 46;
     pub(crate) const TIME_ZONE: CFTypeID = 47;
+    pub(crate) const RUN_LOOP_SOURCE: CFTypeID = 48;
 }
 
 /// Class names with CoreFoundation counterparts.
@@ -85,15 +86,11 @@ pub(crate) fn type_of(object: &AnyObject) -> CFTypeID {
     id::TYPE
 }
 
-/// A number made from a boolean: C type `c` (or `B`) and 0 or 1.
+/// A boolean: one of the two constants `+numberWithBool:` hands out
+/// (`kCFBooleanTrue` and `kCFBooleanFalse`). A number made from a `char`
+/// is a number, as on macOS.
 pub(crate) fn is_boolean(number: &AnyObject) -> bool {
-    // SAFETY: an NSNumber: -objCType returns its C type string.
-    let kind: *const std::ffi::c_char = unsafe { msg_send![number, objCType] };
-    // SAFETY: a NUL-terminated string, or null.
-    let kind =
-        (!kind.is_null()).then(|| unsafe { std::ffi::CStr::from_ptr(kind) }.to_bytes().first().copied()).flatten();
-    // SAFETY: -longLongValue takes nothing.
-    matches!(kind, Some(b'c' | b'B')) && matches!(unsafe { msg_send![number, longLongValue] }, 0i64 | 1i64)
+    crate::number::is_boolean(number)
 }
 
 /// # Safety

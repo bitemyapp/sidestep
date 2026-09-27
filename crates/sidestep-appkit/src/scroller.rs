@@ -162,6 +162,7 @@ define_class!(
             let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
             // A new scroller has nothing to scroll.
             this.control().setEnabled(false);
+            crate::views::clip_by_default(crate::views::imp(this.view()));
             // As macOS answers.
             crate::view_layout::set_redraw_policy(
                 crate::views::imp(this.view()),

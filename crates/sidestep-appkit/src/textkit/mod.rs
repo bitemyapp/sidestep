@@ -16,6 +16,7 @@ pub(crate) mod attrs;
 pub(crate) mod blocks;
 pub(crate) mod commands;
 pub(crate) mod container;
+pub(crate) mod drop;
 pub(crate) mod edit;
 pub(crate) mod field_editor;
 #[doc(hidden)]

@@ -249,6 +249,40 @@ modal windows and tooltips; `examples/eventbench` measures):
 - A render thread without a display (`SIDESTEP_BACKEND=null`) and a testing
   module that plays the compositor for input.
 
+What an application reaches at link time and at launch (a census of a
+real application's API use found the gaps; `conformance/tests/contract_sweep.rs`,
+`funnels.rs`, `constants.rs` and `census_selectors.rs` pin them):
+
+- Every extern constant and function objc2's Foundation, AppKit and
+  CoreFoundation crates declare under Sidestep's features is exported
+  (string constants with macOS's values, `NSApp`, `kCFBooleanTrue` and
+  `kCFBooleanFalse` as the numbers `+numberWithBool:` hands out, the zone,
+  page and extra-reference-count functions, `NSApplicationMain` and the
+  rest), but for the known gaps in [abi.md](abi.md#known-gaps); a test
+  links them all.
+- `NSFontManager` (trait, weight and size conversions),
+  `NSHapticFeedbackManager` (does nothing), `NSAccessibilityElement` and
+  `NSAccessibilityCustomAction` (stored), accessibility children, custom
+  actions and parents on views, and posted accessibility notifications.
+- The application's Window menu and its list of windows; `clipsToBounds`
+  (off, as on macOS 14 and later, with drawing following it);
+  `inLiveResize` and the live resize hooks sent to every view;
+  `-[NSWindow center]` and `constrainFrameRect:toScreen:`; a default
+  content view in every window; `quickLookWithEvent:`; the running
+  application's bundle identifier; a text view taking dropped text.
+- Funnel points (see [architecture.md](architecture.md#funnel-points)):
+  AppKit's methods that other methods reach by message now are, so
+  overrides and swizzles see each call.
+- Foundation: collections from property-list files, a file URL's resource
+  values, `+[NSThread callStackSymbols]`.
+
+Still to do there: the `NSHashTable`/`NSMapTable` C functions,
+CoreFoundation's run loop sources, the old bezel functions; `availableFonts`
+and `availableMembersOfFontFamily:` on the font manager; dragging text out
+of a text view (writing the selection for a drag); swipe and smart
+magnify gestures (no Wayland event source); publishing the accessibility
+store through AccessKit.
+
 Menus, alerts and panels since (`examples/menus-panels` shows them; see
 [architecture.md](architecture.md#menus-alerts-and-panels)):
 
@@ -438,7 +472,9 @@ Next:
 - Check boxes' and radio buttons' `cellSizeForBounds:` (macOS wraps the
   title into the width given) and the width a wrapping label keeps at
   `maximumNumberOfLines`.
-- Accessibility through AccessKit, from the store.
+- Accessibility through AccessKit, from the store (views' and cells'
+  properties, custom elements and actions, and posted notifications such
+  as announcements).
 
 ## 5. A real app
 

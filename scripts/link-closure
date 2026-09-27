@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""Write crates/sidestep/tests/link_closure.rs: a test that references every
+extern static and function objc2-foundation, objc2-app-kit and
+objc2-core-foundation declare under the features Sidestep's crates enable
+on Linux, except the known gaps below (docs/abi.md, "Known gaps"). A symbol
+Sidestep stops exporting then fails the test's link.
+
+Run from the checkout after tools/objc2-overlay has written .objc2-overlay/:
+
+    scripts/link-closure
+
+It reads the overlay's crates (their Cargo.toml features and the item
+declarations in src/generated, which are names and types only) and
+Sidestep's own manifests; it writes names only.
+"""
+import re
+import sys
+import tomllib
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+OVERLAY = ROOT / ".objc2-overlay"
+CRATES = {
+    "objc2-foundation": "objc2_foundation",
+    "objc2-app-kit": "objc2_app_kit",
+    "objc2-core-foundation": "objc2_core_foundation",
+}
+MANIFESTS = ["crates/sidestep-foundation", "crates/sidestep-appkit", "crates/sidestep"]
+
+# Declared but not exported (docs/abi.md, "Known gaps"), by name prefix or
+# name.
+KNOWN_GAPS = [
+    # The NSHashTable and NSMapTable C functions and their callback sets.
+    "NSFreeHashTable", "NSResetHashTable", "NSCompareHashTables", "NSCopyHashTableWithZone", "NSHashGet",
+    "NSHashInsert", "NSHashInsertKnownAbsent", "NSHashInsertIfAbsent", "NSHashRemove", "NSEnumerateHashTable",
+    "NSNextHashEnumeratorItem", "NSEndHashTableEnumeration", "NSCountHashTable", "NSStringFromHashTable",
+    "NSAllHashTableObjects", "NSCreateHashTableWithZone", "NSCreateHashTable", "NSResetMapTable",
+    "NSCompareMapTables", "NSCopyMapTableWithZone", "NSMapMember", "NSMapGet", "NSMapInsert",
+    "NSMapInsertKnownAbsent", "NSMapInsertIfAbsent", "NSMapRemove", "NSEnumerateMapTable",
+    "NSNextMapEnumeratorPair", "NSEndMapTableEnumeration", "NSCountMapTable", "NSStringFromMapTable",
+    "NSAllMapTableKeys", "NSAllMapTableValues", "NSCreateMapTableWithZone", "NSCreateMapTable",
+    "*HashCallBacks", "*MapKeyCallBacks", "*MapValueCallBacks",
+    # Archiving.
+    "NXReadNSObjectFromCoder",
+    # Drawing with the old bezels, and reading a pixel back.
+    "NSDrawGrayBezel", "NSDrawGroove", "NSDrawWhiteBezel", "NSDrawButton", "NSDrawDarkBezel",
+    "NSDrawLightBezel", "NSReadPixel",
+    # CoreFoundation's Gregorian date functions and run loop sources.
+    "CFGregorianDateIsValid", "CFGregorianDateGetAbsoluteTime", "CFAbsoluteTimeGetGregorianDate",
+    "CFAbsoluteTimeAddGregorianUnits", "CFAbsoluteTimeGetDifferenceAsGregorianUnits",
+    "CFAbsoluteTimeGetDayOfWeek", "CFAbsoluteTimeGetDayOfYear", "CFAbsoluteTimeGetWeekOfYear",
+    "CFRunLoopContainsSource", "CFRunLoopAddSource", "CFRunLoopRemoveSource", "CFRunLoopSourceCreate",
+    "CFRunLoopSourceGetOrder", "CFRunLoopSourceInvalidate", "CFRunLoopSourceIsValid",
+    "CFRunLoopSourceGetContext", "CFRunLoopSourceSignal", "CFRunLoopObserverGetContext",
+    "CFRunLoopTimerGetContext",
+]
+
+
+def is_gap(name):
+    return any(name.endswith(g[1:]) if g.startswith("*") else name == g for g in KNOWN_GAPS)
+
+
+def overlay_dir(crate):
+    found = sorted(OVERLAY.glob(crate + "-*"))
+    if not found:
+        sys.exit(f"link-closure: no {crate} in .objc2-overlay (run tools/objc2-overlay first)")
+    return found[-1]
+
+
+def enabled_features():
+    enabled = {c: set() for c in CRATES}
+    for manifest in MANIFESTS:
+        doc = tomllib.loads((ROOT / manifest / "Cargo.toml").read_text())
+        for key, table in doc.get("target", {}).items():
+            if "apple" in key and "not" not in key:
+                continue
+            for name, spec in table.get("dependencies", {}).items():
+                if name in enabled and isinstance(spec, dict):
+                    enabled[name].update(spec.get("features", []))
+    tables = {c: tomllib.loads((overlay_dir(c) / "Cargo.toml").read_text()).get("features", {}) for c in CRATES}
+    changed = True
+    while changed:
+        changed = False
+        for crate in CRATES:
+            for feature in list(enabled[crate]):
+                for implied in tables[crate].get(feature, []):
+                    dep, _, feat = implied.partition("/")
+                    dep, feat = (dep.rstrip("?"), feat) if feat else (crate, dep)
+                    if dep in enabled and not feat.startswith("dep:") and feat not in enabled[dep]:
+                        enabled[dep].add(feat)
+                        changed = True
+    return enabled
+
+
+def split_args(text):
+    out, depth, cur = [], 0, ""
+    for ch in text:
+        depth += ch == "("
+        depth -= ch == ")"
+        if ch == "," and depth == 0:
+            out.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    return [a for a in out + [cur] if a.strip()]
+
+
+def cfg_holds(expr, features):
+    expr = expr.strip()
+    if m := re.fullmatch(r'feature\s*=\s*"([^"]+)"', expr):
+        return m.group(1) in features
+    if m := re.fullmatch(r'target_os\s*=\s*"([^"]+)"', expr):
+        return m.group(1) == "linux"
+    if m := re.fullmatch(r'(all|any|not)\((.*)\)', expr, re.S):
+        values = [cfg_holds(a, features) for a in split_args(m.group(2))]
+        return {"all": all, "any": any, "not": lambda v: not v[0]}[m.group(1)](values)
+    # target_vendor = "apple", test, debug_assertions, doc, …
+    return False
+
+
+def declarations(crate, features):
+    """(kind, name) of each extern item the enabled features declare."""
+    generated = overlay_dir(crate) / "src/generated"
+    modules = (generated / "mod.rs").read_text()
+    # What the crate re-exports by name (C functions wrapped as methods,
+    # such as the `…GetTypeID`s, aren't).
+    public = {
+        name
+        for cfg, name in re.findall(r'(?:#\[cfg\((.*)\)\]\n)?pub use self::__\w+::(\w+);', modules)
+        if not cfg or cfg_holds(cfg, features)
+    }
+    found = []
+    for feature, path in re.findall(r'#\[cfg\(feature = "([^"]+)"\)\]\s*#\[path = "([^"]+)"\]', modules):
+        if feature not in features:
+            continue
+        scopes, pending = [([], False)], []
+        for line in (generated / path).read_text().splitlines():
+            text = line.strip()
+            if text.startswith("//"):
+                continue
+            if m := re.match(r'#\[cfg\((.*)\)\]$', text):
+                pending.append(m.group(1))
+                continue
+            if text.startswith("#["):
+                continue
+            if any(extern for _, extern in scopes):
+                item = re.match(r'(?:pub\s+)?(static|fn)\s+(\w+)\s*[:(]', text)
+                cfgs = [c for scope, _ in scopes for c in scope] + pending
+                if item and item.group(2) in public and all(cfg_holds(c, features) for c in cfgs):
+                    found.append((item.group(1), item.group(2)))
+            opens, closes = text.count("{"), text.count("}")
+            if opens > closes:
+                scopes.append((pending, bool(re.match(r'(?:unsafe\s+)?extern\s+"C(-unwind)?"\s*\{', text))))
+                scopes.extend(([], False) for _ in range(opens - closes - 1))
+            for _ in range(closes - opens):
+                if len(scopes) > 1:
+                    scopes.pop()
+            pending = []
+    return found
+
+
+def main():
+    features = enabled_features()
+    seen, statics, functions = set(), [], []
+    for crate, module in CRATES.items():
+        for kind, name in declarations(crate, features[crate]):
+            if name in seen or is_gap(name):
+                continue
+            seen.add(name)
+            (statics if kind == "static" else functions).append(f"{module}::{name}")
+    body = "\n".join(
+        [
+            "//! Every extern static and function objc2-foundation, objc2-app-kit and",
+            "//! objc2-core-foundation declare under the features Sidestep's crates",
+            "//! enable, referenced so a Linux build links each: one Sidestep stops",
+            "//! exporting fails this test's link. The known gaps (docs/abi.md) are left",
+            "//! out. Written by `scripts/link-closure`; run it again when the features",
+            "//! or the exports change.",
+            '#![cfg(not(target_vendor = "apple"))]',
+            "#![allow(deprecated, unused_unsafe, clippy::fn_to_numeric_cast_any)]",
+            "",
+            "use sidestep as _;",
+            "",
+            "macro_rules! addresses {",
+            "    (statics: [$($s:path,)*] functions: [$($f:path,)*]) => {",
+            "        #[test]",
+            "        fn every_symbol_links() {",
+            "            let statics: &[(&str, usize)] = &[$((stringify!($s), unsafe { &raw const $s } as usize),)*];",
+            "            let functions: &[(&str, usize)] = &[$((stringify!($f), $f as *const () as usize),)*];",
+            "            // Through black_box, so no build folds the checks and drops the references.",
+            "            let (statics, functions) = std::hint::black_box((statics, functions));",
+            "            for (name, address) in statics.iter().chain(functions) {",
+            '                assert_ne!(*address, 0, "{name}");',
+            "            }",
+            f"            assert_eq!(statics.len() + functions.len(), {len(statics) + len(functions)});",
+            "        }",
+            "    };",
+            "}",
+            "",
+            "addresses! {",
+            "    statics: [",
+            *[f"        {s}," for s in statics],
+            "    ]",
+            "    functions: [",
+            *[f"        {f}," for f in functions],
+            "    ]",
+            "}",
+            "",
+        ]
+    )
+    out = ROOT / "crates/sidestep/tests/link_closure.rs"
+    out.write_text(body)
+    print(f"link-closure: {len(statics)} statics, {len(functions)} functions -> {out.relative_to(ROOT)}")
+
+
+main()

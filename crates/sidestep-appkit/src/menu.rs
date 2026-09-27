@@ -43,7 +43,7 @@ use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, Sel};
 use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSEvent, NSEventModifierFlags, NSFont, NSImage, NSMenu, NSMenuItem, NSMenuPresentationStyle,
-    NSMenuProperties, NSMenuSelectionMode, NSUserInterfaceLayoutDirection, NSView,
+    NSMenuProperties, NSMenuSelectionMode, NSUserInterfaceLayoutDirection, NSView, NSWindow,
 };
 use objc2_foundation::{NSArray, NSCopying, NSDictionary, NSNumber, NSPoint, NSSize, NSString, NSZone};
 use sidestep_foundation::notification_center;
@@ -1788,4 +1788,70 @@ pub(crate) fn needs_update(menu: &NSMenu, delegate: &AnyObject) {
     // SAFETY: menuNeedsUpdate: takes the menu.
     let _: () = unsafe { msg_send![delegate, menuNeedsUpdate: menu] };
     UPDATING.with(|u| u.set(u.get() - 1));
+}
+
+// The Window menu's list of windows (`-[NSApplication addWindowsItem:…]`
+// and its kin), as AppKit keeps it: after the menu's own items and a
+// separator (added with the first window, and kept once the last is
+// gone), one item per window with a title, sorted by title ignoring case,
+// each sending `makeKeyAndOrderFront:` to its window.
+
+/// Whether `item` is one of the list's: it orders a window front.
+fn window_item_of(item: &NSMenuItem) -> Option<Retained<AnyObject>> {
+    if item.action() != Some(sel!(makeKeyAndOrderFront:)) {
+        return None;
+    }
+    item.target().filter(|t| crate::controls::kind_of(t, NSWindow::class()))
+}
+
+fn window_items(menu: &NSMenu) -> Vec<(isize, Retained<NSMenuItem>, Retained<AnyObject>)> {
+    let items = menu.itemArray();
+    items.iter().enumerate().filter_map(|(i, item)| window_item_of(&item).map(|w| (i as isize, item, w))).collect()
+}
+
+/// Add `window` to the list as `title`, unless it is there already or
+/// the title is empty.
+pub(crate) fn add_window_item(menu: &NSMenu, window: &NSWindow, title: &NSString) {
+    if title.length() == 0 {
+        return;
+    }
+    let items = window_items(menu);
+    if items.iter().any(|(_, _, w)| std::ptr::eq(&**w, window as &AnyObject)) {
+        return;
+    }
+    let index = match items.first() {
+        None => {
+            let count = menu.numberOfItems();
+            let last_is_separator = count > 0 && menu.itemAtIndex(count - 1).is_some_and(|i| i.isSeparatorItem());
+            if count > 0 && !last_is_separator {
+                let mtm = MainThreadMarker::from(menu);
+                menu.addItem(&NSMenuItem::separatorItem(mtm));
+            }
+            menu.numberOfItems()
+        }
+        Some(&(first, ..)) => {
+            let key = title.to_string().to_lowercase();
+            let after = items.iter().filter(|(_, item, _)| item.title().to_string().to_lowercase() <= key).count();
+            first + after as isize
+        }
+    };
+    let item = new_item(&title.to_string(), Some(sel!(makeKeyAndOrderFront:)), "");
+    // SAFETY: the window answers makeKeyAndOrderFront:.
+    unsafe { item.setTarget(Some(window)) };
+    menu.insertItem_atIndex(&item, index);
+}
+
+/// Retitle `window`'s item, keeping the list sorted, or add one.
+pub(crate) fn change_window_item(menu: &NSMenu, window: &NSWindow, title: &NSString) {
+    remove_window_item(menu, window);
+    add_window_item(menu, window, title);
+}
+
+/// Take `window`'s item out of the list.
+pub(crate) fn remove_window_item(menu: &NSMenu, window: &NSWindow) {
+    for (index, _, w) in window_items(menu).into_iter().rev() {
+        if std::ptr::eq(&*w, window as &AnyObject) {
+            menu.removeItemAtIndex(index);
+        }
+    }
 }

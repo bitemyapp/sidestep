@@ -165,6 +165,24 @@ define_class!(
             self.ivars().main
         }
 
+        /// The calling thread's stack, a line per frame from the caller
+        /// out, as Foundation writes them (see `call_stack`).
+        #[unsafe(method_id(callStackSymbols))]
+        fn call_stack_symbols() -> Retained<objc2_foundation::NSArray<NSString>> {
+            let lines: Vec<Retained<NSString>> =
+                call_stack().iter().map(|f| NSString::from_str(&f.line)).collect();
+            objc2_foundation::NSArray::from_retained_slice(&lines)
+        }
+
+        /// The return addresses of the calling thread's frames, from the
+        /// caller out.
+        #[unsafe(method_id(callStackReturnAddresses))]
+        fn call_stack_return_addresses() -> Retained<objc2_foundation::NSArray<objc2_foundation::NSNumber>> {
+            let numbers: Vec<Retained<objc2_foundation::NSNumber>> =
+                call_stack().iter().map(|f| objc2_foundation::NSNumber::new_usize(f.address)).collect();
+            objc2_foundation::NSArray::from_retained_slice(&numbers)
+        }
+
         #[unsafe(method_id(currentThread))]
         fn current_thread() -> Retained<Self> {
             current()
@@ -530,4 +548,75 @@ crate::runloop::modes::exported_strings! {
     NSWillBecomeMultiThreadedNotification, WILL_BECOME_MULTI_THREADED = "NSWillBecomeMultiThreadedNotification";
     NSDidBecomeSingleThreadedNotification, DID_BECOME_SINGLE_THREADED = "NSDidBecomeSingleThreadedNotification";
     NSThreadWillExitNotification, WILL_EXIT = "NSThreadWillExitNotification";
+}
+
+/// A frame of the calling thread's stack.
+struct Frame {
+    address: usize,
+    line: String,
+}
+
+/// The calling thread's stack, from the frame that called into NSThread
+/// out, each frame written as Foundation writes it:
+/// `index  image  0x<address> symbol + offset`, the index padded to four
+/// columns and the image's name to thirty-six. The symbol is the nearest
+/// one the dynamic linker knows (mangled, as on macOS); a frame in code it
+/// has no symbol for is placed by its offset in its image instead.
+#[inline(never)]
+fn call_stack() -> Vec<Frame> {
+    const MAX: usize = 512;
+    // This function and the class method that called it.
+    const OWN: usize = 2;
+    let mut addresses = [std::ptr::null_mut::<libc::c_void>(); MAX];
+    // SAFETY: room for MAX frames.
+    let n = unsafe { backtrace(addresses.as_mut_ptr(), MAX as libc::c_int) }.max(0) as usize;
+    addresses[..n]
+        .iter()
+        .skip(OWN)
+        .enumerate()
+        .map(|(i, &address)| {
+            let address = address as usize;
+            // SAFETY: zeroed is a valid Dl_info; dladdr fills it.
+            let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
+            // SAFETY: an address and room for its description.
+            let found = unsafe { libc::dladdr(address as *const libc::c_void, &mut info) } != 0;
+            let c_str = |p: *const libc::c_char| {
+                // SAFETY: dladdr's strings are NUL-terminated or null.
+                (!p.is_null()).then(|| unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy().into_owned())
+            };
+            let image = if found { c_str(info.dli_fname) } else { None };
+            let image = image.as_deref().map(|p| p.rsplit('/').next().unwrap_or(p).to_owned());
+            let symbol = if found { c_str(info.dli_sname) } else { None };
+            let (name, offset) = match (&symbol, &image) {
+                (Some(symbol), _) => (symbol.clone(), address.wrapping_sub(info.dli_saddr as usize)),
+                (None, Some(image)) => (image.clone(), address.wrapping_sub(info.dli_fbase as usize)),
+                (None, None) => ("0x0".to_owned(), 0),
+            };
+            let image = image.unwrap_or_else(|| "???".to_owned());
+            Frame { address, line: frame_line(i, &image, address, &name, offset) }
+        })
+        .collect()
+}
+
+unsafe extern "C" {
+    /// glibc's: the return addresses of the calling thread's frames.
+    fn backtrace(buffer: *mut *mut libc::c_void, size: libc::c_int) -> libc::c_int;
+}
+
+/// A line of `+callStackSymbols`, as Apple lays them out: the frame's
+/// number in 4 columns, the image's name in 35 (cut to fit), the address,
+/// the symbol and the offset into it.
+fn frame_line(i: usize, image: &str, address: usize, name: &str, offset: usize) -> String {
+    format!("{i:<4}{image:<35.35} 0x{address:016x} {name} + {offset}")
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn long_image_names_are_cut() {
+        let line = super::frame_line(0, "a_rather_long_binary_name_for_the_call_stack_probe", 0x1047686e0, "main", 88);
+        assert_eq!(line, "0   a_rather_long_binary_name_for_the_c 0x00000001047686e0 main + 88");
+        let line = super::frame_line(12, "dyld", 0x18eba84e4, "start", 6992);
+        assert_eq!(line, "12  dyld                                0x000000018eba84e4 start + 6992");
+    }
 }

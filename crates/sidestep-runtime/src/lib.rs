@@ -37,6 +37,7 @@ mod msgsend;
 mod nsobject;
 mod nsproxy;
 mod object;
+mod object_functions;
 mod property;
 mod protocol;
 mod selector;

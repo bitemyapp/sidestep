@@ -319,10 +319,21 @@ define_class!(
             }
         }
 
+        /// The word around the selection; for an insertion point just
+        /// after a word (not in one), that word, as AppKit selects it.
         #[unsafe(method(selectWord:))]
         fn select_word(&self, _s: Option<&AnyObject>) {
             let v = tv(self);
-            let r = v.range_for_granularity(v.selection(), objc2_app_kit::NSSelectionGranularity::SelectByWord);
+            let sel = v.selection();
+            let before = (sel.length == 0 && sel.location > 0)
+                .then(|| storage(v))
+                .flatten()
+                .filter(|ts| selection::word_holding(ts, sel.location).is_none())
+                .and_then(|ts| selection::word_holding(&ts, sel.location - 1));
+            let r = match before {
+                Some(word) => ns(word),
+                None => v.range_for_granularity(sel, objc2_app_kit::NSSelectionGranularity::SelectByWord),
+            };
             v.as_text_view().setSelectedRange(r);
         }
 
@@ -590,7 +601,7 @@ define_class!(
         fn copy(&self, _s: Option<&AnyObject>) {
             let v = tv(self);
             if v.selection().length > 0 && !v.is_secure() {
-                write_selection(v, &NSPasteboard::generalPasteboard());
+                write_to_pasteboard(v, &NSPasteboard::generalPasteboard());
             }
         }
 
@@ -599,7 +610,7 @@ define_class!(
             let v = tv(self);
             let sel = v.selection();
             if sel.length > 0 && v.is_editable_now() && !v.is_secure() {
-                write_selection(v, &NSPasteboard::generalPasteboard());
+                write_to_pasteboard(v, &NSPasteboard::generalPasteboard());
                 v.edit_replace(sel, "", Kind::Cut);
             }
         }
@@ -628,18 +639,17 @@ define_class!(
             }
         }
 
+        /// The pasteboard is cleared, then each type written by
+        /// `writeSelectionToPasteboard:type:` (by message when a subclass
+        /// overrides it), as AppKit's does. Whether any was written.
         #[unsafe(method(writeSelectionToPasteboard:types:))]
         fn write_selection_to_pasteboard_types(&self, pb: &NSPasteboard, types: &NSArray<NSString>) -> bool {
-            // SAFETY: the constant is a string AppKit exports.
-            let string_type = unsafe { NSPasteboardTypeString };
-            let wants = types.iter().any(|t| t.isEqualToString(string_type));
-            wants && write_selection(tv(self), pb)
+            write_types(tv(self), pb, types)
         }
 
         #[unsafe(method(writeSelectionToPasteboard:type:))]
         fn write_selection_to_pasteboard_type(&self, pb: &NSPasteboard, t: &NSString) -> bool {
-            // SAFETY: as above.
-            t.isEqualToString(unsafe { NSPasteboardTypeString }) && write_selection(tv(self), pb)
+            write_type(tv(self), pb, t)
         }
 
         #[unsafe(method(readSelectionFromPasteboard:))]
@@ -993,17 +1003,68 @@ fn mark_of(v: &NSTextViewImpl) -> Option<usize> {
     MARKS.with(|m| m.borrow().iter().find(|&&(k, _)| k == key).map(|&(_, at)| at)).map(|at| at.min(v.text_length()))
 }
 
-/// Write the selected text to `pb` as plain text.
+/// Write the selection to `pb` as `copy:` and `cut:` do: its
+/// `writablePasteboardTypes` through `writeSelectionToPasteboard:types:`,
+/// both by message when a subclass overrides them.
+fn write_to_pasteboard(v: &NSTextViewImpl, pb: &NSPasteboard) -> bool {
+    let view: &AnyObject = v.as_text_view();
+    if super::text_view::WRITE_TYPES.overridden(view, sel!(writeSelectionToPasteboard:types:)) {
+        // SAFETY: writablePasteboardTypes returns an array of types; the
+        // writer takes a pasteboard and the types and returns BOOL.
+        unsafe {
+            let types: Retained<NSArray<NSString>> = msg_send![view, writablePasteboardTypes];
+            msg_send![view, writeSelectionToPasteboard: pb, types: &*types]
+        }
+    } else {
+        write_selection(v, pb)
+    }
+}
+
+/// `writeSelectionToPasteboard:types:`: the pasteboard is cleared, then
+/// each type written by `writeSelectionToPasteboard:type:` (by message
+/// when a subclass overrides it), as AppKit's does. Whether any was.
+fn write_types(v: &NSTextViewImpl, pb: &NSPasteboard, types: &NSArray<NSString>) -> bool {
+    if v.selection().length == 0 || v.is_secure() {
+        return false;
+    }
+    pb.clearContents();
+    let view: &AnyObject = v.as_text_view();
+    let through = super::text_view::WRITE_TYPE.overridden(view, sel!(writeSelectionToPasteboard:type:));
+    let mut wrote = false;
+    for t in types.iter() {
+        wrote |= if through {
+            // SAFETY: the method takes a pasteboard and a type and returns
+            // BOOL.
+            unsafe { msg_send![view, writeSelectionToPasteboard: pb, type: &*t] }
+        } else {
+            write_type(v, pb, &t)
+        };
+    }
+    wrote
+}
+
+/// Write the selected text to `pb` as plain text, clearing it first.
 fn write_selection(v: &NSTextViewImpl, pb: &NSPasteboard) -> bool {
+    if v.selection().length == 0 || v.is_secure() {
+        return false;
+    }
+    pb.clearContents();
+    // SAFETY: the constant is a string AppKit exports.
+    write_type(v, pb, unsafe { NSPasteboardTypeString })
+}
+
+/// Write the selection to `pb` as type `t`: plain text is the one type
+/// this text view writes.
+fn write_type(v: &NSTextViewImpl, pb: &NSPasteboard, t: &NSString) -> bool {
     let Some(ts) = storage(v) else { return false };
     let sel = v.selection();
-    if sel.length == 0 || v.is_secure() {
+    // SAFETY: the constant is a string AppKit exports.
+    let string_type = unsafe { NSPasteboardTypeString };
+    if sel.length == 0 || v.is_secure() || !t.isEqualToString(string_type) {
         return false;
     }
     let text = NSString::from_str(&selection::text(&ts, sel.location..sel.location + sel.length));
-    pb.clearContents();
-    // SAFETY: the constant is a string AppKit exports.
-    pb.setString_forType(&text, unsafe { NSPasteboardTypeString })
+    pb.setString_forType(&text, string_type)
 }
 
 /// Replace the selection with `pb`'s text, an edit of `kind` (a paste:

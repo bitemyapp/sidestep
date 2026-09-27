@@ -406,13 +406,19 @@ fn destination(window: &NSWindow, location: NSPoint, kinds: &[String]) -> Option
 
 /// Whether `object` registered a type the drag has.
 fn takes(object: &AnyObject, kinds: &[String]) -> bool {
-    registered(object).is_some_and(|types| types.iter().any(|t| types::find(kinds, &types::from_ns(&t)).is_some()))
+    drop_types(object).is_some_and(|types| types.iter().any(|t| types::find(kinds, &types::from_ns(&t)).is_some()))
+}
+
+/// The types `object` takes: those it registered, or a text view's own
+/// (see `textkit::drop`).
+fn drop_types(object: &AnyObject) -> Option<Retained<NSArray<NSString>>> {
+    registered(object).or_else(|| crate::textkit::drop::drop_types(object))
 }
 
 /// The MIME type to accept for `dest`: that of the first type it registered
 /// that the drag has.
 fn accepted_mime(dest: &AnyObject, kinds: &[String], mimes: &[String]) -> Option<String> {
-    let registered = registered(dest)?;
+    let registered = drop_types(dest)?;
     let kind = registered.iter().find_map(|t| {
         let wanted = types::from_ns(&t);
         Some(match types::find(kinds, &wanted)? {

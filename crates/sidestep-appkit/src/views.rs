@@ -18,7 +18,7 @@ use std::rc::Rc;
 
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
-use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send};
+use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAutoresizingMaskOptions, NSCursor, NSEvent, NSResponder, NSTextInputContext, NSTrackingArea, NSView, NSWindow,
 };
@@ -45,6 +45,12 @@ pub(crate) struct ViewIvars {
     hidden: Cell<bool>,
     /// An NSClipView: its document is drawn into a layer of its own.
     is_clip: Cell<bool>,
+    /// `clipsToBounds`: its drawing and its subviews' stay inside its
+    /// bounds. Off for views, as on macOS 14 and later; on for clip views.
+    clips: Cell<bool>,
+    /// How far its subviews may draw outside its bounds (see `overflow`),
+    /// once worked out.
+    overflow: Cell<Option<Overflow>>,
     tracking: RefCell<crate::tracking::ViewTracking>,
     /// Made when first asked for, for views that are text input clients.
     input_context: RefCell<Option<Retained<NSTextInputContext>>>,
@@ -77,6 +83,8 @@ impl ViewIvars {
             autoresizing: Cell::new(NSAutoresizingMaskOptions::ViewNotSizable),
             hidden: Cell::new(false),
             is_clip: Cell::new(false),
+            clips: Cell::new(false),
+            overflow: Cell::new(None),
             tracking: RefCell::default(),
             input_context: RefCell::new(None),
             appearance: Default::default(),
@@ -180,9 +188,9 @@ define_class!(
             if self.ivars().hidden.get() == hidden {
                 return;
             }
-            invalidate(self, bounds(self));
+            invalidate_reach(self);
             self.ivars().hidden.set(hidden);
-            invalidate(self, bounds(self));
+            invalidate_reach(self);
             moved(self);
             crate::view_layout::hidden_changed(self, hidden);
         }
@@ -235,22 +243,66 @@ define_class!(
             autoresize(self, old);
         }
 
+        /// Everything the view draws, through `setNeedsDisplayInRect:`
+        /// when a subclass (or a swizzle) replaced it, with the rect
+        /// AppKit passes: all of the plane, which invalidating clips to
+        /// the view's bounds.
         #[unsafe(method(setNeedsDisplay:))]
         fn set_needs_display(&self, flag: bool) {
-            if flag {
+            if !flag {
+                return;
+            }
+            if SET_NEEDS_DISPLAY_IN_RECT.overridden(self, sel!(setNeedsDisplayInRect:)) {
+                // SAFETY: setNeedsDisplayInRect: takes an NSRect.
+                let _: () = unsafe { msg_send![self, setNeedsDisplayInRect: EVERYWHERE] };
+            } else {
                 invalidate(self, bounds(self));
             }
         }
 
+        /// Marks at most the view's bounds (`setNeedsDisplay:` passes all
+        /// of the plane), cut to them before anything else.
         #[unsafe(method(setNeedsDisplayInRect:))]
         fn set_needs_display_in_rect(&self, rect: NSRect) {
-            invalidate(self, rect);
+            if let Some(rect) = intersection(rect, bounds(self)) {
+                invalidate(self, rect);
+            }
         }
 
         #[unsafe(method(needsDisplay))]
         fn needs_display(&self) -> bool {
             false
         }
+
+        #[unsafe(method(clipsToBounds))]
+        fn clips_to_bounds(&self) -> bool {
+            self.ivars().clips.get()
+        }
+
+        #[unsafe(method(setClipsToBounds:))]
+        fn set_clips_to_bounds(&self, clips: bool) {
+            if self.ivars().clips.get() != clips {
+                // What its subviews drew outside its bounds, or will.
+                invalidate_reach(self);
+                self.ivars().clips.set(clips);
+                reach_changed(self, true);
+                invalidate_reach(self);
+            }
+        }
+
+        /// The window's live resize, as the window has it.
+        #[unsafe(method(inLiveResize))]
+        fn in_live_resize(&self) -> bool {
+            window_of(self).is_some_and(crate::window_events::in_live_resize)
+        }
+
+        /// Sent to every view in a window when a live resize begins and
+        /// ends (`window_events`). The view does nothing of its own.
+        #[unsafe(method(viewWillStartLiveResize))]
+        fn view_will_start_live_resize(&self) {}
+
+        #[unsafe(method(viewDidEndLiveResize))]
+        fn view_did_end_live_resize(&self) {}
 
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty: NSRect) {}
@@ -658,6 +710,9 @@ pub(crate) fn link(this: &NSViewImpl, view: &NSView, index: usize) {
     let mut subviews = this.ivars().subviews.borrow_mut();
     let list = Rc::make_mut(&mut subviews);
     list.insert(index.min(list.len()), view.retain());
+    drop(subviews);
+    // As if it had been there, covering nothing outside `this`.
+    footprint_changed(v, Some(bounds(this)), footprint(v));
 }
 
 /// Take `view` out of its superview's subviews, redrawing where it was if
@@ -666,8 +721,16 @@ pub(crate) fn link(this: &NSViewImpl, view: &NSView, index: usize) {
 pub(crate) fn unlink(view: &NSViewImpl, display: bool) {
     let Some(sup) = superview(view) else { return };
     if display {
-        invalidate(sup, frame(view));
+        // A clip view's document with a layer of its own is drawn behind
+        // it: the clip view draws there instead.
+        if is_clip(sup) && crate::layers::promoted(sup) {
+            invalidate(sup, frame(view));
+        } else {
+            invalidate_reach(view);
+        }
     }
+    // As if it stayed, covering nothing outside its superview.
+    footprint_changed(view, Some(footprint(view)), bounds(sup));
     // Released outside the borrow: releasing may run arbitrary code.
     let removed = {
         let mut subviews = sup.ivars().subviews.borrow_mut();
@@ -685,7 +748,7 @@ pub(crate) fn reorder(this: &NSViewImpl, order: Vec<Retained<NSView>>) {
     debug_assert_eq!(order.len(), this.ivars().subviews.borrow().len());
     let old = this.ivars().subviews.replace(Rc::new(order));
     drop(old);
-    invalidate(this, bounds(this));
+    invalidate_reach(this);
 }
 
 pub(crate) fn superview_of(view: &NSViewImpl) -> Option<&NSViewImpl> {
@@ -696,9 +759,180 @@ pub(crate) fn is_clip(view: &NSViewImpl) -> bool {
     view.ivars().is_clip.get()
 }
 
-/// Mark a new view as an NSClipView (see `scroll`).
+/// Mark a new view as an NSClipView (see `scroll`), which clips to its
+/// bounds.
 pub(crate) fn mark_clip(view: &NSViewImpl) {
     view.ivars().is_clip.set(true);
+    view.ivars().clips.set(true);
+}
+
+/// A new view of a class that clips to its bounds unless told otherwise:
+/// as measured on macOS, clip views, scrollers and table row views do,
+/// and every other view class doesn't.
+pub(crate) fn clip_by_default(view: &NSViewImpl) {
+    view.ivars().clips.set(true);
+}
+
+/// Send `viewWillStartLiveResize` (or `viewDidEndLiveResize`) to `root`
+/// and every view under it, each before its subviews, as a window does to
+/// its views when a live resize starts (or ends). NSView's own methods
+/// don't pass it on, as on macOS, so an override needn't call super.
+pub(crate) fn tell_live_resize(root: &NSView, start: bool) {
+    if start {
+        // SAFETY: the hook takes nothing.
+        let _: () = unsafe { msg_send![root, viewWillStartLiveResize] };
+    } else {
+        // SAFETY: as above.
+        let _: () = unsafe { msg_send![root, viewDidEndLiveResize] };
+    }
+    for sub in subviews(imp(root)).iter() {
+        tell_live_resize(sub, start);
+    }
+}
+
+/// `clipsToBounds`.
+pub(crate) fn clips_to_bounds(view: &NSViewImpl) -> bool {
+    view.ivars().clips.get()
+}
+
+/// How far a view's subviews (and theirs) may draw outside its bounds, in
+/// its coordinates: to the left, to the right, and up or down (one
+/// figure for both, so it holds whether the view or its superview is
+/// flipped). Views that clip to their bounds reach no further than their
+/// frames; hidden ones count as if shown.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Overflow {
+    left: f64,
+    right: f64,
+    vertical: f64,
+}
+
+/// `view`'s [`Overflow`], worked out once and kept until its subviews or
+/// their geometry change (see [`reach_changed`]).
+pub(crate) fn overflow(view: &NSViewImpl) -> Overflow {
+    if let Some(o) = view.ivars().overflow.get() {
+        return o;
+    }
+    let b = bounds(view);
+    let mut o = Overflow::default();
+    for sub in subviews(view).iter() {
+        let sub = imp(sub);
+        let out = if clips_to_bounds(sub) { Overflow::default() } else { overflow(sub) };
+        let s = sticking_out(grow_by(frame(sub), out), b);
+        o = Overflow { left: o.left.max(s.left), right: o.right.max(s.right), vertical: o.vertical.max(s.vertical) };
+    }
+    view.ivars().overflow.set(Some(o));
+    o
+}
+
+/// Everything `view` and its subviews may draw, in its coordinates: its
+/// bounds, and past them as far as its subviews reach if it doesn't clip.
+pub(crate) fn reach(view: &NSViewImpl) -> NSRect {
+    let b = bounds(view);
+    if clips_to_bounds(view) {
+        return b;
+    }
+    grow_by(b, overflow(view))
+}
+
+/// `view`'s subviews, its bounds or (with `frame`) its frame or clipping
+/// changed: forget its overflow, and its ancestors' as far as it counts
+/// for them (up to the first that clips).
+pub(crate) fn reach_changed(view: &NSViewImpl, frame: bool) {
+    view.ivars().overflow.set(None);
+    let mut cur = view;
+    let mut moved = frame;
+    while moved || !clips_to_bounds(cur) {
+        let Some(sup) = superview(cur) else { break };
+        sup.ivars().overflow.set(None);
+        cur = sup;
+        moved = false;
+    }
+}
+
+/// `view`'s frame changed from `old` (it has the new one): keep the
+/// overflows that depend on it right, without working its superview's out
+/// again from all its subviews unless it was the one that reached
+/// furthest. So a subview that moves or grows inside its superview (a
+/// streamed message in a transcript) costs next to nothing. An overflow
+/// kept may be larger than it is (the view's bounds grew): that only
+/// draws and redraws a little more.
+fn frame_reach_changed(view: &NSViewImpl, old: NSRect) {
+    let new = frame(view);
+    let before = view.ivars().overflow.get();
+    // Its bounds only grew: what stuck out of them sticks out no further.
+    if new.size.width < old.size.width || new.size.height < old.size.height {
+        view.ivars().overflow.set(None);
+    }
+    let (before, after) =
+        if clips_to_bounds(view) { (Some(Overflow::default()), Overflow::default()) } else { (before, overflow(view)) };
+    footprint_changed(view, before.map(|o| grow_by(old, o)), grow_by(new, after));
+}
+
+/// What `view` and its subviews cover in its superview went from `before`
+/// (`None`: not known) to `after`: update the superview's overflow, and
+/// its superview's while it counts for it.
+fn footprint_changed(view: &NSViewImpl, before: Option<NSRect>, after: NSRect) {
+    let Some(sup) = superview(view) else { return };
+    // Not worked out: nothing above it was either, as far as it counts.
+    let Some(o) = sup.ivars().overflow.get() else { return };
+    let b = bounds(sup);
+    let now = sticking_out(after, b);
+    // The largest of the subviews' overflows, unless this one had the
+    // largest and has less now.
+    let exact = before.is_some_and(|r| {
+        let was = sticking_out(r, b);
+        let shrank = |was: f64, largest: f64, now: f64| was > 0.0 && was >= largest && now < was;
+        !(shrank(was.left, o.left, now.left)
+            || shrank(was.right, o.right, now.right)
+            || shrank(was.vertical, o.vertical, now.vertical))
+    });
+    if !exact {
+        reach_changed(sup, false);
+        return;
+    }
+    let n =
+        Overflow { left: o.left.max(now.left), right: o.right.max(now.right), vertical: o.vertical.max(now.vertical) };
+    if n == o {
+        return;
+    }
+    sup.ivars().overflow.set(Some(n));
+    if !clips_to_bounds(sup) {
+        let f = frame(sup);
+        footprint_changed(sup, Some(grow_by(f, o)), grow_by(f, n));
+    }
+}
+
+/// What `view` and its subviews cover in its superview: its frame, and
+/// past it as far as its overflow if it doesn't clip.
+fn footprint(view: &NSViewImpl) -> NSRect {
+    if clips_to_bounds(view) { frame(view) } else { grow_by(frame(view), overflow(view)) }
+}
+
+/// How far `r` sticks out of `b`.
+fn sticking_out(r: NSRect, b: NSRect) -> Overflow {
+    Overflow {
+        left: (b.origin.x - r.origin.x).max(0.0),
+        right: (r.origin.x + r.size.width - (b.origin.x + b.size.width)).max(0.0),
+        vertical: (b.origin.y - r.origin.y).max(r.origin.y + r.size.height - (b.origin.y + b.size.height)).max(0.0),
+    }
+}
+
+/// `r` grown by `o` (up and down alike).
+fn grow_by(r: NSRect, o: Overflow) -> NSRect {
+    NSRect::new(
+        NSPoint::new(r.origin.x - o.left, r.origin.y - o.vertical),
+        NSSize::new(r.size.width + o.left + o.right, r.size.height + 2.0 * o.vertical),
+    )
+}
+
+/// The part of `a` inside `b`, if any.
+pub(crate) fn intersection(a: NSRect, b: NSRect) -> Option<NSRect> {
+    let x0 = a.origin.x.max(b.origin.x);
+    let y0 = a.origin.y.max(b.origin.y);
+    let x1 = (a.origin.x + a.size.width).min(b.origin.x + b.size.width);
+    let y1 = (a.origin.y + a.size.height).min(b.origin.y + b.size.height);
+    (x1 > x0 && y1 > y0).then(|| NSRect::new(NSPoint::new(x0, y0), NSSize::new(x1 - x0, y1 - y0)))
 }
 
 pub(crate) fn is_hidden(view: &NSViewImpl) -> bool {
@@ -868,20 +1102,43 @@ pub(crate) fn placement(view: &NSViewImpl) -> Option<Placement> {
         }
         _ => root_xf(root, window.content_height()),
     };
+    // The root's bounds are its layer's (or the window's content); between
+    // it and the view, ancestors that clip to their bounds.
     let mut clip = xf.rect(bounds(root));
     for pair in chain.windows(2).rev() {
         let (child, parent) = (pair[0], pair[1]);
         xf = step(child, is_flipped(parent), frame(child)).then(&xf);
-        clip = clip.intersect(&xf.rect(bounds(child)));
+        if !std::ptr::eq(child, view) && clips_to_bounds(child) {
+            clip = clip.intersect(&xf.rect(bounds(child)));
+        }
     }
     Some(Placement { layer, xf, clip, overlay })
 }
 
-/// Mark part of a view (in its coordinates) for redrawing.
+/// The rect `setNeedsDisplay:` passes to `setNeedsDisplayInRect:`, as
+/// AppKit's does: the whole plane.
+const EVERYWHERE: NSRect = NSRect::new(NSPoint::new(-f64::MAX / 2.0, -f64::MAX / 2.0), NSSize::new(f64::MAX, f64::MAX));
+
+/// `setNeedsDisplayInRect:`, a funnel (see `funnel`).
+pub(crate) static SET_NEEDS_DISPLAY_IN_RECT: crate::funnel::Funnel = crate::funnel::Funnel::new();
+
+/// Mark part of a view (in its coordinates, and within its bounds) for
+/// redrawing.
 pub(crate) fn invalidate(view: &NSViewImpl, rect: NSRect) {
     let Some(window) = window_of(view) else { return };
     let Some(p) = placement(view) else { return };
-    let r = p.xf.rect(rect).intersect(&p.clip).round_out();
+    let r = p.xf.rect(rect).intersect(&p.xf.rect(bounds(view))).intersect(&p.clip).round_out();
+    if !r.is_empty() {
+        window.invalidate(crate::layers::damage_key(p.layer, p.overlay), r);
+    }
+}
+
+/// Mark all a view and its subviews draw for redrawing (its [`reach`]):
+/// past its bounds too, if it doesn't clip to them.
+pub(crate) fn invalidate_reach(view: &NSViewImpl) {
+    let Some(window) = window_of(view) else { return };
+    let Some(p) = placement(view) else { return };
+    let r = p.xf.rect(reach(view)).intersect(&p.clip).round_out();
     if !r.is_empty() {
         window.invalidate(crate::layers::damage_key(p.layer, p.overlay), r);
     }
@@ -898,12 +1155,11 @@ fn change_frame(view: &NSViewImpl, new: NSRect) {
     // clip view, drawn behind the layer, needn't be.
     let in_layer = superview(view).is_some_and(|s| is_clip(s) && crate::layers::promoted(s));
     let keeps = in_layer && old.origin == new.origin && crate::view_layout::keeps_content_on_resize(view);
-    if let Some(sup) = superview(view)
-        && !in_layer
-    {
-        invalidate(sup, old);
+    if !in_layer {
+        invalidate_reach(view);
     }
     view.ivars().frame.set(new);
+    frame_reach_changed(view, old);
     // Bounds scaling, the layout flag, autoresizing and Auto Layout.
     crate::view_layout::frame_changed(view, old);
     // A clip view keeps its bounds over its document (see `scroll`).
@@ -919,7 +1175,7 @@ fn change_frame(view: &NSViewImpl, new: NSRect) {
             }
         }
     } else {
-        invalidate(view, bounds(view));
+        invalidate_reach(view);
     }
     moved(view);
     changed(view, Change::Frame);
@@ -929,14 +1185,20 @@ fn change_bounds_origin(view: &NSViewImpl, origin: NSPoint) {
     if view.ivars().bounds_origin.get() == origin {
         return;
     }
+    // Scrolling a clip view with a layer moves the layer (`moved` below);
+    // nothing is redrawn.
+    let redraw = !(is_clip(view) && crate::layers::promoted(view));
+    // What its subviews drew outside its bounds moves with them.
+    if redraw && !clips_to_bounds(view) {
+        invalidate_reach(view);
+    }
     view.ivars().bounds_origin.set(origin);
+    reach_changed(view, false);
     if is_clip(view) {
         crate::view_layout::clip_moved(view);
     }
-    // Scrolling a clip view with a layer moves the layer (`moved` below);
-    // nothing is redrawn.
-    if !(is_clip(view) && crate::layers::promoted(view)) {
-        invalidate(view, bounds(view));
+    if redraw {
+        invalidate_reach(view);
     }
     moved(view);
     changed(view, Change::Bounds);

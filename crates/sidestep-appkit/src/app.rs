@@ -21,6 +21,7 @@
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::VecDeque;
 use std::mem::ManuallyDrop;
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::time::{Duration, Instant};
 
 use objc2::rc::{Allocated, Retained, Weak};
@@ -67,6 +68,15 @@ thread_local! {
     /// for others, or posted.
     static QUEUE: RefCell<VecDeque<Retained<NSEvent>>> = const { RefCell::new(VecDeque::new()) };
 }
+
+/// `NSApp`: the application, as AppKit's data symbol of that name holds
+/// it. Programs read it without a message (objc2's `NSApp()` sends
+/// `+sharedApplication` instead). Nil until the application is made; its
+/// initializer sets it, so a subclass's `-init` sees it once its `super`
+/// call returns, as on macOS. The application lives as long as the
+/// program, so the pointer doesn't own it.
+#[unsafe(no_mangle)]
+pub static NSApp: AtomicPtr<NSApplication> = AtomicPtr::new(std::ptr::null_mut());
 
 /// Show `cursor` over every window's content, now and in windows shown
 /// later.
@@ -157,6 +167,11 @@ pub(crate) fn remove_window(window: &NSWindow) {
 
 fn windows() -> Vec<Retained<NSWindow>> {
     WINDOWS.with(|w| w.borrow().clone())
+}
+
+/// The windows on screen, in the order they were shown.
+pub(crate) fn on_screen() -> Vec<Retained<NSWindow>> {
+    windows()
 }
 
 /// Every window, for an appearance change to reach.
@@ -381,6 +396,8 @@ pub(crate) struct AppIvars {
     launching: Cell<bool>,
     /// The menu whose key equivalents come after the key window's.
     main_menu: RefCell<Option<Retained<AnyObject>>>,
+    /// The Window menu, which lists the windows (see `menu::add_window_item`).
+    windows_menu: RefCell<Option<Retained<AnyObject>>>,
 }
 
 define_class!(
@@ -403,9 +420,14 @@ define_class!(
                 hidden: Cell::new(false),
                 launching: Cell::new(false),
                 main_menu: RefCell::new(None),
+                windows_menu: RefCell::new(None),
             });
             // SAFETY: NSResponder's designated initializer.
-            unsafe { msg_send![super(this), init] }
+            let this: Retained<Self> = unsafe { msg_send![super(this), init] };
+            // The first application made is the application.
+            let app = Retained::as_ptr(&this).cast::<NSApplication>().cast_mut();
+            let _ = NSApp.compare_exchange(std::ptr::null_mut(), app, Ordering::Release, Ordering::Relaxed);
+            this
         }
 
         /// Kept for the key equivalent phase of `sendEvent:`; showing it is
@@ -421,6 +443,51 @@ define_class!(
             drop(old);
             // Windows show it as a bar (see `menubar`).
             crate::menubar::visibility_changed();
+        }
+
+        /// The Window menu: nil until one is set, and setting nil keeps the
+        /// one there is, as on macOS.
+        #[unsafe(method_id(windowsMenu))]
+        fn windows_menu(&self) -> Option<Retained<AnyObject>> {
+            self.ivars().windows_menu.borrow().clone()
+        }
+
+        #[unsafe(method(setWindowsMenu:))]
+        fn set_windows_menu(&self, menu: Option<&AnyObject>) {
+            if let Some(menu) = menu {
+                let old = self.ivars().windows_menu.replace(Some(menu.retain()));
+                drop(old);
+            }
+        }
+
+        /// Lists any window it is given, as on macOS (the window decides
+        /// whether to send it), but none with an empty title; a window
+        /// listed already keeps its item.
+        #[unsafe(method(addWindowsItem:title:filename:))]
+        fn add_windows_item(&self, window: &NSWindow, title: &NSString, filename: bool) {
+            if let Some(menu) = self.windows_menu_now() {
+                crate::menu::add_window_item(&menu, window, &item_title(title, filename));
+            }
+        }
+
+        /// Retitles the window's item, adding it if it isn't listed; an
+        /// empty title takes it out, by `removeWindowsItem:`. As measured
+        /// on macOS.
+        #[unsafe(method(changeWindowsItem:title:filename:))]
+        fn change_windows_item(&self, window: &NSWindow, title: &NSString, filename: bool) {
+            if title.length() == 0 {
+                // SAFETY: the method takes a window.
+                let _: () = unsafe { msg_send![self, removeWindowsItem: window] };
+            } else if let Some(menu) = self.windows_menu_now() {
+                crate::menu::change_window_item(&menu, window, &item_title(title, filename));
+            }
+        }
+
+        #[unsafe(method(removeWindowsItem:))]
+        fn remove_windows_item(&self, window: &NSWindow) {
+            if let Some(menu) = self.windows_menu_now() {
+                crate::menu::remove_window_item(&menu, window);
+            }
         }
 
         #[unsafe(method_id(delegate))]
@@ -913,6 +980,50 @@ fn shared_as(class: &AnyClass) -> Retained<NSApplication> {
         Retained::cast_unchecked(made.expect("sidestep: NSApplication's initializer returned nil"))
     };
     SHARED.with(|s| s.get_or_init(|| app).clone())
+}
+
+impl NSApplicationImpl {
+    /// The Window menu, if it is a menu.
+    fn windows_menu_now(&self) -> Option<Retained<objc2_app_kit::NSMenu>> {
+        let menu = self.ivars().windows_menu.borrow().clone()?;
+        menu.downcast::<objc2_app_kit::NSMenu>().ok()
+    }
+}
+
+/// A Window menu item's title: the window's title, or for a represented
+/// file's window (whose title reads "name  —  folder", as AppKit writes
+/// it) the file's name.
+fn item_title(title: &NSString, filename: bool) -> Retained<NSString> {
+    let text = title.to_string();
+    match text.split_once("  \u{2014}  ") {
+        Some((name, _)) if filename => NSString::from_str(name),
+        _ => title.retain(),
+    }
+}
+
+// What windows tell the application about the Window menu, by message, as
+// AppKit's do (programs override these methods). Which window sends what
+// was measured on macOS: see `window::listable`.
+
+/// A window came on screen, or stopped being excluded while on screen.
+pub(crate) fn window_listed(window: &NSWindow) {
+    let Some(app) = existing() else { return };
+    // SAFETY: the method takes a window, a title and a BOOL.
+    let _: () = unsafe { msg_send![&*app, addWindowsItem: window, title: &*window.title(), filename: false] };
+}
+
+/// A window on screen was retitled.
+pub(crate) fn window_retitled(window: &NSWindow) {
+    let Some(app) = existing() else { return };
+    // SAFETY: the method takes a window, a title and a BOOL.
+    let _: () = unsafe { msg_send![&*app, changeWindowsItem: window, title: &*window.title(), filename: false] };
+}
+
+/// A window was ordered out (or closed), or excluded from the Window menu.
+pub(crate) fn window_unlisted(window: &NSWindow) {
+    let Some(app) = existing() else { return };
+    // SAFETY: the method takes a window.
+    let _: () = unsafe { msg_send![&*app, removeWindowsItem: window] };
 }
 
 fn app_impl(app: &NSApplication) -> &NSApplicationImpl {

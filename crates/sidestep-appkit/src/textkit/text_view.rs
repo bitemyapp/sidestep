@@ -65,14 +65,36 @@ use super::edit::{self, Kind, Typing, UndoAs};
 use super::layout_manager::NSLayoutManagerImpl;
 use super::notify::{self, Note};
 use super::selection;
+use crate::funnel::Funnel;
 
 sidestep_runtime::static_class!(pub(crate) NSTEXT, NSTEXT_META = "NSText", || {
     let _ = NSTextImpl::class();
 });
 
 sidestep_runtime::static_class!(pub(crate) NSTEXTVIEW, NSTEXTVIEW_META = "NSTextView", || {
-    let _ = NSTextViewImpl::class();
+    let class = NSTextViewImpl::class();
+    SELECT.capture(class, sel!(setSelectedRanges:affinity:stillSelecting:));
+    ORIGIN.capture(class, sel!(textContainerOrigin));
+    INSERTION_INDEX.capture(class, sel!(characterIndexForInsertionAtPoint:));
+    WRITE_TYPES.capture(class, sel!(writeSelectionToPasteboard:types:));
+    WRITE_TYPE.capture(class, sel!(writeSelectionToPasteboard:type:));
+    UNMARK.capture(class, sel!(unmarkText));
 });
+
+// The text view's funnels (see `crate::funnel`): the methods AppKit's text
+// view reaches by message, so a subclass's override sees every call.
+
+/// Every selection change, the view's own included.
+static SELECT: Funnel = Funnel::new();
+/// Drawing and hit testing place the text container here.
+static ORIGIN: Funnel = Funnel::new();
+/// Where a drop would insert.
+pub(crate) static INSERTION_INDEX: Funnel = Funnel::new();
+/// `copy:` and `cut:` write the selection through these.
+pub(crate) static WRITE_TYPES: Funnel = Funnel::new();
+pub(crate) static WRITE_TYPE: Funnel = Funnel::new();
+/// A click ends an input method's composition with it.
+pub(crate) static UNMARK: Funnel = Funnel::new();
 
 /// A container as tall (or wide) as text gets.
 const HUGE: f64 = 10_000_000.0;
@@ -136,6 +158,18 @@ mod flag {
     pub const STILL_SELECTING: u64 = 1 << 33;
     /// A secure field's editor: bullets shown, nothing copied.
     pub const SECURE: u64 = 1 << 34;
+    /// Takes dropped text: a new view does, and `updateDragTypeRegistration`
+    /// keeps it with the editable flag (see `drop`).
+    pub const DROP_TARGET: u64 = 1 << 35;
+}
+
+/// What kind of selection change is on its way through the funnel.
+#[derive(Clone, Copy)]
+enum Funneled {
+    /// A program's, through a selection setter.
+    Program,
+    /// The view's own (an edit, a command, a click).
+    Own { from_edit: bool },
 }
 
 /// The caret's blinking.
@@ -194,6 +228,9 @@ pub(crate) struct Ivars {
     locales: RefCell<Option<Retained<AnyObject>>>,
     highlight_attrs: RefCell<Option<Retained<Dict>>>,
     result_options: Cell<usize>,
+    /// A selection change on its way through an overridden
+    /// `setSelectedRanges:affinity:stillSelecting:` (see `funnel`).
+    funneled: Cell<Option<Funneled>>,
 }
 
 impl Ivars {
@@ -210,7 +247,9 @@ impl Ivars {
             granularity: Cell::new(NSSelectionGranularity::SelectByCharacter),
             anchor: Cell::new(None),
             goal_x: Cell::new(None),
-            flags: Cell::new(EDITABLE | SELECTABLE | RICH | DRAWS_BACKGROUND | USES_FONT_PANEL | FIND_PANEL),
+            flags: Cell::new(
+                EDITABLE | SELECTABLE | RICH | DRAWS_BACKGROUND | USES_FONT_PANEL | FIND_PANEL | DROP_TARGET,
+            ),
             min_size: Cell::new(frame.size),
             max_size: Cell::new(frame.size),
             background: RefCell::new(None),
@@ -237,6 +276,7 @@ impl Ivars {
             locales: RefCell::new(None),
             highlight_attrs: RefCell::new(None),
             result_options: Cell::new(0),
+            funneled: Cell::new(None),
         }
     }
 }
@@ -394,11 +434,16 @@ define_class!(
             self.as_view().setNeedsDisplay(true);
         }
 
+        /// Where the text container sits in the view: the inset. Drawing
+        /// and hit testing ask for it by message when a subclass overrides
+        /// it (see `origin`).
         #[unsafe(method(textContainerOrigin))]
         fn text_container_origin(&self) -> NSPoint {
-            self.origin()
+            self.own_origin()
         }
 
+        /// Nothing to do: the origin isn't kept, it is worked out from the
+        /// inset each time it is asked for.
         #[unsafe(method(invalidateTextContainerOrigin))]
         fn invalidate_text_container_origin(&self) {}
 
@@ -445,11 +490,17 @@ define_class!(
             self.has(flag::EDITABLE)
         }
 
+        /// The view's drag types follow (`updateDragTypeRegistration`),
+        /// when the flag changes, as on macOS.
         #[unsafe(method(setEditable:))]
         fn set_editable(&self, on: bool) {
+            let was = self.has(flag::EDITABLE);
             self.set(flag::EDITABLE, on);
             if on {
                 self.set(flag::SELECTABLE, true);
+            }
+            if was != on {
+                super::drop::update_registration(self.as_text_view());
             }
         }
 
@@ -458,11 +509,14 @@ define_class!(
             self.has(flag::SELECTABLE)
         }
 
+        /// Not selectable, it isn't editable either, and its drag types
+        /// follow if that changed, as on macOS.
         #[unsafe(method(setSelectable:))]
         fn set_selectable(&self, on: bool) {
             self.set(flag::SELECTABLE, on);
-            if !on {
+            if !on && self.has(flag::EDITABLE) {
                 self.set(flag::EDITABLE, false);
+                super::drop::update_registration(self.as_text_view());
             }
         }
 
@@ -560,9 +614,11 @@ define_class!(
             self.selection()
         }
 
+        /// Through `setSelectedRanges:affinity:stillSelecting:`, upstream
+        /// and not still selecting, as AppKit's.
         #[unsafe(method(setSelectedRange:))]
         fn set_selected_range(&self, range: NSRange) {
-            self.select(range, NSSelectionAffinity::Downstream, false);
+            self.select(range, NSSelectionAffinity::Upstream, false);
         }
 
         #[unsafe(method(scrollRangeToVisible:))]
@@ -717,12 +773,16 @@ define_class!(
 
         #[unsafe(method(setSelectedRanges:))]
         fn set_selected_ranges(&self, ranges: &NSArray<NSValue>) {
-            self.select_ranges(ranges, NSSelectionAffinity::Downstream, false);
+            self.select_ranges(ranges, NSSelectionAffinity::Upstream, false);
         }
 
+        /// The selection funnel: every change of the selection comes here,
+        /// by message when a subclass overrides it (see `select` and
+        /// `set_selection_internal`).
         #[unsafe(method(setSelectedRanges:affinity:stillSelecting:))]
         fn set_selected_ranges_affinity(&self, ranges: &NSArray<NSValue>, affinity: NSSelectionAffinity, still: bool) {
-            self.select_ranges(ranges, affinity, still);
+            let list: Vec<NSRange> = ranges.iter().map(|v| range_of(&v)).collect();
+            self.select_now(list, affinity, still);
         }
 
         #[unsafe(method(setSelectedRange:affinity:stillSelecting:))]
@@ -752,8 +812,7 @@ define_class!(
 
         #[unsafe(method(characterIndexForInsertionAtPoint:))]
         fn character_index_for_insertion_at_point(&self, p: NSPoint) -> usize {
-            let o = self.origin();
-            self.lm_impl().map_or(0, |lm| lm.insertion_index(NSPoint::new(p.x - o.x, p.y - o.y)).0)
+            self.insertion_index_at(p)
         }
 
         // Typing attributes and styles.
@@ -1505,6 +1564,15 @@ impl NSTextViewImpl {
         self.has(flag::EDITABLE)
     }
 
+    /// Whether it takes dropped text (see `drop`).
+    pub(crate) fn takes_drops(&self) -> bool {
+        self.has(flag::DROP_TARGET)
+    }
+
+    pub(crate) fn set_takes_drops(&self, on: bool) {
+        self.set(flag::DROP_TARGET, on);
+    }
+
     pub(crate) fn is_selectable_now(&self) -> bool {
         self.has(flag::SELECTABLE)
     }
@@ -1553,9 +1621,39 @@ impl NSTextViewImpl {
         self.attach(&c);
     }
 
+    /// The text container's origin in the view, from `textContainerOrigin`
+    /// when a subclass overrides it.
     pub(crate) fn origin(&self) -> NSPoint {
+        if ORIGIN.overridden(self, sel!(textContainerOrigin)) {
+            // SAFETY: the method takes nothing and returns a point.
+            unsafe { msg_send![self, textContainerOrigin] }
+        } else {
+            self.own_origin()
+        }
+    }
+
+    fn own_origin(&self) -> NSPoint {
         let i = self.ivars().inset.get();
         NSPoint::new(i.width, i.height)
+    }
+
+    /// `characterIndexForInsertionAtPoint:`'s answer, for a point in the
+    /// view.
+    fn insertion_index_at(&self, p: NSPoint) -> usize {
+        let o = self.origin();
+        self.lm_impl().map_or(0, |lm| lm.insertion_index(NSPoint::new(p.x - o.x, p.y - o.y)).0)
+    }
+
+    /// Where a drop at `p` (in the view) would go: from
+    /// `characterIndexForInsertionAtPoint:`, by message when a subclass
+    /// overrides it.
+    pub(crate) fn drop_index(&self, p: NSPoint) -> usize {
+        if INSERTION_INDEX.overridden(self, sel!(characterIndexForInsertionAtPoint:)) {
+            // SAFETY: the method takes a point and returns an index.
+            unsafe { msg_send![self, characterIndexForInsertionAtPoint: p] }
+        } else {
+            self.insertion_index_at(p)
+        }
     }
 
     pub(crate) fn selection(&self) -> NSRange {
@@ -1840,19 +1938,64 @@ impl NSTextViewImpl {
 
     // Selection.
 
+    /// Select `range` as `setSelectedRange:affinity:stillSelecting:`
+    /// does: through the funnel.
     fn select(&self, range: NSRange, affinity: NSSelectionAffinity, still: bool) {
-        self.ivars().affinity.set(affinity);
-        self.set(flag::STILL_SELECTING, still);
-        self.set_selection_internal(range, false);
-        self.ivars().goal_x.set(None);
-        self.ivars().anchor.set(None);
+        if !self.funnel(&[range], affinity, still, Funneled::Program) {
+            self.select_now(vec![range], affinity, still);
+        }
     }
 
     fn select_ranges(&self, ranges: &NSArray<NSValue>, affinity: NSSelectionAffinity, still: bool) {
         let list: Vec<NSRange> = ranges.iter().map(|v| range_of(&v)).collect();
+        if !self.funnel(&list, affinity, still, Funneled::Program) {
+            self.select_now(list, affinity, still);
+        }
+    }
+
+    /// Send the change to an overriding `setSelectedRanges:affinity:
+    /// stillSelecting:`, telling its call to super what kind of change it
+    /// is. Whether it was sent: not when nothing overrides the method, nor
+    /// for a change made while one is on its way (the override's own).
+    fn funnel(&self, ranges: &[NSRange], affinity: NSSelectionAffinity, still: bool, kind: Funneled) -> bool {
+        if self.ivars().funneled.get().is_some()
+            || !SELECT.overridden(self, sel!(setSelectedRanges:affinity:stillSelecting:))
+        {
+            return false;
+        }
+        let values: Vec<Retained<NSValue>> = ranges.iter().map(|r| value_of(*r)).collect();
+        let values = NSArray::from_retained_slice(&values);
+        self.ivars().funneled.set(Some(kind));
+        // SAFETY: the method takes an array of ranges, an affinity and a
+        // BOOL.
+        let _: () = unsafe {
+            msg_send![self.as_text_view(), setSelectedRanges: &*values, affinity: affinity, stillSelecting: still]
+        };
+        self.ivars().funneled.set(None);
+        true
+    }
+
+    /// `setSelectedRanges:affinity:stillSelecting:`'s work. A change of
+    /// the view's own keeps what it would have kept (its edit's typing
+    /// attributes, the anchor and goal its command sets); a program's
+    /// resets the anchor and the vertical goal.
+    fn select_now(&self, list: Vec<NSRange>, affinity: NSSelectionAffinity, still: bool) {
+        let own = match self.ivars().funneled.take() {
+            Some(Funneled::Own { from_edit }) => Some(from_edit),
+            _ => None,
+        };
         let list = normalize_ranges(list, self.text_length());
         let Some(&first) = list.first() else { return };
-        self.select(first, affinity, still);
+        self.ivars().affinity.set(affinity);
+        self.set(flag::STILL_SELECTING, still);
+        match own {
+            Some(from_edit) => self.apply_selection(first, from_edit),
+            None => {
+                self.apply_selection(first, false);
+                self.ivars().goal_x.set(None);
+                self.ivars().anchor.set(None);
+            }
+        }
         if list.len() > 1 {
             *self.ivars().ranges.borrow_mut() = list;
         }
@@ -1877,10 +2020,23 @@ impl NSTextViewImpl {
         }
     }
 
+    /// Change the selection for the view's own reasons (an edit, a
+    /// command, a click): through an overriding `setSelectedRanges:
+    /// affinity:stillSelecting:` if there is one, as AppKit's text view
+    /// does, with the view's affinity (upstream after an edit).
+    pub(crate) fn set_selection_internal(&self, range: NSRange, from_edit: bool) {
+        let affinity = if from_edit { NSSelectionAffinity::Upstream } else { self.ivars().affinity.get() };
+        let still = self.has(flag::STILL_SELECTING);
+        if !self.funnel(&[range], affinity, still, Funneled::Own { from_edit }) {
+            self.ivars().affinity.set(affinity);
+            self.apply_selection(range, from_edit);
+        }
+    }
+
     /// Change the selection: ask the delegate, redraw what changed, take
     /// the typing attributes from the text (unless the change came with an
     /// edit, which keeps them), and tell everyone.
-    pub(crate) fn set_selection_internal(&self, range: NSRange, from_edit: bool) {
+    fn apply_selection(&self, range: NSRange, from_edit: bool) {
         let len = self.text_length();
         let loc = range.location.min(len);
         let mut range = NSRange::new(loc, range.length.min(len - loc));
@@ -2378,6 +2534,21 @@ impl NSTextViewImpl {
         if fin.length > 0 {
             self.ivars().anchor.set(Some(if base <= fin.location { fin.location } else { fin.location + fin.length }));
         }
+        // A click ends a composition: the input context commits the marked
+        // text as it is with `unmarkText` (by message when a subclass
+        // overrides it), as AppKit's does, and the input method starts
+        // afresh.
+        if self.marked_range().is_some() {
+            if UNMARK.overridden(self, sel!(unmarkText)) {
+                // SAFETY: unmarkText takes nothing.
+                let _: () = unsafe { msg_send![view, unmarkText] };
+            } else {
+                super::input_client::unmark(self);
+            }
+            if let Some(c) = view.inputContext() {
+                c.discardMarkedText();
+            }
+        }
         // A click on a link follows it.
         if !dragged && clicks == 1 && !shift {
             self.follow_link(index);
@@ -2619,7 +2790,9 @@ pub(crate) fn typing_attributes(view: &AnyObject) -> Option<Retained<Dict>> {
 
 /// `view` as a text view of Sidestep's class (or a subclass).
 pub(crate) fn as_impl(view: &AnyObject) -> Option<&NSTextViewImpl> {
-    let ours = <NSTextViewImpl as ClassType>::class();
+    // By name, as programs find it: the class is made on first use, which
+    // asking `NSTextViewImpl` for it before then would collide with.
+    let ours = <objc2_app_kit::NSTextView as ClassType>::class();
     // SAFETY: an instance of the class or a subclass.
     crate::textkit::is_kind(view.class(), ours)
         .then(|| unsafe { &*(view as *const AnyObject).cast::<NSTextViewImpl>() })

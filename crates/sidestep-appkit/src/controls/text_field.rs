@@ -1004,8 +1004,34 @@ define_class!(
         fn text_did_end_editing(&self, notification: &NSNotification) {
             did_end_editing(self, notification);
         }
+
+        /// The field editor offers each command to the field first (its
+        /// delegate is the field): the field asks its own delegate's
+        /// `control:textView:doCommandBySelector:`, whose YES means the
+        /// command was taken care of and the editor doesn't perform it.
+        /// Without such a delegate, NO. As measured on macOS.
+        #[unsafe(method(textView:doCommandBySelector:))]
+        fn text_view_do_command_by_selector(&self, text_view: &AnyObject, command: Sel) -> bool {
+            relay_command(self, text_view, command)
+        }
     }
 );
+
+/// `textView:doCommandBySelector:`'s question to the delegate.
+fn relay_command(field: &NSTextFieldImpl, text_view: &AnyObject, command: Sel) -> bool {
+    let delegate = field.ivars().delegate.borrow().load();
+    let Some(delegate) = delegate else { return false };
+    let asked = sel!(control:textView:doCommandBySelector:);
+    if !responds(&delegate, asked) {
+        return false;
+    }
+    let control: &NSControl = field.as_control();
+    // SAFETY: the delegate method takes the control, the text view and the
+    // command, and returns BOOL.
+    let answer: objc2::runtime::Bool =
+        unsafe { objc2::runtime::MessageReceiver::send_message(&*delegate, asked, (control, text_view, command)) };
+    answer.as_bool()
+}
 
 impl NSTextFieldImpl {
     fn as_control(&self) -> &NSControl {

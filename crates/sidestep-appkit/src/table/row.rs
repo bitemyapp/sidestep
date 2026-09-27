@@ -76,7 +76,10 @@ define_class!(
         fn init_with_frame(this: Allocated<Self>, frame: NSRect) -> Retained<Self> {
             let this = this.set_ivars(RowIvars::default());
             // SAFETY: NSView's designated initializer.
-            unsafe { msg_send![super(this), initWithFrame: frame] }
+            let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
+            // A row's views don't draw over its neighbours, as on macOS.
+            crate::views::clip_by_default(crate::views::imp(&this));
+            this
         }
 
         #[unsafe(method(isFlipped))]

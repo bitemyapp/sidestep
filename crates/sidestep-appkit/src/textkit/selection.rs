@@ -217,6 +217,17 @@ pub(crate) fn word_at(ts: &NSTextStorage, index: usize) -> Range<usize> {
     }
 }
 
+/// The word (letters and digits, not spaces or punctuation) holding the
+/// character at `index`, if it is in one.
+pub(crate) fn word_holding(ts: &NSTextStorage, index: usize) -> Option<Range<usize>> {
+    let len = len(ts);
+    if index >= len {
+        return None;
+    }
+    let w = paragraph_window(ts, index);
+    words(&w).into_iter().find(|(r, word)| *word && r.start <= index && index < r.end).map(|(r, _)| r)
+}
+
 /// Where moving a word forward from `index` goes: the end of the word
 /// holding it or the next one.
 pub(crate) fn word_end_after(ts: &NSTextStorage, index: usize) -> usize {

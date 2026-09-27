@@ -116,15 +116,23 @@ pub(crate) fn resizing(window: &NSWindowImpl, resizing: bool) {
     if window.events().live_resize.replace(resizing) == resizing {
         return;
     }
-    let name = if resizing {
+    // Every view in the window hears of it too, after the notification
+    // as the resize starts and before it as it ends.
+    let content = window.as_window().contentView();
+    if resizing {
         // SAFETY: the name is a constant string this crate exports.
-        unsafe { NSWindowWillStartLiveResizeNotification }
+        notifications::post(unsafe { NSWindowWillStartLiveResizeNotification }, window.as_object());
+        if let Some(content) = &content {
+            crate::views::tell_live_resize(content, true);
+        }
     } else {
+        if let Some(content) = &content {
+            crate::views::tell_live_resize(content, false);
+        }
         autosave(window);
         // SAFETY: as above.
-        unsafe { NSWindowDidEndLiveResizeNotification }
-    };
-    notifications::post(name, window.as_object());
+        notifications::post(unsafe { NSWindowDidEndLiveResizeNotification }, window.as_object());
+    }
 }
 
 /// `inLiveResize`.

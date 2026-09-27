@@ -372,9 +372,14 @@ pub(crate) fn from_object(object: &AnyObject) -> Option<Value> {
 pub(crate) fn number_value(number: &objc2_foundation::NSNumber) -> Value {
     // SAFETY: -objCType returns a C string that lives as long as the number.
     let kind = unsafe { std::ffi::CStr::from_ptr(number.objCType().as_ptr()) }.to_bytes().first().copied();
+    // Only the two boolean constants (`kCFBooleanTrue` and `False`, what
+    // `+numberWithBool:` hands out) are booleans: a `char` 1 is an
+    // integer, as on macOS.
+    if crate::number::is_boolean(number) {
+        return Value::Boolean(number.boolValue());
+    }
     match kind {
         Some(b'f' | b'd') => Value::Real(number.doubleValue()),
-        Some(b'c' | b'B') if matches!(number.longLongValue(), 0 | 1) => Value::Boolean(number.boolValue()),
         Some(b'Q' | b'L' | b'I' | b'S' | b'C') => Value::Integer(number.unsignedLongLongValue().into()),
         _ => Value::Integer(number.longLongValue().into()),
     }
@@ -400,6 +405,15 @@ pub(crate) fn dictionary_entries(dict: &NSDictionary) -> Vec<(Retained<AnyObject
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_boolean_constants_are_booleans() {
+        use objc2_foundation::NSNumber;
+        assert!(matches!(number_value(&NSNumber::new_bool(true)), Value::Boolean(true)));
+        assert!(matches!(number_value(&NSNumber::new_bool(false)), Value::Boolean(false)));
+        assert!(matches!(number_value(&NSNumber::new_i8(1)), Value::Integer(_)));
+        assert!(matches!(number_value(&NSNumber::new_i8(0)), Value::Integer(_)));
+    }
 
     #[test]
     fn reals() {

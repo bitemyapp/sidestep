@@ -29,12 +29,13 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use objc2::rc::{Allocated, Retained, Weak};
 use objc2::runtime::{AnyObject, NSObjectProtocol};
-use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSBackingStoreType, NSColor, NSCursor, NSEvent, NSEventMask, NSEventPhase, NSEventType, NSFont,
-    NSFontAttributeName, NSForegroundColorAttributeName, NSResponder, NSSelectionDirection, NSStringDrawing, NSView,
-    NSWindow, NSWindowAnimationBehavior, NSWindowButton, NSWindowCollectionBehavior, NSWindowOcclusionState,
-    NSWindowOrderingMode, NSWindowSharingType, NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility,
+    NSFontAttributeName, NSForegroundColorAttributeName, NSPanel, NSResponder, NSScreen, NSSelectionDirection,
+    NSStringDrawing, NSView, NSWindow, NSWindowAnimationBehavior, NSWindowButton, NSWindowCollectionBehavior,
+    NSWindowOcclusionState, NSWindowOrderingMode, NSWindowSharingType, NSWindowStyleMask, NSWindowTabbingMode,
+    NSWindowTitleVisibility,
 };
 use objc2_foundation::{NSCopying, NSDictionary, NSPoint, NSRect, NSSize, NSString};
 
@@ -296,6 +297,11 @@ define_class!(
             let this: Retained<Self> = unsafe { msg_send![super(this), init] };
             crate::window_events::made(&this);
             app::window_made(as_window(&this));
+            // A plain view as its content, as AppKit's windows have from
+            // the start.
+            let mtm = MainThreadMarker::from(as_window(&this));
+            let content = NSView::initWithFrame(NSView::alloc(mtm), NSRect::new(NSPoint::ZERO, rect.size));
+            set_content_view(&this, Some(&content));
             this
         }
 
@@ -529,9 +535,17 @@ define_class!(
             self.ivars().settings.borrow().excluded_from_windows_menu
         }
 
+        /// Excluding a window takes it out of the Window menu; including
+        /// it again lists it if it's on screen. Only a change says so, as
+        /// on macOS.
         #[unsafe(method(setExcludedFromWindowsMenu:))]
         fn set_excluded_from_windows_menu(&self, flag: bool) {
-            self.ivars().settings.borrow_mut().excluded_from_windows_menu = flag;
+            let was = std::mem::replace(&mut self.ivars().settings.borrow_mut().excluded_from_windows_menu, flag);
+            if flag && !was {
+                app::window_unlisted(as_window(self));
+            } else if was && !flag && self.ivars().visible.get() && listable(self) {
+                app::window_listed(as_window(self));
+            }
         }
 
         #[unsafe(method(canHide))]
@@ -908,7 +922,10 @@ define_class!(
         #[unsafe(method(setFrameTopLeftPoint:))]
         fn set_frame_top_left_point(&self, point: NSPoint) {
             let before = as_window(self).frame();
-            self.ivars().origin.set(NSPoint::new(point.x, point.y - before.size.height));
+            let at = NSRect::new(NSPoint::new(point.x, point.y - before.size.height), before.size);
+            // Asked twice, the second time with the first answer, as on
+            // macOS.
+            self.ivars().origin.set(constrained(self, constrained(self, at)).origin);
             crate::window_events::frame_changed(self, before, as_window(self).frame());
         }
 
@@ -920,15 +937,32 @@ define_class!(
 
         #[unsafe(method(orderBack:))]
         fn order_back(&self, _sender: Option<&AnyObject>) {
-            order_front(self);
+            order(self, NSWindowOrderingMode::Below);
         }
 
+        /// The ordering funnel: `orderFront:`, `orderBack:`, `orderOut:`,
+        /// `makeKeyAndOrderFront:` and `close` come here by message when a
+        /// subclass overrides it (see `order`).
         #[unsafe(method(orderWindow:relativeTo:))]
         fn order_window_relative_to(&self, place: NSWindowOrderingMode, _other: isize) {
             if place == NSWindowOrderingMode::Out {
                 order_out(self);
             } else {
                 order_front(self);
+            }
+        }
+
+        /// Where the window may go on `screen` (nil: its own, or the main
+        /// screen off screen): a titled window inside the screen's visible
+        /// frame (shrunk to fit if it's resizable; too wide, at its left;
+        /// too tall, its top at the top), any other with its top no higher
+        /// than the visible frame's; unchanged if there is no screen at
+        /// all. As measured on macOS.
+        #[unsafe(method(constrainFrameRect:toScreen:))]
+        fn constrain_frame_rect_to_screen(&self, frame: NSRect, screen: Option<&NSScreen>) -> NSRect {
+            match screen.map(Message::retain).or_else(|| crate::screen::window_screen(self)) {
+                Some(screen) => constrain(self.ivars().style.get(), frame, screen.visibleFrame()),
+                None => frame,
             }
         }
 
@@ -964,11 +998,15 @@ define_class!(
             self.ivars().title.borrow().clone()
         }
 
+        /// A new title for a window on screen renames its Window menu item.
         #[unsafe(method(setTitle:))]
         fn set_title(&self, title: &NSString) {
-            self.ivars().title.replace(title.copy());
+            let old = self.ivars().title.replace(title.copy());
             self.ivars().title_dirty.set(true);
             self.ivars().needs_display.set(true);
+            if self.ivars().visible.get() && !old.isEqualToString(title) && listable(self) {
+                app::window_retitled(as_window(self));
+            }
         }
 
         #[unsafe(method(styleMask))]
@@ -1037,17 +1075,24 @@ define_class!(
             grow(rect, -self.titlebar())
         }
 
+        /// The frame keeps its top left corner, on screen or off, as
+        /// AppKit's does (and a Wayland surface's); it is constrained to
+        /// the screen.
         #[unsafe(method(setContentSize:))]
         fn set_content_size(&self, size: NSSize) {
             let before = as_window(self).frame();
-            self.resize_to(size);
+            let mut asked = grow(NSRect::new(self.ivars().origin.get(), size), self.titlebar());
+            asked.origin.y = before.origin.y + before.size.height - asked.size.height;
+            let content = grow(constrained(self, asked), -self.titlebar());
+            self.ivars().origin.set(content.origin);
+            self.resize_to(content.size);
             crate::window_events::frame_changed(self, before, as_window(self).frame());
         }
 
         #[unsafe(method(setFrame:display:))]
         fn set_frame_display(&self, frame: NSRect, _display: bool) {
             let before = as_window(self).frame();
-            let content = grow(frame, -self.titlebar());
+            let content = grow(constrained(self, frame), -self.titlebar());
             self.ivars().origin.set(content.origin);
             self.resize_to(content.size);
             crate::window_events::frame_changed(self, before, as_window(self).frame());
@@ -1056,7 +1101,9 @@ define_class!(
         #[unsafe(method(setFrameOrigin:))]
         fn set_frame_origin(&self, origin: NSPoint) {
             let before = as_window(self).frame();
-            self.ivars().origin.set(origin);
+            // Asked twice, as on macOS (see setFrameTopLeftPoint:).
+            let at = constrained(self, constrained(self, NSRect::new(origin, before.size)));
+            self.ivars().origin.set(at.origin);
             crate::window_events::frame_changed(self, before, as_window(self).frame());
         }
 
@@ -1205,14 +1252,16 @@ define_class!(
             if self.ivars().visible.get() {
                 self.request(WindowRequest::Activate);
             }
-            order_front(self);
+            order(self, NSWindowOrderingMode::Above);
         }
 
         #[unsafe(method(orderFront:))]
         fn order_front(&self, _sender: Option<&AnyObject>) {
-            order_front(self);
+            order(self, NSWindowOrderingMode::Above);
         }
 
+        /// Not through `orderWindow:relativeTo:`, as on macOS; its frame
+        /// is constrained, as for any ordering in (see `order_front`).
         #[unsafe(method(orderFrontRegardless))]
         fn order_front_regardless(&self) {
             order_front(self);
@@ -1220,7 +1269,7 @@ define_class!(
 
         #[unsafe(method(orderOut:))]
         fn order_out(&self, _sender: Option<&AnyObject>) {
-            order_out(self);
+            order(self, NSWindowOrderingMode::Out);
         }
 
         /// Observers hear of it even for a window that isn't on screen,
@@ -1289,8 +1338,28 @@ define_class!(
             self.request(WindowRequest::Fullscreen(!self.ivars().state.get().fullscreen));
         }
 
+        /// Centered across its screen's visible frame (the main screen's,
+        /// off screen), a quarter of the way down, in whole points; a
+        /// window taller than the visible frame has its top at the top.
+        /// As measured on macOS. On Wayland, which places windows itself,
+        /// the frame is only recorded; without a screen it stays as it is.
         #[unsafe(method(center))]
-        fn center(&self) {}
+        fn center(&self) {
+            let Some(screen) = crate::screen::window_screen(self) else { return };
+            let area = screen.visibleFrame();
+            let frame = as_window(self).frame();
+            let x = (area.origin.x + (area.size.width - frame.size.width) / 2.0).floor();
+            let y = if frame.size.height <= area.size.height {
+                (area.origin.y + (area.size.height - frame.size.height) * 0.75).floor()
+            } else {
+                area.origin.y + area.size.height - frame.size.height
+            };
+            let before = frame;
+            // Asked twice, as on macOS (see setFrameTopLeftPoint:).
+            let at = constrained(self, constrained(self, NSRect::new(NSPoint::new(x, y), frame.size)));
+            self.ivars().origin.set(at.origin);
+            crate::window_events::frame_changed(self, before, as_window(self).frame());
+        }
 
         #[unsafe(method(isVisible))]
         fn is_visible(&self) -> bool {
@@ -1730,9 +1799,18 @@ impl NSWindowImpl {
         }
     }
 
+    /// Give the content `size`, its origin set already. On screen the
+    /// compositor resizes the window at its next configure, which keeps
+    /// the top left corner (see `configure`); until then the frame keeps
+    /// the size it has and the top left corner it will have.
     fn resize_to(&self, size: NSSize) {
         let ivars = self.ivars();
         if ivars.visible.get() {
+            if ivars.configured.get() {
+                let mut origin = ivars.origin.get();
+                origin.y += size.height - ivars.size.get().height;
+                ivars.origin.set(origin);
+            }
             let (w, h) = (size.width.round().max(1.0) as u32, size.height.round().max(1.0) as u32);
             app::send(ToRender::Request { window: self.id(), request: WindowRequest::Resize(w, h) });
         } else {
@@ -1899,7 +1977,16 @@ impl NSWindowImpl {
         let ivars = self.ivars();
         let first = !ivars.configured.replace(true);
         let size = NSSize::new(width as f64, height as f64);
-        let resized = ivars.size.replace(size) != size;
+        let old_size = ivars.size.replace(size);
+        let resized = old_size != size;
+        // A Wayland surface resized keeps its top left corner (as a macOS
+        // window does, which the program asked or the user dragged); the
+        // frame follows.
+        if resized && !first {
+            let mut origin = ivars.origin.get();
+            origin.y += old_size.height - size.height;
+            ivars.origin.set(origin);
+        }
         let before_scale = ivars.scale.replace(scale);
         let rescaled = before_scale != scale;
         let titlebar = titlebar as f64;
@@ -2177,9 +2264,113 @@ fn set_content_view(window: &NSWindowImpl, view: Option<&NSView>) {
     window.damage_all();
 }
 
+/// `orderWindow:relativeTo:`, a funnel (see `funnel`).
+pub(crate) static ORDER_WINDOW: crate::funnel::Funnel = crate::funnel::Funnel::new();
+/// `constrainFrameRect:toScreen:`, a funnel.
+pub(crate) static CONSTRAIN_FRAME: crate::funnel::Funnel = crate::funnel::Funnel::new();
+
+/// Show or hide the window, through `orderWindow:relativeTo:` when a
+/// subclass (or a swizzle) replaced it, relative to no window, as AppKit
+/// sends it from `orderFront:`, `orderBack:`, `orderOut:`,
+/// `makeKeyAndOrderFront:` and `close`.
+pub(crate) fn order(window: &NSWindowImpl, place: NSWindowOrderingMode) {
+    if ORDER_WINDOW.overridden(window, sel!(orderWindow:relativeTo:)) {
+        // SAFETY: the method takes an ordering mode and a window number.
+        let _: () = unsafe { msg_send![window, orderWindow: place, relativeTo: 0isize] };
+    } else if place == NSWindowOrderingMode::Out {
+        order_out(window);
+    } else {
+        order_front(window);
+    }
+}
+
+/// `frame` constrained as AppKit constrains a frame it is given while the
+/// window is on screen: by `constrainFrameRect:toScreen:` with the
+/// window's screen. A window off screen isn't constrained (nothing is
+/// asked), as on macOS; nor is a child window, which Wayland shows as a
+/// popup the compositor keeps on screen itself.
+fn constrained(window: &NSWindowImpl, frame: NSRect) -> NSRect {
+    if !window.ivars().visible.get() || window.ivars().parent.get().is_some() {
+        return frame;
+    }
+    constrained_to(window, frame, crate::screen::window_screen(window))
+}
+
+/// `frame` constrained to `screen` (none: left as it is), through an
+/// overriding `constrainFrameRect:toScreen:` if there is one.
+fn constrained_to(window: &NSWindowImpl, frame: NSRect, screen: Option<Retained<NSScreen>>) -> NSRect {
+    if CONSTRAIN_FRAME.overridden(window, sel!(constrainFrameRect:toScreen:)) {
+        // SAFETY: the method takes a rect and a screen or nil and returns
+        // a rect.
+        unsafe { msg_send![window, constrainFrameRect: frame, toScreen: screen.as_deref()] }
+    } else {
+        match screen {
+            Some(screen) => constrain(window.ivars().style.get(), frame, screen.visibleFrame()),
+            None => frame,
+        }
+    }
+}
+
+/// `constrainFrameRect:toScreen:`'s rule (see there), for a window of
+/// `style` and a screen whose visible frame is `area`.
+fn constrain(style: NSWindowStyleMask, frame: NSRect, area: NSRect) -> NSRect {
+    let (min_x, min_y) = (area.origin.x, area.origin.y);
+    let (max_x, max_y) = (min_x + area.size.width, min_y + area.size.height);
+    let mut f = frame;
+    if style.contains(NSWindowStyleMask::Titled) {
+        if style.contains(NSWindowStyleMask::Resizable) {
+            f.size.width = f.size.width.min(area.size.width);
+            f.size.height = f.size.height.min(area.size.height);
+        }
+        f.origin.x =
+            if f.size.width <= area.size.width { f.origin.x.clamp(min_x, max_x - f.size.width) } else { min_x };
+        f.origin.y = if f.size.height <= area.size.height {
+            f.origin.y.clamp(min_y, max_y - f.size.height)
+        } else {
+            max_y - f.size.height
+        };
+    } else if f.origin.y + f.size.height > max_y {
+        f.origin.y = (max_y - f.size.height).max(min_y);
+    }
+    f
+}
+
+/// Whether the Window menu lists `window` while it's on screen, as
+/// measured on macOS: a titled window that isn't a panel, isn't shown as a
+/// sheet and isn't excluded. It's asked as the window is ordered in (a
+/// style changed later doesn't add or remove it). A window without a
+/// title is sent too, and `addWindowsItem:` leaves it out.
+fn listable(window: &NSWindowImpl) -> bool {
+    let this = as_window(window);
+    this.styleMask().contains(NSWindowStyleMask::Titled)
+        && !crate::controls::kind_of(this, <NSPanel as objc2::ClassType>::class())
+        && crate::window_events::sheet_parent(window).is_none()
+        && !this.isExcludedFromWindowsMenu()
+}
+
 fn order_front(window: &NSWindowImpl) {
     let ivars = window.ivars();
+    // Ordering in constrains the frame to the window's screen, on screen
+    // already or not, as on macOS; but not a popup's or a sheet's, which
+    // Wayland places by their parents.
+    if ivars.parent.get().is_none()
+        && ivars.popup.get().is_none()
+        && crate::window_events::sheet_parent(window).is_none()
+    {
+        let frame = as_window(window).frame();
+        let to = constrained_to(window, frame, crate::screen::window_screen(window));
+        if to != frame {
+            let content = grow(to, -window.titlebar());
+            ivars.origin.set(content.origin);
+            window.resize_to(content.size);
+            crate::window_events::frame_changed(window, frame, as_window(window).frame());
+        }
+    }
     if ivars.visible.get() {
+        // Ordered front again, it is listed again, as on macOS.
+        if listable(window) {
+            app::window_listed(as_window(window));
+        }
         return;
     }
     crate::panel::showing(as_window(window));
@@ -2216,6 +2407,9 @@ fn order_front(window: &NSWindowImpl) {
         app::send(ToRender::SetParent { window: window.id(), parent: Some(parent) });
     }
     crate::menubar::window_shown(as_window(window));
+    if listable(window) {
+        app::window_listed(as_window(window));
+    }
     // The first time on screen, the initial first responder takes over from
     // the window, if it's still in it.
     let initial = {
@@ -2233,6 +2427,9 @@ fn order_front(window: &NSWindowImpl) {
 }
 
 fn order_out(window: &NSWindowImpl) {
+    // Out of the Window menu, whether it was on screen or not, as on
+    // macOS.
+    app::window_unlisted(as_window(window));
     let ivars = window.ivars();
     if !ivars.visible.get() {
         return;

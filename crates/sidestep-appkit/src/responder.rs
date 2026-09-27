@@ -205,6 +205,13 @@ define_class!(
             forward(self, |next| next.smartMagnifyWithEvent(event));
         }
 
+        /// Up the chain, as the gestures go. (Nothing on Linux sends it:
+        /// there is no force click or Look Up gesture to start it.)
+        #[unsafe(method(quickLookWithEvent:))]
+        fn quick_look_with_event(&self, event: &NSEvent) {
+            forward(self, |next| next.quickLookWithEvent(event));
+        }
+
         #[unsafe(method(interpretKeyEvents:))]
         fn interpret_key_events(&self, events: &AnyObject) {
             crate::keybindings::interpret_all(as_responder(self), events);

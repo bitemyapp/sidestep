@@ -92,6 +92,29 @@ pub fn take_render_log() -> Vec<Seen> {
     std::mem::take(&mut *null::LOG.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
+/// The damage `window`'s own surface (not its scroll layers) will redraw
+/// at the next pass, in points from its content's top left: x0, y0, x1,
+/// y1.
+pub fn root_damage(window: &NSWindow) -> Vec<[f32; 4]> {
+    let w = crate::window::imp(window);
+    let damage = w.take_damage();
+    let rects = damage
+        .get(&crate::protocol::ROOT_LAYER)
+        .map_or_else(Vec::new, |rs| rs.iter().map(|r| [r.x0, r.y0, r.x1, r.y1]).collect());
+    for (layer, rs) in damage {
+        for r in rs {
+            w.invalidate(layer, r);
+        }
+    }
+    rects
+}
+
+/// Run `window`'s display pass now, as the main loop would once its last
+/// frame is shown (nothing, if it isn't shown or has nothing to draw).
+pub fn display_now(window: &NSWindow) {
+    crate::window::display_if_needed(crate::window::imp(window));
+}
+
 /// The id the render thread knows `window` by while it is on screen.
 pub fn showing_id(window: &NSWindow) -> u32 {
     crate::window::imp(window).id()
@@ -321,4 +344,19 @@ pub fn inject_close_request(window: u32) {
 pub fn inject_configure(window: u32, width: u32, height: u32, scale: f64, resizing: bool, suspended: bool) {
     let state = WindowState { suspended, resizing, ..WindowState::default() };
     event_loop::inject(FromRender::Configure { window, width, height, scale, titlebar: 0, state });
+}
+
+/// The accessibility notifications posted since the last call (with
+/// `NSAccessibilityPostNotificationWithUserInfo`), oldest first: the
+/// element while it lives, the name, and the user info.
+#[allow(clippy::type_complexity)]
+pub fn take_accessibility_notifications() -> Vec<(
+    Option<objc2::rc::Retained<objc2::runtime::AnyObject>>,
+    String,
+    Option<objc2::rc::Retained<objc2_foundation::NSDictionary<objc2_foundation::NSString, objc2::runtime::AnyObject>>>,
+)> {
+    crate::accessibility::take_posted()
+        .into_iter()
+        .map(|p| (p.element.load(), p.name.to_string(), p.user_info))
+        .collect()
 }

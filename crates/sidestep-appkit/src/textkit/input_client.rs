@@ -55,14 +55,7 @@ define_class!(
         /// an inserted composition is.
         #[unsafe(method(unmarkText))]
         fn unmark_text(&self) {
-            let v = tv(self);
-            let marked = v.marked_range();
-            v.ivars().marked.set(None);
-            if let (Some(m), Some(original)) = (marked, composition(v)) {
-                super::edit::register_composition(v, m.location, m.length, original);
-            }
-            set_composition(v, None);
-            v.as_view().setNeedsDisplay(true);
+            unmark(tv(self));
         }
 
         #[unsafe(method(selectedRange))]
@@ -260,6 +253,17 @@ fn set_composition(v: &NSTextViewImpl, original: Option<Retained<NSAttributedStr
             c.push((key, o));
         }
     });
+}
+
+/// `unmarkText`: the marked text stays as it is, committed.
+pub(crate) fn unmark(v: &NSTextViewImpl) {
+    let marked = v.marked_range();
+    v.ivars().marked.set(None);
+    if let (Some(m), Some(original)) = (marked, composition(v)) {
+        super::edit::register_composition(v, m.location, m.length, original);
+    }
+    set_composition(v, None);
+    v.as_view().setNeedsDisplay(true);
 }
 
 /// Offer a command to the delegate, then perform it, or pass it up.

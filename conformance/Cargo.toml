@@ -26,8 +26,8 @@ harness = false
 
 # Input, windows and pasteboards (appkit_input).
 [dev-dependencies]
-objc2-app-kit = { workspace = true, features = ["NSEvent", "NSWindow", "NSGraphics", "NSGraphicsContext", "NSPasteboard", "NSResponder", "NSView", "NSCursor", "NSColor", "NSTrackingArea", "NSTextInputClient", "NSTextInputContext", "NSWindowScripting", "NSApplication", "block2", "objc2-core-foundation", "NSImageRep", "NSBitmapImageRep", "NSColorSpace", "NSBezierPath", "NSAffineTransform", "NSAppearance", "NSImage", "NSGradient", "NSShadow", "NSAnimation", "NSAnimationContext", "NSCustomImageRep", "NSColorList", "NSVisualEffectView", "NSCell", "NSFontDescriptor", "NSRunningApplication", "NSPanel", "NSViewController", "NSWindowController", "NSStoryboard", "NSNib", "NSPasteboardItem", "NSDragging", "NSScreen", "NSControl", "NSActionCell", "NSButton", "NSButtonCell", "NSTextField", "NSTextFieldCell", "NSSecureTextField", "NSSearchField", "NSSearchFieldCell", "NSBox", "NSProgressIndicator", "NSSegmentedControl", "NSSegmentedCell", "NSStepper", "NSStepperCell", "NSSlider", "NSSliderCell", "NSSwitch", "NSLayoutConstraint", "NSUserInterfaceLayout", "NSText", "NSParagraphStyle", "NSAccessibilityConstants", "NSAccessibilityProtocols", "NSUserInterfaceItemIdentification", "NSScrollView", "NSClipView", "NSLayoutAnchor", "NSLayoutGuide", "NSStackView", "NSSplitView", "NSTabView", "NSTabViewItem", "NSTableView", "NSTableColumn", "NSTableRowView", "NSTableCellView", "NSTableHeaderView", "NSTextStorage", "NSTextStorageScripting", "NSLayoutManager", "NSTextContainer", "NSTextView", "NSTextTable", "NSFont", "NSAttributedString", "NSScroller", "NSMenu", "NSMenuItem", "NSUserInterfaceValidation", "NSPopUpButton", "NSPopUpButtonCell", "NSMenuItemCell", "NSAlert", "NSSavePanel", "NSOpenPanel", "NSWorkspace", "NSAccessibility", "libc", "NSImageView", "NSImageCell", "NSStringDrawing"] }
-objc2-foundation = { workspace = true, features = ["NSRange", "NSAttributedString", "NSAffineTransform", "NSData", "NSArray", "NSValue", "NSGeometry", "NSIndexSet", "NSNotification", "NSUserDefaults", "NSUndoManager", "NSInvocation", "NSMethodSignature", "NSRunLoop", "NSDate", "NSString", "NSDictionary", "NSURL", "NSError"] }
+objc2-app-kit = { workspace = true, features = ["NSEvent", "NSWindow", "NSGraphics", "NSGraphicsContext", "NSPasteboard", "NSResponder", "NSView", "NSCursor", "NSColor", "NSTrackingArea", "NSTextInputClient", "NSTextInputContext", "NSWindowScripting", "NSApplication", "block2", "objc2-core-foundation", "NSImageRep", "NSBitmapImageRep", "NSColorSpace", "NSBezierPath", "NSAffineTransform", "NSAppearance", "NSImage", "NSGradient", "NSShadow", "NSAnimation", "NSAnimationContext", "NSCustomImageRep", "NSColorList", "NSVisualEffectView", "NSCell", "NSFontDescriptor", "NSRunningApplication", "NSPanel", "NSViewController", "NSWindowController", "NSStoryboard", "NSNib", "NSPasteboardItem", "NSDragging", "NSScreen", "NSControl", "NSActionCell", "NSButton", "NSButtonCell", "NSTextField", "NSTextFieldCell", "NSSecureTextField", "NSSearchField", "NSSearchFieldCell", "NSBox", "NSProgressIndicator", "NSSegmentedControl", "NSSegmentedCell", "NSStepper", "NSStepperCell", "NSSlider", "NSSliderCell", "NSSwitch", "NSLayoutConstraint", "NSUserInterfaceLayout", "NSText", "NSParagraphStyle", "NSAccessibilityConstants", "NSAccessibilityProtocols", "NSUserInterfaceItemIdentification", "NSScrollView", "NSClipView", "NSLayoutAnchor", "NSLayoutGuide", "NSStackView", "NSSplitView", "NSTabView", "NSTabViewItem", "NSTableView", "NSTableColumn", "NSTableRowView", "NSTableCellView", "NSTableHeaderView", "NSTextStorage", "NSTextStorageScripting", "NSLayoutManager", "NSTextContainer", "NSTextView", "NSTextTable", "NSFont", "NSAttributedString", "NSScroller", "NSMenu", "NSMenuItem", "NSUserInterfaceValidation", "NSPopUpButton", "NSPopUpButtonCell", "NSMenuItemCell", "NSAlert", "NSSavePanel", "NSOpenPanel", "NSWorkspace", "NSAccessibility", "libc", "NSImageView", "NSImageCell", "NSStringDrawing", "NSDraggingItem", "NSHelpManager", "NSFontManager"] }
+objc2-foundation = { workspace = true, features = ["NSRange", "NSAttributedString", "NSAffineTransform", "NSData", "NSArray", "NSValue", "NSGeometry", "NSIndexSet", "NSNotification", "NSUserDefaults", "NSUndoManager", "NSInvocation", "NSMethodSignature", "NSRunLoop", "NSDate", "NSString", "NSDictionary", "NSURL", "NSError", "NSBundle", "NSException", "NSExtensionContext", "NSFileManager", "NSItemProvider", "NSLocale", "NSOperation", "NSProcessInfo", "NSProgress", "NSTextCheckingResult", "NSUserActivity", "NSZone", "NSObjCRuntime", "NSObject", "NSThread"] }
 
 [[test]]
 name = "appkit_input"
@@ -185,4 +185,22 @@ harness = false
 
 [[test]]
 name = "control_images"
+harness = false
+
+# The funnels: AppKit methods other methods reach by message, each seen
+# through a subclass's override (funnels).
+[[test]]
+name = "funnels"
+harness = false
+
+# What programs reach at link time and at launch: data symbols, classes
+# made at launch, and the small gaps around them (contract_sweep).
+[[test]]
+name = "contract_sweep"
+harness = false
+
+# Selectors an application census found present, asked of real instances
+# (census_selectors).
+[[test]]
+name = "census_selectors"
 harness = false

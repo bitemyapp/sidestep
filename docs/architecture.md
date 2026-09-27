@@ -562,10 +562,28 @@ written as XML by Sidestep, byte for byte as macOS writes them.
 is a TR35 pattern engine with English symbols and the en_US style
 patterns; `NSTimeZone` uses jiff over the system's tz database.
 
+A file URL's resource values (`getResourceValue:forKey:error:`,
+`resourceValuesForKeys:error:`) are read from the file system when asked
+for, not cached, for the keys a Linux file system can answer (names, the
+type flags, dates, sizes, access, paths, the resource type); unknown keys
+are left out, a missing file is Cocoa's 260, and a URL that isn't a
+file's has no values, as on macOS. Dictionaries and arrays read
+property-list files (`initWithContentsOfURL:` and the rest).
+`+[NSThread callStackSymbols]` walks the stack with glibc's `backtrace`
+and names each frame with `dladdr`, in Foundation's layout (the index,
+the image, the address, the nearest dynamic symbol and the offset from
+it, or from the image when there is none).
+
 **CoreFoundation** functions are toll-free: a `CFStringRef` is an
 `NSString` and so on, so each CF function forwards to the Foundation
 class behind it. `CFGetTypeID` goes by class name, so it needs no link
-reference to classes that may not be built.
+reference to classes that may not be built. `kCFBooleanTrue` and
+`kCFBooleanFalse` are data symbols, so they are objects in static memory
+from the start: the two numbers `+numberWithBool:` and `initWithBool:`
+hand out (as macOS's do), of C type `c` and of a private subclass of
+`NSNumber` whose instances have no storage of their own (NSNumber's
+methods read a boolean's value by its address). `kCFNull` is `NSNull`'s
+instance.
 
 ## AppKit: a main thread and a render thread
 
@@ -825,7 +843,9 @@ deadline comes sooner; an idle program sleeps with nothing armed and
 allocates nothing per turn. `+sharedApplication` is added to the class by
 hand (a `define_class!` class method can't see its receiver), so sent to
 a subclass it makes an instance of the subclass, whose `sendEvent:` then
-sees every event.
+sees every event. The application's initializer sets the `NSApp` data
+symbol (an atomic pointer, nil before), so a subclass's `-init` sees it
+once its call to super returns, as on macOS.
 
 **Notifications and delegates** (`notifications.rs`). Every window,
 application and view notification name is exported with macOS's value.
@@ -1011,11 +1031,54 @@ ones Wayland has a use for act: views are drawn over the background color,
 clicks reach what's behind, `setMovable:` stops the header from moving the
 window, a hidden title visibility leaves the title out of the header, and
 the initial first responder takes over the first time the window is shown.
+A new window has a plain view as its content, as AppKit's does.
 `performWindowDragWithEvent:` asks the compositor to move the window with
 the pointer, from the press being handled, for windows that draw a title
 bar of their own; the compositor then has the pointer, so the press ends
 there without a mouse-up. Levels, shadows, alpha, tabbing and resize
 increments have no Wayland request behind them and are only kept.
+
+Ordering and frames go through the methods AppKit funnels them through
+(see [Funnel points](#funnel-points)): `orderFront:`, `orderBack:`,
+`orderOut:`, `makeKeyAndOrderFront:` and `close` reach
+`orderWindow:relativeTo:` (relative to no window, as measured on macOS),
+and a frame change of a window on screen (`setFrame:display:`,
+`setFrameOrigin:`, `setContentSize:`, `setFrameTopLeftPoint:`, `center`)
+asks `constrainFrameRect:toScreen:` with the window's screen, once, or
+twice for a move (`setFrameOrigin:`, `setFrameTopLeftPoint:`, `center`:
+the second time with the first answer), as there. Ordering a window in
+asks once too, on screen already or not. A window off screen isn't
+constrained otherwise, as on macOS, nor is a child window, a popup or a
+sheet (which Wayland places by their parents). The rule, measured there: a
+titled window stays inside the screen's visible frame (a resizable one
+shrinks to fit; one too wide has its left edge at the left, one too tall
+its top at the top), any other has its top pulled down to the visible
+frame's; with no screen given, the window's own (the main screen off
+screen). `setContentSize:` keeps the frame's top left corner, as AppKit
+does, and so does a resize by the compositor, as a Wayland surface's
+does: the size a program asks for comes with the compositor's next
+configure, and until then the frame keeps its size and has its new top
+left corner. `center` puts the window halfway across its screen's visible frame
+and a quarter of the way down, in whole points (the top at the top when
+it is taller), the main screen's for a window off screen; Wayland places
+windows itself, so the frame is only recorded, and without a screen it
+stays as it is.
+
+Windows keep the application's Window menu (`windowsMenu`) through its
+`addWindowsItem:title:filename:`, `changeWindowsItem:title:filename:` and
+`removeWindowsItem:`, by message so a subclass sees them, as measured on
+macOS. A titled window that isn't a panel or an attached sheet sends
+`addWindowsItem:` each time it is ordered in, unless it is excluded (its
+style is looked at then only); retitled on screen, it sends
+`changeWindowsItem:`; ordered out or closed, on screen or not, it sends
+`removeWindowsItem:`; excluding it sends that too, and including it again
+on screen adds it. Borderless windows, which is what Sidestep's menus and
+tooltips are, never list themselves. The application's methods list any
+window they are given, but not with an empty title (`changeWindowsItem:`
+with one sends `removeWindowsItem:`, and adds a window that isn't listed
+otherwise): an item per window after the menu's own items and a
+separator, sorted by title ignoring case, sending `makeKeyAndOrderFront:`
+to its window; a represented file's window is listed by the file's name.
 
 ### The clipboard
 
@@ -1099,7 +1162,10 @@ under the pointer (or one of its superviews) that registered, with
 `registerForDraggedTypes:`, a type the drag pasteboard has as
 `availableTypeFromArray:` finds it (so a view that takes `public.url`
 takes files, and one that takes `public.file-url` doesn't take a link),
-else the window, and sends it `draggingEntered:`, `draggingUpdated:` and
+or an editable text view, which takes its `acceptableDragTypes` from the
+start though, as on macOS, nothing shows in its `registeredDraggedTypes`
+until `updateDragTypeRegistration` (sent when `setEditable:` changes the
+flag) registers them; else the window, and sends it `draggingEntered:`, `draggingUpdated:` and
 `draggingExited:` as it changes. Its answer, masked with the source's
 operations, goes back as the offer's accepted MIME type and actions,
 passed on to the compositor only when it changes. The render thread
@@ -1315,6 +1381,33 @@ testing and conversion don't scale yet (so a scroll view's magnification is
 kept, scales its clip view's bounds as AppKit's does, and changes nothing
 drawn). The scrolling helpers (`scrollRectToVisible:`, `autoscroll:`) work
 through the enclosing clip views.
+
+**Clipping.** As on macOS 14 and later, a view doesn't clip to its bounds
+(`clipsToBounds` is NO, but for clip views, scrollers and table row views,
+as measured there): what it draws outside them shows, and so do subviews
+that stick out of it, within whatever its ancestors that do clip let
+through. It is still asked to draw only for damage to its bounds, and
+`drawRect:` gets that part of them; the drawing itself is clipped to the
+ancestors'. Invalidating (`setNeedsDisplay:`, `setNeedsDisplayInRect:`)
+marks at most the view's bounds, and a subview outside a view that doesn't
+clip is marked where it is. Each view keeps how far its subviews (and
+theirs) reach outside its bounds, worked out when first needed. A subview
+that moves, grows, comes or goes updates it (and its ancestors', up to
+the first that clips) with its own share, and it is worked out again from
+all the subviews only when the one that reached furthest reaches less (a
+view whose bounds only grew keeps what it had, which may be more than
+now: that draws a little more, never less). A bounds origin or a change
+of clipping forgets it. Drawing passes over a
+subtree whose reach misses the damage, as it passes over a clipping view
+outside it, and hiding, moving, removing a view or changing its clipping
+redraws all it reached, not only its bounds.
+
+**Live resizes.** When the compositor starts a live resize, the window
+posts `NSWindowWillStartLiveResizeNotification` and then sends
+`viewWillStartLiveResize` to every view in it, each before its subviews;
+when it ends, `viewDidEndLiveResize` the same way, then the notification.
+NSView's own methods do nothing and don't pass the message on (as on
+macOS), so an override needn't call super. `inLiveResize` is the window's.
 
 **The layout pass.** Each view has a few flags: it needs layout, its
 constraints need updating, and "some view below does" for each, raised
@@ -1587,6 +1680,55 @@ end uploads the line, and a caret blinking in a scroll view commits two
 surfaces. `SIDESTEP_TRACE_FRAMES=1` prints, for each pass, the main
 thread's time and the tiles it recorded, and for each present the bytes
 uploaded to tiles, overlays and the window and the surfaces committed.
+
+### Funnel points
+
+AppKit reaches some of its own methods by message, and programs override
+or swizzle exactly those to see every call: a text view's selection goes
+through `setSelectedRanges:affinity:stillSelecting:`, a window's ordering
+through `orderWindow:relativeTo:`. Sidestep's methods mostly call each
+other in Rust, which would skip an override, so at each of these points
+(`funnel.rs`) the caller asks whether the receiver's class still has
+Sidestep's own implementation (one method-cache probe, the lookup a
+message starts with) and sends the message only when it doesn't, much as
+the runtime skips `-retain` for classes that don't override it. Each
+funnel remembers its class's implementation from when the class loaded,
+before any program code could see the class, so a swizzle made at any
+time counts as an override. In a release build `setNeedsDisplay:` costs
+the same with the check as `setNeedsDisplayInRect:` without it (about
+45 ns either way, most of it the invalidation), for a class that
+overrides the funnel or not.
+
+The funnels, with what AppKit passes, as `conformance/tests/funnels.rs`
+measures on macOS:
+
+- `setSelectedRanges:affinity:stillSelecting:` for every change of a text
+  view's selection, its own included: the selection setters (upstream, not
+  still selecting), edits (upstream), commands (their affinity), a click
+  (still selecting until the button comes up), a program editing the text
+  storage. The view's own change keeps what it would have kept through an
+  override's call to super (an edit's typing attributes, a command's
+  anchor and vertical goal).
+- `textContainerOrigin` wherever a text view places its container:
+  drawing, hit testing, the input client's rectangles. It is worked out
+  from the inset each time, so `invalidateTextContainerOrigin` has nothing
+  to do.
+- `writeSelectionToPasteboard:types:` with `writablePasteboardTypes` from
+  `copy:` and `cut:`, which writes each type through
+  `writeSelectionToPasteboard:type:`.
+- `characterIndexForInsertionAtPoint:` with the drag's place in the view,
+  each time a drag over a text view (`textkit/drop.rs`) asks where it
+  would go.
+- `unmarkText` when a click ends an input method's composition.
+- `setNeedsDisplayInRect:` from `setNeedsDisplay:YES`, with the rect
+  AppKit passes (the whole plane: `-DBL_MAX/2` for the origin, `DBL_MAX`
+  for the size), which invalidating clips to the view's bounds.
+- `orderWindow:relativeTo:` and `constrainFrameRect:toScreen:` (see
+  [Windows and decorations](#windows-and-decorations)).
+
+The field editor's commands reach the field by message anyway (see
+[Controls](#controls)), and live resizes are sent to each view (see
+[Views, layout and containers](#views-layout-and-containers)).
 
 ## Text
 
@@ -1884,7 +2026,12 @@ swash.
   `textDidBeginEditing:` and the rest into one
   `NSControlTextDid…Notification` (the field editor, and at the end the
   text movement, in its user info) for its delegate and then the
-  notification center, holding no borrow while they run.
+  notification center, holding no borrow while they run. The field editor
+  offers each command to the field first (`textView:doCommandBySelector:`,
+  the field being its delegate), and the field asks its own delegate's
+  `control:textView:doCommandBySelector:`, whose YES means the command was
+  taken care of, so Return, Escape and the arrows reach a program's
+  delegate before the editor acts on them, as measured on macOS.
 - **Accessibility** is a store (`controls/a11y.rs`): views and cells keep
   what `setAccessibility…:` sets, nil included, and answer macOS's
   default for their class until then (as on macOS, a control's cell is
@@ -1892,7 +2039,28 @@ swash.
   label; help set on a control is its cell's too, and a label set on a
   button leaves its cell's empty). Records are keyed by object and
   dropped with it, with fields that map onto AccessKit's node properties,
-  for an adapter to read.
+  for an adapter to read. They also hold the children and custom actions
+  (the arrays as set, as AppKit keeps them; a view's children until then
+  are its subviews that are elements) and the parent (weakly; a view's
+  until then is its nearest ancestor element, else its window, and none
+  outside a window). `NSAccessibilityElement` (`accessibility.rs`) keeps
+  the same properties in the same store, with an element's own defaults
+  (no role or label, not enabled, an element) and its frame: the one set,
+  or one set in its parent's space (or a subclass's
+  `accessibilityFrameInParentSpace`) turned into screen coordinates
+  through the parent view; `+accessibilityElementWithRole:frame:label:
+  parent:` makes an instance of the class it's sent to.
+  `NSAccessibilityCustomAction` keeps its name, handler, target (weakly)
+  and selector, and `NSAccessibilityPostNotificationWithUserInfo` puts the
+  notification in a short queue for the adapter.
+- **The font manager** (`font_manager.rs`) is one object, whoever makes
+  it. It converts fonts by trait (bold, italic, their opposites, condensed
+  and expanded where the family has such a face), weight (the next
+  heavier or lighter face of the family) and size, on the fonts' specs, and
+  gives back the font it was given when nothing changes, as AppKit does;
+  weights are AppKit's 0 to 15 (5 regular, 9 bold). There is no font panel.
+  `NSHapticFeedbackManager`'s performer does nothing: Linux has no
+  force-feedback trackpads to drive.
 
 ## Menus, alerts and panels
 

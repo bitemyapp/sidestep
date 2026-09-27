@@ -365,6 +365,11 @@ pub(crate) fn outline(view: &NSView) -> Option<parts::Outline> {
     round(bounds, parts::RADIUS)
 }
 
+/// How far a focus ring draws outside its view's bounds: its outline is
+/// inside them, and `parts::focus_ring` strokes 2 points out of it with a
+/// 2-point pen.
+pub(crate) const RING_REACH: f32 = 3.0;
+
 /// Draw `view`'s focus ring, in its coordinates, into what's being
 /// recorded.
 pub(crate) fn draw_ring(view: &NSView) {
