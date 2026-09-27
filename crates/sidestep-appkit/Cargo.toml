@@ -44,6 +44,8 @@ kasuari = { version = "0.4.12", default-features = false, features = ["std"] }
 # character boundaries for selection and commands (both already built for
 # parley).
 smallvec = "1.13"
+# Finding paragraph separators in text a storage takes in whole.
+memchr = { version = "2.7", default-features = false, features = ["std"] }
 icu_segmenter = { version = "2.1", default-features = false, features = ["compiled_data"] }
 # Which characters are emoji, to draw them in color (compiled into the binary).
 icu_properties = { version = "2.1", default-features = false, features = ["compiled_data"] }

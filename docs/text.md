@@ -11,8 +11,8 @@ text blocks and tables. The code is in
 What the classes do was measured on macOS, not read from Apple's headers
 or documentation: each behavior below that a program can see is checked
 by a conformance test that runs against AppKit first and Sidestep second
-(`conformance/tests/text_storage.rs`, `text_layout.rs`, `text_blocks.rs`,
-`undo_manager.rs`, `text_view.rs`).
+(`conformance/tests/text_storage.rs`, `text_fixing.rs`, `text_layout.rs`,
+`text_blocks.rs`, `undo_manager.rs`, `text_view.rs`).
 
 ## Text storage
 
@@ -23,9 +23,26 @@ units. Paragraphs sit in chunks of at most 128 (a chunk's sums let an index
 find its chunk in a binary search), and a paragraph longer than 4096 bytes
 keeps UTF-16 checkpoints, so a UTF-16 index finds its byte in a few hundred
 bytes at most. An edit inside one paragraph that makes no new paragraphs
-changes it in place; others splice paragraphs. Every edit bumps a
-generation. Property tests check the tree against a plain string and runs
-over random edits, CR LF pairs and surrogates included.
+changes it in place; others splice paragraphs. Every edit of the text bumps
+a generation. Property tests check the tree against a plain string and
+runs over random edits, CR LF pairs and surrogates included.
+
+Long text taken in whole (16 KB or more: a text set at once, a large
+paste) isn't cut into paragraphs as it comes. It is copied once into a
+shared buffer and cut into raw chunks of whole paragraphs, a few kilobytes
+each, whose sums (UTF-16 units, bytes, paragraphs) one pass over the bytes
+counts, in byte lanes the compiler vectorizes; a chunk takes about as many
+bytes as 64 paragraphs took in the one before, fewer where paragraphs get
+short, so none holds more than 128. A raw chunk is cut into its paragraphs,
+which slice the shared buffer until one is edited, when something first
+reads them (finding an index, laying out); what needs no paragraphs reads
+it as it is: the whole text, a chunk's text, its runs (which may cross its
+paragraphs' ends), attributes set over it, effective ranges crossing it,
+and layout estimates. Setting 11 MB of text costs the copy and the count;
+the property tests run through raw chunks too, cut and uncut. When most of
+such a text is deleted, so that the shared buffers would hold more than
+twice the text left (and 16 KB more), what is left is copied into buffers
+of its own, a chunk's to each, and the old ones go.
 
 **Attributes.** Each storage interns its attribute dictionaries
 (`attrs::AttrTable`): runs name an id, the same dictionary (by address, then
@@ -44,9 +61,9 @@ where the tree's do, and a line never crosses one),
 `rangeOfComposedCharacterSequenceAtIndex:`, `hasPrefix:` and `hasSuffix:`;
 the rest of `NSString` reads the whole text, as for any subclass. A test
 checks each of these against a plain string with the same text. A storage
-made with text has its attributes fixed from the start, and the scripting
-accessors `font` and `foregroundColor` read the first character's and set
-one over all the text.
+made with text has its attributes fixed from the start (lazily, when it is
+long), and the scripting accessors `font` and `foregroundColor` read the
+first character's and set one over all the text.
 Edits between `beginEditing` and `endEditing` gather into one change (its
 mask, the union of the edited ranges, the total change in length).
 `processEditing` then runs as AppKit's does: the will-process notification,
@@ -60,6 +77,48 @@ processed as a change of its own, at once. A subclass that keeps its own text (o
 primitives) works too: Sidestep's fast paths apply only to its own class,
 and a layout manager keeps a copy of such a storage's text, read through
 the primitives, edit by edit.
+
+**Fixing lazily.** As on macOS, the storage fixes attributes lazily
+(`fixesAttributesLazily`; a subclass with text of its own doesn't, unless
+it says so). Measured there: an edit of 65 536 units or more, or any edit
+while text is left to fix, isn't fixed as it is processed. The edit,
+through the end of its last paragraph, joins the text left to fix (one
+range covering it all, moved by later edits), the change the delegate
+hears of covers its paragraphs whole, and its mask gets no attributes from
+fixing. The text is fixed quietly (no notification, no delegate call, no
+change to process) when something asks for its attributes
+(`attributesAtIndex:effectiveRange:`, `attribute:atIndex:…`, the longest
+effective ranges, and what goes through them, such as substrings) or the
+layout manager lays it out, a stretch at a time: asked about an index
+nearer the start of what is left than its end, from that start through
+the index, 65 536 units at least; otherwise from the index's paragraph to
+the end. So effective ranges end where the text fixed does, and reading
+on from the start, or laying out down the text, fixes 64 KB at a time.
+Fixing notes in each chunk how far from its start it has fixed, and any
+change of the chunk clears the note, so a stretch fixed again reads only
+what changed since: typing where text is left to fix, which puts what is
+left back at the edit, fixes the edited chunk each keystroke, not 64 KB.
+`ensureAttributesAreFixedInRange:` fixes the same way for its range; for a
+subclass that says it fixes lazily it is the subclass's to call, and it
+fixes through `fixAttributesInRange:`, whose edits are no change to
+process. Fixing itself skips a chunk whose paragraphs all have one set of
+attributes with a font, raw or not, and sets a font over a raw chunk
+without cutting it, so text set with a font (as a text view's is) is
+never cut to be fixed. A paragraph style set in the middle of a paragraph
+is taken away as the edit is processed, and the change reported reaches
+the paragraph's end, as on macOS. Where AppKit differs: its effective
+ranges, once text has been fixed in several stretches, sometimes end where
+a stretch did though the attributes either side are equal; Sidestep's
+runs with equal attributes merge (an effective range may be shorter than
+the longest, so both answer rightly).
+
+**Longest effective ranges** walk the runs out from the index, each way,
+until the attributes (or the one attribute's value) differ or the limit is
+reached, so walking a text by them costs what the runs crossed cost. What
+they find is clipped to the limit as AppKit clips it (measured): to (0, 0)
+when it only touches the limit or misses it (the index needn't be in the
+limit), and a limit past the text's end is no error, its end wrapping
+rather than checked; Foundation's attributed strings clip the same way.
 
 ## Undo
 
@@ -94,7 +153,15 @@ whether it follows its text view's width and height.
 (`layout_cache`): the paragraph's lines once laid out, else an estimate of
 its height, in chunks whose heights are summed lazily, so a paragraph's
 position is a binary search and an edit that changes one height costs one
-chunk. An edit replaces the entries of the paragraphs it touched with
+chunk. Text the storage hasn't cut into paragraphs is estimated a raw chunk
+at a time, its paragraphs alike (as long as the chunk's average), and the
+cache holds such a run as one chunk of a count and an entry, runs alike
+joined: positions in it are multiples, and setting an entry there gives the
+half-chunk of paragraphs around it entries of their own. Before laying
+paragraphs out the manager has the storage fix their attributes where it
+put that off, and a change widened to whole paragraphs for the delegate is
+laid out again as edited (with what the delegate edited when told it was
+processed). An edit replaces the entries of the paragraphs it touched with
 estimates, keeping the old height where one paragraph became one; nothing
 else is laid out again, since other paragraphs' lines are relative to their
 paragraph's top. A question about an index lays out the paragraph holding
@@ -308,22 +375,38 @@ of 13-point monospaced text, in a scrollable text view not in a window.
 
 | | Sidestep | AppKit |
 |---|---:|---:|
-| `setString:` | 25 ms | 1.7 ms |
-| first screen laid out | 0.65 ms | 0.53 ms |
-| all of it laid out | 2.8 s | 1.5 s |
-| last screen, non-contiguous, fresh view | 0.33 ms | 0.34 ms |
-| keystroke and its screen, contiguous (p50 / p99) | 0.048 / 0.071 ms | 0.15 / 9.6 ms |
-| keystroke, non-contiguous (p50 / p99) | 0.048 / 0.069 ms | 0.86 / 0.99 ms |
-| delete backward, contiguous (p50 / p99) | 0.050 / 0.074 ms | 0.12 / 0.22 ms |
-| keystroke, then the string's length and paragraph (p50 / p99) | 0.048 / 0.071 ms | 0.13 / 0.26 ms |
-| select all, with an input method's rect for it | 0.003 ms | 27 ms |
-| keystroke in a 32 KB paragraph (p50 / p99) | 2.9 / 3.5 ms | 3.4 / 4.1 ms |
+| `setString:`, 1 KB | 0.007 ms | 0.03 ms |
+| `setString:`, 1 MB | 0.09 ms | 0.86 ms |
+| `setString:`, 11 MB | 1.0–2.3 ms | 1.8–2.0 ms |
+| `setString:` and the first screen laid out | 1.5 ms | 2.2 ms |
+| `setString:`, then the attributes at the end | 0.9 ms | 1.7 ms |
+| the storage's `replaceCharactersInRange:withString:`, all of it | 1.6 ms | 1.7 ms |
+| the storage's `setAttributedString:`, two runs a line | 33–45 ms | 225 ms |
+| first screen laid out | 0.64 ms | 0.54 ms |
+| all of it laid out | 2.9 s | 1.5 s |
+| last screen, non-contiguous, fresh view | 0.33 ms | 0.33 ms |
+| keystroke and its screen, contiguous (p50 / p99) | 0.047 / 0.075 ms | 0.14 / 10 ms |
+| keystroke, non-contiguous (p50 / p99) | 0.042 / 0.07 ms | 0.88 / 1.2 ms |
+| delete backward, contiguous (p50 / p99) | 0.048 / 0.074 ms | 0.12 / 0.24 ms |
+| keystroke, then the string's length and paragraph (p50 / p99) | 0.049 / 0.075 ms | 0.13 / 0.25 ms |
+| select all, with an input method's rect for it | 0.005 ms | 27 ms |
+| keystroke in a 32 KB paragraph (p50 / p99) | 3.1 / 4.0 ms | 3.4 / 4.3 ms |
+| keystroke in highlighted text left to fix, non-contiguous (p50 / p99) | 0.045 / 0.066 ms | 9.2 / 11 ms |
+| the same once all of it is fixed (p50 / p99) | 0.043 / 0.067 ms | 7.4 / 8.7 ms |
 
-`setString:` builds the paragraph tree and fixes each paragraph's
-attributes up front, where AppKit's storage defers that; full layout goes
+`setString:` copies the text once and counts its paragraphs and units;
+cutting it into paragraphs and fixing its attributes wait until something
+reads or lays out the text there, as AppKit's storage waits to fix (before
+this, it built all 200 000 paragraphs and fixed them up front: 25 ms for
+11 MB, 2 ms for 1 MB, and 380 ms for `setAttributedString:`, whose 400 000
+runs, with a dictionary each, now go in as they are, looked up among the
+last few by `isEqual:` before the storage's table). Typing costs what it
+did, in text left to fix too (the highlighted rows: nine runs a line, set
+through the storage in the view's font, before and after all of it is
+fixed; fixing reads again only the chunk an edit changed). Full layout goes
 at about 14 µs a line of the text engine's shaping. Neither blocks a
 keystroke: sizing a text view never lays text out (it uses the estimates,
 and background layout sizes it again as it goes), and nor does a selection
 change. An edit lays its paragraph out again whole, so a keystroke costs
-what its paragraph's layout costs (the last row). The view isn't in a
-window, so drawing isn't measured.
+what its paragraph's layout costs (the 32 KB paragraph's row). The view
+isn't in a window, so drawing isn't measured.

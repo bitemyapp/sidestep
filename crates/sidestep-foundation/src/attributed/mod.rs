@@ -271,8 +271,9 @@ define_class!(
         #[unsafe(method_id(attributesAtIndex:longestEffectiveRange:inRange:))]
         fn attributes_longest(&self, index: NSUInteger, range: *mut NSRange, limit: NSRange) -> Retained<Dict> {
             let r = Recv::new(self);
+            // The limit isn't checked, as on macOS: what is found is clipped
+            // to it.
             check_index("attributesAtIndex:longestEffectiveRange:inRange:", index, r.len());
-            check("attributesAtIndex:longestEffectiveRange:inRange:", limit, r.len());
             let (attrs, longest) = r.longest(index, limit);
             if !range.is_null() {
                 // SAFETY: the caller passes a valid pointer or null.
@@ -290,8 +291,8 @@ define_class!(
             limit: NSRange,
         ) -> Option<Retained<AnyObject>> {
             let r = Recv::new(self);
+            // As above, the limit isn't checked.
             check_index("attribute:atIndex:longestEffectiveRange:inRange:", index, r.len());
-            check("attribute:atIndex:longestEffectiveRange:inRange:", limit, r.len());
             let (value, longest) = r.longest_value(name, index, limit);
             if !range.is_null() {
                 // SAFETY: the caller passes a valid pointer or null.
@@ -601,6 +602,21 @@ pub struct RunRef {
     pub attrs: Retained<NSDictionary<NSString, AnyObject>>,
 }
 
+/// `found`, a longest effective range, clipped to `limit` as macOS clips
+/// it (measured): to nothing, (0, 0), when it only touches the limit or
+/// misses it (the index it was found around needn't be in the limit); and
+/// the limit's end wraps rather than being checked, so a limit past the
+/// text is no error.
+#[doc(hidden)]
+pub fn clip_to_limit(found: Range<usize>, limit: NSRange) -> NSRange {
+    let limit_end = limit.location.wrapping_add(limit.length);
+    if found.end <= limit.location || limit_end <= found.start {
+        return NSRange::new(0, 0);
+    }
+    let from = found.start.max(limit.location);
+    NSRange::new(from, found.end.min(limit_end).wrapping_sub(from))
+}
+
 /// Run `f` on an attributed string's text and runs. The text is UTF-8 (a
 /// lone surrogate becomes U+FFFD, which keeps byte ranges consistent); the
 /// runs are snapshotted, so no borrow is held while `f` runs.
@@ -611,8 +627,17 @@ pub fn with_runs<R>(s: &NSAttributedString, f: impl FnOnce(&str, &[RunRef]) -> R
     let runs = r.runs_of(NSRange::new(0, len));
     let string = r.string();
     crate::string::with_str(&string, |text| {
-        // Map run boundaries to bytes in one pass over the text.
         let mut out = Vec::with_capacity(runs.runs().len());
+        // As many bytes as units: ASCII, where bytes are units.
+        if text.len() == len {
+            out.extend(runs.runs().iter().map(|run| RunRef {
+                utf16: run.start..run.end(),
+                utf8: run.start..run.end(),
+                attrs: run.attrs.clone(),
+            }));
+            return f(text, &out);
+        }
+        // Map run boundaries to bytes in one pass over the text.
         let (mut unit, mut byte) = (0, 0);
         let mut chars = text.char_indices().peekable();
         for run in runs.runs() {

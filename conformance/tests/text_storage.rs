@@ -340,6 +340,110 @@ fn runs_and_inheritance() {
     assert_eq!(at(&ts, 5).1, (0, 9));
 }
 
+/// The reason of the exception `f` raises (Sidestep panics where Apple
+/// raises).
+fn raises(f: impl FnOnce()) -> String {
+    use std::panic::AssertUnwindSafe;
+    #[cfg(target_vendor = "apple")]
+    {
+        match objc2::exception::catch(AssertUnwindSafe(f)) {
+            Ok(()) => panic!("expected an exception"),
+            Err(Some(e)) => {
+                let reason: Retained<NSString> = unsafe { msg_send![&*e, reason] };
+                reason.to_string()
+            }
+            Err(None) => panic!("nil exception"),
+        }
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        let e = std::panic::catch_unwind(AssertUnwindSafe(f)).expect_err("expected a panic");
+        match e.downcast::<String>() {
+            Ok(s) => *s,
+            Err(e) => e.downcast::<&str>().map(|s| s.to_string()).unwrap_or_default(),
+        }
+    }
+}
+
+/// Longest effective ranges look past runs, as far as the attributes (or
+/// the one attribute) go, and are clipped to the limit: to nothing, (0, 0),
+/// when what they found only touches the limit or misses it (the index
+/// needn't be in the limit). A limit past the text's end is no error; an
+/// index past it is.
+#[test]
+fn longest_effective_ranges() {
+    let ts = NSTextStorage::new();
+    replace(&ts, 0, 0, "0123456789abcdefghij");
+    // Equal values that are different objects, then another attribute.
+    add(&ts, &s("color"), &s("red-long-enough"), 2, 3);
+    add(&ts, &s("color"), &s("red-long-enough"), 5, 3);
+    add(&ts, &s("k"), &s("value-long-enough"), 12, 4);
+    let longest = |i: usize, limit: (usize, usize)| {
+        let (mut a, mut b) = (range(0, 0), range(0, 0));
+        unsafe { ts.attributesAtIndex_longestEffectiveRange_inRange(i, &mut a, range(limit.0, limit.1)) };
+        unsafe { ts.attribute_atIndex_longestEffectiveRange_inRange(&s("color"), i, &mut b, range(limit.0, limit.1)) };
+        (pair(a), pair(b))
+    };
+    let same = |r: (usize, usize)| (r, r);
+    assert_eq!(longest(3, (0, 20)), same((2, 6)));
+    assert_eq!(longest(3, (3, 4)), same((3, 4)));
+    assert_eq!(longest(3, (1, 6)), same((2, 5)));
+    assert_eq!(longest(3, (3, 0)), same((3, 0)));
+    assert_eq!(longest(14, (0, 20)), ((12, 4), (8, 12)));
+    assert_eq!(longest(14, (15, 3)), ((15, 1), (15, 3)));
+    // Only touching the limit, or outside it.
+    assert_eq!(longest(14, (10, 2)), ((0, 0), (10, 2)));
+    assert_eq!(longest(3, (10, 0)), same((0, 0)));
+    assert_eq!(longest(3, (6, 4)), same((6, 2)));
+    assert_eq!(longest(10, (2, 3)), same((0, 0)));
+    assert_eq!(longest(1, (5, 5)), same((0, 0)));
+    // Limits past the text.
+    assert_eq!(longest(3, (0, 21)), same((2, 6)));
+    assert_eq!(longest(3, (18, 5)), same((0, 0)));
+    assert_eq!(longest(3, (usize::MAX, 2)), same((0, 0)));
+    let reason = raises(|| {
+        let _ = longest(20, (0, 20));
+    });
+    assert!(reason.contains("out of bounds"), "{reason}");
+}
+
+/// Walking a text with many runs by longest effective range finds what an
+/// attributed string of the same text finds, in about as long (each range
+/// found costs about as much as the runs it spans).
+#[test]
+fn walking_by_longest_effective_range() {
+    let lines = 5000;
+    let line = "line of the text 123456\n";
+    let text = s(&line.repeat(lines));
+    let fill = |m: &NSMutableAttributedString| {
+        m.replaceCharactersInRange_withString(range(0, 0), &text);
+        for i in 0..lines {
+            unsafe { m.addAttribute_value_range(&s("number"), &s("number"), range(i * line.len(), 6)) };
+        }
+    };
+    let walk = |m: &NSAttributedString, limit: &dyn Fn(usize) -> NSRange| {
+        let (mut i, mut found) = (0, Vec::new());
+        while i < m.length() {
+            let mut r = range(0, 0);
+            let _ = unsafe { m.attribute_atIndex_longestEffectiveRange_inRange(&s("number"), i, &mut r, limit(i)) };
+            found.push(pair(r));
+            i = r.location + r.length;
+        }
+        found
+    };
+    let plain = NSMutableAttributedString::new();
+    fill(&plain);
+    let ts = NSTextStorage::new();
+    fill(&ts);
+    let all = |_| range(0, text.length());
+    let found = walk(&ts, &all);
+    assert_eq!(found.len(), 2 * lines);
+    assert_eq!(found, walk(&plain, &all));
+    // Limited to each line.
+    let each_line = |i: usize| range(i / line.len() * line.len(), line.len());
+    assert_eq!(walk(&ts, &each_line), walk(&plain, &each_line));
+}
+
 /// setAttributedString:, append and insert carry the other string's runs.
 #[test]
 fn attributed_edits() {

@@ -1,12 +1,18 @@
 //! Text editing at scale: an `NSTextView` (as `scrollableTextView` makes
-//! it, not in a window) holding 10 MB of text in 200 000 lines, in the
+//! it, not in a window) holding 11 MB of text in 200 000 lines, in the
 //! 13-point monospaced system font. Run in release mode on macOS (AppKit)
 //! and on Linux (Sidestep) to compare: `cargo run --release -p textbench`.
 //!
 //! Each figure is the median of seven runs (a fresh view each time, after
 //! a warm-up run):
 //!
-//! - `setString`: replacing the view's text with the 10 MB string.
+//! - `setString`: replacing the text of a fresh view with 1 KB, 1 MB and
+//!   the 11 MB string (the first two over 201 and 21 runs); then the same
+//!   with the first screen laid out after it, and with the attributes read
+//!   at the text's end (where a lazy storage fixes them only when asked).
+//! - replacing all the text through the text storage, with
+//!   `replaceCharactersInRange:withString:` and with
+//!   `setAttributedString:` (an attributed string of two runs a line).
 //! - first screen: laying out the top 600 points after that, what the first
 //!   paint needs.
 //! - full layout: laying out all of it (contiguous layout, AppKit's
@@ -25,19 +31,27 @@
 //!   method asks for on each selection change.
 //! - keystroke in a long paragraph: typing in the middle of the middle one
 //!   of 40 paragraphs of 32 KB each (a paragraph is laid out again whole).
+//! - keystroke in highlighted text: the text set through the storage with
+//!   `setAttributedString:` (in the view's font, four highlighted words a
+//!   line, nine runs), then typing in the middle with non-contiguous
+//!   layout, as above: before its attributes are fixed (a lazy storage
+//!   fixes them as layout reaches them), and after they all have been.
 //!
 //! What isn't measured: drawing (turning the laid-out lines into pixels),
 //! which depends on the window system.
 
 use std::time::{Duration, Instant};
 
-use objc2::MainThreadMarker;
 use objc2::rc::Retained;
+use objc2::runtime::AnyObject;
+use objc2::{AnyThread, MainThreadMarker};
 use objc2_app_kit::{
-    NSApplication, NSFont, NSFontWeightRegular, NSLayoutManager, NSScrollView, NSStandardKeyBindingResponding,
-    NSTextContainer, NSTextInputClient, NSTextView,
+    NSApplication, NSFont, NSFontAttributeName, NSFontWeightRegular, NSLayoutManager, NSScrollView,
+    NSStandardKeyBindingResponding, NSTextContainer, NSTextInputClient, NSTextView,
 };
-use objc2_foundation::{NSNotFound, NSPoint, NSRange, NSRect, NSSize, NSString};
+use objc2_foundation::{
+    NSAttributedString, NSDictionary, NSMutableAttributedString, NSNotFound, NSPoint, NSRange, NSRect, NSSize, NSString,
+};
 
 use sidestep as _;
 
@@ -120,6 +134,70 @@ impl View {
     }
 }
 
+/// The text's size as the figures name it.
+fn size_name(bytes: usize) -> String {
+    if bytes >= 500_000 { format!("{:.0} MB", bytes as f64 / 1e6) } else { format!("{:.0} KB", bytes as f64 / 1e3) }
+}
+
+/// The median time of `f` on a fresh view readied by `ready`, over `runs`
+/// runs after a warm-up.
+fn on_fresh_views(mtm: MainThreadMarker, runs: usize, ready: impl Fn(&View), f: impl Fn(&View)) -> f64 {
+    let mut times = Vec::with_capacity(runs);
+    for run in 0..=runs {
+        objc2::rc::autoreleasepool(|_| {
+            let v = view(mtm, false);
+            ready(&v);
+            let t = Instant::now();
+            f(&v);
+            let dt = ms(t.elapsed());
+            drop(v);
+            if run > 0 {
+                times.push(dt);
+            }
+        });
+    }
+    median(times)
+}
+
+/// `text` with two runs a line: its number in an attribute of its own.
+fn two_runs_a_line(text: &NSString) -> Retained<NSMutableAttributedString> {
+    let m = NSMutableAttributedString::from_nsstring(text);
+    let key = NSString::from_str("textbench.number");
+    let value = NSString::from_str("number");
+    let len = text.length();
+    let mut at = 0;
+    while at < len {
+        let line = text.lineRangeForRange(NSRange::new(at, 0));
+        unsafe { m.addAttribute_value_range(&key, &value, NSRange::new(at, 6.min(line.length))) };
+        at = line.location + line.length.max(1);
+    }
+    m
+}
+
+/// `text` in the view's font with four words a line highlighted, as a
+/// highlighter makes it: nine runs a line.
+fn highlighted(text: &NSString) -> Retained<NSMutableAttributedString> {
+    let font = unsafe { NSFont::monospacedSystemFontOfSize_weight(13.0, NSFontWeightRegular) };
+    let attrs = NSDictionary::from_slices(&[unsafe { NSFontAttributeName }], &[&*font as &AnyObject]);
+    let m = unsafe {
+        NSMutableAttributedString::initWithString_attributes(NSMutableAttributedString::alloc(), text, Some(&attrs))
+    };
+    let key = NSString::from_str("textbench.highlight");
+    let value = NSString::from_str("keyword");
+    let len = text.length();
+    let mut at = 0;
+    while at < len {
+        let line = text.lineRangeForRange(NSRange::new(at, 0));
+        for k in 0..4 {
+            if k * 12 + 5 < line.length {
+                unsafe { m.addAttribute_value_range(&key, &value, NSRange::new(at + k * 12, 5)) };
+            }
+        }
+        at = line.location + line.length.max(1);
+    }
+    m
+}
+
 /// 40 paragraphs of 32 KB: words, no line breaks.
 fn long_paragraphs() -> String {
     let words = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor ";
@@ -180,6 +258,8 @@ fn main() {
     let mtm = MainThreadMarker::new().expect("must run on the main thread");
     let _app = NSApplication::sharedApplication(mtm);
     let lines = lines();
+    let small = NSString::from_str(&text(19));
+    let mid = NSString::from_str(&text(18_182));
     let text = text(lines);
     println!("{} bytes, {} lines", text.len(), lines);
     let ns = NSString::from_str(&text);
@@ -188,6 +268,8 @@ fn main() {
     let (mut typed, mut deleted, mut typed_nc, mut deleted_nc) =
         (Keys::default(), Keys::default(), Keys::default(), Keys::default());
     let (mut read, mut long) = (Keys::default(), Keys::default());
+    let (mut lit_lazy, mut lit_fixed) = (Keys::default(), Keys::default());
+    let lit = highlighted(&ns);
     let mut select = Vec::new();
     let long_text = NSString::from_str(&long_paragraphs());
     for run in 0..8 {
@@ -234,9 +316,28 @@ fn main() {
         let knc = keystrokes(&v, View::type_char);
         let dnc = keystrokes(&v, View::delete_backward);
         drop(v);
+        // Highlighted text, typed into before and after its attributes are
+        // all fixed.
+        let mut lit_keys = Vec::new();
+        for fix_first in [false, true] {
+            let v = view(mtm, true);
+            let storage = unsafe { v.tv.textStorage() }.unwrap();
+            let m: &NSMutableAttributedString = &storage;
+            let a: &NSAttributedString = &lit;
+            m.setAttributedString(a);
+            if fix_first {
+                storage.ensureAttributesAreFixedInRange(NSRange::new(0, storage.length()));
+            }
+            v.tv.setSelectedRange(NSRange::new(middle, 0));
+            v.caret_screen();
+            lit_keys.push(keystrokes(&v, View::type_char));
+            drop(v);
+        }
         if warm {
             continue;
         }
+        lit_lazy.add(&lit_keys[0]);
+        lit_fixed.add(&lit_keys[1]);
         set.push(t_set);
         first.push(t_first);
         full.push(t_full);
@@ -249,7 +350,42 @@ fn main() {
         long.add(&l);
         select.push(t_select);
     }
-    println!("{:<34} {:>9.3} ms", "setString (10 MB)", median(set));
+    // setString at other sizes, and what laziness puts off until later.
+    let size = size_name(text.len());
+    let nothing = |_: &View| {};
+    let t_small = on_fresh_views(mtm, 201, nothing, |v| v.tv.setString(&small));
+    let t_mid = on_fresh_views(mtm, 21, nothing, |v| v.tv.setString(&mid));
+    let t_set_first = on_fresh_views(mtm, 7, nothing, |v| {
+        v.tv.setString(&ns);
+        v.screen_at(0.0);
+    });
+    let t_set_attrs = on_fresh_views(mtm, 7, nothing, |v| {
+        v.tv.setString(&ns);
+        let storage = unsafe { v.tv.textStorage() }.unwrap();
+        let mut r = NSRange::new(0, 0);
+        let d = unsafe { storage.attributesAtIndex_effectiveRange(storage.length() - 1, &mut r) };
+        std::hint::black_box((d, r));
+    });
+    let short = |v: &View| v.tv.setString(&small);
+    let t_replace = on_fresh_views(mtm, 7, short, |v| {
+        let storage = unsafe { v.tv.textStorage() }.unwrap();
+        let m: &NSMutableAttributedString = &storage;
+        m.replaceCharactersInRange_withString(NSRange::new(0, storage.length()), &ns);
+    });
+    let attributed = two_runs_a_line(&ns);
+    let t_attributed = on_fresh_views(mtm, 7, short, |v| {
+        let storage = unsafe { v.tv.textStorage() }.unwrap();
+        let m: &NSMutableAttributedString = &storage;
+        let a: &NSAttributedString = &attributed;
+        m.setAttributedString(a);
+    });
+    println!("{:<34} {:>9.3} ms", format!("setString ({})", size_name(small.length())), t_small);
+    println!("{:<34} {:>9.3} ms", format!("setString ({})", size_name(mid.length())), t_mid);
+    println!("{:<34} {:>9.3} ms", format!("setString ({size})"), median(set));
+    println!("{:<34} {:>9.3} ms", "setString and first screen", t_set_first);
+    println!("{:<34} {:>9.3} ms", "setString, attributes at the end", t_set_attrs);
+    println!("{:<34} {:>9.3} ms", "storage: replace all", t_replace);
+    println!("{:<34} {:>9.3} ms", "storage: setAttributedString", t_attributed);
     println!("{:<34} {:>9.3} ms", "first screen", median(first));
     println!("{:<34} {:>9.3} ms", "full layout", median(full));
     println!("{:<34} {:>9.3} ms", "jump to the end (non-contiguous)", median(end));
@@ -260,4 +396,6 @@ fn main() {
     read.report("keystroke and reading the text");
     println!("{:<34} {:>9.3} ms", "select all", median(select));
     long.report("keystroke in a 32 KB paragraph");
+    lit_lazy.report("keystroke, highlighted, to fix");
+    lit_fixed.report("keystroke, highlighted, fixed");
 }

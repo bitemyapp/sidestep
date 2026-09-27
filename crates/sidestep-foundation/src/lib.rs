@@ -82,7 +82,7 @@ pub use const_string::{ConstStr, ConstantString};
 pub use notification::notification;
 
 #[doc(hidden)]
-pub use attributed::{RunRef, with_runs};
+pub use attributed::{RunRef, clip_to_limit, with_runs};
 #[doc(hidden)]
 pub use string::with_str;
 

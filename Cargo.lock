@@ -1462,6 +1462,7 @@ dependencies = [
  "kasuari",
  "kbvm",
  "kurbo",
+ "memchr",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",

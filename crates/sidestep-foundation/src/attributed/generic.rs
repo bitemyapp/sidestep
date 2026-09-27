@@ -228,22 +228,8 @@ impl<'a> Recv<'a> {
     /// equal (by value) to those at `i`, and those attributes.
     pub(crate) fn longest(&self, i: usize, limit: NSRange) -> (Retained<Dict>, NSRange) {
         let (attrs, run) = self.attrs_at(i);
-        let (mut start, mut end) = (run.location.max(limit.location), run.end().min(limit.end()));
-        while start > limit.location {
-            let (prev, r) = self.attrs_at(start - 1);
-            if !dicts::equal(&prev, &attrs) {
-                break;
-            }
-            start = r.location.max(limit.location);
-        }
-        while end < limit.end() {
-            let (next, r) = self.attrs_at(end);
-            if !dicts::equal(&next, &attrs) {
-                break;
-            }
-            end = r.end().min(limit.end());
-        }
-        (attrs, NSRange::new(start, end - start))
+        let found = self.widen(run, limit, |d| dicts::equal(d, &attrs));
+        (attrs, found)
     }
 
     /// The value of `key` at `i`, and the longest range within `limit` with
@@ -256,22 +242,31 @@ impl<'a> Recv<'a> {
     ) -> (Option<Retained<AnyObject>>, NSRange) {
         let (attrs, run) = self.attrs_at(i);
         let value = attrs.objectForKey(key);
-        let (mut start, mut end) = (run.location.max(limit.location), run.end().min(limit.end()));
+        let found = self.widen(run, limit, |d| dicts::values_equal(d.objectForKey(key).as_deref(), value.as_deref()));
+        (value, found)
+    }
+
+    /// `run` widened over the runs either side whose attributes are
+    /// `alike`, as far as `limit` (whose end wraps, as on macOS, rather
+    /// than being checked), then clipped to it as macOS clips it.
+    fn widen(&self, run: NSRange, limit: NSRange, alike: impl Fn(&Dict) -> bool) -> NSRange {
+        let limit_end = limit.location.wrapping_add(limit.length).min(self.len());
+        let (mut start, mut end) = (run.location, run.end());
         while start > limit.location {
             let (prev, r) = self.attrs_at(start - 1);
-            if !dicts::values_equal(prev.objectForKey(key).as_deref(), value.as_deref()) {
+            if !alike(&prev) {
                 break;
             }
-            start = r.location.max(limit.location);
+            start = r.location;
         }
-        while end < limit.end() {
+        while end < limit_end {
             let (next, r) = self.attrs_at(end);
-            if !dicts::values_equal(next.objectForKey(key).as_deref(), value.as_deref()) {
+            if !alike(&next) {
                 break;
             }
-            end = r.end().min(limit.end());
+            end = r.end();
         }
-        (value, NSRange::new(start, end - start))
+        super::clip_to_limit(start..end, limit)
     }
 
     /// Whether two attributed strings hold equal text and equal attributes

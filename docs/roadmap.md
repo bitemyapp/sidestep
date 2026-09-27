@@ -350,7 +350,11 @@ paragraph, about eighty key-binding commands, the clipboard, input
 methods (`NSTextInputClient`) and coalesced typing undo; `NSUndoManager`;
 the window's field editor with the API controls start and end editing
 with; a keystroke and its layout in 11 MB of text in 0.07 ms at p99
-(drawing not measured). See [text.md](text.md).
+(drawing not measured). `setString:` as lazy as AppKit's: long text is
+copied once and cut into paragraphs as reading and layout reach it, and
+attributes are fixed lazily as macOS fixes them (edits of 64 K units or
+more, a stretch at a time when asked for), so setting 11 MB takes 2 ms
+(1.8 ms on macOS; 25 ms before) and 1 MB 0.09 ms. See [text.md](text.md).
 
 - `NSAttributedString` drawing and measuring: `string_drawing` turns
   attribute dictionaries over UTF-16 ranges into the layout's runs
@@ -381,9 +385,11 @@ with; a keystroke and its layout in 11 MB of text in 0.07 ms at p99
   background color drawn, `CGGlyphAtIndex:` and `getGlyphsInRange:…`,
   laying a long paragraph out again from the edited line rather than
   whole (the text engine's frames do; the layout manager needs a paragraph
-  entry point for it), and `setString:` as lazy as AppKit's (it builds the
-  paragraph tree and fixes attributes up front: 25 ms for 11 MB, against
-  1.7 ms).
+  entry point for it); once text left to fix has been fixed in several
+  stretches, AppKit's effective ranges sometimes end between equal
+  attributes where Sidestep's go on; the layout manager's copy of a
+  subclass's text (one with text of its own) is still read whole through
+  its primitives.
 
 ## 4. Controls and services
 

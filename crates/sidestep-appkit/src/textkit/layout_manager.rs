@@ -13,7 +13,13 @@
 //! (AppKit's default) the paragraphs above them first, so positions are
 //! exact, and with `allowsNonContiguousLayout` the ones above keep their
 //! estimates until laid out. `ensureLayout…` and `usedRectForTextContainer:`
-//! lay out what they cover exactly. What remains is laid out when the run
+//! lay out what they cover exactly. Text the storage hasn't cut into
+//! paragraphs yet (text set whole) is estimated a stretch at a time, its
+//! paragraphs alike, so setting 11 MB of text costs a few thousand
+//! estimates, not 200 000. Before laying paragraphs out, the manager has the
+//! storage fix their attributes where it put fixing off, and it lays out
+//! again what an edit changed, not the whole paragraphs a change put off
+//! fixing is widened to. What remains is laid out when the run
 //! loop is idle, a few milliseconds a turn, before it would wait: only
 //! for a manager whose text a view shows, on the main thread (views are
 //! the main thread's, so such a manager is too); other managers lay out
@@ -69,8 +75,8 @@ use sidestep_foundation::runloop::{self, Activity, Mode, ObserverId, RunLoop};
 use super::attrs::{AttrTable, Dict, EMPTY};
 use super::blocks::{self, Chain, Metrics, Place, RowMember};
 use super::container::{self, Geometry};
-use super::layout_cache::{Entry, LayoutCache};
-use super::storage::{AttrId, Storage};
+use super::layout_cache::{Entry, LayoutCache, Piece};
+use super::storage::{AttrId, Extent, Run, Storage};
 use super::temporary::{self, Temporary};
 use crate::text::layout::{Attrs, LineBreak};
 use crate::text::lines::{self, Container, Line, ParagraphLines, Span, Styled};
@@ -162,7 +168,7 @@ define_class!(
                 containers: RefCell::new(Vec::new()),
                 delegate: RefCell::new(Weak::default()),
                 state: RefCell::new(State {
-                    cache: LayoutCache::new(vec![Entry::estimate(0.0)]),
+                    cache: LayoutCache::new(vec![Piece::one(Entry::estimate(0.0))]),
                     resolved: Vec::new(),
                     known: Vec::new(),
                     chains: Vec::new(),
@@ -362,6 +368,9 @@ define_class!(
             _invalidated: NSRange,
         ) {
             let characters = mask.contains(NSTextStorageEditActions::EditedCharacters);
+            // A change widened to whole paragraphs for its delegate is laid
+            // out again as edited.
+            let range = super::text_storage::edited_range(storage, range);
             self.edited(storage, range, delta, characters);
         }
 
@@ -1086,11 +1095,11 @@ impl NSLayoutManagerImpl {
         }
         let geometry = self.read_geometry();
         let n = self.with_text(Storage::paragraph_count).unwrap_or(1);
-        let entries = self.estimates(0..n, &geometry);
+        let pieces = self.estimates(0..n, &geometry);
         {
             let mut state = self.ivars().state.borrow_mut();
             state.geometry = geometry;
-            state.cache = LayoutCache::new(entries);
+            state.cache = LayoutCache::new(pieces);
             state.redraw = None;
             state.mark_moved(0);
         }
@@ -1117,10 +1126,9 @@ impl NSLayoutManagerImpl {
                 self.rebuild();
                 return;
             }
-            m.replace(a..old_end, &text, ids.first().copied().unwrap_or(EMPTY));
-            for ((r, _), id) in runs.iter().zip(ids) {
-                m.set_attrs(a + r.start..a + r.end, id);
-            }
+            let runs: Vec<Run> =
+                runs.iter().zip(ids).map(|((r, _), id)| Run { len: r.len() as u32, attrs: id }).collect();
+            m.replace_runs(a..old_end, &text, &runs);
         }
         let Some((n_new, k0, k1)) =
             self.with_text(|t| (t.paragraph_count(), t.locate(a).para, t.locate(b.min(t.len())).para))
@@ -1134,24 +1142,26 @@ impl NSLayoutManagerImpl {
             return;
         }
         let geometry = self.ivars().state.borrow().geometry;
-        let mut entries = self.estimates(k0..k1 + 1, &geometry);
+        let mut pieces = self.estimates(k0..k1 + 1, &geometry);
+        // A few paragraphs a view shows are laid out now, if they were
+        // before, so that only what changed is drawn again; otherwise all
+        // from them down is.
+        let few = k1 + 1 - k0 <= 8;
         let was_laid = {
             let mut state = self.ivars().state.borrow_mut();
             let old_end = (k0 + old_count as usize).min(state.cache.len());
-            let was_laid = (k0..old_end).all(|p| state.cache.get(p).is_laid());
+            let was_laid = few && (k0..old_end).all(|p| state.cache.get(p).is_laid());
             // One paragraph for one: keep the old extent, which is likelier
             // than an estimate.
-            if old_count == 1 && entries.len() == 1 {
+            if old_count == 1 && pieces.len() == 1 && pieces[0].count == 1 {
                 let old = state.cache.get(k0);
-                entries[0] = Entry { lines: None, ..old.clone() };
+                pieces[0] = Piece::one(Entry { lines: None, ..old.clone() });
             }
-            state.cache.splice(k0, old_count as usize, entries);
+            state.cache.splice(k0, old_count as usize, pieces);
             was_laid
         };
         let around = self.unlay_around(k0, k1);
-        // A few paragraphs a view shows are laid out now, so that only what
-        // changed is drawn again; otherwise all from them down is.
-        let eager = was_laid && around.is_none() && k1 + 1 - k0 <= 8 && self.shown();
+        let eager = was_laid && around.is_none() && self.shown();
         {
             let mut state = self.ivars().state.borrow_mut();
             if !eager {
@@ -1342,6 +1352,13 @@ impl NSLayoutManagerImpl {
         {
             return crate::string_drawing::attrs_of(Some(&dict));
         }
+        let len = self.text_len();
+        let storage = self.ivars().storage.borrow().load();
+        if let Some(storage) = storage
+            && len > 0
+        {
+            super::text_storage::ensure_fixed(&storage, len - 1..len);
+        }
         let last = self.with_text(|t| (!t.is_empty()).then(|| t.attrs_at(t.len() - 1, false).0)).flatten();
         match last.and_then(|id| self.with_table(|t| t.borrow().dict(id).clone())) {
             Some(dict) => crate::string_drawing::attrs_of(Some(&dict)),
@@ -1353,38 +1370,39 @@ impl NSLayoutManagerImpl {
 
     /// Estimated entries for paragraphs `paras`: a line of the paragraph's
     /// first font for each container width of text, at half an em a unit.
-    fn estimates(&self, paras: Range<usize>, g: &Geometry) -> Vec<Entry> {
+    /// Text the storage hasn't cut into paragraphs yet is estimated a
+    /// stretch at a time, its paragraphs alike, as long as the stretch's
+    /// average.
+    fn estimates(&self, paras: Range<usize>, g: &Geometry) -> Vec<Piece> {
         let Some(facts) = self.with_text(|t| {
-            let mut out = Vec::with_capacity(paras.len());
-            if paras.is_empty() {
-                return out;
-            }
-            let mut at = Some(t.locate_paragraph(paras.start));
-            while let Some(a) = at {
-                if a.para >= paras.end {
-                    break;
-                }
-                let p = t.para(a);
-                out.push((p.len16(), p.runs().first().map_or(EMPTY, |r| r.attrs)));
-                at = t.next(a);
-            }
+            let mut out = Vec::new();
+            t.for_each_extent(paras, |e| out.push(e));
             out
         }) else {
             return Vec::new();
         };
-        let mut ids: Vec<AttrId> = facts.iter().map(|f| f.1).collect();
+        let attrs_of = |e: &Extent| match *e {
+            Extent::One { attrs, .. } | Extent::Many { attrs, .. } => attrs.unwrap_or(EMPTY),
+        };
+        let mut ids: Vec<AttrId> = facts.iter().map(attrs_of).collect();
         ids.sort_unstable();
         ids.dedup();
         self.resolve(&ids);
         let state = self.ivars().state.borrow();
         let width = (g.size.width - 2.0 * g.padding).max(1.0) as f32;
+        let estimate = |len: f32, id: AttrId| {
+            let size = state.resolved.get(id as usize).map_or(12.0, |a| a.font.size);
+            let line = (size * 1.25).round().max(1.0);
+            let lines = ((len * size * 0.5) / width).ceil().max(1.0);
+            Entry::estimate(line * lines)
+        };
         facts
             .iter()
-            .map(|&(len, id)| {
-                let size = state.resolved.get(id as usize).map_or(12.0, |a| a.font.size);
-                let line = (size * 1.25).round().max(1.0);
-                let lines = ((len as f32 * size * 0.5) / width).ceil().max(1.0);
-                Entry::estimate(line * lines)
+            .map(|e| match *e {
+                Extent::One { len16, .. } => Piece::one(estimate(len16 as f32, attrs_of(e))),
+                Extent::Many { count, len16, .. } => {
+                    Piece { count, entry: estimate(len16 as f32 / count.max(1) as f32, attrs_of(e)) }
+                }
             })
             .collect()
     }
@@ -1424,6 +1442,7 @@ impl NSLayoutManagerImpl {
         if wanted.is_empty() {
             return 0;
         }
+        self.fix_attributes_of(&wanted);
         self.resolve_runs(&wanted);
         // Paragraphs in text blocks: their neighbours' blocks, and whole
         // table rows. (Paragraphs in none don't depend on their neighbours.)
@@ -1440,6 +1459,7 @@ impl NSLayoutManagerImpl {
                 wanted.extend(rows.into_iter().flatten());
                 wanted.sort_unstable();
                 wanted.dedup();
+                self.fix_attributes_of(&wanted);
                 self.resolve_runs(&wanted);
                 own = self.chains_of(&wanted);
             }
@@ -1548,6 +1568,20 @@ impl NSLayoutManagerImpl {
             limit_lines(&mut state.cache, max_lines, content, padding);
         }
         n
+    }
+
+    /// Have the storage fix the attributes of paragraphs `ps` where it put
+    /// fixing off, before they are laid out.
+    fn fix_attributes_of(&self, ps: &[usize]) {
+        let (Some(&lo), Some(&hi)) = (ps.iter().min(), ps.iter().max()) else { return };
+        let Some(storage) = self.ivars().storage.borrow().load() else { return };
+        let range = self.with_text(|t| {
+            let (a, b) = (t.locate_paragraph(lo), t.locate_paragraph(hi));
+            a.start..b.start + t.para(b).len16() as usize
+        });
+        if let Some(range) = range {
+            super::text_storage::ensure_fixed(&storage, range);
+        }
     }
 
     /// Resolve the attributes of every run of paragraphs `ps`.
@@ -2522,11 +2556,10 @@ type Runs = Vec<(Range<usize>, Retained<Dict>)>;
 fn mirror_of(storage: &NSTextStorage, table: &RefCell<AttrTable>) -> Storage {
     let len = storage.length();
     let (text, runs) = read_range(storage, 0..len);
-    let ids: Vec<AttrId> = runs.iter().map(|(_, d)| super::attrs::intern(table, Some(d))).collect();
-    let mut s = Storage::with_text(&text, ids.first().copied().unwrap_or(EMPTY));
-    for ((r, _), id) in runs.iter().zip(ids) {
-        s.set_attrs(r.clone(), id);
-    }
+    let runs: Vec<Run> =
+        runs.iter().map(|(r, d)| Run { len: r.len() as u32, attrs: super::attrs::intern(table, Some(d)) }).collect();
+    let mut s = Storage::new();
+    s.replace_runs(0..0, &text, &runs);
     s
 }
 

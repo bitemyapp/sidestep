@@ -227,6 +227,35 @@ fn effective_and_longest_ranges() {
     assert!(std::ptr::eq(&*d1, &*d2));
 }
 
+/// Longest ranges are clipped to the limit: to nothing, (0, 0), when what
+/// they found only touches the limit or misses it (the index needn't be in
+/// the limit). A limit past the end is no error.
+#[test]
+fn longest_ranges_clipped_to_the_limit() {
+    let m = NSMutableAttributedString::from_nsstring(&s("0123456789abcdefghij"));
+    add(&m, "color", &s(RED), 2, 3);
+    add(&m, "color", &s(RED), 5, 3);
+    add(&m, "k", &s(BLUE), 12, 4);
+    let longest = |i: usize, limit: (usize, usize)| {
+        let (mut a, mut b) = (NSRange::new(0, 0), NSRange::new(0, 0));
+        let limit = NSRange::new(limit.0, limit.1);
+        unsafe { m.attributesAtIndex_longestEffectiveRange_inRange(i, &mut a, limit) };
+        unsafe { m.attribute_atIndex_longestEffectiveRange_inRange(&s("color"), i, &mut b, limit) };
+        ((a.location, a.length), (b.location, b.length))
+    };
+    let same = |r: (usize, usize)| (r, r);
+    assert_eq!(longest(3, (0, 20)), same((2, 6)));
+    assert_eq!(longest(3, (3, 0)), same((3, 0)));
+    assert_eq!(longest(14, (15, 3)), ((15, 1), (15, 3)));
+    assert_eq!(longest(14, (10, 2)), ((0, 0), (10, 2)));
+    assert_eq!(longest(3, (10, 0)), same((0, 0)));
+    assert_eq!(longest(3, (6, 4)), same((6, 2)));
+    assert_eq!(longest(10, (2, 3)), same((0, 0)));
+    assert_eq!(longest(3, (0, 21)), same((2, 6)));
+    assert_eq!(longest(3, (18, 5)), same((0, 0)));
+    assert_eq!(longest(3, (usize::MAX, 2)), same((0, 0)));
+}
+
 /// "aabbccdd": k=red on 0..2, an equal but separate red on 2..4, j=blue on
 /// 1..3, k=blue on 6..8.
 fn enumerable() -> Retained<NSMutableAttributedString> {

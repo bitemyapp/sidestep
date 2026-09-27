@@ -1734,8 +1734,11 @@ positions in points. `crates/sidestep-appkit/src/text/` holds the stack.
 - **Text editing.** TextKit 1 and the text view live in
   `crates/sidestep-appkit/src/textkit/`, on the lines above: a text
   storage keeps its text as a tree of paragraphs with interned attribute
-  runs; a layout manager keeps an entry per paragraph (its lines, or an
-  estimate of its height, in chunks with lazily summed heights), lays out
+  runs (long text taken in whole is cut into paragraphs as it is first
+  read, and attributes are fixed lazily, as AppKit's storage fixes them);
+  a layout manager keeps an entry per paragraph (its lines, or an
+  estimate of its height, in chunks with lazily summed heights, text not
+  yet cut into paragraphs estimated a stretch at a time), lays out
   a paragraph at a time as questions need it and, for text a view shows,
   the rest when the main run loop is idle, places paragraphs in text
   blocks and table rows, and tells its views what to draw again (a

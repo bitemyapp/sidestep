@@ -12,6 +12,14 @@
 //! paragraphs up to one are laid out, as contiguous layout does before
 //! every question about a line, costs nothing once they are.
 //!
+//! Paragraphs not laid out may be estimated alike, many at a time: a chunk
+//! can hold a number of paragraphs and one entry for all of them (text
+//! taken in whole, which the text storage hasn't cut into paragraphs yet,
+//! is estimated so, a stretch of the storage at a time). Positions in such
+//! a chunk are multiples of its entry's extent, and setting an entry in it
+//! gives the paragraphs around it (half a chunk's worth) entries of their
+//! own, so laying out goes on from there as through any other chunk.
+//!
 //! A paragraph's extent down the page is the spacing before it (none for
 //! the first paragraph, as string drawing places text), its lines, and the
 //! line spacing and paragraph spacing after it; the text's height leaves
@@ -28,6 +36,9 @@ use super::blocks::Place;
 use crate::text::lines::ParagraphLines;
 
 const MAX_CHUNK: usize = 128;
+
+/// As many entries as a chunk made at once holds.
+const HALF: usize = MAX_CHUNK / 2;
 
 /// A paragraph's layout.
 #[derive(Clone, Debug)]
@@ -79,11 +90,41 @@ impl Entry {
     pub fn is_laid(&self) -> bool {
         self.lines.is_some()
     }
+
+    /// Whether it is an estimate just like `other`.
+    fn same_estimate(&self, other: &Entry) -> bool {
+        !self.is_laid()
+            && !other.is_laid()
+            && self.place.is_none()
+            && other.place.is_none()
+            && (self.lead, self.height, self.trail) == (other.lead, other.height, other.trail)
+    }
 }
 
-#[derive(Debug, Default)]
+/// Entries to put in: a paragraph's (`count` 1), or `count` paragraphs'
+/// estimated alike.
+#[derive(Clone, Debug)]
+pub(crate) struct Piece {
+    pub count: usize,
+    pub entry: Entry,
+}
+
+impl Piece {
+    pub fn one(entry: Entry) -> Piece {
+        Piece { count: 1, entry }
+    }
+}
+
+#[derive(Debug)]
+enum Body {
+    Each(Vec<Entry>),
+    /// Paragraphs estimated alike: how many, and the entry each has.
+    Alike(usize, Entry),
+}
+
+#[derive(Debug)]
 struct Chunk {
-    entries: Vec<Entry>,
+    body: Body,
     extent: f64,
     left: f32,
     right: f32,
@@ -91,11 +132,75 @@ struct Chunk {
 }
 
 impl Chunk {
+    fn each(entries: Vec<Entry>) -> Chunk {
+        Chunk::with(Body::Each(entries))
+    }
+
+    fn with(body: Body) -> Chunk {
+        let mut c = Chunk { body, extent: 0.0, left: f32::INFINITY, right: 0.0, laid: 0 };
+        c.resum();
+        c
+    }
+
+    fn len(&self) -> usize {
+        match &self.body {
+            Body::Each(v) => v.len(),
+            Body::Alike(n, _) => *n,
+        }
+    }
+
+    fn get(&self, i: usize) -> &Entry {
+        match &self.body {
+            Body::Each(v) => &v[i],
+            Body::Alike(_, e) => e,
+        }
+    }
+
+    /// The extents of the entries before entry `i`.
+    fn before(&self, i: usize) -> f64 {
+        match &self.body {
+            Body::Each(v) => v[..i].iter().map(Entry::extent).sum(),
+            Body::Alike(_, e) => i as f64 * e.extent(),
+        }
+    }
+
+    /// The first entry from `from` on that isn't laid out.
+    fn first_unlaid(&self, from: usize) -> Option<usize> {
+        match &self.body {
+            Body::Each(v) => v[from..].iter().position(|e| !e.is_laid()).map(|i| from + i),
+            Body::Alike(n, e) => (from < *n && !e.is_laid()).then_some(from),
+        }
+    }
+
     fn resum(&mut self) {
-        self.extent = self.entries.iter().map(Entry::extent).sum();
-        self.left = self.entries.iter().map(|e| e.left).fold(f32::INFINITY, f32::min);
-        self.right = self.entries.iter().map(|e| e.right).fold(0.0, f32::max);
-        self.laid = self.entries.iter().filter(|e| e.is_laid()).count();
+        match &self.body {
+            Body::Each(v) => {
+                self.extent = v.iter().map(Entry::extent).sum();
+                self.left = v.iter().map(|e| e.left).fold(f32::INFINITY, f32::min);
+                self.right = v.iter().map(|e| e.right).fold(0.0, f32::max);
+                self.laid = v.iter().filter(|e| e.is_laid()).count();
+            }
+            Body::Alike(n, e) => {
+                self.extent = *n as f64 * e.extent();
+                (self.left, self.right) = if *n > 0 { (e.left, e.right) } else { (f32::INFINITY, 0.0) };
+                self.laid = if e.is_laid() { *n } else { 0 };
+            }
+        }
+    }
+
+    /// Cut it in two before entry `i` (0 < `i` < its length): the second
+    /// part.
+    fn split_off(&mut self, i: usize) -> Chunk {
+        let rest = match &mut self.body {
+            Body::Each(v) => Body::Each(v.split_off(i)),
+            Body::Alike(n, e) => {
+                let rest = Body::Alike(*n - i, e.clone());
+                *n = i;
+                rest
+            }
+        };
+        self.resum();
+        Chunk::with(rest)
     }
 }
 
@@ -120,11 +225,11 @@ pub(crate) struct LayoutCache {
 }
 
 impl LayoutCache {
-    /// Entries for `n` paragraphs, each estimated with `estimate(i)`.
-    pub fn new(entries: Vec<Entry>) -> LayoutCache {
-        let mut c = LayoutCache { chunks: into_chunks(entries), ..LayoutCache::default() };
+    /// Entries for the paragraphs `pieces` give.
+    pub fn new(pieces: Vec<Piece>) -> LayoutCache {
+        let mut c = LayoutCache { chunks: into_chunks(pieces), ..LayoutCache::default() };
         if c.chunks.is_empty() {
-            c.chunks.push(Chunk::default());
+            c.chunks.push(Chunk::each(Vec::new()));
         }
         c.recount(0);
         c
@@ -132,7 +237,7 @@ impl LayoutCache {
 
     pub fn len(&self) -> usize {
         let last = self.chunks.len() - 1;
-        self.counts[last] + self.chunks[last].entries.len()
+        self.counts[last] + self.chunks[last].len()
     }
 
     /// The left and right edges of the used rects, over the paragraphs
@@ -146,12 +251,12 @@ impl LayoutCache {
         let from = from.min(self.chunks.len());
         self.counts.truncate(from);
         let mut n = match from.checked_sub(1) {
-            Some(p) => self.counts[p] + self.chunks[p].entries.len(),
+            Some(p) => self.counts[p] + self.chunks[p].len(),
             None => 0,
         };
         for c in &self.chunks[from..] {
             self.counts.push(n);
-            n += c.entries.len();
+            n += c.len();
         }
         self.stale.set(self.stale.get().min(from));
     }
@@ -184,7 +289,7 @@ impl LayoutCache {
 
     pub fn get(&self, para: usize) -> &Entry {
         let s = self.slot(para);
-        &self.chunks[s.chunk].entries[s.index]
+        self.chunks[s.chunk].get(s.index)
     }
 
     /// Replace paragraph `para`'s entry.
@@ -192,62 +297,144 @@ impl LayoutCache {
         if !entry.is_laid() {
             self.lower_prefix(para);
         }
-        let s = self.slot(para);
+        let s = self.open(self.slot(para));
         let chunk = &mut self.chunks[s.chunk];
-        chunk.entries[s.index] = entry;
+        if let Body::Each(v) = &mut chunk.body {
+            v[s.index] = entry;
+        }
         chunk.resum();
         self.stale.set(self.stale.get().min(s.chunk + 1));
     }
 
-    /// Replace the `count` entries from paragraph `first` with `new`.
-    pub fn splice(&mut self, first: usize, count: usize, new: Vec<Entry>) {
+    /// Give the paragraph at `s` an entry of its own, and the paragraphs
+    /// around it (in a chunk of estimates alike, half a chunk's worth): where
+    /// it is now.
+    fn open(&mut self, s: Slot) -> Slot {
+        let n = self.chunks[s.chunk].len();
+        if matches!(self.chunks[s.chunk].body, Body::Each(_)) {
+            return s;
+        }
+        let i0 = s.index / HALF * HALF;
+        let w = HALF.min(n - i0);
+        let mut c = s.chunk;
+        if i0 > 0 {
+            self.cut_chunk(c, i0);
+            c += 1;
+        }
+        if w < n - i0 {
+            self.cut_chunk(c, w);
+        }
+        let chunk = &mut self.chunks[c];
+        let entry = chunk.get(0).clone();
+        chunk.body = Body::Each(vec![entry; w]);
+        chunk.resum();
+        Slot { chunk: c, index: s.index - i0, para: s.para }
+    }
+
+    /// Cut chunk `c` in two before its entry `i` (0 < `i` < its length).
+    fn cut_chunk(&mut self, c: usize, i: usize) {
+        let rest = self.chunks[c].split_off(i);
+        self.chunks.insert(c + 1, rest);
+        self.counts.insert(c + 1, self.counts[c] + i);
+        let mut tops = self.tops.borrow_mut();
+        tops.truncate(c + 1);
+        self.stale.set(self.stale.get().min(c + 1));
+    }
+
+    /// A chunk boundary at paragraph `para` (cutting the chunk holding it):
+    /// the index of the chunk that starts there (the number of chunks, at
+    /// the end).
+    fn boundary(&mut self, para: usize) -> usize {
+        if para >= self.len() {
+            return self.chunks.len();
+        }
+        let s = self.slot(para);
+        if s.index == 0 {
+            return s.chunk;
+        }
+        self.cut_chunk(s.chunk, s.index);
+        s.chunk + 1
+    }
+
+    /// Replace the `count` entries from paragraph `first` with those
+    /// `new` gives.
+    pub fn splice(&mut self, first: usize, count: usize, new: Vec<Piece>) {
         self.lower_prefix(first);
-        let s = self.slot(first.min(self.len()));
-        // At the end: after the last entry.
-        let (c0, i0) = if first >= self.len() {
+        let first = first.min(self.len());
+        if new.iter().all(|p| p.count == 1) && self.splice_within(first, count, &new) {
+            return;
+        }
+        let a = self.boundary(first);
+        let b = self.boundary(first + count);
+        let chunks = into_chunks(new);
+        let k = chunks.len();
+        self.chunks.splice(a..b, chunks);
+        // Join the chunks at the seams where they are small enough, and
+        // drop empty ones.
+        let mut join = |c: usize| {
+            if c + 1 >= self.chunks.len() {
+                return;
+            }
+            let (l, r) = (self.chunks[c].len(), self.chunks[c + 1].len());
+            if r == 0 {
+                self.chunks.remove(c + 1);
+            } else if l == 0 {
+                self.chunks.remove(c);
+            } else if l + r <= MAX_CHUNK
+                && let (Body::Each(_), Body::Each(_)) = (&self.chunks[c].body, &self.chunks[c + 1].body)
+            {
+                let next = self.chunks.remove(c + 1);
+                if let (Body::Each(v), Body::Each(w)) = (&mut self.chunks[c].body, next.body) {
+                    v.extend(w);
+                }
+                self.chunks[c].resum();
+            }
+        };
+        if k > 0 {
+            join(a + k - 1);
+        }
+        if a > 0 {
+            join(a - 1);
+        }
+        if self.chunks.len() > 1 && self.chunks.last().is_some_and(|c| c.len() == 0) {
+            self.chunks.pop();
+        }
+        if self.chunks.is_empty() {
+            self.chunks.push(Chunk::each(Vec::new()));
+        }
+        let from = a.saturating_sub(1);
+        self.tops.borrow_mut().truncate(from);
+        self.recount(from);
+    }
+
+    /// [`splice`](Self::splice) of single entries inside one chunk of
+    /// entries (an edit's few paragraphs, as typing makes): done in place,
+    /// the chunks left where they are. Whether it could be.
+    fn splice_within(&mut self, first: usize, count: usize, new: &[Piece]) -> bool {
+        let (c, i) = if first == self.len() {
             let last = self.chunks.len() - 1;
-            (last, self.chunks[last].entries.len())
+            (last, self.chunks[last].len())
         } else {
+            let s = self.slot(first);
             (s.chunk, s.index)
         };
-        let mut left = count;
-        let mut tail = Vec::new();
-        let mut c = c0;
-        let mut i = i0;
-        let mut emptied = Vec::new();
-        while left > 0 && c < self.chunks.len() {
-            let chunk = &mut self.chunks[c];
-            let take = (chunk.entries.len() - i).min(left);
-            chunk.entries.drain(i..i + take);
-            left -= take;
-            if c != c0 {
-                if left == 0 {
-                    tail = std::mem::take(&mut chunk.entries);
-                }
-                emptied.push(c);
-            }
-            c += 1;
-            i = 0;
+        let Body::Each(v) = &mut self.chunks[c].body else { return false };
+        if i + count > v.len() {
+            return false;
         }
-        let chunk = &mut self.chunks[c0];
-        let rest: Vec<Entry> = chunk.entries.drain(i0..).collect();
-        chunk.entries.extend(new);
-        chunk.entries.extend(rest);
-        chunk.entries.extend(tail);
-        for &e in emptied.iter().rev() {
-            self.chunks.remove(e);
-        }
-        let len = self.chunks[c0].entries.len();
-        if len > MAX_CHUNK {
-            let entries = std::mem::take(&mut self.chunks[c0].entries);
-            self.chunks.splice(c0..=c0, into_chunks(entries));
-        } else if len == 0 && self.chunks.len() > 1 {
-            self.chunks.remove(c0);
+        v.splice(i..i + count, new.iter().map(|p| p.entry.clone()));
+        let n = v.len();
+        if n > MAX_CHUNK {
+            let entries = std::mem::take(v);
+            self.chunks.splice(c..=c, into_chunks(entries.into_iter().map(Piece::one).collect()));
+        } else if n == 0 && self.chunks.len() > 1 {
+            self.chunks.remove(c);
         } else {
-            self.chunks[c0].resum();
+            self.chunks[c].resum();
         }
-        self.tops.borrow_mut().truncate(c0);
-        self.recount(c0);
+        self.tops.borrow_mut().truncate(c);
+        self.recount(c);
+        true
     }
 
     /// The top of paragraph `para`'s first line (after its leading
@@ -266,8 +453,7 @@ impl LayoutCache {
         }
         let s = self.slot(para);
         let base = self.tops()[s.chunk];
-        let chunk = &self.chunks[s.chunk];
-        base + chunk.entries[..s.index].iter().map(Entry::extent).sum::<f64>()
+        base + self.chunks[s.chunk].before(s.index)
     }
 
     /// The first paragraph of the table row `para` ends (itself, when it
@@ -292,8 +478,9 @@ impl LayoutCache {
     pub fn height(&self) -> f64 {
         let last = self.chunks.len() - 1;
         let tops = self.tops();
-        let total = tops[last] + self.chunks[last].extent;
-        let tail = self.chunks[last].entries.last().map_or(0.0, Entry::tail);
+        let chunk = &self.chunks[last];
+        let total = tops[last] + chunk.extent;
+        let tail = chunk.len().checked_sub(1).map_or(0.0, |i| chunk.get(i).tail());
         (total - tail).max(0.0)
     }
 
@@ -305,13 +492,22 @@ impl LayoutCache {
         let mut top = tops[c];
         drop(tops);
         let chunk = &self.chunks[c];
-        for (i, e) in chunk.entries.iter().enumerate() {
-            top += e.extent();
-            if y < top || i + 1 == chunk.entries.len() {
-                return self.counts[c] + i;
+        match &chunk.body {
+            Body::Each(v) => {
+                for (i, e) in v.iter().enumerate() {
+                    top += e.extent();
+                    if y < top || i + 1 == v.len() {
+                        return self.counts[c] + i;
+                    }
+                }
+                self.counts[c]
+            }
+            Body::Alike(n, e) => {
+                let h = e.extent();
+                let i = if h > 0.0 { ((y - top) / h).floor().max(0.0) as usize } else { n - 1 };
+                self.counts[c] + i.min(n - 1)
             }
         }
-        self.counts[c]
     }
 
     fn lower_prefix(&self, para: usize) {
@@ -333,12 +529,12 @@ impl LayoutCache {
             if self.counts[c] >= end {
                 break;
             }
-            if chunk.laid == chunk.entries.len() {
+            if chunk.laid == chunk.len() {
                 continue;
             }
             let first = if c == s.chunk { s.index } else { 0 };
-            if let Some(i) = chunk.entries[first..].iter().position(|e| !e.is_laid()) {
-                found = Some(self.counts[c] + first + i).filter(|&p| p < end);
+            if let Some(i) = chunk.first_unlaid(first) {
+                found = Some(self.counts[c] + i).filter(|&p| p < end);
                 break;
             }
         }
@@ -353,28 +549,40 @@ impl LayoutCache {
     /// Entries from paragraph `from` on, with their numbers.
     #[cfg(test)]
     pub fn iter_from(&self, from: usize) -> impl Iterator<Item = (usize, &Entry)> {
-        let s = self.slot(from);
-        let start = if from >= self.len() { self.chunks.len() } else { s.chunk };
-        self.chunks[start.min(self.chunks.len())..].iter().enumerate().flat_map(move |(k, c)| {
-            let chunk = start + k;
-            let skip = if chunk == s.chunk { s.index } else { 0 };
-            c.entries.iter().enumerate().skip(skip).map(move |(i, e)| (self.counts[chunk] + i, e))
-        })
+        (from..self.len()).map(move |p| (p, self.get(p)))
     }
 }
 
-fn new_chunk(entries: Vec<Entry>) -> Chunk {
-    let mut c = Chunk { entries, ..Chunk::default() };
-    c.resum();
-    c
-}
-
-/// Chunks of half the most entries each, moved, not copied.
-fn into_chunks(entries: Vec<Entry>) -> Vec<Chunk> {
-    let mut out = Vec::with_capacity(entries.len().div_ceil(MAX_CHUNK / 2));
-    let mut it = entries.into_iter();
-    while it.len() > 0 {
-        out.push(new_chunk(it.by_ref().take(MAX_CHUNK / 2).collect()));
+/// Chunks for `pieces`: single entries half a chunk at a time, and runs of
+/// estimates alike as they are (joined when alike too).
+fn into_chunks(pieces: Vec<Piece>) -> Vec<Chunk> {
+    let mut out: Vec<Chunk> = Vec::new();
+    let mut each: Vec<Entry> = Vec::new();
+    for p in pieces {
+        match p.count {
+            0 => {}
+            1 => {
+                each.push(p.entry);
+                if each.len() == HALF {
+                    out.push(Chunk::each(std::mem::take(&mut each)));
+                }
+            }
+            n => {
+                if !each.is_empty() {
+                    out.push(Chunk::each(std::mem::take(&mut each)));
+                }
+                match out.last_mut() {
+                    Some(Chunk { body: Body::Alike(m, e), .. }) if e.same_estimate(&p.entry) => {
+                        *m += n;
+                        out.last_mut().expect("just matched").resum();
+                    }
+                    _ => out.push(Chunk::with(Body::Alike(n, p.entry))),
+                }
+            }
+        }
+    }
+    if !each.is_empty() {
+        out.push(Chunk::each(each));
     }
     out
 }
@@ -389,7 +597,7 @@ mod tests {
 
     #[test]
     fn tops_and_heights_follow_edits() {
-        let mut c = LayoutCache::new((0..1000).map(|i| est(10.0 + (i % 3) as f32)).collect());
+        let mut c = LayoutCache::new((0..1000).map(|i| Piece::one(est(10.0 + (i % 3) as f32))).collect());
         let naive = |c: &LayoutCache| {
             let mut y = 0.0;
             let mut tops = Vec::new();
@@ -411,13 +619,13 @@ mod tests {
         c.set(500, Entry { lead: 2.0, height: 40.0, trail: 3.0, left: 1.0, right: 7.0, lines: None, place: None });
         check(&c);
         assert_eq!(c.used_x(), (1.0, 7.0));
-        c.splice(10, 300, (0..5).map(|_| est(1.0)).collect());
+        c.splice(10, 300, (0..5).map(|_| Piece::one(est(1.0))).collect());
         assert_eq!(c.len(), 705);
         check(&c);
-        c.splice(700, 5, (0..400).map(|_| est(2.0)).collect());
+        c.splice(700, 5, (0..400).map(|_| Piece::one(est(2.0))).collect());
         assert_eq!(c.len(), 1100);
         check(&c);
-        c.splice(c.len(), 0, vec![est(5.0)]);
+        c.splice(c.len(), 0, vec![Piece::one(est(5.0))]);
         assert_eq!(c.len(), 1101);
         check(&c);
         assert_eq!(c.next_unlaid(0, c.len()), Some(0));
@@ -443,7 +651,7 @@ mod tests {
     /// plain search, as paragraphs are laid out, unlaid and spliced.
     #[test]
     fn next_unlaid_follows_changes() {
-        let mut c = LayoutCache::new((0..700).map(|_| est(10.0)).collect());
+        let mut c = LayoutCache::new((0..700).map(|_| Piece::one(est(10.0))).collect());
         let naive = |c: &LayoutCache, from: usize, end: usize| (from..end.min(c.len())).find(|&p| !c.get(p).is_laid());
         let check = |c: &LayoutCache| {
             for (from, end) in [(0, usize::MAX), (0, 300), (250, 260), (650, 700), (699, 700), (10, 10)] {
@@ -460,13 +668,99 @@ mod tests {
         check(&c);
         c.set(120, laid());
         check(&c);
-        c.splice(50, 3, vec![est(1.0), laid(), est(2.0), laid()]);
+        c.splice(50, 3, [est(1.0), laid(), est(2.0), laid()].into_iter().map(Piece::one).collect());
         check(&c);
         for p in 0..c.len() {
             c.set(p, laid());
         }
         check(&c);
-        c.splice(c.len(), 0, vec![est(5.0)]);
+        c.splice(c.len(), 0, vec![Piece::one(est(5.0))]);
         check(&c);
+    }
+
+    /// Chunks of estimates alike, against a plain list of entries, through
+    /// sets (which give the paragraphs around entries of their own),
+    /// splices of single entries and runs of alike ones, and unlaying.
+    #[test]
+    fn alike_estimates_follow_edits() {
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut below = |n: usize| {
+            seed ^= seed >> 12;
+            seed ^= seed << 25;
+            seed ^= seed >> 27;
+            (seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) % n.max(1) as u64) as usize
+        };
+        let pieces = |below: &mut dyn FnMut(usize) -> usize| -> Vec<Piece> {
+            (0..below(4))
+                .map(|_| match below(3) {
+                    0 => Piece::one(est(1.0 + below(20) as f32)),
+                    1 => Piece::one(laid()),
+                    _ => Piece { count: 1 + below(700), entry: est(3.0 + below(2) as f32) },
+                })
+                .collect()
+        };
+        let expand = |ps: &[Piece]| -> Vec<Entry> {
+            ps.iter().flat_map(|p| std::iter::repeat_n(p.entry.clone(), p.count)).collect()
+        };
+        let first = vec![
+            Piece { count: 1000, entry: est(10.0) },
+            Piece::one(est(4.0)),
+            Piece { count: 500, entry: est(20.0) },
+            Piece { count: 300, entry: est(20.0) },
+        ];
+        let mut model = expand(&first);
+        let mut c = LayoutCache::new(first);
+        for step in 0..400 {
+            match below(4) {
+                0 => {
+                    let p = below(model.len());
+                    let e = if below(2) == 0 { laid() } else { est(below(30) as f32) };
+                    c.set(p, e.clone());
+                    model[p] = e;
+                }
+                1 | 2 => {
+                    let at = below(model.len() + 1);
+                    let n = below(900).min(model.len() - at);
+                    let new = pieces(&mut below);
+                    model.splice(at..at + n, expand(&new));
+                    c.splice(at, n, new);
+                }
+                _ => {
+                    let p = below(model.len().max(1));
+                    c.unlay(p);
+                    if let Some(e) = model.get_mut(p) {
+                        e.lines = None;
+                    }
+                }
+            }
+            assert_eq!(c.len(), model.len(), "step {step}");
+            let mut y = 0.0;
+            let tops: Vec<f64> = model
+                .iter()
+                .map(|e| {
+                    let t = y;
+                    y += e.extent();
+                    t
+                })
+                .collect();
+            let height = (y - model.last().map_or(0.0, |e| e.tail())).max(0.0);
+            assert!((c.height() - height).abs() < 1e-6, "height at step {step}");
+            for _ in 0..20 {
+                if model.is_empty() {
+                    break;
+                }
+                let p = below(model.len());
+                assert!((c.flow_top(p) - tops[p]).abs() < 1e-6, "top of {p} at step {step}");
+                assert_eq!(c.get(p).height, model[p].height);
+                assert_eq!(c.get(p).is_laid(), model[p].is_laid());
+                if model[p].extent() > 0.0 {
+                    assert_eq!(c.para_at_y(tops[p] + model[p].extent() / 2.0), p, "at y of {p}, step {step}");
+                }
+                let from = below(model.len());
+                let naive = (from..model.len()).find(|&q| !model[q].is_laid());
+                assert_eq!(c.next_unlaid(from, usize::MAX), naive);
+            }
+            assert!(c.chunks.iter().all(|ch| ch.len() > 0 || c.chunks.len() == 1));
+        }
     }
 }
