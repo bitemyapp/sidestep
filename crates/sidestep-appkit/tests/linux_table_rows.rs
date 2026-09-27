@@ -114,6 +114,11 @@ mod linux {
         w.makeKeyAndOrderFront(None);
         testing::settle_first_frames();
         assert!(w.isKeyWindow());
+        // However many frames showing it took, the tests read one frame:
+        // everything drawn again once.
+        testing::take_painted_text();
+        t.setNeedsDisplayInRect(t.bounds());
+        testing::settle();
         let id = testing::showing_id(&w);
         (w, id, t, src)
     }
