@@ -24,7 +24,7 @@ use objc2_app_kit::{
     NSTextStorage, NSTextView, NSTextViewDelegate, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
-    NSArray, NSAttributedString, NSDate, NSMutableAttributedString, NSNotFound, NSNotification, NSNumber,
+    NSArray, NSAttributedString, NSData, NSDate, NSMutableAttributedString, NSNotFound, NSNotification, NSNumber,
     NSObjectProtocol, NSPoint, NSRange, NSRect, NSRunLoop, NSSize, NSString, NSUndoManager, NSValue,
 };
 
@@ -796,6 +796,135 @@ fn pasteboard(mtm: MainThreadMarker) {
     }
 }
 
+/// Rich text on the pasteboard: the types a text view writes and reads
+/// (by their old names, as AppKit lists them), and rich text pasted into
+/// a rich text view keeping its attributes, into a plain one as text.
+#[allow(deprecated)] // The old type names AppKit's lists use.
+fn rich_pasteboard(mtm: MainThreadMarker) {
+    use objc2_app_kit::{
+        NSFontAttributeName, NSFontDescriptorSymbolicTraits, NSHTMLPboardType, NSParagraphStyle,
+        NSParagraphStyleAttributeName, NSPasteboardTypeHTML, NSPasteboardTypeRTF, NSRTFDPboardType, NSRTFPboardType,
+        NSStringPboardType, NSTextAlignment,
+    };
+    let names = |a: Retained<NSArray<NSString>>| a.iter().map(|t| t.to_string()).collect::<Vec<_>>();
+    // SAFETY: constant strings.
+    let (rtf, rtfd, html, string) = unsafe {
+        (
+            NSRTFPboardType.to_string(),
+            NSRTFDPboardType.to_string(),
+            NSHTMLPboardType.to_string(),
+            NSStringPboardType.to_string(),
+        )
+    };
+    let tv = text_view(mtm);
+    assert!(tv.isRichText());
+    tv.setString(&s("Hello world"));
+    tv.setSelectedRange(NSRange::new(0, 0));
+    assert!(names(tv.writablePasteboardTypes()).is_empty(), "nothing to write without a selection");
+    tv.setSelectedRange(NSRange::new(0, 5));
+    let writable = names(tv.writablePasteboardTypes());
+    assert_eq!(writable.first(), Some(&rtf), "{writable:?}");
+    assert!(writable.iter().position(|t| *t == string) > Some(0), "{writable:?}");
+    let readable = names(tv.readablePasteboardTypes());
+    let at = |t: &String| readable.iter().position(|x| x == t).unwrap_or_else(|| panic!("{t} in {readable:?}"));
+    assert!(at(&rtf) == 0 && at(&rtf) < at(&rtfd) && at(&rtfd) < at(&html) && at(&html) < at(&string));
+    // A rich text view takes RTF as it is.
+    let pb = NSPasteboard::pasteboardWithUniqueName();
+    pb.clearContents();
+    let rtf_data =
+        NSData::with_bytes(b"{\\rtf1\\ansi{\\fonttbl\\f0\\fswiss Helvetica;}\\pard\\qc\\f0\\fs40 \\b Centered}");
+    // SAFETY: a constant type.
+    pb.setData_forType(Some(&rtf_data), unsafe { NSPasteboardTypeRTF });
+    tv.setString(&s(""));
+    assert!(tv.readSelectionFromPasteboard(&pb));
+    let storage = storage_of(&tv);
+    assert_eq!(storage.string().to_string(), "Centered");
+    // SAFETY: an index in the text and constant keys.
+    let (font, style) = unsafe {
+        (
+            storage.attribute_atIndex_effectiveRange(NSFontAttributeName, 0, std::ptr::null_mut()),
+            storage.attribute_atIndex_effectiveRange(NSParagraphStyleAttributeName, 0, std::ptr::null_mut()),
+        )
+    };
+    let font = font.unwrap().downcast::<NSFont>().unwrap();
+    assert_eq!(font.pointSize(), 20.0);
+    assert!(font.fontDescriptor().symbolicTraits().contains(NSFontDescriptorSymbolicTraits::TraitBold));
+    assert_eq!(style.unwrap().downcast::<NSParagraphStyle>().unwrap().alignment(), NSTextAlignment::Center);
+    // And HTML.
+    pb.clearContents();
+    // SAFETY: as above.
+    pb.setData_forType(Some(&NSData::with_bytes(b"<meta charset=utf-8><b>bold</b> plain")), unsafe {
+        NSPasteboardTypeHTML
+    });
+    tv.setString(&s(""));
+    assert!(tv.readSelectionFromPasteboard(&pb));
+    let storage = storage_of(&tv);
+    assert_eq!(storage.string().to_string(), "bold plain");
+    // SAFETY: as above.
+    let bold = unsafe { storage.attribute_atIndex_effectiveRange(NSFontAttributeName, 1, std::ptr::null_mut()) };
+    assert!(
+        bold.unwrap()
+            .downcast::<NSFont>()
+            .unwrap()
+            .fontDescriptor()
+            .symbolicTraits()
+            .contains(NSFontDescriptorSymbolicTraits::TraitBold)
+    );
+    // A plain text view writes and reads text first, and takes rich text as
+    // text.
+    let plain = text_view(mtm);
+    plain.setRichText(false);
+    plain.setString(&s("Hello world"));
+    plain.setSelectedRange(NSRange::new(0, 5));
+    assert_eq!(names(plain.writablePasteboardTypes()), std::slice::from_ref(&string));
+    let readable = names(plain.readablePasteboardTypes());
+    assert_eq!(readable.first(), Some(&string), "{readable:?}");
+    assert!(readable.contains(&rtf), "{readable:?}");
+    pb.clearContents();
+    // SAFETY: as above.
+    pb.setData_forType(Some(&rtf_data), unsafe { NSPasteboardTypeRTF });
+    plain.setString(&s(""));
+    assert!(plain.readSelectionFromPasteboard(&pb));
+    assert_eq!(plain.string().to_string(), "Centered");
+    let storage = storage_of(&plain);
+    // SAFETY: as above.
+    let font = unsafe { storage.attribute_atIndex_effectiveRange(NSFontAttributeName, 0, std::ptr::null_mut()) };
+    assert!(font.is_none_or(|f| f.downcast::<NSFont>().unwrap().pointSize() != 20.0), "text in the view's own font");
+    // Writing a rich selection, by the types the view lists (their old
+    // names: macOS's text view declares types named by the new ones, but
+    // writes none of them and answers NO).
+    tv.setString(&s(""));
+    pb.clearContents();
+    // SAFETY: as above.
+    pb.setData_forType(Some(&rtf_data), unsafe { NSPasteboardTypeRTF });
+    assert!(tv.readSelectionFromPasteboard(&pb));
+    tv.setSelectedRange(NSRange::new(0, 8));
+    let out = NSPasteboard::pasteboardWithUniqueName();
+    assert!(tv.writeSelectionToPasteboard_types(&out, &tv.writablePasteboardTypes()));
+    // SAFETY: constant types.
+    let (rtf_type, string_type) = unsafe { (NSPasteboardTypeRTF, NSPasteboardTypeString) };
+    let data = out.dataForType(rtf_type).expect("RTF");
+    let text = String::from_utf8(data.to_vec()).unwrap();
+    assert!(text.starts_with("{\\rtf1") && text.contains("\\b") && text.contains("Centered"), "{text}");
+    assert_eq!(out.stringForType(string_type).unwrap().to_string(), "Centered");
+    // One type at a time, into types declared beforehand: each write keeps
+    // what the others wrote.
+    let each = NSPasteboard::pasteboardWithUniqueName();
+    let old_names = [&*NSString::from_str(&rtf), &*NSString::from_str(&string)];
+    // SAFETY: an array of types, and no owner.
+    unsafe { each.declareTypes_owner(&NSArray::from_slice(&old_names), None) };
+    assert!(tv.writeSelectionToPasteboard_type(&each, old_names[0]));
+    assert!(tv.writeSelectionToPasteboard_type(&each, old_names[1]));
+    assert!(each.dataForType(rtf_type).is_some(), "the RTF stays");
+    assert_eq!(each.stringForType(string_type).unwrap().to_string(), "Centered");
+    // SAFETY: a pasteboard's method, taking nothing.
+    unsafe {
+        let _: () = msg_send![&*pb, releaseGlobally];
+        let _: () = msg_send![&*out, releaseGlobally];
+        let _: () = msg_send![&*each, releaseGlobally];
+    }
+}
+
 /// A window has its delegate's undo manager, or one of its own, which it
 /// keeps once made; views in it find it up the responder chain.
 fn window_undo(mtm: MainThreadMarker) {
@@ -1190,6 +1319,7 @@ fn main() {
         ("undo", undo),
         ("input_client", input_client),
         ("pasteboard", pasteboard),
+        ("rich_pasteboard", rich_pasteboard),
         ("window_undo", window_undo),
         ("field_editor", field_editor),
         ("scrolling", scrolling),

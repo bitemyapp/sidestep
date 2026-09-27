@@ -622,12 +622,12 @@ define_class!(
 
         #[unsafe(method(pasteAsPlainText:))]
         fn paste_as_plain_text(&self, _s: Option<&AnyObject>) {
-            read_selection(tv(self), &NSPasteboard::generalPasteboard(), Kind::Paste);
+            read_as(tv(self), &NSPasteboard::generalPasteboard(), Kind::Paste, &[Flavor::Text]);
         }
 
         #[unsafe(method(pasteAsRichText:))]
         fn paste_as_rich_text(&self, _s: Option<&AnyObject>) {
-            read_selection(tv(self), &NSPasteboard::generalPasteboard(), Kind::Paste);
+            read_as(tv(self), &NSPasteboard::generalPasteboard(), Kind::Paste, &RICH_READABLE);
         }
 
         #[unsafe(method(delete:))]
@@ -658,20 +658,18 @@ define_class!(
         }
 
         #[unsafe(method(readSelectionFromPasteboard:type:))]
-        fn read_selection_from_pasteboard_type(&self, pb: &NSPasteboard, _t: &NSString) -> bool {
-            read_selection(tv(self), pb, Kind::Other)
+        fn read_selection_from_pasteboard_type(&self, pb: &NSPasteboard, t: &NSString) -> bool {
+            Flavor::of(t).is_some_and(|f| read_as(tv(self), pb, Kind::Other, &[f]))
         }
 
         #[unsafe(method_id(writablePasteboardTypes))]
         fn writable_pasteboard_types(&self) -> Retained<NSArray<NSString>> {
-            // SAFETY: as above.
-            NSArray::from_slice(&[unsafe { NSPasteboardTypeString }])
+            names(&writable(tv(self)))
         }
 
         #[unsafe(method_id(readablePasteboardTypes))]
         fn readable_pasteboard_types(&self) -> Retained<NSArray<NSString>> {
-            // SAFETY: as above.
-            NSArray::from_slice(&[unsafe { NSPasteboardTypeString }])
+            names(readable(tv(self)))
         }
 
         #[unsafe(method(validateUserInterfaceItem:))]
@@ -1043,48 +1041,168 @@ fn write_types(v: &NSTextViewImpl, pb: &NSPasteboard, types: &NSArray<NSString>)
     wrote
 }
 
-/// Write the selected text to `pb` as plain text, clearing it first.
-fn write_selection(v: &NSTextViewImpl, pb: &NSPasteboard) -> bool {
-    if v.selection().length == 0 || v.is_secure() {
-        return false;
-    }
-    pb.clearContents();
-    // SAFETY: the constant is a string AppKit exports.
-    write_type(v, pb, unsafe { NSPasteboardTypeString })
+/// What a text view puts on or takes from a pasteboard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Flavor {
+    Rtf,
+    Rtfd,
+    Html,
+    Text,
 }
 
-/// Write the selection to `pb` as type `t`: plain text is the one type
-/// this text view writes.
+/// What a rich text view reads, best first; a plain one reads the text
+/// first, and rich text as text.
+const RICH_READABLE: [Flavor; 4] = [Flavor::Rtf, Flavor::Rtfd, Flavor::Html, Flavor::Text];
+const PLAIN_READABLE: [Flavor; 4] = [Flavor::Text, Flavor::Rtf, Flavor::Rtfd, Flavor::Html];
+
+impl Flavor {
+    /// The flavor a pasteboard type is, by its name or its old name.
+    fn of(t: &NSString) -> Option<Flavor> {
+        use crate::pasteboard_types::{HTML, RTF, RTFD, STRING, from_ns};
+        Some(match from_ns(t).as_str() {
+            RTF => Flavor::Rtf,
+            RTFD => Flavor::Rtfd,
+            HTML => Flavor::Html,
+            STRING => Flavor::Text,
+            _ => return None,
+        })
+    }
+
+    /// The type, by the old name AppKit's text view lists it by (the
+    /// pasteboard takes it as the new one).
+    #[allow(deprecated)] // The old names, which AppKit's text view still lists.
+    fn name(self) -> &'static NSString {
+        use objc2_app_kit::{NSHTMLPboardType, NSRTFDPboardType, NSRTFPboardType, NSStringPboardType};
+        // SAFETY: constant strings AppKit exports.
+        unsafe {
+            match self {
+                Flavor::Rtf => NSRTFPboardType,
+                Flavor::Rtfd => NSRTFDPboardType,
+                Flavor::Html => NSHTMLPboardType,
+                Flavor::Text => NSStringPboardType,
+            }
+        }
+    }
+
+    fn uti(self) -> &'static str {
+        use crate::pasteboard_types::{HTML, RTF, RTFD, STRING};
+        match self {
+            Flavor::Rtf => RTF,
+            Flavor::Rtfd => RTFD,
+            Flavor::Html => HTML,
+            Flavor::Text => STRING,
+        }
+    }
+}
+
+fn names(flavors: &[Flavor]) -> Retained<NSArray<NSString>> {
+    let names: Vec<&NSString> = flavors.iter().map(|f| f.name()).collect();
+    NSArray::from_slice(&names)
+}
+
+/// What the selection is written as: nothing when there is none (as
+/// AppKit's list is empty then), rich text and text from a rich view (RTF
+/// and text, as AppKit writes, and HTML, for the Linux programs that read
+/// no RTF), text from a plain one.
+fn writable(v: &NSTextViewImpl) -> Vec<Flavor> {
+    if v.selection().length == 0 || v.is_secure() {
+        return Vec::new();
+    }
+    if v.as_text_view().isRichText() { vec![Flavor::Rtf, Flavor::Html, Flavor::Text] } else { vec![Flavor::Text] }
+}
+
+fn can_write(v: &NSTextViewImpl, f: Flavor) -> bool {
+    f == Flavor::Text || v.as_text_view().isRichText()
+}
+
+fn readable(v: &NSTextViewImpl) -> &'static [Flavor] {
+    if v.as_text_view().isRichText() { &RICH_READABLE } else { &PLAIN_READABLE }
+}
+
+/// Write the selected text to `pb` as the view writes it.
+fn write_selection(v: &NSTextViewImpl, pb: &NSPasteboard) -> bool {
+    let flavors = writable(v);
+    !flavors.is_empty() && write_flavors(v, pb, &flavors, true)
+}
+
+/// Write the selection to `pb` as type `t`, beside what it holds, if the
+/// view writes that type.
 fn write_type(v: &NSTextViewImpl, pb: &NSPasteboard, t: &NSString) -> bool {
+    Flavor::of(t).is_some_and(|f| can_write(v, f) && write_flavors(v, pb, &[f], false))
+}
+
+/// Write the selected text to `pb` as `flavors`, clearing it first if
+/// `clear`.
+fn write_flavors(v: &NSTextViewImpl, pb: &NSPasteboard, flavors: &[Flavor], clear: bool) -> bool {
     let Some(ts) = storage(v) else { return false };
     let sel = v.selection();
-    // SAFETY: the constant is a string AppKit exports.
-    let string_type = unsafe { NSPasteboardTypeString };
-    if sel.length == 0 || v.is_secure() || !t.isEqualToString(string_type) {
+    if sel.length == 0 || v.is_secure() {
         return false;
     }
-    let text = NSString::from_str(&selection::text(&ts, sel.location..sel.location + sel.length));
-    pb.setString_forType(&text, string_type)
+    if clear {
+        pb.clearContents();
+    }
+    let mut wrote = false;
+    for &f in flavors {
+        wrote |= match f {
+            Flavor::Text => {
+                let text = NSString::from_str(&selection::text(&ts, sel.location..sel.location + sel.length));
+                // SAFETY: the constant is a string AppKit exports.
+                pb.setString_forType(&text, unsafe { NSPasteboardTypeString })
+            }
+            _ => crate::rich::to_pasteboard(&ts, sel, f.uti())
+                .and_then(|value| value.downcast::<objc2_foundation::NSData>().ok())
+                .is_some_and(|data| pb.setData_forType(Some(&data), &NSString::from_str(f.uti()))),
+        };
+    }
+    wrote
 }
 
 /// Replace the selection with `pb`'s text, an edit of `kind` (a paste:
 /// command's is named for undo; `readSelectionFromPasteboard:`'s isn't, as
-/// on macOS).
+/// on macOS), in the first of the view's readable types the pasteboard has.
 fn read_selection(v: &NSTextViewImpl, pb: &NSPasteboard, kind: Kind) -> bool {
+    read_as(v, pb, kind, readable(v))
+}
+
+/// Replace the selection with `pb`'s contents in the first of `flavors` it
+/// has: rich text as it is in a rich text view, as text in a plain one.
+fn read_as(v: &NSTextViewImpl, pb: &NSPasteboard, kind: Kind, flavors: &[Flavor]) -> bool {
     if !v.is_editable_now() {
         return false;
     }
-    // SAFETY: the constant is a string AppKit exports.
-    let Some(text) = pb.stringForType(unsafe { NSPasteboardTypeString }) else { return false };
+    let Some(found) = pb.availableTypeFromArray(&names(flavors)) else { return false };
+    let Some(flavor) = Flavor::of(&found) else { return false };
+    let rich = match flavor {
+        Flavor::Text => None,
+        _ => {
+            let Some(data) = pb.dataForType(&NSString::from_str(flavor.uti())) else { return false };
+            let Some(rich) = crate::rich::from_pasteboard(&data, &NSString::from_str(flavor.uti())) else {
+                return false;
+            };
+            Some(rich)
+        }
+    };
+    let text = match &rich {
+        Some(r) => r.string(),
+        // SAFETY: the constant is a string AppKit exports.
+        None => match pb.stringForType(unsafe { NSPasteboardTypeString }) {
+            Some(text) => text,
+            None => return false,
+        },
+    };
+    let range = v.marked_range().unwrap_or(v.selection());
+    v.ivars().marked.set(None);
+    super::input_client::forget_composition(v);
+    if let Some(rich) = rich.filter(|_| v.as_text_view().isRichText() && !v.is_field_editor_now()) {
+        return v.edit_replace_attributed(range, &rich, kind);
+    }
     let text = if v.is_field_editor_now() {
         // A field holds one line: line breaks become spaces.
         NSString::from_str(&text.to_string().replace(['\n', '\r', '\u{2029}', '\u{2028}'], " "))
     } else {
         text
     };
-    let range = v.marked_range().unwrap_or(v.selection());
-    v.ivars().marked.set(None);
-    super::input_client::forget_composition(v);
     v.edit_replace_ns(range, &text, kind)
 }
 
@@ -1101,8 +1219,7 @@ fn validate(v: &NSTextViewImpl, action: Option<Sel>) -> bool {
     } else if action == sel!(paste:) || action == sel!(pasteAsPlainText:) || action == sel!(pasteAsRichText:) {
         // Only the types are looked at: nothing is read (another program's
         // text may still be on its way).
-        // SAFETY: the constant is a string AppKit exports.
-        let types = NSArray::from_slice(&[unsafe { NSPasteboardTypeString }]);
+        let types = names(readable(v));
         v.is_editable_now() && NSPasteboard::generalPasteboard().availableTypeFromArray(&types).is_some()
     } else if action == sel!(selectAll:) {
         v.is_selectable_now()

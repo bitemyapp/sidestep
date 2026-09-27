@@ -103,17 +103,40 @@ impl Drop for Alive {
 /// text gets the typing attributes. False if the view or its delegate
 /// refused.
 pub(crate) fn user_replace(view: &NSTextViewImpl, range: NSRange, text: &NSString, kind: Kind) -> bool {
-    replace(view, range, text, UndoAs::Kind(kind))
+    replace(view, range, New::Text(text), UndoAs::Kind(kind))
+}
+
+/// [`user_replace`] with text that has attributes of its own (rich text
+/// pasted), which it keeps.
+pub(crate) fn user_replace_attributed(
+    view: &NSTextViewImpl,
+    range: NSRange,
+    text: &NSAttributedString,
+    kind: Kind,
+) -> bool {
+    replace(view, range, New::Attributed(text), UndoAs::Kind(kind))
 }
 
 /// [`user_replace`] registering no undo: an input method's composition
 /// on its way (see `input_client`).
 pub(crate) fn user_replace_quietly(view: &NSTextViewImpl, range: NSRange, text: &NSString) -> bool {
-    replace(view, range, text, UndoAs::Quiet)
+    replace(view, range, New::Text(text), UndoAs::Quiet)
 }
 
-fn replace(view: &NSTextViewImpl, range: NSRange, text: &NSString, undo: UndoAs) -> bool {
+/// What an edit puts in: text in the typing attributes, or text with its
+/// own.
+enum New<'a> {
+    Text(&'a NSString),
+    Attributed(&'a NSAttributedString),
+}
+
+fn replace(view: &NSTextViewImpl, range: NSRange, new: New<'_>, undo: UndoAs) -> bool {
     let tv = view.as_text_view();
+    let string = match new {
+        New::Text(t) => objc2::Message::retain(t),
+        New::Attributed(a) => a.string(),
+    };
+    let text: &NSString = &string;
     view.set_undo_as(undo);
     // SAFETY: the method's own types; a subclass may override it.
     let ok: bool = unsafe { msg_send![tv, shouldChangeTextInRange: range, replacementString: Some(text)] };
@@ -122,9 +145,14 @@ fn replace(view: &NSTextViewImpl, range: NSRange, text: &NSString, undo: UndoAs)
         return false;
     }
     let Some(storage) = view.storage() else { return false };
-    let typing = view.typing_attributes_dict();
-    // SAFETY: the typing attributes are an attribute dictionary.
-    let new = unsafe { NSAttributedString::new_with_attributes(text, &typing) };
+    let new = match new {
+        New::Text(text) => {
+            let typing = view.typing_attributes_dict();
+            // SAFETY: the typing attributes are an attribute dictionary.
+            unsafe { NSAttributedString::new_with_attributes(text, &typing) }
+        }
+        New::Attributed(a) => objc2::Message::retain(a),
+    };
     let added = text.length();
     view.begin_transaction();
     storage.beginEditing();

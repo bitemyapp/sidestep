@@ -77,6 +77,7 @@ mod path;
 mod protocol;
 mod raster;
 mod responder;
+mod rich;
 mod screen;
 mod scroll;
 mod scroller;

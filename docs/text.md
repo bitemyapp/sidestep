@@ -334,7 +334,8 @@ deleting by character, word, line and paragraph (to the kill ring, which
 15.1, as AppKit's is, so a conjunct of an Indic script, one character to
 move over, is deleted a consonant at a time; `transpose:`, case changes
 (of the word the insertion point follows), the mark; `copy:`, `cut:`,
-`paste:` and `delete:` through the general pasteboard (as plain text);
+`paste:`, `pasteAsPlainText:`, `pasteAsRichText:` and `delete:` through
+the general pasteboard (rich text as [below](#rich-text));
 `validateMenuItem:` and `validateUserInterfaceItem:`, which look only at
 the pasteboard's types, reading nothing. A secure view won't copy or cut.
 Like AppKit's, it has no `transposeWords:` or `changeCaseOfLetter:`.
@@ -367,6 +368,127 @@ being asked (its control left the window), is over: it is ended quietly
 when next come across, touching the control only while it is alive, and
 the editor forgets it was editing, so the next session begins afresh.
 
+## Rich text
+
+Attributed strings are read and written as RTF, flat RTFD, HTML and
+plain text by the methods AppKit adds to them
+(`initWithData:options:documentAttributes:error:` and its URL, RTF, RTFD
+and HTML forms, `dataFromRange:documentAttributes:error:`,
+`RTFFromRange:documentAttributes:`, `RTFDFromRange:…`, and a mutable
+string's `readFromData:…` and `readFromURL:…`). The code is in
+`crates/sidestep-appkit/src/rich/`: each format reads into and writes
+from plain data (a text with character runs and paragraphs), which
+`convert` turns into an attributed string and back. Everything a program
+can see was measured on macOS (`conformance/tests/rich_text.rs`).
+
+**Reading.** The type is the one the options name, else what the data
+starts with: flat RTFD, `{\rtf`, an HTML document (`<html`,
+`<!DOCTYPE html`, `<head`), else plain text. A type Sidestep doesn't read
+is error 65806; data that isn't the RTF it is said to be, 256; RTF that
+ends before its last group closes, 259; a URL that isn't a file's, 262
+(`NSFileReadUnsupportedSchemeError`). The document attributes are
+AppKit's: for RTF the page (US Letter and RTF's margins unless the
+document gives its own), the default tab interval (0 in Cocoa's RTF, half
+an inch in others'), hyphenation, text scaling, the Cocoa RTF version
+(80 when the RTF names none) and whatever the document's information
+holds (title, author, keywords, …); for HTML the type (and a Cocoa HTML
+writer's version); for plain text the encoding it was read in.
+
+- **RTF** is read by a reader written from Microsoft's published
+  specification and what AppKit writes: fonts by name (PostScript or
+  family names, else Helvetica, Times or Courier by the family class) with
+  `\b` and `\i` adding traits, Helvetica before any `\f` or for a font
+  the table lacks (`\deff` is ignored and `\plain` goes back to `\f0`,
+  as in AppKit); colors from Cocoa's extended color table
+  in their spaces (sRGB, calibrated RGB, Display P3, gray, CMYK; a system
+  color by its name), else from `\red\green\blue`; underlines and
+  strikethroughs with their styles and colors, super- and subscripts,
+  baseline offsets, kerning, shadows, strokes, obliqueness, expansion,
+  ligatures; hyperlink fields as links; `\uN` with its stand-ins and
+  surrogate pairs; Windows-1250 to 1257, Mac Roman and the DOS pages for
+  `\'hh`, by the document's code page or the font's charset. A paragraph
+  takes the paragraph formatting in effect at its end, and has a
+  paragraph style only once some control word sets one; after `\pard` it
+  is left-aligned (RTF has no natural alignment), left to right, with no
+  tab stops. As on macOS, a right indent becomes a tail indent from the
+  leading margin (the page's text width less the indent), `\cb1` in
+  Cocoa's RTF is no background, `\line` is U+2028 and an optional hyphen
+  is dropped; a parameter keeps the low 32 bits of its digits, and
+  indents and line heights are worked out in floating point (so no
+  number overflows); a mutable string reads RTF onto its end. Unlike
+  AppKit, Word's highlights and character shading are backgrounds,
+  `\cb0` is none, table cells and rows become tabs and paragraph ends,
+  `\expnd` is in quarter points, and `\bin` data is skipped.
+- **HTML** is read without a browser engine, by a tolerant tokenizer
+  and a small CSS: inline styles, `<style>` sheets with type and class
+  selectors, `<font>`. What it makes of markup follows what WebKit makes
+  of it on macOS: Times 12, CSS pixels as points, `monospace` alone at
+  13; bold, italic, underline and strikethrough elements; headings at 24,
+  18, 14, 12, 10 and 9 points, bold, with their header level; links blue
+  and underlined, with a URL when absolute (or made so by a base URL);
+  each paragraph with a style (left to right, no tab stops, a 36-point
+  default tab interval, its block's alignment and indents, and its bottom
+  margin as the spacing after: a `<p>`'s 1em); list items with their
+  markers between tabs, in the style of the item's first text, indented
+  by depth alone, the blocks in an item (a `<p>` in an `<li>`, as Google
+  Docs, GitHub and Confluence write them) lines of its paragraph, which
+  takes their spacing, and nested lists, tables and preformatted text
+  ending it; letters and Roman numerals as macOS counts them (an item's
+  `value` ignored); `<br>` as U+2028 inside a paragraph, heading or list
+  item and a paragraph end elsewhere (outside any block, a trailing one
+  too); `<body>` not a block, so a fragment's last inline text ends
+  without a newline; white space collapsed but in `<pre>`, and an
+  `Apple-converted-space`'s no-break spaces read as spaces; opaque black
+  as no color. Bytes are decoded by their byte order mark, the options'
+  encoding, a `<meta>` charset, else Windows-1252. Unlike macOS, a
+  block's margins add up with its ancestors' and its first line starts
+  with the rest (macOS takes only the innermost `<p>`'s or
+  `<blockquote>`'s margins and starts the first line at the page's margin
+  unless `text-indent` is positive, so a quotation's first line hangs
+  out).
+- **Plain text** is UTF-8 unless the options say (a UTF-16 byte order
+  mark is followed; bytes that aren't UTF-8 are Mac OS Roman), in the
+  options' default attributes, else Helvetica 12.
+
+**Writing.** `NSDocumentTypeDocumentAttribute` says the format (none, or
+one Sidestep doesn't write, is error 66062).
+
+- **RTF** is laid out as AppKit writes it: Windows-1252 with Cocoa's RTF
+  version, a font table of PostScript names, a color table (auto and
+  white first) with Cocoa's extended table beside it, the document's
+  information and page, then a `\pard` wherever a paragraph's style
+  changes (the twelve default tab stops included) and each run's
+  formatting as it changes (the color written again after each `\pard`),
+  links as fields, text beyond Windows-1252 as `\uN`. Text without a font
+  is written in Helvetica 12.
+- **RTFD** is flat RTFD with the RTF as its `TXT.rtf`, byte for byte as
+  AppKit writes it (attachments aren't written yet).
+- **HTML** is an HTML 4.01 document in UTF-8 shaped as AppKit's: a style
+  sheet of paragraph and span classes (margins, indents, alignment, the
+  paragraph's font; a run's font, color, background, decoration, baseline
+  offset and kerning; Helvetica 12 for text without a font), `<b>`, `<i>`,
+  `<sup>`, `<sub>` and `<a href>`, tabs and runs of spaces kept for
+  browsers.
+- **Plain text** is UTF-8 unless `NSCharacterEncodingDocumentAttribute`
+  names another encoding (UTF-16 with its byte order mark,
+  little-endian).
+
+**Pasteboards.** An attributed string writes itself as RTF, HTML and plain
+text (AppKit writes RTF and text; HTML is for the Linux programs that
+read no RTF, browsers among them), with RTFD first when it has
+attachments, and reads itself from flat RTFD, RTF, HTML or text, in that
+order: text as a string, with no attributes, and HTML that names no
+charset as UTF-8 where it is (Linux programs put it there so). A rich text
+view writes its selection as RTF, HTML and text (a plain one as text; with
+no selection, nothing), and reads RTF, RTFD, HTML and text in that order
+(a plain one text first): rich text keeps its attributes in a rich view
+and is text in a plain one or a field editor. `pasteAsPlainText:` reads
+text alone. The lists are AppKit's old type names, as its text view gives
+them (AppKit's writes only types named so: asked for `public.rtf` it
+declares the type but writes nothing and answers NO, where Sidestep's
+writes it). `writeSelectionToPasteboard:type:` writes one type beside
+those already declared.
+
 ## Performance
 
 `examples/textbench` (release; median of seven runs; Linux in a VM on an
@@ -393,6 +515,10 @@ of 13-point monospaced text, in a scrollable text view not in a window.
 | keystroke in a 32 KB paragraph (p50 / p99) | 3.1 / 4.0 ms | 3.4 / 4.3 ms |
 | keystroke in highlighted text left to fix, non-contiguous (p50 / p99) | 0.045 / 0.066 ms | 9.2 / 11 ms |
 | the same once all of it is fixed (p50 / p99) | 0.043 / 0.067 ms | 7.4 / 8.7 ms |
+| 1 MB of rich text (four bold words a line) written as RTF | 141 ms | 127 ms |
+| the same RTF read | 69 ms | 59 ms |
+| the same written as HTML | 198 ms | 719 ms |
+| the same HTML read | 123 ms | 3.7 s |
 
 `setString:` copies the text once and counts its paragraphs and units;
 cutting it into paragraphs and fixing its attributes wait until something
@@ -409,4 +535,7 @@ keystroke: sizing a text view never lays text out (it uses the estimates,
 and background layout sizes it again as it goes), and nor does a selection
 change. An edit lays its paragraph out again whole, so a keystroke costs
 what its paragraph's layout costs (the 32 KB paragraph's row). The view
-isn't in a window, so drawing isn't measured.
+isn't in a window, so drawing isn't measured. Rich text's writers and
+readers pass each paragraph and run once, so their time grows with the
+text (the rich text rows: 18 182 paragraphs of nine runs, as copying from
+and pasting into a rich text view writes and reads them).

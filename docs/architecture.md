@@ -1137,6 +1137,8 @@ Paste and on every drag update, looks at the types only: nothing is read,
 no owner is asked and no object is made. `readObjectsForClasses:options:`
 hands a class of the program's its type as data, unless its
 `readingOptionsForType:pasteboard:` asks for a string or a property list.
+`NSAttributedString` is such a class (reading RTFD, RTF, HTML or text),
+and writes itself as RTF, HTML and text (see `rich`).
 
 Types travel as MIME types (`pasteboard_types.rs` has the table): text as
 `text/plain;charset=utf-8` and its aliases, `public.html` as `text/html`,
@@ -1882,7 +1884,38 @@ positions in points. `crates/sidestep-appkit/src/text/` holds the stack.
   from a link-time category (`NSStringDrawing`, the methods of a helper
   class), which the runtime attaches when `NSString` registers. So a
   program may measure or draw a string as its very first AppKit call
-  (`conformance/tests/text_first_call.rs`).
+  (`conformance/tests/text_first_call.rs`). `NSAttributedString` gets its
+  own (`size`, `drawAtPoint:`, `drawInRect:`,
+  `drawWithRect:options:context:`, `boundingRectWithSize:options:context:`)
+  the same way, attached to Foundation's class: its runs, read through its
+  primitives (so a text storage's too), become one set of layout
+  attributes per distinct dictionary and byte runs over the text, laid
+  out and cached as a string's are; each paragraph takes its first
+  character's paragraph style, and text without attributes is in the
+  12-point interface font (Helvetica 12 on macOS). `NSStringDrawingContext`
+  reports the bounds of what it measured or drew
+  (`conformance/tests/attributed_drawing.rs`).
+- **Rich text.** `rich/` reads and writes attributed strings as RTF, flat
+  RTFD, HTML and plain text, as AppKit's categories on
+  `NSAttributedString` and `NSMutableAttributedString` do
+  (`initWithData:options:documentAttributes:error:`,
+  `dataFromRange:documentAttributes:error:`, `RTFFromRange:…`,
+  `readFromData:…`, …), and makes attributed strings pasteboard readers
+  and writers. Each format works on plain data (`model::Doc`: UTF-8 text,
+  character runs of a style, paragraphs with a paragraph style or none):
+  an RTF lexer and group-state reader written from Microsoft's
+  specification and AppKit's output, a writer laid out as AppKit's (font
+  and color tables, Cocoa's extended color table, `\pard` where a
+  paragraph's style changes, formatting as it changes), flat RTFD, a
+  tolerant HTML tokenizer with a small CSS and a reader that follows what
+  WebKit makes of pasted HTML on macOS, and an HTML writer shaped as
+  AppKit's. `convert` makes fonts (by name, then by family class, traits
+  added through descriptors), colors in their spaces, paragraph styles,
+  shadows and links, one dictionary per distinct style, and reads them
+  back. Single-byte code pages, CSS's named colors and HTML's character
+  references are tables in `rich/tables.rs`. No browser engine or other
+  dependency is used. [text.md](text.md#rich-text) has what each format
+  reads and writes.
 
 - **Text editing.** TextKit 1 and the text view live in
   `crates/sidestep-appkit/src/textkit/`, on the lines above: a text

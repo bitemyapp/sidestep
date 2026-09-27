@@ -60,6 +60,16 @@ harness = false
 name = "text"
 harness = false
 
+# Attributed strings measured and drawn, and read and written as RTF,
+# RTFD, HTML and plain text (rich_text), on the main thread.
+[[test]]
+name = "attributed_drawing"
+harness = false
+
+[[test]]
+name = "rich_text"
+harness = false
+
 # Run loops: the main thread's loop behaves differently from others'.
 [[test]]
 name = "runloop"

@@ -13,18 +13,29 @@
 //! runtime attaches when `NSString` registers, whatever loads first. So a
 //! program can measure or draw a string as its very first AppKit call.
 //!
+//! `NSAttributedString` gets the same methods without the dictionary
+//! (`size`, `drawAtPoint:`, `drawInRect:`, `drawWithRect:options:context:`,
+//! `boundingRectWithSize:options:context:`) from a second category: its
+//! runs become one set of attributes per distinct dictionary, missing
+//! attributes take the defaults (Helvetica 12, which is the 12-point
+//! interface font here, in black), and each paragraph is laid out in the
+//! paragraph style of its first character, as AppKit's are.
+//! `NSStringDrawingContext` reports the bounds of what was measured or
+//! drawn; it doesn't shrink text (`minimumScaleFactor` is kept but its
+//! `actualScaleFactor` is always 1).
+//!
 //! [`attribute_spans`] turns an attributed string's attribute dictionaries
 //! into the attributes and UTF-16 spans that `text::lines` lays out (and,
 //! through byte runs, that [`draw`] and [`measure`] take), and
 //! [`record_frame`] records laid-out lines for a layout manager.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ops::Range;
 
-use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObject};
-use objc2::{ClassType, define_class, msg_send, sel};
+use objc2::rc::{Allocated, Retained};
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
+use objc2::{ClassType, DefinedClass, define_class, msg_send, sel};
 #[allow(deprecated)] // NSObliqueness, which TextKit 2 leaves out and string drawing draws.
 use objc2_app_kit::{
     NSBackgroundColorAttributeName, NSBaselineOffsetAttributeName, NSColor, NSFont, NSFontAttributeName,
@@ -33,7 +44,7 @@ use objc2_app_kit::{
     NSStrikethroughStyleAttributeName, NSStringDrawingContext, NSStringDrawingOptions, NSStrokeColorAttributeName,
     NSStrokeWidthAttributeName, NSUnderlineColorAttributeName, NSUnderlineStyleAttributeName,
 };
-use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{NSAttributedString, NSDictionary, NSPoint, NSRect, NSSize, NSString};
 
 use crate::font::{number, text_font};
 use crate::graphics::{self, Xf, with_recorder};
@@ -481,9 +492,12 @@ define_class!(
             rect: NSRect,
             options: NSStringDrawingOptions,
             attrs: Option<&Attributes>,
-            _context: Option<&NSStringDrawingContext>,
+            context: Option<&NSStringDrawingContext>,
         ) {
-            draw_string(self, attrs, Place::WithRect(rect, options));
+            let text = this_string(self);
+            let attrs = [attrs_of(attrs)];
+            draw(&text, &attrs, &whole(&text), Place::WithRect(rect, options));
+            report(context, || measure(&text, &attrs, &whole(&text), Some((rect.size, options))));
         }
 
         #[unsafe(method(drawWithRect:options:attributes:))]
@@ -503,10 +517,12 @@ define_class!(
             size: NSSize,
             options: NSStringDrawingOptions,
             attrs: Option<&Attributes>,
-            _context: Option<&NSStringDrawingContext>,
+            context: Option<&NSStringDrawingContext>,
         ) -> NSRect {
             let text = this_string(self);
-            measure(&text, &[attrs_of(attrs)], &whole(&text), Some((size, options)))
+            let bounds = measure(&text, &[attrs_of(attrs)], &whole(&text), Some((size, options)));
+            report(context, || bounds);
+            bounds
         }
 
         #[unsafe(method(boundingRectWithSize:options:attributes:))]
@@ -528,6 +544,179 @@ sidestep_runtime::category!("NSString"(NSStringDrawing), |category| {
     // SAFETY: the helper's methods treat their receiver as an NSString.
     unsafe { category.add_methods_of(StringDrawing::class()) };
 });
+
+/// An attributed string's text, its attributes (one per distinct
+/// dictionary) and its runs over the text's bytes: what [`draw`] and
+/// [`measure`] take.
+pub(crate) struct Parts {
+    pub text: String,
+    pub attrs: Vec<Attrs>,
+    pub runs: Vec<Run>,
+}
+
+/// The parts of `string`, read through its primitives (so a subclass with
+/// text of its own, such as a text storage, is read as it answers).
+pub(crate) fn attributed_parts(string: &NSAttributedString) -> Parts {
+    sidestep_foundation::with_runs(string, |text, refs| {
+        let mut attrs: Vec<Attrs> = Vec::new();
+        let mut seen: HashMap<*const Attributes, u32, FxBuild> = HashMap::default();
+        let mut runs = Vec::with_capacity(refs.len());
+        for r in refs.iter().filter(|r| !r.utf8.is_empty()) {
+            let index = *seen.entry(Retained::as_ptr(&r.attrs)).or_insert_with(|| {
+                attrs.push(attrs_of(Some(&r.attrs)));
+                attrs.len() as u32 - 1
+            });
+            runs.push(Run { start: r.utf8.start, end: r.utf8.end, attrs: index });
+        }
+        if runs.is_empty() {
+            attrs.push(attrs_of(None));
+            runs.push(Run { start: 0, end: text.len(), attrs: 0 });
+        }
+        Parts { text: text.to_owned(), attrs, runs }
+    })
+}
+
+fn this_attributed<T>(this: &T) -> Parts {
+    attributed_parts(crate::rich::receiver(this))
+}
+
+impl Parts {
+    fn draw(&self, place: Place) {
+        draw(&self.text, &self.attrs, &self.runs, place);
+    }
+
+    fn measure(&self, bounds: Option<(NSSize, NSStringDrawingOptions)>) -> NSRect {
+        measure(&self.text, &self.attrs, &self.runs, bounds)
+    }
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "_SidestepAttributedStringDrawing"]
+    struct AttributedStringDrawing;
+
+    impl AttributedStringDrawing {
+        #[unsafe(method(size))]
+        fn size(&self) -> NSSize {
+            this_attributed(self).measure(None).size
+        }
+
+        #[unsafe(method(drawAtPoint:))]
+        fn draw_at_point(&self, point: NSPoint) {
+            this_attributed(self).draw(Place::Point(point));
+        }
+
+        #[unsafe(method(drawInRect:))]
+        fn draw_in_rect(&self, rect: NSRect) {
+            this_attributed(self).draw(Place::Rect(rect));
+        }
+
+        #[unsafe(method(drawWithRect:options:context:))]
+        fn draw_with_rect(&self, rect: NSRect, options: NSStringDrawingOptions, context: Option<&NSStringDrawingContext>) {
+            let parts = this_attributed(self);
+            parts.draw(Place::WithRect(rect, options));
+            report(context, || parts.measure(Some((rect.size, options))));
+        }
+
+        #[unsafe(method(drawWithRect:options:))]
+        fn draw_with_rect_no_context(&self, rect: NSRect, options: NSStringDrawingOptions) {
+            this_attributed(self).draw(Place::WithRect(rect, options));
+        }
+
+        #[unsafe(method(boundingRectWithSize:options:context:))]
+        fn bounding_rect(
+            &self,
+            size: NSSize,
+            options: NSStringDrawingOptions,
+            context: Option<&NSStringDrawingContext>,
+        ) -> NSRect {
+            let bounds = this_attributed(self).measure(Some((size, options)));
+            report(context, || bounds);
+            bounds
+        }
+
+        #[unsafe(method(boundingRectWithSize:options:))]
+        fn bounding_rect_no_context(&self, size: NSSize, options: NSStringDrawingOptions) -> NSRect {
+            this_attributed(self).measure(Some((size, options)))
+        }
+    }
+);
+
+// NSAttributedString's drawing methods, as AppKit's NSStringDrawing
+// category adds them. Foundation's class registers first; this attaches to
+// it at link time, whatever loads first.
+sidestep_runtime::category!("NSAttributedString"(NSStringDrawing), |category| {
+    // SAFETY: the helper's methods treat their receiver as an attributed
+    // string.
+    unsafe { category.add_methods_of(AttributedStringDrawing::class()) };
+});
+
+sidestep_runtime::static_class!(pub NSSTRINGDRAWINGCONTEXT, NSSTRINGDRAWINGCONTEXT_META = "NSStringDrawingContext", || {
+    let _ = NSStringDrawingContextImpl::class();
+});
+
+pub(crate) struct ContextIvars {
+    minimum_scale: Cell<f64>,
+    actual_scale: Cell<f64>,
+    total_bounds: Cell<NSRect>,
+}
+
+define_class!(
+    // SAFETY: NSObject has no subclassing requirements; a context is used
+    // by one thread at a time.
+    #[unsafe(super(NSObject))]
+    #[name = "NSStringDrawingContext"]
+    #[ivars = ContextIvars]
+    pub(crate) struct NSStringDrawingContextImpl;
+
+    impl NSStringDrawingContextImpl {
+        #[unsafe(method_id(init))]
+        fn init(this: Allocated<Self>) -> Retained<Self> {
+            // A new context has measured nothing: no scale, no bounds.
+            let this = this.set_ivars(ContextIvars {
+                minimum_scale: Cell::new(0.0),
+                actual_scale: Cell::new(0.0),
+                total_bounds: Cell::new(NSRect::ZERO),
+            });
+            // SAFETY: NSObject's designated initializer.
+            unsafe { msg_send![super(this), init] }
+        }
+
+        #[unsafe(method(minimumScaleFactor))]
+        fn minimum_scale_factor(&self) -> f64 {
+            self.ivars().minimum_scale.get()
+        }
+
+        #[unsafe(method(setMinimumScaleFactor:))]
+        fn set_minimum_scale_factor(&self, factor: f64) {
+            self.ivars().minimum_scale.set(factor);
+        }
+
+        #[unsafe(method(actualScaleFactor))]
+        fn actual_scale_factor(&self) -> f64 {
+            self.ivars().actual_scale.get()
+        }
+
+        #[unsafe(method(totalBounds))]
+        fn total_bounds(&self) -> NSRect {
+            self.ivars().total_bounds.get()
+        }
+    }
+
+    unsafe impl NSObjectProtocol for NSStringDrawingContextImpl {}
+);
+
+/// Tell a drawing context what was measured or drawn: its bounds (as
+/// `boundingRect…` gives them for the same size and options) and a scale of
+/// 1, since text isn't shrunk to fit. Nothing for no context, or an object
+/// that isn't one.
+fn report(context: Option<&NSStringDrawingContext>, bounds: impl FnOnce() -> NSRect) {
+    let Some(context) = context else { return };
+    let object: &AnyObject = context;
+    let Some(ours) = object.downcast_ref::<NSStringDrawingContextImpl>() else { return };
+    ours.ivars().total_bounds.set(bounds());
+    ours.ivars().actual_scale.set(1.0);
+}
 
 #[cfg(test)]
 mod tests {
@@ -941,6 +1130,29 @@ mod tests {
         let expect = &hundred.line.runs[0];
         assert!(runs.iter().any(|r| r.x == 10.0 + expect.x && Arc::ptr_eq(&r.glyphs, &expect.glyphs)));
         assert!(!frame.is_empty());
+    }
+
+    #[test]
+    fn attributed_strings_draw_their_runs() {
+        use objc2_foundation::{NSMutableAttributedString, NSRange};
+        let red = NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 0.0, 0.0, 1.0);
+        let string = NSMutableAttributedString::from_nsstring(&NSString::from_str("aé😀 plain red"));
+        // SAFETY: a constant key and a color, over a range in the text.
+        unsafe { string.addAttribute_value_range(NSForegroundColorAttributeName, &red, NSRange::new(11, 3)) };
+        let parts = attributed_parts(&string);
+        assert_eq!(parts.text, "aé😀 plain red");
+        // One set of attributes per dictionary, the runs over bytes.
+        assert_eq!(parts.attrs.len(), 2);
+        let bounds: Vec<_> = parts.runs.iter().map(|r| (r.start, r.end)).collect();
+        assert_eq!(bounds, [(0, 14), (14, 17)]);
+        assert_eq!(parts.attrs[parts.runs[1].attrs as usize].color, [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(parts.attrs[0].font.size, 12.0, "no font is the 12-point default");
+        // Drawn, the red run is red; empty text still has a run.
+        let ops = record(|| parts.draw(Place::Point(NSPoint::new(0.0, 0.0))));
+        assert!(glyph_runs(&ops).iter().any(|r| r.color == [1.0, 0.0, 0.0, 1.0]));
+        let empty = attributed_parts(&NSMutableAttributedString::from_nsstring(&NSString::from_str("")));
+        assert_eq!((empty.runs.len(), empty.attrs.len()), (1, 1));
+        assert_eq!(empty.measure(None).size.height, parts.measure(None).size.height);
     }
 
     #[test]

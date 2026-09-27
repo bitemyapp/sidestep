@@ -2629,6 +2629,10 @@ impl NSTextViewImpl {
     pub(crate) fn edit_replace_ns(&self, range: NSRange, text: &NSString, kind: Kind) -> bool {
         edit::user_replace(self, range, text, kind)
     }
+
+    pub(crate) fn edit_replace_attributed(&self, range: NSRange, text: &NSAttributedString, kind: Kind) -> bool {
+        edit::user_replace_attributed(self, range, text, kind)
+    }
 }
 
 /// Whether `lm`'s class draws as Sidestep's does (no override of the

@@ -85,8 +85,7 @@ enumeration, paths and numbers; `NSAttributedString` and
   forms; locale tailoring for case mapping and collation, and
   `NSLocale` arguments generally; dictionary-based word breaks for CJK and
   Thai; in regular expressions, character names (`\N{…}`), `\G`, full case
-  folding and exact hit-end flags; attributed string drawing (with the text
-  engine).
+  folding and exact hit-end flags.
 - `-description` on NSObject before Foundation's `NSString` has loaded.
 - Collections: key-value coding on collections (beyond `NSDictionary`'s
   `-valueForKey:`), `NSCoding`; class factory methods (`+array`,
@@ -371,10 +370,23 @@ paragraph styles, kerning, underlines and strikethroughs (with dot and
 dash patterns, and by word), baseline offsets, ligatures, strokes,
 obliqueness, shadows (without blur) and tab stops (`NSTextTab`, read back
 with `tabStops`, laid out in the order set as on macOS); all attribute
-name constants. The line layout TextKit will stand on: lines, clusters
-and carets with UTF-16 ranges and directions, a paragraph or a few lines
-at a time on any thread, hit testing, caret and selection geometry, and
-relayout of only what an edit touched. See
+name constants; the same for attributed strings (`size`, `drawAtPoint:`,
+`drawInRect:`, `drawWithRect:options:context:`,
+`boundingRectWithSize:options:context:`), run by run and paragraph by
+paragraph, and `NSStringDrawingContext`'s bounds. Rich text interchange:
+attributed strings read and written as RTF, flat RTFD, HTML and plain
+text (`initWithData:options:documentAttributes:error:`,
+`dataFromRange:documentAttributes:error:`, `RTFFromRange:…`,
+`initWithRTF:…`, `initWithHTML:…`, `readFromData:…` and the rest) with
+AppKit's document attributes and errors, by an RTF reader and writer
+written from Microsoft's specification and AppKit's output, and an HTML
+reader (no browser engine) and writer shaped as AppKit's; attributed
+strings on the pasteboard (`NSPasteboardReading` and `…Writing`: RTF,
+HTML, text), and rich copy and paste in text views. The line layout
+TextKit will stand on: lines, clusters and carets with UTF-16 ranges and
+directions, a paragraph or a few lines at a time on any thread, hit
+testing, caret and selection geometry, and relayout of only what an edit
+touched. See
 [architecture.md](architecture.md#text). Text editing: TextKit 1
 (`NSTextStorage` over a paragraph tree, `NSLayoutManager` laying out a
 paragraph at a time with idle layout, `NSTextContainer`), text blocks and
@@ -390,14 +402,21 @@ attributes are fixed lazily as macOS fixes them (edits of 64 K units or
 more, a stretch at a time when asked for), so setting 11 MB takes 2 ms
 (1.8 ms on macOS; 25 ms before) and 1 MB 0.09 ms. See [text.md](text.md).
 
-- `NSAttributedString` drawing and measuring: `string_drawing` turns
-  attribute dictionaries over UTF-16 ranges into the layout's runs
-  (`attribute_spans`, `lines::runs_of`); the category methods wait for
-  Foundation's class.
 - `NSExpansion` (advances scaled before line breaking); shadow blur (a
   blurred glyph op); tabs in right-to-left paragraphs, measured from the
   right; descriptors' `fontAttributes` with numbers (`NSNumber`);
-  `NSStringDrawingContext`.
+  `NSStringDrawingContext`'s `minimumScaleFactor` (text isn't shrunk to
+  fit: `actualScaleFactor` is always 1).
+- Rich text still to do: attachments (`NSTextAttachment`: RTFD's other
+  files, `\NeXTGraphic`, pictures in RTF, `<img>`), then
+  `RTFDFileWrapperFromRange:` and file wrappers; Word, Word XML,
+  OpenDocument and web archive documents; double-byte code pages in RTF
+  (Shift-JIS, GBK, Big5, EUC-KR: text beside their `\u` escapes reads
+  rightly); `NSTextList` for HTML lists (read as text with markers) and
+  `NSTextTable` for HTML tables (cells read as paragraphs); CSS selectors
+  with combinators, attributes or pseudo-classes, and `line-height`;
+  `fontAttributesInRange:` and `rulerAttributesInRange:`; the character-
+  and paragraph-formatting pasteboard types (Copy Style).
 - Bidi: clusters give their direction, not the bidi level, for numbers in
   right-to-left text of a left-to-right paragraph (level 2, shown as 0:
   parley keeps levels to itself); explicit embeddings and isolates open
@@ -411,19 +430,18 @@ more, a stretch at a time when asked for), so setting 11 MB takes 2 ms
   Lao, Khmer and Myanmar (parley's `complex-scripts`, several megabytes of
   data).
 - Vertical text, hyphenation, `allowsDefaultTighteningForTruncation`.
-- Text editing still to do: rich text on the pasteboard (RTF), the find
-  bar and `NSTextFinder`, spelling and substitutions, `NSTextList`, text
-  attachments, several text containers, text block height dimensions,
-  vertical alignment, row spans and `hidesEmptyCells`, TextKit 2
-  (`NSTextLayoutManager` and friends), temporary attributes other than a
-  background color drawn, `CGGlyphAtIndex:` and `getGlyphsInRange:…`,
-  laying a long paragraph out again from the edited line rather than
-  whole (the text engine's frames do; the layout manager needs a paragraph
-  entry point for it); once text left to fix has been fixed in several
-  stretches, AppKit's effective ranges sometimes end between equal
-  attributes where Sidestep's go on; the layout manager's copy of a
-  subclass's text (one with text of its own) is still read whole through
-  its primitives.
+- Text editing still to do: the find bar and `NSTextFinder`, spelling and
+  substitutions, `NSTextList`, text attachments, several text containers,
+  text block height dimensions, vertical alignment, row spans and
+  `hidesEmptyCells`, TextKit 2 (`NSTextLayoutManager` and friends),
+  temporary attributes other than a background color drawn,
+  `CGGlyphAtIndex:` and `getGlyphsInRange:…`, laying a long paragraph out
+  again from the edited line rather than whole (the text engine's frames
+  do; the layout manager needs a paragraph entry point for it); once text
+  left to fix has been fixed in several stretches, AppKit's effective
+  ranges sometimes end between equal attributes where Sidestep's go on;
+  the layout manager's copy of a subclass's text (one with text of its
+  own) is still read whole through its primitives.
 
 ## 4. Controls and services
 

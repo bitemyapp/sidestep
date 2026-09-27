@@ -36,6 +36,10 @@
 //!   line, nine runs), then typing in the middle with non-contiguous
 //!   layout, as above: before its attributes are fixed (a lazy storage
 //!   fixes them as layout reaches them), and after they all have been.
+//! - rich text: the 1 MB text with four bold words a line (18 182
+//!   paragraphs, nine runs each) written as RTF and as HTML, as copying it
+//!   from a rich text view writes it, and each read back, as pasting reads
+//!   it (the median of three runs for reading HTML, seven for the rest).
 //!
 //! What isn't measured: drawing (turning the laid-out lines into pixels),
 //! which depends on the window system.
@@ -46,11 +50,13 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{AnyThread, MainThreadMarker};
 use objc2_app_kit::{
-    NSApplication, NSFont, NSFontAttributeName, NSFontWeightRegular, NSLayoutManager, NSScrollView,
-    NSStandardKeyBindingResponding, NSTextContainer, NSTextInputClient, NSTextView,
+    NSApplication, NSAttributedStringDocumentFormats, NSDocumentTypeDocumentAttribute, NSDocumentTypeDocumentOption,
+    NSFont, NSFontAttributeName, NSFontWeightRegular, NSHTMLTextDocumentType, NSLayoutManager, NSRTFTextDocumentType,
+    NSScrollView, NSStandardKeyBindingResponding, NSTextContainer, NSTextInputClient, NSTextView,
 };
 use objc2_foundation::{
-    NSAttributedString, NSDictionary, NSMutableAttributedString, NSNotFound, NSPoint, NSRange, NSRect, NSSize, NSString,
+    NSAttributedString, NSData, NSDictionary, NSMutableAttributedString, NSNotFound, NSPoint, NSRange, NSRect, NSSize,
+    NSString,
 };
 
 use sidestep as _;
@@ -196,6 +202,65 @@ fn highlighted(text: &NSString) -> Retained<NSMutableAttributedString> {
         at = line.location + line.length.max(1);
     }
     m
+}
+
+/// `text` in the 13-point system font with four bold words a line: nine
+/// runs a line that rich text formats write.
+fn bold_words(text: &NSString) -> Retained<NSMutableAttributedString> {
+    let font = NSFont::systemFontOfSize(13.0);
+    let bold = NSFont::boldSystemFontOfSize(13.0);
+    let attrs = NSDictionary::from_slices(&[unsafe { NSFontAttributeName }], &[&*font as &AnyObject]);
+    let m = unsafe {
+        NSMutableAttributedString::initWithString_attributes(NSMutableAttributedString::alloc(), text, Some(&attrs))
+    };
+    let len = text.length();
+    let mut at = 0;
+    while at < len {
+        let line = text.lineRangeForRange(NSRange::new(at, 0));
+        for k in 0..4 {
+            if k * 12 + 5 < line.length {
+                unsafe { m.addAttribute_value_range(NSFontAttributeName, &bold, NSRange::new(at + k * 12, 5)) };
+            }
+        }
+        at = line.location + line.length.max(1);
+    }
+    m
+}
+
+/// The median time of `f` over `runs` runs after a warm-up.
+fn timed<T>(runs: usize, f: impl Fn() -> T) -> f64 {
+    let mut times = Vec::with_capacity(runs);
+    for run in 0..=runs {
+        objc2::rc::autoreleasepool(|_| {
+            let t = Instant::now();
+            std::hint::black_box(f());
+            if run > 0 {
+                times.push(ms(t.elapsed()));
+            }
+        });
+    }
+    median(times)
+}
+
+/// Writing `string` as `kind` (RTF or HTML) and reading it back.
+fn rich_text(string: &NSAttributedString, kind: &NSString, read_runs: usize) -> (f64, f64) {
+    let write = NSDictionary::from_slices(&[unsafe { NSDocumentTypeDocumentAttribute }], &[kind as &AnyObject]);
+    let read = NSDictionary::from_slices(&[unsafe { NSDocumentTypeDocumentOption }], &[kind as &AnyObject]);
+    let range = NSRange::new(0, string.length());
+    let data =
+        || -> Retained<NSData> { unsafe { string.dataFromRange_documentAttributes_error(range, &write) }.unwrap() };
+    let t_write = timed(7, data);
+    let bytes = data();
+    let t_read = timed(read_runs, || unsafe {
+        NSAttributedString::initWithData_options_documentAttributes_error(
+            NSAttributedString::alloc(),
+            &bytes,
+            &read,
+            None,
+        )
+        .unwrap()
+    });
+    (t_write, t_read)
 }
 
 /// 40 paragraphs of 32 KB: words, no line breaks.
@@ -398,4 +463,13 @@ fn main() {
     long.report("keystroke in a 32 KB paragraph");
     lit_lazy.report("keystroke, highlighted, to fix");
     lit_fixed.report("keystroke, highlighted, fixed");
+    let rich = bold_words(&mid);
+    let mid_size = size_name(mid.length());
+    for (name, kind, read_runs) in
+        [("RTF", unsafe { NSRTFTextDocumentType }, 7), ("HTML", unsafe { NSHTMLTextDocumentType }, 3)]
+    {
+        let (write, read) = rich_text(&rich, kind, read_runs);
+        println!("{:<34} {:>9.3} ms", format!("rich text: {mid_size} as {name}"), write);
+        println!("{:<34} {:>9.3} ms", format!("rich text: {mid_size} of {name} read"), read);
+    }
 }

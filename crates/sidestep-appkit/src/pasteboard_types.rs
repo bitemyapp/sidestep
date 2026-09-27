@@ -44,6 +44,8 @@ pub(crate) const STRING: &str = "public.utf8-plain-text";
 pub(crate) const FILE_URL: &str = "public.file-url";
 pub(crate) const URL: &str = "public.url";
 pub(crate) const HTML: &str = "public.html";
+pub(crate) const RTF: &str = "public.rtf";
+pub(crate) const RTFD: &str = "com.apple.flat-rtfd";
 
 /// The two old names whose values a pasteboard makes from its URLs.
 pub(crate) const FILENAMES: &str = "NSFilenamesPboardType";
@@ -54,8 +56,8 @@ const OLD_NAMES: &[(&str, &str)] = &[
     (STRING, "NSStringPboardType"),
     ("public.tiff", "NeXT TIFF v4.0 pasteboard type"),
     ("public.png", "Apple PNG pasteboard type"),
-    ("public.rtf", "NeXT Rich Text Format v1.0 pasteboard type"),
-    ("com.apple.flat-rtfd", "NeXT RTFD pasteboard type"),
+    (RTF, "NeXT Rich Text Format v1.0 pasteboard type"),
+    (RTFD, "NeXT RTFD pasteboard type"),
     ("public.utf8-tab-separated-values-text", "NeXT tabular text pasteboard type"),
     ("com.apple.cocoa.pasteboard.character-formatting", "NeXT font pasteboard type"),
     ("com.apple.cocoa.pasteboard.paragraph-formatting", "NeXT ruler pasteboard type"),
