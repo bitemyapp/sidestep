@@ -1,0 +1,13 @@
+[package]
+name = "ctbench"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+objc2.workspace = true
+objc2-foundation = { workspace = true, features = ["NSString", "NSObject", "NSDictionary", "NSAttributedString"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "objc2", "CFData", "CFString", "CFAttributedString", "CFCGTypes"] }
+objc2-core-graphics = { workspace = true, features = ["CGBitmapContext", "CGColorSpace", "CGContext", "CGDataProvider", "CGFont", "CGImage", "CGPath", "objc2"] }
+objc2-core-text = { workspace = true, features = ["CTFont", "CTFontDescriptor", "CTLine", "CTStringAttributes", "objc2-core-graphics"] }
+sidestep.workspace = true

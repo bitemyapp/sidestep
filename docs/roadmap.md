@@ -236,6 +236,19 @@ pictures on macOS for comparison):
   CGContext]`, `-[NSImage CGImageForProposedRect:context:hints:]`,
   `-[NSBitmapImageRep CGImage]`, `-[NSBezierPath CGPath]` and their
   inverses).
+- CoreText (`coretext/`, the gallery's `SCENARIO=ct` page), on the text
+  engine: `CTFont` as `NSFont` (by
+  name, from descriptors and from `CGFont` font files, metrics, glyphs for
+  characters, advances, bounds, outlines as `CGPath`s, names, tables,
+  traits, feature settings, variations), `CTFontDescriptor` as
+  `NSFontDescriptor`, the
+  font manager and font collections, `CTLine` and `CTRun` (glyphs,
+  positions, advances, indices, typographic and image bounds, carets,
+  truncation, justification), `CTTypesetter`, `CTFramesetter` and
+  `CTFrame`, `CTParagraphStyle`, drawing glyphs and lines into CGContexts
+  (as glyph runs where they stay upright, as outlines otherwise),
+  CoreGraphics' glyph drawing, `CFAttributedString` over
+  `NSAttributedString`, and the string constants.
 
 Events and window behaviour since (`examples/appkit-events` shows sheets,
 modal windows and tooltips; `examples/eventbench` measures):
@@ -338,8 +351,14 @@ Next:
   visual effect views (no Wayland protocol yet), and batching a bitmap
   context's operations instead of rasterizing each at once (layouts other
   than RGBA are unpacked and packed for each).
-- CoreGraphics: text drawing (`CGContextShowGlyphsAtPositions` and its kin
-  do nothing until CoreText), pattern colors, conic gradients, the path
+- CoreText: vertical text, font matrices, ruby and run delegates in
+  layout, ligature carets from `GDEF`, language extents from the font
+  (they're DejaVu Sans's for any font), rules fitted to more fonts (the
+  cap and x heights of fonts without H and O, the slant trait, underline
+  placement), `CTFontCopyFeatures`' names and exclusive groups, runs split
+  where the script changes, and a cache of laid-out lines (a line of 26
+  characters takes 6.5 µs to make, macOS's 2.3 µs).
+- CoreGraphics: pattern colors, conic gradients, the path
   set operations, `CGLayer`, PDF, CMYK and 5-bit bitmap contexts, 16-bit
   and float contexts at their full precision, dithered gradients, color
   management by profile (CMYK, contexts in wide spaces, images and bitmaps
@@ -569,16 +588,18 @@ libobjc2 v2 ABI's `__objc_load` path) the runtime would then need to accept.
 - Keep the fallback declarations crate from [legal.md](legal.md) ready:
   prototype the Cargo mechanics early.
 - CI on Linux x86_64 and aarch64 and on macOS.
-- QuartzCore, CoreText and ImageIO: with the fork, their crates and
-  AppKit's methods with their types (`-[NSView layer]` and the rest) build
-  on Linux, and sidestep-appkit depends on them. Supply the classes and
-  functions behind them next, as CoreGraphics' are: CALayer and
-  CADisplayLink, CTLine and CTFont (which CoreGraphics' text drawing
-  waits for). ImageIO's sources and destinations are done (see
+- QuartzCore: with the fork, its crate and AppKit's methods with its
+  types (`-[NSView layer]` and the rest) build on Linux, and
+  sidestep-appkit depends on it. Supply the classes and functions behind
+  them next, as CoreGraphics', CoreText's and ImageIO's are: CALayer and
+  CADisplayLink. ImageIO's sources and destinations are done (see
   [architecture.md](architecture.md#imageio)); still to do there:
   `CGImageMetadata`, `CGAnimateImage…`, auxiliary data, TIFF pages, ICO
   images and APNG frames past the first, metadata and profiles in files
   written, and HEIC/AVIF (codecs the `image` crate lacks).
+- The fork keeps objc2's safe bridging between AppKit's and CoreText's
+  font types Apple-only; Sidestep's `NSFont` is a `CTFont` (raw casts
+  work), so the bridging could be offered on GNUstep too.
 - Ask objc2 to link objc2-core-services and -natural-language (and any
   framework crate without GNUstep support) to their frameworks only on
   Apple targets; needs the maintainer's go-ahead like the fork's commits.

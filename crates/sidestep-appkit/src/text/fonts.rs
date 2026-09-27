@@ -26,6 +26,7 @@ use parley::fontique::{
 use parley::{FontContext, FontData};
 use skrifa::MetadataProvider;
 use skrifa::instance::{Location, Size};
+use skrifa::raw::TableProvider;
 use skrifa::string::StringId;
 
 /// The face a [`FontSpec`] names when it names no family.
@@ -43,6 +44,247 @@ pub(crate) enum Design {
 pub(crate) enum Family {
     System(Design),
     Named(Arc<str>),
+    /// A face from a font file a program loaded itself (a `CGFont` made
+    /// into a CoreText font): see [`register_data`].
+    Data(DataFamily),
+}
+
+/// A font file's face, laid out under a private family name of its own
+/// (registered in the font collection when a font is first made of it),
+/// so that text laid out in it finds exactly it, whatever families the
+/// system has.
+#[derive(Clone, Debug)]
+pub(crate) struct DataFamily(pub Arc<DataFace>);
+
+#[derive(Debug)]
+pub(crate) struct DataFace {
+    /// The private family name it's laid out under.
+    pub family: Arc<str>,
+    /// Its own weight, style and width, which a spec asks for so that
+    /// nothing is synthesized.
+    pub weight: f32,
+    pub italic: bool,
+    pub stretch: f32,
+    /// The face's file.
+    pub font: FontData,
+    /// Whether the collection took it (it may not: a face without a
+    /// character map can't lay text out), once asked.
+    in_collection: OnceLock<bool>,
+    /// Names the face.
+    id: u64,
+}
+
+impl DataFace {
+    /// Register the face in `fcx`'s collection the first time; whether
+    /// the collection has it.
+    fn collected(&self, fcx: &mut FontContext) -> bool {
+        *self.in_collection.get_or_init(|| {
+            let over = parley::fontique::FontInfoOverride { family_name: Some(&self.family), ..Default::default() };
+            let registered = fcx.collection.register_fonts(self.font.data.clone(), Some(over));
+            registered.iter().flat_map(|(_, fonts)| fonts).any(|f| f.index() == self.font.index)
+        })
+    }
+}
+
+impl PartialEq for DataFamily {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.id == other.0.id
+    }
+}
+
+impl Eq for DataFamily {}
+
+impl std::hash::Hash for DataFamily {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.id.hash(state);
+    }
+}
+
+/// The prefix of the private family names font files are laid out under,
+/// which lists of the system's families leave out.
+pub(crate) const PRIVATE_FAMILY: &str = ".SidestepFont-";
+
+#[derive(Default)]
+struct DataRegistry {
+    /// By blob id and index, and by the file's contents (a hash, the
+    /// length and the index, then the bytes compared): a program that
+    /// loads the same file again gets the face it got the first time.
+    by_blob: HashMap<(u64, u32), DataFamily>,
+    by_content: HashMap<(u64, usize, u32), Vec<DataFamily>>,
+    /// Faces registered by name (`CTFontManagerRegisterGraphicsFont`), by
+    /// PostScript name and full name.
+    named: HashMap<String, DataFamily>,
+}
+
+static DATA: LazyLock<Mutex<DataRegistry>> = LazyLock::new(Default::default);
+
+/// Blobs remembered before the blob map starts over (the content map
+/// still finds their faces).
+const BLOBS: usize = 1024;
+
+fn content_key(font: &FontData) -> (u64, usize, u32) {
+    let bytes = font.data.data();
+    let mut h = super::layout::Fx::default();
+    std::hash::Hasher::write(&mut h, bytes);
+    (std::hash::Hasher::finish(&h), bytes.len(), font.index)
+}
+
+impl DataRegistry {
+    fn find(&mut self, font: &FontData, content: Option<(u64, usize, u32)>) -> Option<DataFamily> {
+        let blob_key = (font.data.id(), font.index);
+        if let Some(found) = self.by_blob.get(&blob_key) {
+            return Some(found.clone());
+        }
+        let bytes = font.data.data();
+        let found = self
+            .by_content
+            .get(&content?)?
+            .iter()
+            .find(|f| f.0.font.data.id() == font.data.id() || f.0.font.data.data() == bytes)
+            .cloned()?;
+        self.remember_blob(blob_key, &found);
+        Some(found)
+    }
+
+    fn remember_blob(&mut self, key: (u64, u32), family: &DataFamily) {
+        if self.by_blob.len() >= BLOBS {
+            self.by_blob.clear();
+        }
+        self.by_blob.insert(key, family.clone());
+    }
+}
+
+/// The face made of `font` before, if any: nothing new is made.
+pub(crate) fn data_face(font: &FontData) -> Option<DataFamily> {
+    let mut reg = DATA.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(found) = reg.find(font, None) {
+        return Some(found);
+    }
+    drop(reg);
+    let content = content_key(font);
+    DATA.lock().unwrap_or_else(|e| e.into_inner()).find(font, Some(content))
+}
+
+/// The face `font` is, made the first time (a file makes one face however
+/// often it's loaded, so a program holds a bounded number of them, which
+/// are never let go). `None` if it isn't a font.
+pub(crate) fn register_data(font: &FontData) -> Option<DataFamily> {
+    if let Some(found) = DATA.lock().unwrap_or_else(|e| e.into_inner()).find(font, None) {
+        return Some(found);
+    }
+    let made = new_data_face(font)?;
+    // Hashing a large file takes a while: not while holding the lock.
+    let content = content_key(font);
+    let mut reg = DATA.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(found) = reg.find(font, Some(content)) {
+        return Some(found);
+    }
+    reg.by_content.entry(content).or_default().push(made.clone());
+    reg.remember_blob((font.data.id(), font.index), &made);
+    Some(made)
+}
+
+/// A face of `font` not remembered anywhere (for a descriptor of a file
+/// that may never be used), unless one was made before.
+pub(crate) fn peek_data(font: &FontData) -> Option<DataFamily> {
+    data_face(font).or_else(|| new_data_face(font))
+}
+
+fn new_data_face(font: &FontData) -> Option<DataFamily> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let file = skrifa::FontRef::from_index(font.data.data(), font.index).ok()?;
+    let a = file.attributes();
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let face = DataFace {
+        family: format!("{PRIVATE_FAMILY}{id}").into(),
+        weight: a.weight.value(),
+        italic: a.style != skrifa::attribute::Style::Normal,
+        stretch: a.stretch.ratio(),
+        font: font.clone(),
+        in_collection: OnceLock::new(),
+        id,
+    };
+    Some(DataFamily(Arc::new(face)))
+}
+
+/// A name from `font`'s `name` table: the English one, or the first there
+/// is; none if it's missing or empty.
+pub(crate) fn name_of(font: &skrifa::FontRef<'_>, id: StringId) -> Option<String> {
+    let s: String = font.localized_strings(id).english_or_first()?.chars().collect();
+    (!s.is_empty()).then_some(s)
+}
+
+/// A file face's name from its `name` table (`id`), or its private
+/// family's.
+fn data_string(face: &DataFace, id: StringId) -> String {
+    skrifa::FontRef::from_index(face.font.data.data(), face.font.index)
+        .ok()
+        .and_then(|f| name_of(&f, id))
+        .unwrap_or_else(|| face.family.to_string())
+}
+
+/// A file face's PostScript name.
+pub(crate) fn data_name(face: &DataFace) -> String {
+    data_string(face, StringId::POSTSCRIPT_NAME)
+}
+
+/// A file face's full name.
+pub(crate) fn data_full_name(face: &DataFace) -> String {
+    data_string(face, StringId::FULL_NAME)
+}
+
+/// The system's family names, in order (case aside), leaving out the
+/// private ones font files are laid out under.
+pub(crate) fn family_names() -> Vec<String> {
+    let mut names: Vec<String> = crate::text::with_ctx(|ctx| {
+        ctx.fcx.collection.family_names().filter(|n| !n.starts_with(PRIVATE_FAMILY)).map(String::from).collect()
+    });
+    names.sort_by_key(|n| n.to_lowercase());
+    names.dedup();
+    names
+}
+
+/// The weight, style and width of each face of the family `name`.
+pub(crate) fn family_faces(name: &str) -> Vec<(f32, bool, f32)> {
+    crate::text::with_ctx(|ctx| {
+        let Some(family) = ctx.fcx.collection.family_by_name(name) else { return Vec::new() };
+        family
+            .fonts()
+            .iter()
+            .map(|f| (f.weight().value(), !matches!(f.style(), FontStyle::Normal), f.width().ratio()))
+            .collect()
+    })
+}
+
+/// Make `family` findable by its PostScript and full names, as a font
+/// registered with the font manager is.
+pub(crate) fn register_named(family: &DataFamily, names: &[&str]) {
+    let mut reg = DATA.lock().unwrap_or_else(|e| e.into_inner());
+    for name in names.iter().filter(|n| !n.is_empty()) {
+        reg.named.insert((*name).to_string(), family.clone());
+    }
+}
+
+/// Forget the names [`register_named`] gave `family`; whether it had any.
+pub(crate) fn unregister_named(family: &DataFamily) -> bool {
+    let mut reg = DATA.lock().unwrap_or_else(|e| e.into_inner());
+    let before = reg.named.len();
+    reg.named.retain(|_, f| f != family);
+    reg.named.len() != before
+}
+
+/// The names faces were registered by with [`register_named`].
+pub(crate) fn registered_names() -> Vec<(String, DataFamily)> {
+    let reg = DATA.lock().unwrap_or_else(|e| e.into_inner());
+    reg.named.iter().map(|(n, f)| (n.clone(), f.clone())).collect()
+}
+
+impl FontSpec {
+    /// A spec for a registered file's face, as it is (nothing synthesized).
+    pub fn data(family: DataFamily, size: f64) -> Self {
+        let (weight, italic, stretch) = (family.0.weight, family.0.italic, family.0.stretch);
+        FontSpec { family: Family::Data(family), weight, italic, stretch, ..FontSpec::system(Design::Default, size) }
+    }
 }
 
 /// What an `NSFont` or `NSFontDescriptor` asks for.
@@ -61,6 +303,9 @@ pub(crate) struct FontSpec {
     /// OpenType features turned on or off, from a descriptor's feature
     /// settings.
     pub features: Option<Features>,
+    /// Variation axis values a descriptor set (tag and value), which the
+    /// face is matched and laid out at.
+    pub variations: Option<Variations>,
     /// The spec names a family or font the system doesn't have, so no font
     /// matches it (`fontWithDescriptor:size:` gives nil); `family` holds
     /// the name.
@@ -69,6 +314,9 @@ pub(crate) struct FontSpec {
 
 /// OpenType feature tags and values.
 pub(crate) type Features = Arc<[([u8; 4], u16)]>;
+
+/// Variation axis tags and values.
+pub(crate) type Variations = Arc<[([u8; 4], f32)]>;
 
 impl FontSpec {
     pub fn system(design: Design, size: f64) -> Self {
@@ -80,6 +328,7 @@ impl FontSpec {
             size,
             tabular_digits: false,
             features: None,
+            variations: None,
             missing: false,
         }
     }
@@ -90,9 +339,13 @@ impl FontSpec {
             weight: self.weight.to_bits(),
             italic: self.italic,
             stretch: self.stretch.to_bits(),
+            variations: self.variations.as_ref().map(|v| v.iter().map(|&(t, x)| (t, x.to_bits())).collect()),
         }
     }
 }
+
+/// Variation tags and the bits of their values, as a key.
+type VariationBits = Arc<[([u8; 4], u32)]>;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct FaceKey {
@@ -100,6 +353,7 @@ pub(crate) struct FaceKey {
     weight: u32,
     italic: bool,
     stretch: u32,
+    variations: Option<VariationBits>,
 }
 
 /// Vertical and other metrics of a face, per point of size. Distances
@@ -123,11 +377,36 @@ pub(crate) struct Metrics {
     pub max_advance: f32,
 }
 
+/// A face's metrics in its own units, as CoreText reports them scaled
+/// to a size (exactly: the file's integers times the size over the units
+/// per em). Distances follow [`Metrics`]' signs.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Units {
+    pub per_em: f64,
+    pub ascent: f64,
+    pub descent: f64,
+    pub leading: f64,
+    pub cap_height: f64,
+    pub x_height: f64,
+    pub underline_position: f64,
+    pub underline_thickness: f64,
+    /// x0, y0, x1, y1.
+    pub bounds: [f64; 4],
+    pub italic_angle: f64,
+    /// The typographic ascender and descender (`OS/2`), for vertical
+    /// glyph metrics.
+    pub typo_ascender: f64,
+    pub typo_descender: f64,
+}
+
 /// A face resolved from a [`FontSpec`], with what `NSFont` reports about it.
 #[derive(Debug)]
 pub(crate) struct Face {
     /// The family to lay text out in, as the collection names it.
     pub family: Arc<str>,
+    /// The family name to report: the collection's, or a font file's own
+    /// (from its `name` table) for a face registered under a private one.
+    pub family_name: Arc<str>,
     pub postscript_name: Arc<str>,
     pub full_name: Arc<str>,
     /// What layout asks for to get this face: the spec's width and style,
@@ -137,11 +416,41 @@ pub(crate) struct Face {
     pub italic: bool,
     pub stretch: f32,
     pub metrics: Metrics,
+    pub units: Units,
     pub fixed_pitch: bool,
     pub glyph_count: u32,
-    /// The font file, and the variation settings the face was matched with.
+    /// The font file, and the variation settings the face was matched with
+    /// (and those a descriptor set, which follow them).
     pub font: Option<FontData>,
     pub variations: Vec<(skrifa::Tag, f32)>,
+    /// The variation settings a descriptor set, which layout asks for.
+    pub set_variations: Vec<(skrifa::Tag, f32)>,
+    /// Its glyphs' outline boxes, as they're asked for.
+    pub boxes: GlyphBoxes,
+    /// Its glyphs by name (from `post` or the CFF charset), made the first
+    /// time one is looked up.
+    pub glyph_names: OnceLock<HashMap<Box<str>, u16>>,
+}
+
+/// A face's glyphs' outline boxes (x0, y0, x1, y1 in font units; none for
+/// an empty outline), found once each: finding one can mean drawing the
+/// outline. At most one entry a glyph.
+#[derive(Debug, Default)]
+pub(crate) struct GlyphBoxes(RwLock<HashMap<u16, Option<[f32; 4]>>>);
+
+impl GlyphBoxes {
+    /// Call `f` with each of `glyphs`' positions and its box if known.
+    pub fn lookup(&self, glyphs: &[u16], mut f: impl FnMut(usize, Option<Option<[f32; 4]>>)) {
+        let known = self.0.read().unwrap_or_else(|e| e.into_inner());
+        for (k, g) in glyphs.iter().enumerate() {
+            f(k, known.get(g).copied());
+        }
+    }
+
+    pub fn remember(&self, found: impl Iterator<Item = (u16, Option<[f32; 4]>)>) {
+        let mut known = self.0.write().unwrap_or_else(|e| e.into_inner());
+        known.extend(found);
+    }
 }
 
 /// The families behind AppKit's font roles, and the prototype font
@@ -357,6 +666,9 @@ pub(crate) fn parse_style(style: &str, spec: &mut FontSpec) -> Option<()> {
 /// PostScript name (`Family-Style`), a full name (`Family Style`), or one
 /// of Apple's families that programs name directly.
 pub(crate) fn spec_named(name: &str, size: f64) -> Option<FontSpec> {
+    if let Some(family) = DATA.lock().unwrap_or_else(|e| e.into_inner()).named.get(name).cloned() {
+        return Some(FontSpec::data(family, size));
+    }
     let mut spec = FontSpec::system(Design::Default, size);
     if name.starts_with(".AppleSystemUIFont") || name.starts_with(".SF") {
         if name.contains("Mono") {
@@ -406,15 +718,26 @@ pub(crate) fn resolve(spec: &FontSpec) -> Arc<Face> {
             return face.clone();
         }
         let face = Arc::new(load_face(&mut ctx.fcx, spec));
+        // Weights and variation values vary continuously (an animation, a
+        // slider): the faces a thread remembers start over past a bound,
+        // as `NSFont`'s cache does.
+        if ctx.faces.len() >= FACES {
+            ctx.faces.clear();
+        }
         ctx.faces.insert(key, face.clone());
         face
     })
 }
 
+/// Faces a thread remembers before it starts over.
+const FACES: usize = 512;
+
 fn load_face(fcx: &mut FontContext, spec: &FontSpec) -> Face {
     let family = match &spec.family {
         Family::System(design) => shared().family_for(*design).clone(),
         Family::Named(name) => name.clone(),
+        Family::Data(data) if !data.0.collected(fcx) => return file_face(&data.0, spec),
+        Family::Data(data) => data.0.family.clone(),
     };
     let style = if spec.italic { FontStyle::Italic } else { FontStyle::Normal };
     let attributes = Attributes::new(FontWidth::from_ratio(spec.stretch), style, FontWeight::new(spec.weight));
@@ -445,37 +768,78 @@ fn load_face(fcx: &mut FontContext, spec: &FontSpec) -> Face {
         .and_then(|f| fcx.collection.family_name(f.family.0))
         .map(Arc::from)
         .unwrap_or_else(|| family.clone());
-    let mut face = Face {
-        family: matched_family.clone(),
-        postscript_name: matched_family.clone(),
-        full_name: matched_family,
-        weight,
-        italic: spec.italic,
-        stretch: spec.stretch,
-        metrics: Metrics {
-            ascent: 0.8,
-            descent: -0.2,
-            cap_height: 0.7,
-            x_height: 0.5,
-            underline_position: -0.1,
-            underline_thickness: 0.05,
-            strikeout_position: 0.3,
-            strikeout_thickness: 0.05,
-            bounds: [0.0, -0.2, 1.0, 0.8],
-            max_advance: 1.0,
-            ..Metrics::default()
-        },
-        fixed_pitch: false,
-        glyph_count: 0,
-        font: None,
-        variations: Vec::new(),
-    };
+    let mut face = Face::unfound(matched_family, weight, spec);
     if let Some(font) = found {
         face.variations = font.synthesis.variation_settings().iter().map(|&(tag, value)| (tag, value)).collect();
+        face.set_variations(spec, &font.blob, font.index);
         describe(&mut face, font.blob.as_ref(), font.index);
         face.font = Some(FontData::new(font.blob, font.index));
     }
     face
+}
+
+/// The face of a font file the collection wouldn't take (one without a
+/// character map): its metrics and glyphs are there, but text laid out in
+/// it falls back on the system's faces.
+fn file_face(data: &DataFace, spec: &FontSpec) -> Face {
+    let mut face = Face::unfound(data.family.clone(), data.weight, spec);
+    face.set_variations(spec, &data.font.data, data.font.index);
+    describe(&mut face, data.font.data.data(), data.font.index);
+    face.font = Some(data.font.clone());
+    face
+}
+
+impl Face {
+    /// A face of `family` with the metrics of none, before a file
+    /// describes it.
+    fn unfound(family: Arc<str>, weight: f32, spec: &FontSpec) -> Face {
+        Face {
+            family: family.clone(),
+            family_name: family.clone(),
+            postscript_name: family.clone(),
+            full_name: family,
+            weight,
+            italic: spec.italic,
+            stretch: spec.stretch,
+            metrics: Metrics {
+                ascent: 0.8,
+                descent: -0.2,
+                cap_height: 0.7,
+                x_height: 0.5,
+                underline_position: -0.1,
+                underline_thickness: 0.05,
+                strikeout_position: 0.3,
+                strikeout_thickness: 0.05,
+                bounds: [0.0, -0.2, 1.0, 0.8],
+                max_advance: 1.0,
+                ..Metrics::default()
+            },
+            units: Units::default(),
+            fixed_pitch: false,
+            glyph_count: 0,
+            font: None,
+            variations: Vec::new(),
+            set_variations: Vec::new(),
+            boxes: GlyphBoxes::default(),
+            glyph_names: OnceLock::new(),
+        }
+    }
+
+    /// What a descriptor set, over what matching chose, for the axes the
+    /// font has.
+    fn set_variations(&mut self, spec: &FontSpec, blob: &parley::fontique::Blob<u8>, index: u32) {
+        let Some(set) = &spec.variations else { return };
+        let Ok(file) = skrifa::FontRef::from_index(blob.as_ref(), index) else { return };
+        let axes = file.axes();
+        for &(tag, value) in set.iter() {
+            let tag = skrifa::Tag::new(&tag);
+            if axes.iter().any(|a| a.tag() == tag) {
+                self.variations.retain(|v| v.0 != tag);
+                self.variations.push((tag, value));
+                self.set_variations.push((tag, value));
+            }
+        }
+    }
 }
 
 /// A glyph's advance and bounding box (x0, y0, x1, y1, y up), per point.
@@ -491,29 +855,71 @@ pub(crate) fn glyph_metrics(face: &Face, glyph: u32) -> Option<(f32, [f32; 4])> 
     Some((advance / upem, [b.x_min / upem, b.y_min / upem, b.x_max / upem, b.y_max / upem]))
 }
 
+/// A face's cap height and x-height in font units, at `location`:
+/// `OS/2`'s, or without them (tables before version 2) where CoreText
+/// finds them, halfway between a flat letter's top and a round one's
+/// (H's and O's, x's and o's), rounded down; measured on macOS, which
+/// overshoots with the round letter. Fonts without the letters get
+/// shares of the ascent.
+pub(crate) fn heights(font: &skrifa::FontRef<'_>, location: &Location) -> (f32, f32) {
+    let m = font.metrics(Size::unscaled(), location);
+    let tops = font.glyph_metrics(Size::unscaled(), location);
+    let charmap = font.charmap();
+    let top = |c: char| charmap.map(c).and_then(|g| tops.bounds(g)).map(|b| b.y_max);
+    let height = |given: Option<f32>, flat: char, round: char, share: f32| match (given, top(flat), top(round)) {
+        (Some(h), ..) if h > 0.0 => h,
+        (_, Some(a), Some(b)) => ((a + b) / 2.0).floor(),
+        (_, Some(a), None) => a,
+        _ => m.ascent * share,
+    };
+    (height(m.cap_height, 'H', 'O', 0.7), height(m.x_height, 'x', 'o', 0.5))
+}
+
 /// Fill in `face`'s names and metrics from its font file.
 fn describe(face: &mut Face, data: &[u8], index: u32) {
     let Ok(font) = skrifa::FontRef::from_index(data, index) else { return };
     let location: Location = font.axes().location(face.variations.iter().copied());
     let m = font.metrics(Size::unscaled(), &location);
     let upem = f32::from(m.units_per_em.max(1));
-    let name = |id: StringId| -> Option<Arc<str>> {
-        let s: String = font.localized_strings(id).english_or_first()?.chars().collect();
-        (!s.is_empty()).then(|| s.into())
-    };
+    let name = |id: StringId| -> Option<Arc<str>> { name_of(&font, id).map(Arc::from) };
     if let Some(n) = name(StringId::POSTSCRIPT_NAME) {
         face.postscript_name = n;
     }
     if let Some(n) = name(StringId::FULL_NAME) {
         face.full_name = n;
     }
+    // A file registered under a private family reports its own.
+    if face.family.starts_with(PRIVATE_FAMILY)
+        && let Some(n) = name(StringId::FAMILY_NAME)
+    {
+        face.family_name = n;
+    }
     let bounds = m.bounds.map(|b| [b.x_min, b.y_min, b.x_max, b.y_max]).unwrap_or([0.0, m.descent, upem, m.ascent]);
+    let (cap_height, x_height) = heights(&font, &location);
+    let (typo_ascender, typo_descender) = match font.os2() {
+        Ok(os2) => (f64::from(os2.s_typo_ascender()), f64::from(os2.s_typo_descender())),
+        Err(_) => (f64::from(m.ascent), f64::from(m.descent)),
+    };
+    face.units = Units {
+        per_em: f64::from(upem),
+        ascent: f64::from(m.ascent),
+        descent: f64::from(m.descent),
+        leading: f64::from(m.leading),
+        cap_height: f64::from(cap_height),
+        x_height: f64::from(x_height),
+        underline_position: m.underline.map_or(-f64::from(upem) / 10.0, |u| f64::from(u.offset)),
+        underline_thickness: m.underline.map_or(f64::from(upem) / 18.0, |u| f64::from(u.thickness)),
+        bounds: bounds.map(f64::from),
+        italic_angle: f64::from(m.italic_angle),
+        typo_ascender,
+        typo_descender,
+    };
     face.metrics = Metrics {
         ascent: m.ascent / upem,
         descent: m.descent / upem,
         leading: m.leading / upem,
-        cap_height: m.cap_height.unwrap_or(m.ascent * 0.7) / upem,
-        x_height: m.x_height.unwrap_or(m.ascent * 0.5) / upem,
+        cap_height: cap_height / upem,
+        x_height: x_height / upem,
         underline_position: m.underline.map_or(-upem / 10.0, |u| u.offset) / upem,
         underline_thickness: m.underline.map_or(upem / 18.0, |u| u.thickness) / upem,
         // HarfBuzz's defaults, as parley's.
@@ -577,12 +983,14 @@ impl Synth {
     }
 }
 
+/// A face's file, index and synthesis, as a key.
+type FileKey = (u64, u32, bool, u32, u32);
+
 #[derive(Default)]
 struct Registry {
     faces: Vec<FaceData>,
-    /// Candidates by font file, index and synthesis; coordinates are
-    /// compared on lookup.
-    ids: HashMap<(u64, u32, bool, u32, u32), Vec<u32>>,
+    /// Ids by font file, index and synthesis, then by coordinates.
+    ids: HashMap<FileKey, HashMap<Box<[i16]>, u32>>,
 }
 
 static REGISTRY: LazyLock<RwLock<Registry>> = LazyLock::new(Default::default);
@@ -595,8 +1003,7 @@ static REGISTRY: LazyLock<RwLock<Registry>> = LazyLock::new(Default::default);
 pub(crate) fn register(font: &FontData, coords: &[i16], synth: Synth) -> u32 {
     let synth = synth.stepped();
     let key = (font.data.id(), font.index, synth.embolden, synth.skew.to_bits(), synth.stroke.to_bits());
-    let find =
-        |reg: &Registry| reg.ids.get(&key)?.iter().copied().find(|&id| *reg.faces[id as usize].coords == *coords);
+    let find = |reg: &Registry| reg.ids.get(&key)?.get(coords).copied();
     if let Some(id) = find(&REGISTRY.read().unwrap_or_else(|e| e.into_inner())) {
         return id;
     }
@@ -607,7 +1014,7 @@ pub(crate) fn register(font: &FontData, coords: &[i16], synth: Synth) -> u32 {
     let id = reg.faces.len() as u32;
     let (embolden, skew, stroke) = (synth.embolden, synth.skew, synth.stroke);
     reg.faces.push(FaceData { font: font.clone(), coords: coords.into(), embolden, skew, stroke });
-    reg.ids.entry(key).or_default().push(id);
+    reg.ids.entry(key).or_default().insert(coords.into(), id);
     id
 }
 
@@ -619,17 +1026,6 @@ pub(crate) fn face_data(id: u32) -> Option<FaceData> {
 /// `NSFontWeight` (−1 to 1) as a CSS weight, through the named weights,
 /// whose values are single precision as AppKit's are.
 pub(crate) fn css_weight(ns: f64) -> f32 {
-    const STOPS: [(f64, f64); 9] = [
-        (-0.8f32 as f64, 100.0),
-        (-0.6f32 as f64, 200.0),
-        (-0.4f32 as f64, 300.0),
-        (0.0, 400.0),
-        (0.23f32 as f64, 500.0),
-        (0.3f32 as f64, 600.0),
-        (0.4f32 as f64, 700.0),
-        (0.56f32 as f64, 800.0),
-        (0.62f32 as f64, 900.0),
-    ];
     if ns <= STOPS[0].0 {
         return (100.0 + (ns - STOPS[0].0) * 500.0).max(1.0) as f32;
     }
@@ -641,3 +1037,32 @@ pub(crate) fn css_weight(ns: f64) -> f32 {
     }
     (900.0 + (ns - STOPS[8].0) * 263.0).min(1000.0) as f32
 }
+
+/// A CSS weight as `NSFontWeight`, the inverse of [`css_weight`].
+pub(crate) fn ns_weight(css: f32) -> f64 {
+    let css = f64::from(css);
+    if css <= STOPS[0].1 {
+        return STOPS[0].0 + (css - 100.0) / 500.0;
+    }
+    for pair in STOPS.windows(2) {
+        let ((a, wa), (b, wb)) = (pair[0], pair[1]);
+        if css <= wb {
+            return a + (css - wa) / (wb - wa) * (b - a);
+        }
+    }
+    STOPS[8].0 + (css - 900.0) / 263.0
+}
+
+/// The named weights: `NSFontWeight` values (single precision, as
+/// AppKit's are) and CSS weights.
+const STOPS: [(f64, f64); 9] = [
+    (-0.8f32 as f64, 100.0),
+    (-0.6f32 as f64, 200.0),
+    (-0.4f32 as f64, 300.0),
+    (0.0, 400.0),
+    (0.23f32 as f64, 500.0),
+    (0.3f32 as f64, 600.0),
+    (0.4f32 as f64, 700.0),
+    (0.56f32 as f64, 800.0),
+    (0.62f32 as f64, 900.0),
+];

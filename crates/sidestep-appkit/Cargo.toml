@@ -17,13 +17,13 @@ objc2-app-kit = { workspace = true, features = ["gnustep-2-1", "NSApplication", 
 # CoreGraphics, QuartzCore, CoreText and ImageIO, with the features apps use.
 # They build off Apple with objc2's fork (tools/objc2-overlay), and AppKit's
 # methods with their types (NSColor's CGColor, NSView's layer and so on) come
-# with them. Sidestep implements CoreGraphics (src/coregraphics); QuartzCore,
-# CoreText and ImageIO come next (tests/framework_types.rs checks that they
-# compile).
+# with them. Sidestep implements CoreGraphics (src/coregraphics) and CoreText
+# (src/coretext); QuartzCore and ImageIO come next (tests/framework_types.rs
+# checks that they compile).
 objc2-core-graphics = { workspace = true, features = ["CGAffineTransform", "CGBitmapContext", "CGColor", "CGColorSpace", "CGContext", "CGDataConsumer", "CGDataProvider", "CGDirectDisplay", "CGEventTypes", "CGFont", "CGFunction", "CGGeometry", "CGGradient", "CGImage", "CGPath", "CGPattern", "CGShading", "bitflags", "block2", "objc2"] }
-objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "objc2", "CFBase", "CFCGTypes", "CFArray", "CFData", "CFDictionary", "CFString", "CFURL"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "objc2", "CFBase", "CFCGTypes", "CFArray", "CFData", "CFDictionary", "CFString", "CFURL", "CFAttributedString"] }
 objc2-quartz-core = { workspace = true, features = ["gnustep-2-1", "CAAnimation", "CABase", "CADisplayLink", "CALayer", "CAMediaTiming", "CAMediaTimingFunction", "CAOpenGLLayer", "CATransaction", "CATransform3D", "bitflags", "objc2-core-foundation", "objc2-core-graphics"] }
-objc2-core-text = { workspace = true, features = ["CTFont", "CTFontDescriptor", "CTFontManager", "CTLine", "CTRun", "CTStringAttributes", "SFNTLayoutTypes", "bitflags", "objc2-core-graphics"] }
+objc2-core-text = { workspace = true, features = ["CTDefines", "CTFont", "CTFontCollection", "CTFontDescriptor", "CTFontManager", "CTFontManagerErrors", "CTFontTraits", "CTFrame", "CTFramesetter", "CTGlyphInfo", "CTLine", "CTParagraphStyle", "CTRubyAnnotation", "CTRun", "CTRunDelegate", "CTStringAttributes", "CTTextTab", "CTTypesetter", "SFNTLayoutTypes", "SFNTTypes", "bitflags", "block2", "objc2-core-graphics"] }
 objc2-image-io = { workspace = true, features = ["CGImageDestination", "CGImageProperties", "CGImageSource", "objc2-core-graphics"] }
 smithay-client-toolkit = { version = "0.19", default-features = false, features = ["calloop"] }
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }

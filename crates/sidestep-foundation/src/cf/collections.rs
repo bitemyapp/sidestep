@@ -211,6 +211,62 @@ pub unsafe extern "C-unwind" fn CFDictionaryContainsKey(cf: *const c_void, key: 
     u8::from(!unsafe { CFDictionaryGetValue(cf, key) }.is_null())
 }
 
+/// How many times `key` is a key: once or not at all.
+///
+/// # Safety
+///
+/// `cf` is a dictionary; `key` an object or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn CFDictionaryGetCountOfKey(cf: *const c_void, key: *const c_void) -> CFIndex {
+    // SAFETY: per this function's contract.
+    CFIndex::from(unsafe { CFDictionaryContainsKey(cf, key) })
+}
+
+/// How many keys have a value equal to `value`.
+///
+/// # Safety
+///
+/// `cf` is a dictionary; `value` an object or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn CFDictionaryGetCountOfValue(cf: *const c_void, value: *const c_void) -> CFIndex {
+    if value.is_null() {
+        return 0;
+    }
+    let entries = crate::plist::dictionary_entries(dictionary(cf));
+    // SAFETY: both are objects.
+    let equal = |v: &Retained<AnyObject>| unsafe { super::base::CFEqual(Retained::as_ptr(v).cast(), value) } != 0;
+    entries.iter().filter(|(_, v)| equal(v)).count() as CFIndex
+}
+
+/// # Safety
+///
+/// As [`CFDictionaryGetCountOfValue`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn CFDictionaryContainsValue(cf: *const c_void, value: *const c_void) -> Boolean {
+    // SAFETY: per this function's contract.
+    u8::from(unsafe { CFDictionaryGetCountOfValue(cf, value) } > 0)
+}
+
+/// The function a dictionary's pairs are handed to.
+type Applier = Option<unsafe extern "C-unwind" fn(*const c_void, *const c_void, *mut c_void)>;
+
+/// Call `applier` with each key and value, and `context`. The pairs are
+/// taken first, so the function may change the dictionary.
+///
+/// # Safety
+///
+/// `cf` is a dictionary; `applier` is null or a function taking a key, a
+/// value and `context`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn CFDictionaryApplyFunction(cf: *const c_void, applier: Applier, context: *mut c_void) {
+    let Some(applier) = applier else { return };
+    for (key, value) in crate::plist::dictionary_entries(dictionary(cf)) {
+        // SAFETY: per this function's contract; the pairs are held while
+        // the function runs.
+        unsafe { applier(Retained::as_ptr(&key).cast(), Retained::as_ptr(&value).cast(), context) };
+    }
+}
+
 /// # Safety
 ///
 /// `cf` is a dictionary; `keys` and `values` are null or have room for its

@@ -271,6 +271,28 @@ impl ContextState {
         self.flush();
     }
 
+    /// Run `f` to record ops that carry only a rectangular clip: inside a
+    /// group the clip masks when it isn't a rectangle.
+    pub(crate) fn masked(&mut self, f: impl FnOnce(&mut Self)) {
+        let Some(mask) = self.gs.mask.clone() else {
+            f(self);
+            self.flush();
+            return;
+        };
+        let draw = crate::protocol::Draw {
+            xf: tiny_skia::Transform::identity(),
+            blend: crate::protocol::Blend::SourceOver,
+            aa: true,
+            clip: self.gs.clip,
+            mask: Some(mask),
+            shadow: None,
+        };
+        self.rec.ops.push(Op::BeginGroup { alpha: 1.0, draw });
+        f(self);
+        self.rec.ops.push(Op::EndGroup);
+        self.flush();
+    }
+
     /// Apply what applies to every op but the ops don't carry themselves:
     /// CoreGraphics' global alpha, and antialiasing the context doesn't
     /// allow.
@@ -761,22 +783,27 @@ pub(crate) fn begin_view(view: &crate::views::NSViewImpl, xf: Xf, clip: Rect) ->
         let depth = st.stack.len();
         st.stack.push(st.gs.clone());
         st.gs = GState::fresh(xf_affine(xf), clip);
-        let saved = Saved {
+        let mut saved = Saved {
             depth,
             clip: std::mem::replace(&mut st.view_clip, clip),
             flipped: std::mem::replace(&mut st.flipped, flipped),
             view_flipped: std::mem::replace(&mut st.view_flipped, flipped),
             device: st.device,
             view_device: st.view_device,
+            text_matrix: None,
         };
         // In a window, CoreGraphics sees the view's own space, as macOS
-        // draws views into layers of their own.
+        // draws views into layers of their own, and each view's text
+        // matrix starts as the identity, whatever the views drawn before
+        // it left (measured on macOS); drawing into a context of one's own
+        // (`cacheDisplayInRect:`) keeps it from view to view.
         if matches!(st.target, Target::Record) {
             let to_layer = xf_affine(xf);
             if to_layer.determinant() != 0.0 {
                 st.device = to_layer.inverse();
                 st.view_device = Some(flipped);
             }
+            saved.text_matrix = Some(std::mem::replace(&mut st.text_matrix, Affine::IDENTITY));
         }
         st.path = CtxPath::default();
         st.sync();
@@ -801,6 +828,8 @@ struct Saved {
     view_flipped: bool,
     device: Affine,
     view_device: Option<bool>,
+    /// The text matrix, when the view's drawing started from the identity.
+    text_matrix: Option<Affine>,
 }
 
 /// The view's `drawRect:` returned: drop what it saved and didn't
@@ -821,6 +850,9 @@ pub(crate) fn end_view(mark: ViewMark) {
         st.view_clip = saved.clip;
         (st.flipped, st.view_flipped) = (saved.flipped, saved.view_flipped);
         (st.device, st.view_device) = (saved.device, saved.view_device);
+        if let Some(m) = saved.text_matrix {
+            st.text_matrix = m;
+        }
         st.path = CtxPath::default();
         st.sync();
         st.flush();

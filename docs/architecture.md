@@ -1480,10 +1480,12 @@ and out, which live with their classes and call in.
   whatever's on top, as on macOS, and a layer's rectangle narrows the
   clip.
 - **Text.** The text settings (font, size, spacing, drawing mode, matrix
-  and position) are kept and read back; drawing glyphs through a
-  CGContext does nothing until CoreText arrives. `CGFont` reads a font
-  file's tables with skrifa (metrics, bounds, names, glyph names from
-  `post` or CFF, advances and boxes, tables by tag).
+  and position) are kept and read back. `CGContextShowGlyphs…` and
+  `CGContextShowText…` draw the context's font's glyphs through CoreText's
+  glyph drawing (see [CoreText](#coretext)): at positions in text space,
+  or from the text position, which then moves on by the glyphs' advances.
+  `CGFont` reads a font file's tables with skrifa (metrics, bounds, names,
+  glyph names from `post` or CFF, advances and boxes, tables by tag).
 - **TextKit's way in.** `coregraphics::context::with_state(cg, f)` runs `f`
   with the context's `ContextState` (None if it's in use), for pushing ops
   on it directly; `drawing_into(cg, f)` runs `f` with an
@@ -1629,6 +1631,191 @@ sRGB's chromaticities and a JPEG's density comes from its JFIF header
 when no EXIF resolution gives one, which ImageIO reports without saying
 where from; and an EXIF thumbnail is used only when it has the image's
 proportions, where ImageIO passes over some others too.
+
+### CoreText
+
+CoreText is a module tree in sidestep-appkit (`coretext/`) on the text
+engine AppKit's text uses (`text/`: fontique, parley, swash): every
+function objc2-core-text declares under Sidestep's features, and its 129
+string constants with macOS's values (listed in [abi.md](abi.md#symbols)).
+There is no second shaper and no second font system; what a program can
+see was measured on macOS against DejaVu Sans loaded from a file
+(`conformance/tests/coretext.rs`, which runs the same on Ubuntu with only
+DejaVu installed).
+
+- **Fonts are `NSFont`s.** A `CTFont` *is* an `NSFont`: `CTFontGetTypeID`
+  is the type ID `CFGetTypeID` gives `NSFont`'s class, a font made either
+  way is the same kind of object, and casting one to the other (as
+  programs do, and as macOS's toll-free bridging allows) is sound. A
+  `CTFontDescriptor` is an `NSFontDescriptor` the same way, sharing its
+  attribute handling and matching; a descriptor reports the attributes it
+  was made with, and a font's reports its PostScript name, size, feature
+  settings and variation, as macOS's do. Matching a family finds each of
+  its faces. Variation axis values a descriptor sets
+  (`kCTFontVariationAttribute`, by axis tag) are part of the font: its face
+  is matched at them, its metrics and outlines read at them, and layout
+  shapes with them, on the axes the face has. Font feature settings (by
+  the font feature registry's type and selector, or by OpenType tag)
+  become the OpenType features the shaper applies
+  (`font::registry_feature`: common ligatures to `liga`, rare to `dlig`,
+  contextual alternates to `calt`, …), and a kerning attribute of 0 turns
+  `kern` off, tracking or not.
+- **Font files.** `CTFontCreateWithGraphicsFont` makes a font of a
+  `CGFont`'s file (`text::fonts::register_data`: one face a file, found by
+  its contents however often it's loaded). The face is laid out under a
+  private family name (`.SidestepFont-n`, left out of every list of
+  families), registered in the shared font collection when a font is
+  first made of it, so text laid out in the font finds exactly that face
+  whatever the system has, and falls back to the system's fonts for
+  characters it lacks. A file the collection won't take (one without a
+  character map) still makes a font from its bytes: metrics, glyphs by id
+  and drawing work, and text laid out in it falls back. The font reports
+  the file's own names; its spec (`FontSpec` with `Family::Data`) keys
+  `NSFont`'s cache like any other, so asking twice gives the same object.
+  The font manager (`coretext/manager.rs`) registers files by URL and
+  `CGFont`s, making their faces findable by PostScript and full name
+  (`CTFontCreateWithName`, `+[NSFont fontWithName:size:]`), and fails as
+  macOS does, with `CFError`s in its domain: a file registered twice
+  (105), a file or `CGFont` unregistered that wasn't (201, and -1 for the
+  `CGFont`), a missing file (101), one that isn't a font (103).
+  Descriptors made of a file's data don't register it.
+- **Metrics and glyphs.** A font's metrics are its file's integers scaled
+  exactly (`units × size / unitsPerEm`, in double precision), as are the
+  same font's `NSFont` metrics: ascent, descent and leading, the
+  underline's position and thickness from `post`, the bounding box from
+  `head`, and the cap and x heights from `OS/2`, or where macOS finds them
+  without them, for CoreText's fonts and `CGFont`s alike
+  (`text::fonts::heights`: halfway between a flat letter's top and a round
+  one's, rounded down). Glyph advances come from `hmtx`, bounds from the
+  outlines' boxes (a glyph with nothing to draw has an empty box, left out
+  of a union; a face remembers its glyphs' boxes, as a CFF outline has to
+  be drawn to find one), outlines as `CGPath`s (y up, at the font's size),
+  all read with skrifa. The vertical metrics are macOS's for fonts without
+  vertical tables: the glyph turned a quarter, across from its left edge
+  less half its advance, down from the typographic ascender.
+- **Lines are the layout's lines.** `CTLineCreateWithAttributedString`
+  reads the attributed string's runs as string drawing does (a
+  `CFAttributedString` is an `NSAttributedString`), with CoreText's
+  attribute names added (colors as `CGColor`s, the context's fill color,
+  tracking, a baseline offset, a `CTParagraphStyle`), and lays the text out
+  with the same code (`text/glyphs.rs` over `text/layout.rs`'s shaping,
+  bidi and fallback) on one line: separators and control characters are
+  zero-width glyphs (the space's, or the font's own for U+2028 and
+  U+2029), taking no room at all, and a tab reaches the next stop. An
+  emoji the font has a glyph for takes it (string drawing prefers a color
+  emoji face). Each
+  glyph keeps its id, position, advance and character index; runs split
+  where the attributes, the face or the direction change, a run's string
+  range covers every character its glyphs stand for (a ligature's later
+  ones too), and a run's attributes are the string's own dictionary (or a
+  copy naming the fallback face). The line's ascent, descent and leading
+  are its fonts' largest, unrounded as CoreText has them.
+- **Carets** are per character, left to right: a character's share of its
+  cluster (a ligature's characters share it evenly), its leading edge on
+  the left in left-to-right text and on the right in right-to-left text,
+  and between a kerned pair halfway into the kerning. A string index's
+  primary offset is the trailing edge of the character before it and its
+  secondary the leading edge of its own, which differ where the direction
+  changes; an index inside a character counts as after it. A position
+  finds the character under it and the edge of the half it's in; an empty
+  line has none (-1). `CTLineEnumerateCaretOffsets` walks the edges left
+  to right.
+- **Truncation and justification**, as measured on macOS: truncating
+  keeps whole clusters beside the token (at the end, the start, or half
+  the room each in the middle), the room being the width less the token's
+  plus the line's trailing whitespace, which the kept end of a middle
+  truncation counts as nothing; whitespace next to the token is dropped.
+  No token leaves nothing in the gap; a width narrower than the token
+  gives no line; a line that fits but for its trailing whitespace loses
+  it. Justifying widens word spaces first, up to half an em each (a space
+  followed by another twice as much), then the gaps between letters, with
+  half as much for spaces; trailing whitespace goes. Narrowing takes up to
+  11/256 em from each space, then up to 11/128 em from each letter gap
+  (half that from spaces), then the rest from the spaces (from the
+  letters, if there are none); a factor below 1 never narrows, and a
+  factor of 0 changes nothing.
+- **Bounds.** A line's box is its fonts' ascent, descent and leading
+  before baseline offsets; optical bounds leave out trailing whitespace,
+  and win over glyph bounds; hanging punctuation leaves out quotes and
+  guillemets at either end, and periods, commas, hyphens and closing
+  double quotes at the end (measured on macOS).
+- **Typesetters and frames.** A typesetter's suggested breaks are counts
+  of units, trailing whitespace and a paragraph's separator included; it
+  keeps the last paragraph's lines, so asking line after line lays each
+  paragraph out once. An offset measures tab stops from that far before
+  the line. A framesetter fills a rectangle with each paragraph's lines in
+  its style (lines rounded to whole points as macOS rounds them), breaking
+  the whole paragraph and cutting its lines where the range asked for
+  ends; the frame's string range is the range asked for, its visible
+  range what fits.
+- **Drawing.** Glyphs are drawn into a CGContext's graphics state
+  (`coretext::draw`): a glyph at a position has its origin there through
+  the text matrix (whose translation is the text position) and its outline
+  scaled by the font's size through the matrix's scale and turn, then the
+  CTM. A line's glyphs are placed from the text position without the
+  matrix's scale (measured: a scaled text matrix scales a line's glyphs,
+  not the gaps between them), and drawing a line moves the text position
+  on by its width. In a window, each view's drawing starts with the
+  identity text matrix, whatever the views drawn before it left (on macOS
+  each has a layer of its own); drawing into a context of one's own keeps
+  it from view to view. Where the transform keeps glyphs upright on the
+  layer and scaled the same both ways (a view's usual drawing, a flipped
+  view turned back by the text matrix or the CTM), the glyphs become the
+  same `Op::Glyphs` string drawing records, from the render thread's glyph
+  cache, at the font's size times that scale. Otherwise (turned, mirrored,
+  stretched), and for what the glyph op can't carry (a shadow, a blend
+  mode, stroked or clipping text modes, an outlined stroke width), they
+  are drawn as their outlines, paths filled and stroked with the graphics
+  state like any other. Lines draw their backgrounds first, then glyphs,
+  then underlines and strikethroughs: an underline at least its thickness
+  below the baseline, a strikethrough halfway up the x-height, thick ones
+  twice as thick, double underlines as two lines a third of that each,
+  edges in whole points as macOS snaps them to pixels at 1×.
+  `NSObliqueness` doesn't slant CoreText's glyphs (it does AppKit's).
+  Glyphs are black unless the attributes color them, whatever the fill
+  color, as on macOS.
+- **Objects.** The other types (`CTLine`, `CTRun`, `CTTypesetter`,
+  `CTFramesetter`, `CTFrame`, `CTParagraphStyle`, `CTTextTab`,
+  `CTFontCollection`, `CTGlyphInfo`, `CTRunDelegate`,
+  `CTRubyAnnotation`) are classes with Sidestep-private names and type IDs
+  120 to 132, as CoreGraphics' are; lines, runs and frames are immutable,
+  their data plain and shareable across threads; a typesetter's and a
+  collection's changing parts are behind locks.
+
+Known differences, and rules fitted to few samples:
+
+- Fitted to DejaVu Sans alone: the cap and x heights of fonts without them
+  in `OS/2` (macOS reports others for fonts without H and O, such as
+  Noto Naskh Arabic, which isn't followed); the vertical glyph metrics;
+  `kCTLineBoundsIncludeLanguageExtents`, whose extents (in ems of the
+  line's largest font) are DejaVu Sans's for Latin text, though macOS's
+  depend on the font (Noto Sans's are taller).
+- The justification stages and caps were fitted to DejaVu Sans at three
+  sizes, with spaces, tabs, no-break and ideographic spaces; other
+  scripts' rules (kashida, CJK) aren't followed.
+- The underline and strikethrough rules were fitted to DejaVu Sans and
+  Noto Sans at a few sizes; double underlines match DejaVu's, not Noto's.
+- Truncation: macOS's quirks when the kept ends overlap (a middle
+  truncation of a line that nearly fits keeps some characters twice) and
+  the shortened ranges it gives the last run when an end truncation
+  without a token drops whitespace aren't followed; truncation assumes
+  left-to-right order.
+- `kCTFontSlantTrait` is the italic angle over 180° (macOS gave 0.0694
+  for both a 11° and a 12° italic, which one more sample might explain).
+- `CTFontCopyFeatures` lists the registry types a face's layout tables
+  map to, without names, exclusivity or unregistered OpenType features.
+- A font file without a character map lays text out in fallback fonts
+  (macOS maps characters through its glyph names).
+- Runs aren't split where the script changes within one font.
+- A font's matrix other than the identity is ignored; vertical text isn't
+  laid out; ruby annotations and run delegates are kept and handed back
+  but don't change layout; the table tags `CTFontCopyAvailableTables`
+  returns are numbers (CoreText puts the bare tags in the array, which
+  Foundation's arrays of objects can't hold); ligature carets from `GDEF`
+  aren't read; the supported languages list is empty and the cascade list
+  the three generic families; and nothing is downloaded (a descriptor
+  naming a font nobody has makes the default font, Helvetica here the
+  interface font, as CoreText makes Helvetica).
 
 ### Colors and appearance
 
@@ -2078,7 +2265,9 @@ positions in points. `crates/sidestep-appkit/src/text/` holds the stack.
   size, traits and feature settings (by Apple's feature registry numbers
   or OpenType tags) from attribute dictionaries. Size 0 means 13 points for
   the interface fonts (`systemFontOfSize:` and its kin) and 12 for the
-  rest, as on macOS.
+  rest, as on macOS. An `NSFont` is also CoreText's `CTFont`, and a font
+  file a program loads (a `CGFont`) makes one of a family registered for
+  it alone ([CoreText](#coretext)).
 - **Layout.** parley does bidi, line breaking (ICU4X, compiled in),
   shaping (harfrust) and fallback per script; `text/layout.rs` places the
   lines as AppKit's string drawing does, from measurements of Apple's (the

@@ -275,6 +275,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
+name = "ctbench"
+version = "0.0.0"
+dependencies = [
+ "objc2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-core-text",
+ "objc2-foundation",
+ "sidestep",
+]
+
+[[package]]
 name = "cursor-icon"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -380,6 +392,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-core-foundation",
  "objc2-core-graphics",
+ "objc2-core-text",
  "objc2-foundation",
  "sidestep",
 ]
@@ -1101,6 +1114,7 @@ name = "objc2-core-text"
 version = "0.3.2"
 dependencies = [
  "bitflags 2.13.2",
+ "block2",
  "objc2",
  "objc2-core-foundation",
  "objc2-core-graphics",
@@ -1476,6 +1490,7 @@ dependencies = [
  "objc2",
  "objc2-app-kit",
  "objc2-core-foundation",
+ "objc2-core-text",
  "objc2-foundation",
  "objc2-image-io",
  "sidestep-appkit",
@@ -1528,6 +1543,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-core-foundation",
  "objc2-core-graphics",
+ "objc2-core-text",
  "objc2-foundation",
  "objc2-image-io",
  "sidestep",

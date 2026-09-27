@@ -121,10 +121,9 @@ define_class!(
 
         #[unsafe(method_id(availableFontFamilies))]
         fn available_font_families(&self) -> Retained<NSArray<NSString>> {
-            let mut names: Vec<String> =
-                crate::text::with_ctx(|ctx| ctx.fcx.collection.family_names().map(String::from).collect());
-            names.sort_by_key(|n| n.to_lowercase());
-            names.dedup();
+            // Font files programs load are laid out under private family
+            // names (CoreText's fonts): not the system's.
+            let names = crate::text::fonts::family_names();
             let strings: Vec<Retained<NSString>> = names.iter().map(|n| NSString::from_str(n)).collect();
             NSArray::from_retained_slice(&strings)
         }

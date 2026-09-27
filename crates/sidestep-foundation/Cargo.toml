@@ -22,6 +22,6 @@ icu_properties = { version = "2.1", default-features = false, features = ["compi
 icu_segmenter = { version = "2.1", default-features = false, features = ["compiled_data"] }
 icu_locale_core = { version = "2.1", default-features = false }
 fancy-regex = "0.16"
-objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "objc2", "CFRunLoop", "CFDate"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "objc2", "CFRunLoop", "CFDate", "CFAttributedString", "CFDictionary"] }
 plist = { version = "1.10.1", default-features = false }
 jiff = { version = "0.2.37", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }

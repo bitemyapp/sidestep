@@ -2,7 +2,8 @@
 //! CGColor]` and `+colorWithCGColor:`, `-[NSGraphicsContext CGContext]` and
 //! `+graphicsContextWithCGContext:flipped:` (the two sharing one graphics
 //! state), CoreGraphics in `drawRect:`, `NSImage` and `NSBitmapImageRep`
-//! with `CGImage`s, and `NSBezierPath`'s `CGPath`. Views draw into bitmaps
+//! with `CGImage`s, `NSBezierPath`'s `CGPath`, and CoreText's lines and
+//! glyphs drawn in views. Views draw into bitmaps
 //! (`cacheDisplayInRect:toBitmapImageRep:`), so no window is needed.
 //!
 //! AppKit belongs to the main thread, so this file has its own `main`.
@@ -693,10 +694,16 @@ fn window_display(mtm: MainThreadMarker) {
     /// A view's name and its CTM, user-to-device transform and clip.
     type Seen = Vec<(&'static str, [f64; 16])>;
     let seen: Rc<RefCell<Seen>> = Rc::default();
+    // Each view's text matrix as its drawing starts.
+    let texts: Rc<RefCell<Vec<(&'static str, CGAffineTransform)>>> = Rc::default();
     let logger = |name: &'static str| {
         let log = seen.clone();
+        let texts = texts.clone();
         move |_: &objc2_app_kit::NSView, _: NSRect| {
             let cg = NSGraphicsContext::currentContext().unwrap().CGContext();
+            texts.borrow_mut().push((name, CGContext::text_matrix(Some(&cg))));
+            // Left for whatever draws next.
+            CGContext::set_text_matrix(Some(&cg), transform(3.0, 0.0, 0.0, 3.0, 1.0, 1.0));
             let (m, u, c) = (
                 CGContext::ctm(Some(&cg)),
                 CGContext::user_space_to_device_space_transform(Some(&cg)),
@@ -729,7 +736,10 @@ fn window_display(mtm: MainThreadMarker) {
     let flipped = draw_view(mtm, rect(20.0, 3.0, 10.0, 8.0), true, logger("flipped"));
     let inner = draw_view(mtm, rect(2.0, 3.0, 4.0, 4.0), false, logger("inner"));
     view.addSubview(&inner);
-    let content = draw_view(mtm, rect(0.0, 0.0, 60.0, 40.0), false, |_, _| {});
+    let content = draw_view(mtm, rect(0.0, 0.0, 60.0, 40.0), false, |_, _| {
+        let cg = NSGraphicsContext::currentContext().unwrap().CGContext();
+        CGContext::set_text_position(Some(&cg), 7.0, 8.0);
+    });
     window.setContentView(Some(&content));
     content.addSubview(&view);
     content.addSubview(&flipped);
@@ -760,6 +770,100 @@ fn window_display(mtm: MainThreadMarker) {
         let down = if name == "flipped" { -s } else { s };
         assert_eq!(v[..12], [1.0, 0.0, 0.0, 1.0, 0.0, 0.0, s, 0.0, 0.0, down, 0.0, 0.0], "{name}: {v:?}");
     }
+    // Every view's text matrix starts as the identity, whatever the views
+    // drawn before it left.
+    for (name, m) in texts.borrow().iter() {
+        assert_eq!(*m, transform(1.0, 0.0, 0.0, 1.0, 0.0, 0.0), "{name}");
+    }
+}
+
+/// The box of pixels of `rep` with alpha above 16: x0, y0 (rows from the
+/// top), x1, y1.
+fn ink_of(rep: &NSBitmapImageRep) -> Option<[isize; 4]> {
+    let mut b: Option<[isize; 4]> = None;
+    for y in 0..rep.pixelsHigh() {
+        for x in 0..rep.pixelsWide() {
+            if pixel(rep, x, y)[3] > 16 {
+                b = Some(match b {
+                    None => [x, y, x + 1, y + 1],
+                    Some([a, bb, c, d]) => [a.min(x), bb.min(y), c.max(x + 1), d.max(y + 1)],
+                });
+            }
+        }
+    }
+    b
+}
+
+/// CoreText drawing in views: a line drawn at a text position, and glyphs
+/// drawn by position, in a plain view and in a flipped one (with the text
+/// matrix, or the CTM, turned back over), at 1× and 2×. Ink within a
+/// device pixel of macOS's.
+fn coretext_in_views(mtm: MainThreadMarker) {
+    use objc2_core_text::{CTFont, CTLine, kCTFontAttributeName};
+    let data = CFData::from_bytes(include_bytes!("fixtures/DejaVuSans.ttf"));
+    let provider = CGDataProvider::with_cf_data(Some(&data)).unwrap();
+    let file = CGFont::with_data_provider(&provider).unwrap();
+    // SAFETY: a font file, no matrix or attributes.
+    let font = unsafe { CTFont::with_graphics_font(&file, 16.0, std::ptr::null(), None) };
+    let font = Rc::new(font);
+    // (flipped, turned back by the CTM rather than the text matrix, glyphs)
+    let cases =
+        [(false, false, false), (true, false, false), (true, true, false), (false, false, true), (true, true, true)];
+    for (flipped, ctm, glyphs) in cases {
+        let f = font.clone();
+        let view = draw_view(mtm, rect(0.0, 0.0, 40.0, 30.0), flipped, move |_, _| {
+            let cg = NSGraphicsContext::currentContext().unwrap().CGContext();
+            if flipped && ctm {
+                CGContext::translate_ctm(Some(&cg), 0.0, 30.0);
+                CGContext::scale_ctm(Some(&cg), 1.0, -1.0);
+            } else if flipped {
+                CGContext::set_text_matrix(Some(&cg), transform(1.0, 0.0, 0.0, -1.0, 0.0, 0.0));
+            } else {
+                CGContext::set_text_matrix(Some(&cg), transform(1.0, 0.0, 0.0, 1.0, 0.0, 0.0));
+            }
+            // A baseline 20 points from the top: 20 in a flipped view's
+            // coordinates, 10 in a plain view's or through the CTM's flip.
+            let baseline = if flipped && !ctm { 20.0 } else { 10.0 };
+            if glyphs {
+                let g = [43u16, 91];
+                let p = [CGPoint::new(4.0, baseline), CGPoint::new(16.0, baseline)];
+                // SAFETY: two glyphs and two positions.
+                unsafe {
+                    f.draw_glyphs(
+                        NonNull::new(g.as_ptr().cast_mut()).unwrap(),
+                        NonNull::new(p.as_ptr().cast_mut()).unwrap(),
+                        2,
+                        &cg,
+                    )
+                };
+            } else {
+                let key: &objc2_foundation::NSString = unsafe { &*(kCTFontAttributeName as *const _ as *const _) };
+                let value: &objc2::runtime::AnyObject = unsafe { &*(&**f as *const CTFont).cast() };
+                let dict = objc2_foundation::NSDictionary::from_slices(&[key], &[value]);
+                let text = unsafe {
+                    objc2_foundation::NSAttributedString::initWithString_attributes(
+                        objc2_foundation::NSAttributedString::alloc(),
+                        &objc2_foundation::NSString::from_str("Hx"),
+                        Some(&dict),
+                    )
+                };
+                // SAFETY: an attributed string is a CFAttributedString.
+                let line = unsafe { CTLine::with_attributed_string(&*(Retained::as_ptr(&text).cast())) };
+                CGContext::set_text_position(Some(&cg), 4.0, baseline);
+                // SAFETY: a line and a context.
+                unsafe { line.draw(&cg) };
+            }
+        });
+        // Every way puts "Hx" upright at the same place.
+        for (scale, want) in [(1.0, [5, 8, 25, 20]), (2.0, [11, 16, 50, 40])] {
+            let rep = snapshot(&view, scale);
+            let got = ink_of(&rep).expect("ink");
+            assert!(
+                got.iter().zip(&want).all(|(a, b)| a.abs_diff(*b) <= 1),
+                "flipped {flipped}, ctm {ctm}, glyphs {glyphs}, at {scale}x: ink {got:?}, want {want:?}"
+            );
+        }
+    }
 }
 
 type Test = (&'static str, fn(MainThreadMarker));
@@ -781,6 +885,7 @@ fn main() {
         ("bitmaps_of_cg_images", bitmaps_of_cg_images),
         ("colors_and_contexts", colors_and_contexts),
         ("set_cg_path", set_cg_path),
+        ("coretext_in_views", coretext_in_views),
     ];
     for (name, test) in tests {
         objc2::rc::autoreleasepool(|_| test(mtm));

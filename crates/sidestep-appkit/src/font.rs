@@ -35,8 +35,9 @@ use objc2_app_kit::{
     NSFontTextStyleTitle3, NSFontTraitsAttribute, NSFontVisibleNameAttribute, NSFontWeightTrait, NSFontWidthTrait,
     NSGlyph,
 };
-use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString, NSZone, ns_string};
+use objc2_foundation::{NSCopying, NSDictionary, NSMutableCopying, NSPoint, NSRect, NSSize, NSString, NSZone};
 
+use crate::coretext::any;
 use crate::text::fonts::{self, Design, Face, Family, FontSpec};
 use crate::text::layout::TextFont;
 
@@ -219,7 +220,7 @@ define_class!(
 
         #[unsafe(method_id(familyName))]
         fn family_name(&self) -> Option<Retained<NSString>> {
-            Some(NSString::from_str(&self.ivars().face.family))
+            Some(NSString::from_str(&self.ivars().face.family_name))
         }
 
         #[unsafe(method_id(displayName))]
@@ -234,37 +235,37 @@ define_class!(
 
         #[unsafe(method(ascender))]
         fn ascender(&self) -> f64 {
-            self.scaled(|m| m.ascent)
+            self.in_units(|u| u.ascent, |m| m.ascent)
         }
 
         #[unsafe(method(descender))]
         fn descender(&self) -> f64 {
-            self.scaled(|m| m.descent)
+            self.in_units(|u| u.descent, |m| m.descent)
         }
 
         #[unsafe(method(leading))]
         fn leading(&self) -> f64 {
-            self.scaled(|m| m.leading)
+            self.in_units(|u| u.leading, |m| m.leading)
         }
 
         #[unsafe(method(capHeight))]
         fn cap_height(&self) -> f64 {
-            self.scaled(|m| m.cap_height)
+            self.in_units(|u| u.cap_height, |m| m.cap_height)
         }
 
         #[unsafe(method(xHeight))]
         fn x_height(&self) -> f64 {
-            self.scaled(|m| m.x_height)
+            self.in_units(|u| u.x_height, |m| m.x_height)
         }
 
         #[unsafe(method(underlinePosition))]
         fn underline_position(&self) -> f64 {
-            self.scaled(|m| m.underline_position)
+            self.in_units(|u| u.underline_position, |m| m.underline_position)
         }
 
         #[unsafe(method(underlineThickness))]
         fn underline_thickness(&self) -> f64 {
-            self.scaled(|m| m.underline_thickness)
+            self.in_units(|u| u.underline_thickness, |m| m.underline_thickness)
         }
 
         #[unsafe(method(italicAngle))]
@@ -366,6 +367,14 @@ define_class!(
 impl NSFontImpl {
     fn scaled(&self, f: impl Fn(&fonts::Metrics) -> f32) -> f64 {
         f64::from(f(&self.ivars().face.metrics)) * self.ivars().spec.size
+    }
+
+    /// A metric from the font file's units, scaled as CoreText scales them
+    /// (so a font's `ascender` and `CTFontGetAscent` agree to the last
+    /// bit); from `metrics` for a face without a file.
+    fn in_units(&self, units: impl Fn(&fonts::Units) -> f64, metrics: impl Fn(&fonts::Metrics) -> f32) -> f64 {
+        let u = &self.ivars().face.units;
+        if u.per_em > 0.0 { units(u) * (self.ivars().spec.size / u.per_em) } else { self.scaled(metrics) }
     }
 
     /// A glyph's advance and bounding box at this size.
@@ -472,6 +481,11 @@ fn load<T: ClassType>() {
 
 pub(crate) struct DescriptorIvars {
     spec: FontSpec,
+    /// The attributes the descriptor was made with, which `fontAttributes`
+    /// reports as they were given (as on macOS); `None` for one made from
+    /// a font or by a derivation that resolves, whose are worked out from
+    /// the spec ([`attributes_of`]).
+    attributes: Option<Retained<NSDictionary<NSString, AnyObject>>>,
 }
 
 define_class!(
@@ -483,7 +497,8 @@ define_class!(
     impl NSFontDescriptorImpl {
         #[unsafe(method_id(init))]
         fn init(this: Allocated<Self>) -> Retained<Self> {
-            let this = this.set_ivars(DescriptorIvars { spec: FontSpec::system(Design::Default, 0.0) });
+            let spec = FontSpec::system(Design::Default, 0.0);
+            let this = this.set_ivars(DescriptorIvars { spec, attributes: Some(NSDictionary::new()) });
             // SAFETY: NSObject's designated initializer.
             unsafe { msg_send![super(this), init] }
         }
@@ -493,14 +508,17 @@ define_class!(
             this: Allocated<Self>,
             attributes: Option<&NSDictionary<NSString, AnyObject>>,
         ) -> Retained<Self> {
-            let this = this.set_ivars(DescriptorIvars { spec: spec_of_attributes(attributes) });
+            let spec = spec_of_attributes(attributes);
+            let attributes = Some(attributes.map_or_else(NSDictionary::new, |a| a.copy()));
+            let this = this.set_ivars(DescriptorIvars { spec, attributes });
             // SAFETY: NSObject's designated initializer.
             unsafe { msg_send![super(this), init] }
         }
 
         #[unsafe(method_id(fontDescriptorWithFontAttributes:))]
         fn with_attributes(attributes: Option<&NSDictionary<NSString, AnyObject>>) -> Retained<Self> {
-            new_descriptor(spec_of_attributes(attributes))
+            let given = attributes.map_or_else(NSDictionary::new, |a| a.copy());
+            new_descriptor_with(spec_of_attributes(attributes), Some(given))
         }
 
         #[unsafe(method_id(preferredFontDescriptorForTextStyle:options:))]
@@ -510,7 +528,11 @@ define_class!(
 
         #[unsafe(method_id(fontDescriptorWithName:size:))]
         fn with_name_size(name: &NSString, size: f64) -> Retained<Self> {
-            new_descriptor(spec_of_name(&name.to_string(), size))
+            // SAFETY: the constants are this crate's own, always valid.
+            let keys = unsafe { [NSFontNameAttribute, NSFontSizeAttribute] };
+            let size_number = objc2_foundation::NSNumber::new_f64(size);
+            let given = NSDictionary::from_slices(&keys, &[name as &AnyObject, &*size_number as &AnyObject]);
+            new_descriptor_with(spec_of_name(&name.to_string(), size), Some(given))
         }
 
         #[unsafe(method_id(postscriptName))]
@@ -558,12 +580,16 @@ define_class!(
         fn by_adding_attributes(&self, attributes: &NSDictionary<NSString, AnyObject>) -> Retained<Self> {
             let mut spec = self.ivars().spec.clone();
             apply_attributes(&mut spec, attributes);
-            new_descriptor(spec)
+            new_descriptor_with(spec, Some(merged(&self.attributes(), attributes)))
         }
 
         #[unsafe(method_id(fontDescriptorWithSize:))]
         fn with_size(&self, size: f64) -> Retained<Self> {
-            new_descriptor(FontSpec { size, ..self.ivars().spec.clone() })
+            // SAFETY: the constant is this crate's own, always valid.
+            let key = unsafe { NSFontSizeAttribute };
+            let number = objc2_foundation::NSNumber::new_f64(size);
+            let added = NSDictionary::from_slices(&[key], &[&*number as &AnyObject]);
+            new_descriptor_with(FontSpec { size, ..self.ivars().spec.clone() }, Some(merged(&self.attributes(), &added)))
         }
 
         #[unsafe(method_id(fontDescriptorWithFamily:))]
@@ -588,18 +614,13 @@ define_class!(
 
         #[unsafe(method_id(objectForKey:))]
         fn object_for_key(&self, key: &NSString) -> Option<Retained<AnyObject>> {
-            object_for_key(&self.ivars().spec, key)
+            let given = self.ivars().attributes.as_ref().and_then(|a| a.objectForKey(key));
+            given.or_else(|| object_for_key(&self.ivars().spec, key))
         }
 
         #[unsafe(method_id(fontAttributes))]
         fn font_attributes(&self) -> Retained<NSDictionary<NSString, AnyObject>> {
-            let face = fonts::resolve(&self.ivars().spec);
-            let family = NSString::from_str(&face.family);
-            let name = NSString::from_str(&face.postscript_name);
-            // SAFETY: the constants are this crate's own, always valid.
-            let keys = unsafe { [NSFontFamilyAttribute, NSFontNameAttribute] };
-            let values: [&AnyObject; 2] = [&family, &name];
-            NSDictionary::from_slices(&keys, &values)
+            self.attributes()
         }
 
         #[unsafe(method(copyWithZone:))]
@@ -642,12 +663,12 @@ fn with_design(spec: &FontSpec, design: &NSString) -> Option<Retained<NSFontDesc
     Some(new_descriptor(FontSpec { family: Family::System(design), ..spec.clone() }))
 }
 
-fn object_for_key(spec: &FontSpec, key: &NSString) -> Option<Retained<AnyObject>> {
+pub(crate) fn object_for_key(spec: &FontSpec, key: &NSString) -> Option<Retained<AnyObject>> {
     let face = fonts::resolve(spec);
     // SAFETY: the constants are this crate's own, always valid.
     let value = unsafe {
         if key == NSFontFamilyAttribute {
-            &face.family
+            &face.family_name
         } else if key == NSFontNameAttribute {
             &face.postscript_name
         } else if key == NSFontVisibleNameAttribute {
@@ -659,16 +680,129 @@ fn object_for_key(spec: &FontSpec, key: &NSString) -> Option<Retained<AnyObject>
     Some(Retained::into_super(Retained::into_super(NSString::from_str(value))))
 }
 
+impl NSFontDescriptorImpl {
+    /// The attributes it was made with, or those of what it describes.
+    fn attributes(&self) -> Retained<NSDictionary<NSString, AnyObject>> {
+        match &self.ivars().attributes {
+            Some(given) => given.clone(),
+            None => attributes_of(&self.ivars().spec),
+        }
+    }
+}
+
+/// `base` with `added`'s entries put in.
+fn merged(
+    base: &NSDictionary<NSString, AnyObject>,
+    added: &NSDictionary<NSString, AnyObject>,
+) -> Retained<NSDictionary<NSString, AnyObject>> {
+    let out: Retained<objc2_foundation::NSMutableDictionary<NSString, AnyObject>> = base.mutableCopy();
+    out.addEntriesFromDictionary(added);
+    Retained::into_super(out)
+}
+
+/// What a descriptor of a font made from `spec` reports as its
+/// attributes, as macOS reports a font's: its PostScript name, its size
+/// (when it has one) and the feature settings it was made with.
+pub(crate) fn attributes_of(spec: &FontSpec) -> Retained<NSDictionary<NSString, AnyObject>> {
+    let face = fonts::resolve(spec);
+    let name = match &spec.family {
+        Family::Named(name) if spec.missing => any(NSString::from_str(name)),
+        _ => any(NSString::from_str(&face.postscript_name)),
+    };
+    // SAFETY: the constants are this crate's own, always valid.
+    let (name_key, size_key, features_key) =
+        unsafe { (NSFontNameAttribute, NSFontSizeAttribute, NSFontFeatureSettingsAttribute) };
+    let mut keys: Vec<&NSString> = vec![name_key];
+    let mut values: Vec<Retained<AnyObject>> = vec![name];
+    if spec.size > 0.0 {
+        keys.push(size_key);
+        values.push(any(objc2_foundation::NSNumber::new_f64(spec.size)));
+    }
+    if let Some(settings) = settings_of(spec) {
+        keys.push(features_key);
+        values.push(settings);
+    }
+    if let Some(variations) = spec.variations.as_ref().filter(|v| !v.is_empty()) {
+        let tags: Vec<Retained<objc2_foundation::NSNumber>> =
+            variations.iter().map(|(t, _)| objc2_foundation::NSNumber::new_u32(u32::from_be_bytes(*t))).collect();
+        let vals: Vec<Retained<AnyObject>> =
+            variations.iter().map(|(_, v)| any(objc2_foundation::NSNumber::new_f64(f64::from(*v)))).collect();
+        let tag_refs: Vec<&objc2_foundation::NSNumber> = tags.iter().map(|t| &**t).collect();
+        let val_refs: Vec<&AnyObject> = vals.iter().map(|v| &**v).collect();
+        // SAFETY: the constant is this crate's own.
+        keys.push(unsafe { objc2_app_kit::NSFontVariationAttribute });
+        values.push(any(NSDictionary::<objc2_foundation::NSNumber, AnyObject>::from_slices(&tag_refs, &val_refs)));
+    }
+    let refs: Vec<&AnyObject> = values.iter().map(|v| &**v).collect();
+    NSDictionary::from_slices(&keys, &refs)
+}
+
+/// A spec's feature settings as `NSFontFeatureSettingsAttribute` gives
+/// them: by feature type and selector where the font feature registry
+/// has the feature, by OpenType tag and value where it doesn't.
+pub(crate) fn settings_of(spec: &FontSpec) -> Option<Retained<AnyObject>> {
+    let features = spec.features.as_ref().filter(|f| !f.is_empty())?;
+    // SAFETY: the constants are this crate's own, always valid.
+    let (type_key, selector_key) = unsafe { (NSFontFeatureTypeIdentifierKey, NSFontFeatureSelectorIdentifierKey) };
+    let items: Vec<Retained<NSDictionary<NSString, AnyObject>>> = features
+        .iter()
+        .map(|&(tag, value)| match registry_setting(tag, value) {
+            Some((kind, selector)) => {
+                let (k, s) = (objc2_foundation::NSNumber::new_i64(kind), objc2_foundation::NSNumber::new_i64(selector));
+                NSDictionary::from_slices(&[type_key, selector_key], &[&*k as &AnyObject, &*s as &AnyObject])
+            }
+            None => {
+                let t = NSString::from_str(&String::from_utf8_lossy(&tag));
+                let v = objc2_foundation::NSNumber::new_i64(i64::from(value));
+                let keys = <[&NSString; 2]>::from(opentype_keys());
+                NSDictionary::from_slices(&keys, &[&*t as &AnyObject, &*v as &AnyObject])
+            }
+        })
+        .collect();
+    Some(any(objc2_foundation::NSArray::from_retained_slice(&items)))
+}
+
+/// The font feature registry's type and selector for an OpenType feature
+/// turned on or off, if it has one.
+pub(crate) fn registry_setting(tag: [u8; 4], value: u16) -> Option<(i64, i64)> {
+    (0..40i64)
+        .flat_map(|kind| (0..48i64).map(move |selector| (kind, selector)))
+        .find(|&(kind, selector)| registry_feature(kind, selector) == Some((tag, value)))
+}
+
 fn descriptor_imp(descriptor: &NSFontDescriptor) -> &NSFontDescriptorImpl {
     // SAFETY: every NSFontDescriptor is an NSFontDescriptorImpl.
     unsafe { &*(descriptor as *const NSFontDescriptor).cast::<NSFontDescriptorImpl>() }
 }
 
+/// What `descriptor` describes.
+pub(crate) fn descriptor_spec(descriptor: &NSFontDescriptor) -> FontSpec {
+    descriptor_imp(descriptor).ivars().spec.clone()
+}
+
 fn new_descriptor(spec: FontSpec) -> Retained<NSFontDescriptorImpl> {
+    new_descriptor_with(spec, None)
+}
+
+fn new_descriptor_with(
+    spec: FontSpec,
+    attributes: Option<Retained<NSDictionary<NSString, AnyObject>>>,
+) -> Retained<NSFontDescriptorImpl> {
     crate::load_shell::<objc2_app_kit::NSFontDescriptor>();
-    let this = NSFontDescriptorImpl::alloc().set_ivars(DescriptorIvars { spec });
+    let this = NSFontDescriptorImpl::alloc().set_ivars(DescriptorIvars { spec, attributes });
     // SAFETY: NSObject's designated initializer.
     unsafe { msg_send![super(this), init] }
+}
+
+/// A descriptor for `spec`, reporting `attributes` if given (see
+/// [`DescriptorIvars`]).
+pub(crate) fn make_descriptor(
+    spec: FontSpec,
+    attributes: Option<Retained<NSDictionary<NSString, AnyObject>>>,
+) -> Retained<NSFontDescriptor> {
+    load::<NSFontDescriptor>();
+    // SAFETY: NSFontDescriptorImpl is NSFontDescriptor's implementation.
+    unsafe { Retained::cast_unchecked(new_descriptor_with(spec, attributes)) }
 }
 
 fn descriptor(spec: FontSpec) -> Retained<NSFontDescriptor> {
@@ -679,7 +813,7 @@ fn descriptor(spec: FontSpec) -> Retained<NSFontDescriptor> {
 
 /// What a descriptor naming `name` asks for: a font the system has, or a
 /// missing one that no font will be made from.
-fn spec_of_name(name: &str, size: f64) -> FontSpec {
+pub(crate) fn spec_of_name(name: &str, size: f64) -> FontSpec {
     fonts::spec_named(name, size).unwrap_or_else(|| FontSpec {
         family: Family::Named(name.into()),
         missing: true,
@@ -687,7 +821,7 @@ fn spec_of_name(name: &str, size: f64) -> FontSpec {
     })
 }
 
-fn traits_of(spec: &FontSpec) -> NSFontDescriptorSymbolicTraits {
+pub(crate) fn traits_of(spec: &FontSpec) -> NSFontDescriptorSymbolicTraits {
     let mut traits = NSFontDescriptorSymbolicTraits::empty();
     if spec.italic {
         traits |= NSFontDescriptorSymbolicTraits::TraitItalic;
@@ -720,7 +854,7 @@ pub(crate) fn number(value: &AnyObject) -> Option<f64> {
 
 /// A descriptor for `attributes`, as `fontDescriptorWithFontAttributes:`
 /// makes one.
-fn spec_of_attributes(attributes: Option<&NSDictionary<NSString, AnyObject>>) -> FontSpec {
+pub(crate) fn spec_of_attributes(attributes: Option<&NSDictionary<NSString, AnyObject>>) -> FontSpec {
     let mut spec = FontSpec::system(Design::Default, 0.0);
     if let Some(attributes) = attributes {
         apply_attributes(&mut spec, attributes);
@@ -730,15 +864,16 @@ fn spec_of_attributes(attributes: Option<&NSDictionary<NSString, AnyObject>>) ->
 
 /// Apply descriptor attributes to `spec`: the name or family, the size,
 /// the traits (symbolic traits, weight and width) and feature settings.
-fn apply_attributes(spec: &mut FontSpec, attributes: &NSDictionary<NSString, AnyObject>) {
+pub(crate) fn apply_attributes(spec: &mut FontSpec, attributes: &NSDictionary<NSString, AnyObject>) {
     // SAFETY: the constants are this crate's own, always valid.
-    let (name_key, family_key, size_key, traits_key, features_key) = unsafe {
+    let (name_key, family_key, size_key, traits_key, features_key, variation_key) = unsafe {
         (
             NSFontNameAttribute,
             NSFontFamilyAttribute,
             NSFontSizeAttribute,
             NSFontTraitsAttribute,
             NSFontFeatureSettingsAttribute,
+            objc2_app_kit::NSFontVariationAttribute,
         )
     };
     let string = |key: &NSString| attributes.objectForKey(key).and_then(|o| o.downcast::<NSString>().ok());
@@ -776,6 +911,22 @@ fn apply_attributes(spec: &mut FontSpec, attributes: &NSDictionary<NSString, Any
         if let Some(width) = traits.objectForKey(width_key).and_then(|v| number(&v)) {
             spec.stretch = stretch_of_width(width);
         }
+    }
+    if let Some(variation) = attributes.objectForKey(variation_key).and_then(|v| v.downcast::<NSDictionary>().ok()) {
+        // Axes by tag (as a number) to values, over what the spec had.
+        let mut values: Vec<([u8; 4], f32)> = spec.variations.iter().flat_map(|v| v.iter().copied()).collect();
+        // SAFETY: the generic types are only a view; the keys are read as
+        // objects.
+        let variation: Retained<NSDictionary<AnyObject, AnyObject>> = unsafe { Retained::cast_unchecked(variation) };
+        for key in variation.allKeys() {
+            let (Some(tag), Some(value)) = (number(&key), variation.objectForKey(&key).and_then(|v| number(&v))) else {
+                continue;
+            };
+            let tag = (tag as u32).to_be_bytes();
+            values.retain(|v| v.0 != tag);
+            values.push((tag, value as f32));
+        }
+        spec.variations = (!values.is_empty()).then(|| values.into());
     }
     if let Some(settings) = attributes.objectForKey(features_key) {
         let mut features: Vec<([u8; 4], u16)> = spec.features.iter().flat_map(|f| f.iter().copied()).collect();
@@ -817,11 +968,10 @@ fn feature_settings(settings: &AnyObject) -> Vec<([u8; 4], u16)> {
         let value = |key: &NSString| setting.objectForKey(key).and_then(|v| number(&v));
         if let (Some(kind), Some(selector)) = (value(type_key), value(selector_key)) {
             out.extend(registry_feature(kind as i64, selector as i64));
-        } else if let Some(tag) =
-            setting.objectForKey(ns_string!("CTFeatureOpenTypeTag")).and_then(|t| t.downcast::<NSString>().ok())
+        } else if let Some(tag) = setting.objectForKey(opentype_keys().0).and_then(|t| t.downcast::<NSString>().ok())
             && let Ok(tag) = <[u8; 4]>::try_from(tag.to_string().as_bytes())
         {
-            let on = value(ns_string!("CTFeatureOpenTypeValue")).unwrap_or(1.0);
+            let on = value(opentype_keys().1).unwrap_or(1.0);
             out.push((tag, on.clamp(0.0, f64::from(u16::MAX)) as u16));
         }
     }
@@ -829,10 +979,14 @@ fn feature_settings(settings: &AnyObject) -> Vec<([u8; 4], u16)> {
 }
 
 /// The OpenType feature a font feature registry type and selector turn on
-/// or off.
-fn registry_feature(kind: i64, selector: i64) -> Option<([u8; 4], u16)> {
+/// or off (CoreText's `SFNTLayoutTypes` numbers, which
+/// `NSFontFeatureSettingsAttribute` and `kCTFontFeatureSettingsAttribute`
+/// take).
+pub(crate) fn registry_feature(kind: i64, selector: i64) -> Option<([u8; 4], u16)> {
     let on_off =
         |tag: &[u8; 4], on: i64| (selector == on || selector == on + 1).then(|| (*tag, u16::from(selector == on)));
+    let pick =
+        |tags: &[[u8; 4]], from: i64| tags.get(usize::try_from(selector.checked_sub(from)?).ok()?).map(|t| (*t, 1));
     match kind {
         // Ligatures: required, common, rare, contextual, historical.
         1 => match selector {
@@ -843,25 +997,49 @@ fn registry_feature(kind: i64, selector: i64) -> Option<([u8; 4], u16)> {
             20 | 21 => on_off(b"hlig", 20),
             _ => None,
         },
+        // Vertical forms.
+        4 => on_off(b"vert", 0),
         // Number spacing: monospaced, proportional.
-        6 => [(*b"tnum", 1), (*b"pnum", 1)].get(usize::try_from(selector).ok()?).copied(),
-        // Vertical position: superiors, inferiors, ordinals.
-        10 => [*b"sups", *b"subs", *b"ordn"].get(usize::try_from(selector - 1).ok()?).map(|t| (*t, 1)),
+        6 => pick(&[*b"tnum", *b"pnum"], 0),
+        // Vertical position: superiors, inferiors, ordinals, scientific
+        // inferiors.
+        10 => pick(&[*b"sups", *b"subs", *b"ordn", *b"sinf"], 1),
         // Fractions: none, vertical, diagonal.
         11 => [(*b"frac", 0), (*b"afrc", 1), (*b"frac", 1)].get(usize::try_from(selector).ok()?).copied(),
         // Typographic extras: slashed zero.
         14 => on_off(b"zero", 4),
         // Number case: lower case (old style), upper case (lining).
-        21 => [(*b"onum", 1), (*b"lnum", 1)].get(usize::try_from(selector).ok()?).copied(),
-        33 => on_off(b"case", 0),
+        21 => pick(&[*b"onum", *b"lnum"], 0),
+        // Text spacing: proportional, full, half, third, quarter and
+        // alternate widths; then kerning on (7) and off (8).
+        22 => match selector {
+            0..=6 => pick(&[*b"pwid", *b"fwid", *b"hwid", *b"twid", *b"qwid", *b"palt", *b"halt"], 0),
+            7 => Some((*b"kern", 1)),
+            8 => Some((*b"kern", 0)),
+            _ => None,
+        },
+        // Case-sensitive layout and spacing.
+        33 => match selector {
+            0 | 1 => on_off(b"case", 0),
+            2 | 3 => on_off(b"cpsp", 2),
+            _ => None,
+        },
         // Stylistic sets, two selectors (on, off) each from 2.
         35 if (2..42).contains(&selector) => {
             let n = selector / 2;
             Some(([b's', b's', b'0' + (n / 10) as u8, b'0' + (n % 10) as u8], u16::from(selector % 2 == 0)))
         }
-        36 => on_off(b"calt", 0),
-        37 if selector == 1 => Some((*b"smcp", 1)),
-        38 if selector == 1 => Some((*b"c2sc", 1)),
+        // Contextual alternates, swashes, contextual swashes.
+        36 => match selector {
+            0 | 1 => on_off(b"calt", 0),
+            2 | 3 => on_off(b"swsh", 2),
+            4 | 5 => on_off(b"cswh", 4),
+            _ => None,
+        },
+        // Lower case: small and petite capitals.
+        37 => pick(&[*b"smcp", *b"pcap"], 1),
+        // Upper case: small and petite capitals.
+        38 => pick(&[*b"c2sc", *b"c2pc"], 1),
         _ => None,
     }
 }
@@ -878,6 +1056,20 @@ pub(crate) fn face_of(font: &NSFont) -> Arc<Face> {
     imp(font).ivars().face.clone()
 }
 
+/// What `font` was made from and the face it resolved to, borrowed.
+pub(crate) fn parts(font: &NSFont) -> (&FontSpec, &Arc<Face>) {
+    let ivars = imp(font).ivars();
+    (&ivars.spec, &ivars.face)
+}
+
+/// The font `spec` describes, whose size 0 is 12 points, as an `NSFont`.
+pub(crate) fn make_font(spec: FontSpec) -> Retained<NSFont> {
+    let made = font(spec);
+    load::<NSFont>();
+    // SAFETY: NSFontImpl is NSFont's implementation.
+    unsafe { Retained::cast_unchecked(made) }
+}
+
 /// A font made from `spec`, with `like`'s default size.
 pub(crate) fn font_like(like: &NSFont, spec: FontSpec) -> Retained<NSFont> {
     let made = font_with_zero(spec, imp(like).ivars().zero);
@@ -892,13 +1084,25 @@ pub(crate) fn named(name: &str, size: f64) -> Option<FontSpec> {
     fonts::spec_named(name, size)
 }
 
+/// The keys of a feature setting by OpenType tag and value
+/// (`kCTFontOpenTypeFeatureTag`, `kCTFontOpenTypeFeatureValue`).
+fn opentype_keys() -> (&'static NSString, &'static NSString) {
+    // SAFETY: the constants are this crate's own.
+    unsafe {
+        (
+            crate::coretext::ns_string(objc2_core_text::kCTFontOpenTypeFeatureTag),
+            crate::coretext::ns_string(objc2_core_text::kCTFontOpenTypeFeatureValue),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use objc2::DefinedClass;
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, NSObjectProtocol};
     use objc2_app_kit::{NSFont, NSFontDescriptor, NSFontFeatureSettingsAttribute};
-    use objc2_foundation::{NSDictionary, NSString, ns_string};
+    use objc2_foundation::{NSDictionary, NSString};
 
     use super::imp;
     use crate::test_objects::{array, number};
@@ -913,7 +1117,7 @@ mod tests {
 
     fn opentype(tag: &str, value: f64) -> Retained<AnyObject> {
         let (tag, value) = (NSString::from_str(tag), number(value));
-        let keys = [ns_string!("CTFeatureOpenTypeTag"), ns_string!("CTFeatureOpenTypeValue")];
+        let keys = <[&NSString; 2]>::from(super::opentype_keys());
         let setting = NSDictionary::from_slices(&keys, &[&*tag as &AnyObject, &*value as &AnyObject]);
         Retained::into_super(Retained::into_super(setting))
     }

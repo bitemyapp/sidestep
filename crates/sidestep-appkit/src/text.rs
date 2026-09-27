@@ -17,6 +17,8 @@
 //!   parley doing bidi, line breaking and shaping.
 //! - [`lines`]: the same lines with their UTF-16 ranges, clusters and
 //!   carets, a paragraph or a few lines at a time, for TextKit.
+//! - [`glyphs`]: the same lines as CoreText describes them, every glyph
+//!   with its position, advance and character index, for `CTLine`.
 //! - [`pool`]: worker threads for laying many lines out at once.
 //! - [`raster`]: the render thread's glyph cache and compositing.
 //!
@@ -27,6 +29,7 @@
 #[cfg(test)]
 mod bench;
 pub(crate) mod fonts;
+pub(crate) mod glyphs;
 pub(crate) mod layout;
 // TextKit (NSLayoutManager, NSTextView), which a later workstream builds,
 // is what lays text out through this; until then only its tests do.

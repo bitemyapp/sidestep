@@ -36,8 +36,9 @@
 //! - [`image`]: `CGImage`, its masks, and the pixels drawing takes of it.
 //! - [`data`]: `CGDataProvider` and `CGDataConsumer`.
 //! - [`gradient`]: `CGGradient`, `CGFunction` and `CGShading`.
-//! - [`font`]: `CGFont`, over font files' tables (skrifa); text drawing
-//!   through a CGContext comes with CoreText.
+//! - [`font`]: `CGFont`, over font files' tables (skrifa); text drawn
+//!   through a CGContext (`CGContextShowGlyphs…`) goes through CoreText's
+//!   glyph drawing (`coretext::draw`).
 //!
 //! CoreGraphics lives in `sidestep-appkit` because it shares AppKit's
 //! graphics state, rasterizer, image cache and text: a CGContext *is*

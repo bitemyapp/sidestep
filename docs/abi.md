@@ -29,13 +29,6 @@ at the end, which `tools/objc2-overlay` applies; other versions are untested.
 | Foundation constants | Every string constant objc2-foundation declares under the features Sidestep's crates enable, with macOS's value (run-loop modes, error domains and keys, file attribute and URL resource keys, defaults domains, notification names, exception names, locale keys, …); `NSZeroPoint`, `NSZeroSize`, `NSZeroRect`, `NSEdgeInsetsZero`, `NSFoundationVersionNumber` (macOS 26's); `kCFBooleanTrue`, `kCFBooleanFalse` and `kCFNull`, `kCFAbsoluteTimeIntervalSince1970` and `…1904` |
 | AppKit | `NSApp`; every string constant objc2-app-kit declares under Sidestep's features, with macOS's value (accessibility attributes, roles, notifications and keys, image names, document types and attributes, workspace keys, pasteboard types, …), `NSAppKitVersionNumber` (macOS 26's) and the other numbers; `NSApplicationMain`, `NSApplicationLoad`, `NSAccessibilityPostNotification(WithUserInfo)`, the drawing functions (`NSRectFill…`, `NSFrameRect…`, `NSDrawTiledRects`, `NSDrawColorTiledRects`, `NSDrawThreePartImage`, `NSDrawNinePartImage`, …), window depths (`NSBestDepth` and the rest), the window list (`NSCountWindows`, `NSWindowList`), typed file pasteboard types (`NSCreateFilenamePboardType`, `NSGetFileType`, …; the two `Create` functions return autoreleased strings, as measured on macOS, which objc2-app-kit 0.3.2's wrappers took ownership of until the objc2 fork's fix below), the services functions (no Services menu on Linux) and the rest objc2-app-kit declares under Sidestep's features, but for the known gaps below |
 
-`crates/sidestep/tests/link_closure.rs` references every extern static and
-function that objc2-foundation, objc2-app-kit and objc2-core-foundation
-declare under the features Sidestep's crates enable, but for the known
-gaps below, so a symbol that stops being exported fails a Linux build of
-the test; `scripts/link-closure` writes it from the overlay's crates when
-the features or the exports change. `conformance/tests/constants.rs`
-checks the string constants' values against macOS's.
 | CoreGraphics: geometry | `CGPoint…`: `EqualToPoint`, `CreateDictionaryRepresentation`, `MakeWithDictionaryRepresentation`, `ApplyAffineTransform`; `CGSize…`: `EqualToSize`, `CreateDictionaryRepresentation`, `MakeWithDictionaryRepresentation`, `ApplyAffineTransform`; `CGRect…`: `GetMinX`, `GetMidX`, `GetMaxX`, `GetMinY`, `GetMidY`, `GetMaxY`, `GetWidth`, `GetHeight`, `EqualToRect`, `Standardize`, `IsEmpty`, `IsNull`, `IsInfinite`, `Inset`, `Integral`, `Union`, `Intersection`, `Offset`, `Divide`, `ContainsPoint`, `ContainsRect`, `IntersectsRect`, `CreateDictionaryRepresentation`, `MakeWithDictionaryRepresentation`, `ApplyAffineTransform`; `CGAffineTransform…`: `Make`, `MakeTranslation`, `MakeScale`, `MakeRotation`, `IsIdentity`, `Translate`, `Scale`, `Rotate`, `Invert`, `Concat`, `EqualToTransform`, `Decompose`, `MakeWithComponents` |
 | CoreGraphics: colors | `CGColorSpace…`: `GetTypeID`, `CreateDeviceGray`, `CreateDeviceRGB`, `CreateDeviceCMYK`, `CreateWithName`, `GetName`, `CopyName`, `GetNumberOfComponents`, `GetModel`, `GetBaseColorSpace`, `CopyBaseColorSpace`, `GetColorTableCount`, `GetColorTable`, `CreateIndexed`, `CreatePattern`, `CreateWithICCData`, `CreateWithICCProfile`, `CreateICCBased`, `CopyICCData`, `CopyICCProfile`, `CreateLinearized`, `CreateExtended`, `CreateExtendedLinearized`, `CreateCopyWithStandardRange`, `UsesExtendedRange`, `IsWideGamutRGB`, `IsHDR`, `UsesITUR_2100TF`, `IsPQBased`, `IsHLGBased`, `SupportsOutput`; `CGColor…`: `GetTypeID`, `Create`, `CreateGenericGray`, `CreateGenericRGB`, `CreateGenericCMYK`, `CreateGenericGrayGamma2_2`, `CreateSRGB`, `CreateWithContentHeadroom`, `GetContentHeadroom`, `GetConstantColor`, `CreateWithPattern`, `CreateCopy`, `CreateCopyWithAlpha`, `CreateCopyByMatchingToColorSpace`, `EqualToColor`, `GetNumberOfComponents`, `GetComponents`, `GetAlpha`, `GetColorSpace`, `GetPattern`; `CGPattern…`: `GetTypeID`, `Create` |
 | CoreGraphics: paths | `CGPath…`: `GetTypeID`, `CreateMutable`, `CreateCopy`, `CreateMutableCopy`, `CreateCopyByTransformingPath`, `CreateMutableCopyByTransformingPath`, `CreateWithRect`, `CreateWithEllipseInRect`, `CreateWithRoundedRect`, `AddRoundedRect`, `CreateCopyByDashingPath`, `CreateCopyByStrokingPath`, `CreateCopyByFlattening`, `EqualToPath`, `MoveToPoint`, `AddLineToPoint`, `AddQuadCurveToPoint`, `AddCurveToPoint`, `CloseSubpath`, `AddRect`, `AddRects`, `AddLines`, `AddEllipseInRect`, `AddRelativeArc`, `AddArc`, `AddArcToPoint`, `AddPath`, `IsEmpty`, `IsRect`, `GetCurrentPoint`, `GetBoundingBox`, `GetPathBoundingBox`, `ContainsPoint`, `Apply`, `ApplyWithBlock` |
@@ -47,6 +40,26 @@ checks the string constants' values against macOS's.
 | CoreGraphics: fonts | `CGFont…`: `GetTypeID`, `CreateWithDataProvider`, `CreateWithFontName`, `CreateCopyWithVariations`, `CreateWithPlatformFont`, `GetNumberOfGlyphs`, `GetUnitsPerEm`, `CopyPostScriptName`, `CopyFullName`, `GetAscent`, `GetDescent`, `GetLeading`, `GetCapHeight`, `GetXHeight`, `GetFontBBox`, `GetItalicAngle`, `GetStemV`, `CopyVariationAxes`, `CopyVariations`, `GetGlyphAdvances`, `GetGlyphBBoxes`, `GetGlyphWithGlyphName`, `CopyGlyphNameForGlyph`, `CanCreatePostScriptSubset`, `CopyTableTags`, `CopyTableForTag` |
 | CoreGraphics: constants | `CGPointZero`, `CGSizeZero`, `CGRectZero`, `CGRectNull`, `CGRectInfinite`, `CGAffineTransformIdentity`, `kCGColorWhite`, `kCGColorBlack`, `kCGColorClear`, `kCGFontVariationAxisName`, `…MinValue`, `…MaxValue`, `…DefaultValue`, and the color space names `kCGColorSpace…`: `GenericGray`, `GenericRGB`, `GenericCMYK`, `DisplayP3`, `GenericRGBLinear`, `AdobeRGB1998`, `SRGB`, `GenericGrayGamma2_2`, `GenericXYZ`, `GenericLab`, `ACESCGLinear`, `ITUR_709`, `ITUR_709_PQ`, `ITUR_709_HLG`, `ITUR_2020`, `ITUR_2020_sRGBGamma`, `ROMMRGB`, `DCIP3`, `LinearITUR_2020`, `ExtendedITUR_2020`, `ExtendedLinearITUR_2020`, `LinearDisplayP3`, `ExtendedDisplayP3`, `ExtendedLinearDisplayP3`, `ITUR_2100_PQ`, `ITUR_2100_HLG`, `DisplayP3_PQ`, `DisplayP3_HLG`, `ITUR_2020_PQ`, `ITUR_2020_HLG`, `DisplayP3_PQ_EOTF`, `ITUR_2020_PQ_EOTF`, `ExtendedSRGB`, `LinearSRGB`, `ExtendedLinearSRGB`, `ExtendedGray`, `LinearGray`, `ExtendedLinearGray`, `CoreMedia709`, `ExtendedRange` |
 | ImageIO | `CGImageSource…`: `GetTypeID`, `CopyTypeIdentifiers`, `CreateWithDataProvider`, `CreateWithData`, `CreateWithURL`, `GetType`, `GetCount`, `CopyProperties`, `CopyPropertiesAtIndex`, `CopyMetadataAtIndex`, `CreateImageAtIndex`, `RemoveCacheAtIndex`, `CreateThumbnailAtIndex`, `CreateIncremental`, `UpdateData`, `UpdateDataProvider`, `GetStatus`, `GetStatusAtIndex`, `GetPrimaryImageIndex`, `CopyAuxiliaryDataInfoAtIndex`, `SetAllowableTypes`; `CGImageDestination…`: `GetTypeID`, `CopyTypeIdentifiers`, `CreateWithDataConsumer`, `CreateWithData`, `CreateWithURL`, `SetProperties`, `AddImage`, `AddImageFromSource`, `Finalize`; every key and option constant objc2-image-io declares (750: `kCGImageProperty…`, `kCGImageSource…`, `kCGImageDestination…`, `kCGImageMetadata…`, `kCGImageAnimation…`, …), with macOS's values |
+| CoreText: fonts | `CTFont…`: `GetTypeID`, `CreateWithName`, `CreateWithFontDescriptor`, `CreateWithNameAndOptions`, `CreateWithFontDescriptorAndOptions`, `CreateUIFontForLanguage`, `CreateCopyWithAttributes`, `CreateCopyWithSymbolicTraits`, `CreateCopyWithFamily`, `CreateForString`, `CreateForStringWithLanguage`, `CopyFontDescriptor`, `CopyAttribute`, `GetSize`, `GetMatrix`, `GetSymbolicTraits`, `CopyTraits`, `CopyDefaultCascadeListForLanguages`, `CopyPostScriptName`, `CopyFamilyName`, `CopyFullName`, `CopyDisplayName`, `CopyName`, `CopyLocalizedName`, `CopyCharacterSet`, `GetStringEncoding`, `CopySupportedLanguages`, `GetGlyphsForCharacters`, `GetAscent`, `GetDescent`, `GetLeading`, `GetUnitsPerEm`, `GetGlyphCount`, `GetBoundingBox`, `GetUnderlinePosition`, `GetUnderlineThickness`, `GetSlantAngle`, `GetCapHeight`, `GetXHeight`, `GetGlyphWithName`, `CopyNameForGlyph`, `GetBoundingRectsForGlyphs`, `GetOpticalBoundsForGlyphs`, `GetAdvancesForGlyphs`, `GetVerticalTranslationsForGlyphs`, `CreatePathForGlyph`, `CopyVariationAxes`, `CopyVariation`, `CopyFeatures`, `CopyFeatureSettings`, `CopyGraphicsFont`, `CreateWithGraphicsFont`, `CreateWithQuickdrawInstance`, `CopyAvailableTables`, `HasTable`, `CopyTable`, `DrawGlyphs`, `GetLigatureCaretPositions`, `GetTypographicBoundsForAdaptiveImageProvider`, `DrawImageFromAdaptiveImageProviderAtPoint` |
+| CoreText: font descriptors, collections and the font manager | `CTFontDescriptor…`: `GetTypeID`, `CreateWithNameAndSize`, `CreateWithAttributes`, `CreateCopyWithAttributes`, `CreateCopyWithFamily`, `CreateCopyWithSymbolicTraits`, `CreateCopyWithVariation`, `CreateCopyWithFeature`, `CreateMatchingFontDescriptors`, `CreateMatchingFontDescriptor`, `MatchFontDescriptorsWithProgressHandler`, `CopyAttributes`, `CopyAttribute`, `CopyLocalizedAttribute`; `CTFontCollection…`: `GetTypeID`, `CreateFromAvailableFonts`, `CreateWithFontDescriptors`, `CreateCopyWithFontDescriptors`, `CreateMutableCopy`, `CopyQueryDescriptors`, `SetQueryDescriptors`, `CopyExclusionDescriptors`, `SetExclusionDescriptors`, `CreateMatchingFontDescriptors`, `CreateMatchingFontDescriptorsSortedWithCallback`, `CreateMatchingFontDescriptorsWithOptions`, `CreateMatchingFontDescriptorsForFamily`, `CopyFontAttribute`, `CopyFontAttributes`; `CTFontManager…`: `CopyAvailablePostScriptNames`, `CopyAvailableFontFamilyNames`, `CopyAvailableFontURLs`, `CompareFontFamilyNames`, `CreateFontDescriptorsFromURL`, `CreateFontDescriptorFromData`, `CreateFontDescriptorsFromData`, `RegisterFontsForURL`, `UnregisterFontsForURL`, `RegisterGraphicsFont`, `UnregisterGraphicsFont`, `RegisterFontsForURLs`, `UnregisterFontsForURLs`, `RegisterFontURLs`, `UnregisterFontURLs`, `RegisterFontDescriptors`, `UnregisterFontDescriptors`, `RegisterFontsWithAssetNames`, `EnableFontDescriptors`, `GetScopeForURL`, `CopyRegisteredFontDescriptors`, `RequestFonts`, `IsSupportedFont`, `CreateFontRequestRunLoopSource`, `SetAutoActivationSetting`, `GetAutoActivationSetting` |
+| CoreText: lines and runs | `CTLine…`: `GetTypeID`, `CreateWithAttributedString`, `CreateTruncatedLine`, `CreateJustifiedLine`, `GetGlyphCount`, `GetGlyphRuns`, `GetStringRange`, `GetPenOffsetForFlush`, `Draw`, `GetTypographicBounds`, `GetBoundsWithOptions`, `GetTrailingWhitespaceWidth`, `GetImageBounds`, `GetStringIndexForPosition`, `GetOffsetForStringIndex`, `EnumerateCaretOffsets`; `CTRun…`: `GetTypeID`, `GetGlyphCount`, `GetAttributes`, `GetStatus`, `GetGlyphsPtr`, `GetGlyphs`, `GetPositionsPtr`, `GetPositions`, `GetAdvancesPtr`, `GetAdvances`, `GetStringIndicesPtr`, `GetStringIndices`, `GetStringRange`, `GetTypographicBounds`, `GetImageBounds`, `GetTextMatrix`, `GetBaseAdvancesAndOrigins`, `Draw` |
+| CoreText: typesetters and frames | `CTTypesetter…`: `GetTypeID`, `CreateWithAttributedString`, `CreateWithAttributedStringAndOptions`, `CreateLineWithOffset`, `CreateLine`, `SuggestLineBreakWithOffset`, `SuggestLineBreak`, `SuggestClusterBreakWithOffset`, `SuggestClusterBreak`; `CTFramesetter…`: `GetTypeID`, `CreateWithTypesetter`, `CreateWithAttributedString`, `CreateFrame`, `GetTypesetter`, `SuggestFrameSizeWithConstraints`; `CTFrame…`: `GetTypeID`, `GetStringRange`, `GetVisibleStringRange`, `GetPath`, `GetFrameAttributes`, `GetLines`, `GetLineOrigins`, `Draw` |
+| CoreText: paragraph styles and the rest | `CTParagraphStyle…`: `GetTypeID`, `Create`, `CreateCopy`, `GetValueForSpecifier`; `CTTextTab…`: `GetTypeID`, `Create`, `GetAlignment`, `GetLocation`, `GetOptions`; `CTGlyphInfo…`: `GetTypeID`, `CreateWithGlyphName`, `CreateWithGlyph`, `CreateWithCharacterIdentifier`, `GetGlyphName`, `GetGlyph`, `GetCharacterIdentifier`, `GetCharacterCollection`; `CTRunDelegate…`: `GetTypeID`, `Create`, `GetRefCon`; `CTRubyAnnotation…`: `GetTypeID`, `CreateWithAttributes`, `CreateCopy`, `GetAlignment`, `GetOverhang`, `GetSizeFactor`, `GetTextForPosition` |
+| CoreText: constants | `CTGetCoreTextVersion`; every string constant objc2-core-text declares (129), with macOS's value: the string attribute names (`kCTFontAttributeName`, `kCTForegroundColorAttributeName`, `kCTKernAttributeName`, …, several of them AppKit's names), font descriptor attributes (`kCTFontNameAttribute`, `kCTFontFeatureSettingsAttribute`, …), name, feature, variation and trait keys, baseline classes, frame, typesetter, ruby and collection options, and the font manager's keys, domain and notification |
+| CoreFoundation: attributed strings | `CFAttributedString…`: `GetTypeID`, `Create`, `CreateWithSubstring`, `CreateCopy`, `GetString`, `GetLength`, `GetAttributes`, `GetAttribute`, `GetAttributesAndLongestEffectiveRange`, `GetAttributeAndLongestEffectiveRange`, `CreateMutableCopy`, `CreateMutable`, `ReplaceString`, `GetMutableString`, `SetAttributes`, `SetAttribute`, `RemoveAttribute`, `ReplaceAttributedString`, `BeginEditing`, `EndEditing`, `GetBidiLevelsAndResolvedDirections`, `GetStatisticalWritingDirections` |
+
+`crates/sidestep/tests/link_closure.rs` references every extern static and
+function that objc2-foundation, objc2-app-kit, objc2-core-foundation and
+objc2-core-text declare under the features Sidestep's crates enable, but
+for the known gaps below, so a symbol that stops being exported fails a
+Linux build of the test; `scripts/link-closure` writes it from the
+overlay's crates when the features or the exports change.
+CoreFoundation's functions count as declared by the features
+sidestep-foundation enables (`CFRunLoop`, `CFDate`, `CFAttributedString`,
+`CFDictionary`): the ones AppKit's crates turn on for the types their
+bindings name (CoreGraphics' and CoreText's) don't add to them (see Known
+gaps). `conformance/tests/constants.rs` and `conformance/tests/coretext.rs`
+check the string constants' values against macOS's.
 
 dispatch2 links `-ldispatch` on Linux (objc2-foundation 0.3.2 doesn't
 depend on dispatch2; objc2-core-foundation and objc2-core-graphics do
@@ -75,6 +88,15 @@ constant objc2-image-io declares under Sidestep's features, but for the
 known gaps below, as `link_closure.rs` does Foundation's, AppKit's and
 CoreFoundation's; `conformance/tests/imageio.rs` runs them against
 macOS's.
+
+The CoreText functions (200, and 129 constants: all that objc2-core-text
+0.3.2 declares) come from sidestep-appkit's `coretext` module, with the
+signatures objc2-core-text declares; [architecture.md](architecture.md#coretext)
+describes them. A `CTFont` is an `NSFont` and a `CTFontDescriptor` an
+`NSFontDescriptor` (`CFGetTypeID` gives their classes CoreText's type IDs);
+the other types are Sidestep-private classes (`_SidestepCTLine`, …), as
+CoreGraphics' are. `CGContextShowGlyphs…` and `CGContextShowText…` draw
+through CoreText's glyph drawing.
 
 ## Conventions
 
@@ -216,6 +238,19 @@ macOS's.
   `CGImageSourceCopyAuxiliaryDataInfoAtIndex` return NULL. HEIC, AVIF and
   the other types the codecs lack are read as ImageIO reads a type it
   doesn't know (a source of no type and no images).
+- CoreFoundation's feature groups that only AppKit's crates enable (for
+  the types CoreGraphics' and CoreText's bindings name: `CFArray`,
+  `CFBase`, `CFCGTypes`, `CFData`, `CFString`, `CFURL`) declare 234
+  functions and statics nobody exports (133 `CFURL` resource keys, 60
+  mutable `CFString` functions and string keys, 27 more `CFURL`
+  functions, 8 `CFArray` functions, and a few others), and 76 more that
+  Sidestep exports but the link closure doesn't check, since it takes
+  CoreFoundation's features from sidestep-foundation alone.
+- CoreText: `CTFontCopyAvailableTables` puts the tags in the array as
+  `NSNumber`s (CoreText's array holds the bare tags, which Foundation's
+  arrays of objects can't: a program reading them as integers gets the
+  numbers' pointers). The rest of what CoreText does differently is in
+  [architecture.md](architecture.md#coretext).
 
 ## Fixed in the objc2 fork, pending upstream
 
@@ -252,20 +287,20 @@ The tool's README maps each patch and rule to its commit.
   supporting GNUstep, makes the Darwin-only `libc` types (Mach ports,
   `cpu_type_t`, `boolean_t`, malloc zones) Apple-only so the crates compile
   with default features, and keeps the toll-free bridging between AppKit and
-  CoreText types Apple-only, since GNUstep's (and Sidestep's) `NSFont` isn't
-  a `CTFont`. Rules: the framework link lines become
-  `cfg_attr(target_vendor = "apple", ...)`, dependency tables follow the
-  generator's platform logic (AppKit takes CoreGraphics, CoreText and
-  QuartzCore everywhere; QuartzCore takes Metal and CoreVideo on Apple only),
-  every item's platform `cfg` is recomputed (AppKit loses 80, keeps 102,
-  among them the bridging, and gains 2), and QuartzCore's `gnustep-*`
-  features forward to objc2 again. The published 0.3.2 bindings came from
+  CoreText types Apple-only, since GNUstep's `NSFont` isn't a `CTFont`
+  (Sidestep's is, so casts between the two work). Rules: the framework link
+  lines become `cfg_attr(target_vendor = "apple", ...)`, dependency tables
+  follow the generator's platform logic (AppKit takes CoreGraphics,
+  CoreText and QuartzCore everywhere; QuartzCore takes Metal and CoreVideo
+  on Apple only), every item's platform `cfg` is recomputed (AppKit loses
+  80, keeps 102, among them the bridging, and gains 2), and QuartzCore's
+  `gnustep-*` features forward to objc2 again. The published 0.3.2 bindings came from
   a newer generator than the tag's, so the bridging and malloc-zone parts
   of these rules follow `sidestep-main`'s version of the commit; the tag's
   generator emits no bridging and doesn't map malloc zones. Sidestep
   builds the four crates and AppKit's methods with their types on Linux,
-  and implements CoreGraphics and ImageIO (see Symbols) but not yet
-  QuartzCore and CoreText.
+  and implements CoreGraphics, ImageIO and CoreText (see Symbols) but
+  not yet QuartzCore.
 - **`NSStringEncoding` on GNUstep** (commit 4). GNUstep declares it as a C
   enum without a fixed type: an `int`, which Clang encodes as `i`.
   objc2-foundation bound it as `NSUInteger` while objc2's own helpers used

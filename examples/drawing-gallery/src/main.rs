@@ -11,7 +11,8 @@
 //! `bench`: a frame of 2,000 rounded-rect fills, 1,000 strokes and 300
 //! image draws (half of them downscaled), timed; `cg`: CoreGraphics, the
 //! same kinds of drawing through `-[NSGraphicsContext CGContext]`;
-//! `cgbench`: the bench frame through CoreGraphics calls.
+//! `cgbench`: the bench frame through CoreGraphics calls; `ct`: CoreText,
+//! lines, glyphs and a frame in DejaVu Sans loaded from a file.
 //! GALLERY_QUIT_AFTER: seconds until the app terminates itself.
 //! GALLERY_APPEARANCE: `light` or `dark` sets the application's
 //! appearance (else it follows the desktop's).
@@ -39,15 +40,15 @@ use objc2_app_kit::{
     NSRectFillUsingOperation, NSResponder, NSShadow, NSStringDrawing, NSView, NSWindingRule, NSWindow,
     NSWindowStyleMask,
 };
-use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{CFRetained, CGAffineTransform, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGBitmapContextCreateImage, CGBlendMode, CGColor, CGColorSpace, CGContext, CGGradient,
     CGGradientDrawingOptions, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo, CGLineCap, CGLineJoin, CGMutablePath,
-    CGPath, CGPathDrawingMode, kCGColorSpaceSRGB,
+    CGPath, CGPathDrawingMode, CGTextDrawingMode, kCGColorSpaceSRGB,
 };
 use objc2_foundation::{
-    NSAffineTransform, NSArray, NSDictionary, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize,
-    NSString, NSTimer, ns_string,
+    NSAffineTransform, NSArray, NSDictionary, NSNotification, NSNumber, NSObject, NSObjectProtocol, NSPoint, NSRect,
+    NSSize, NSString, NSTimer, ns_string,
 };
 
 // Links Sidestep's runtime and frameworks on Linux; empty on macOS.
@@ -652,6 +653,7 @@ define_class!(
                 "bench" => bench_frame(),
                 "cg" => coregraphics(),
                 "cgbench" => cg_bench_frame(),
+                "ct" => coretext(),
                 _ => shapes(),
             }
             let i = self.ivars();
@@ -673,6 +675,197 @@ impl Canvas {
         let i = self.ivars();
         i.drawing.replace(0.0) * 1000.0 / f64::from(i.frames.replace(0).max(1))
     }
+}
+
+// CoreText: lines, glyphs and frames through the view's CGContext.
+
+/// DejaVu Sans at `size`, from the file the conformance tests use.
+fn dejavu(size: f64) -> CFRetained<objc2_core_text::CTFont> {
+    use objc2_core_graphics::{CGDataProvider, CGFont};
+    let data =
+        objc2_core_foundation::CFData::from_bytes(include_bytes!("../../../conformance/tests/fixtures/DejaVuSans.ttf"));
+    let provider = CGDataProvider::with_cf_data(Some(&data)).expect("a provider");
+    let file = CGFont::with_data_provider(&provider).expect("a font");
+    // SAFETY: no matrix or attributes.
+    unsafe { objc2_core_text::CTFont::with_graphics_font(&file, size, std::ptr::null(), None) }
+}
+
+/// An attributed string of `text` in `font` with more attributes.
+fn ct_string(
+    text: &str,
+    font: &objc2_core_text::CTFont,
+    more: &[(&objc2_core_foundation::CFString, &AnyObject)],
+) -> Retained<objc2_foundation::NSAttributedString> {
+    let as_ns = |k: &objc2_core_foundation::CFString| -> *const NSString {
+        (k as *const objc2_core_foundation::CFString).cast()
+    };
+    // SAFETY: CFStrings are NSStrings; a font is an object.
+    let mut keys: Vec<&NSString> = vec![unsafe { &*as_ns(objc2_core_text::kCTFontAttributeName) }];
+    let mut values: Vec<&AnyObject> = vec![unsafe { &*(font as *const objc2_core_text::CTFont).cast() }];
+    for (k, v) in more {
+        keys.push(unsafe { &*as_ns(k) });
+        values.push(v);
+    }
+    let dict = NSDictionary::from_slices(&keys, &values);
+    // SAFETY: a string and its attributes.
+    unsafe {
+        objc2_foundation::NSAttributedString::initWithString_attributes(
+            objc2_foundation::NSAttributedString::alloc(),
+            &NSString::from_str(text),
+            Some(&dict),
+        )
+    }
+}
+
+fn ct_line(string: &objc2_foundation::NSAttributedString) -> CFRetained<objc2_core_text::CTLine> {
+    // SAFETY: an NSAttributedString is a CFAttributedString.
+    unsafe {
+        objc2_core_text::CTLine::with_attributed_string(
+            &*(string as *const objc2_foundation::NSAttributedString).cast(),
+        )
+    }
+}
+
+/// Draw `line` with its baseline at `at` in the (flipped) view.
+fn draw_ct_line(c: &CGContext, line: &objc2_core_text::CTLine, at: NSPoint) {
+    CGContext::set_text_position(Some(c), at.x, at.y);
+    // SAFETY: a line and a context.
+    unsafe { line.draw(c) };
+}
+
+fn coretext() {
+    use objc2_core_text::*;
+    let c = cg();
+    // The view is flipped: the text matrix turns text back up.
+    let upright = CGAffineTransform { a: 1.0, b: 0.0, c: 0.0, d: -1.0, tx: 0.0, ty: 0.0 };
+    CGContext::set_text_matrix(Some(&c), upright);
+    let red = CGColor::new_srgb(0.88, 0.11, 0.14, 1.0);
+    let ink = NSColor::labelColor();
+    let ink_key: &objc2_core_foundation::CFString =
+        unsafe { &*(NSForegroundColorAttributeName as *const NSString).cast() };
+    with_tile(0, "CTLine, three sizes", |r| {
+        for (k, size) in [11.0, 16.0, 24.0].into_iter().enumerate() {
+            let line = ct_line(&ct_string("Hxg fi AV", &dejavu(size), &[(ink_key, &ink)]));
+            draw_ct_line(&c, &line, at(r, 8.0, 30.0 + 45.0 * k as f64));
+        }
+    });
+    with_tile(1, "colors, kerning, underline", |r| {
+        let three = NSNumber::new_f64(3.0);
+        let one = NSNumber::new_i64(1);
+        let font = dejavu(16.0);
+        // SAFETY: the constants are strings.
+        let rows: [Vec<(&objc2_core_foundation::CFString, &AnyObject)>; 3] = unsafe {
+            [
+                vec![(kCTForegroundColorAttributeName, &*(&*red as *const CGColor).cast::<AnyObject>())],
+                vec![(kCTKernAttributeName, &*three), (ink_key, &ink)],
+                vec![(kCTUnderlineStyleAttributeName, &*one), (ink_key, &ink)],
+            ]
+        };
+        for (k, extra) in rows.iter().enumerate() {
+            draw_ct_line(&c, &ct_line(&ct_string("Kerning AV", &font, extra)), at(r, 8.0, 35.0 + 40.0 * k as f64));
+        }
+    });
+    with_tile(2, "glyphs by position", |r| {
+        let font = dejavu(20.0);
+        let text: Vec<u16> = "Sidestep".encode_utf16().collect();
+        let mut glyphs = vec![0u16; text.len()];
+        // SAFETY: as many glyphs as characters.
+        unsafe {
+            font.glyphs_for_characters(
+                NonNull::new(text.as_ptr().cast_mut()).unwrap(),
+                NonNull::new(glyphs.as_mut_ptr()).unwrap(),
+                text.len() as isize,
+            )
+        };
+        // Positions are in text space, through the text matrix: from the
+        // text position, y up.
+        CGContext::set_text_position(Some(&c), r.origin.x + 10.0, r.origin.y + 80.0);
+        let positions: Vec<CGPoint> =
+            (0..glyphs.len()).map(|i| CGPoint::new(16.0 * i as f64, 20.0 * (i as f64 * 0.8).sin())).collect();
+        CGContext::set_fill_color_with_color(Some(&c), Some(&NSColor::systemBlueColor().CGColor()));
+        // SAFETY: as many positions as glyphs.
+        unsafe {
+            font.draw_glyphs(
+                NonNull::new(glyphs.as_ptr().cast_mut()).unwrap(),
+                NonNull::new(positions.as_ptr().cast_mut()).unwrap(),
+                glyphs.len(),
+                &c,
+            )
+        };
+    });
+    with_tile(3, "turned (outlines)", |r| {
+        let line = ct_line(&ct_string("Turned text", &dejavu(18.0), &[(ink_key, &ink)]));
+        let middle = center(r);
+        CGContext::translate_ctm(Some(&c), middle.x, middle.y);
+        CGContext::rotate_ctm(Some(&c), -0.6);
+        draw_ct_line(&c, &line, NSPoint::new(-50.0, 6.0));
+    });
+    with_tile(4, "stroke and fill-stroke", |r| {
+        let line = ct_line(&ct_string("Hollow", &dejavu(28.0), &[]));
+        CGContext::set_stroke_color_with_color(Some(&c), Some(&NSColor::systemGreenColor().CGColor()));
+        CGContext::set_line_width(Some(&c), 1.0);
+        CGContext::set_text_drawing_mode(Some(&c), CGTextDrawingMode::Stroke);
+        draw_ct_line(&c, &line, at(r, 10.0, 60.0));
+        CGContext::set_fill_color_with_color(Some(&c), Some(&red));
+        CGContext::set_text_drawing_mode(Some(&c), CGTextDrawingMode::FillStroke);
+        let filled = ct_line(&ct_string("Filled", &dejavu(28.0), &[(from_context_key(), &*NSNumber::new_bool(true))]));
+        draw_ct_line(&c, &filled, at(r, 10.0, 110.0));
+        CGContext::set_text_drawing_mode(Some(&c), CGTextDrawingMode::Fill);
+    });
+    with_tile(5, "truncated", |r| {
+        let font = dejavu(14.0);
+        let long = ct_line(&ct_string("Hello wonderful world", &font, &[(ink_key, &ink)]));
+        let token = ct_line(&ct_string("\u{2026}", &font, &[(ink_key, &ink)]));
+        for (k, kind) in [CTLineTruncationType::End, CTLineTruncationType::Middle, CTLineTruncationType::Start]
+            .into_iter()
+            .enumerate()
+        {
+            // SAFETY: lines.
+            let cut = unsafe { long.truncated_line(r.size.width - 16.0, kind, Some(&token)) }.expect("a line");
+            draw_ct_line(&c, &cut, at(r, 8.0, 35.0 + 40.0 * k as f64));
+        }
+    });
+    with_tile(6, "a frame, centered", |r| {
+        let align = CTTextAlignment::Center;
+        let setting = CTParagraphStyleSetting {
+            spec: CTParagraphStyleSpecifier::Alignment,
+            valueSize: std::mem::size_of::<CTTextAlignment>(),
+            value: NonNull::from(&align).cast(),
+        };
+        // SAFETY: one setting.
+        let style = unsafe { CTParagraphStyle::new(&setting, 1) };
+        let text = ct_string(
+            "A framesetter fills a rectangle with lines, centered by a paragraph style.",
+            &dejavu(12.0),
+            // SAFETY: the constant is a string.
+            &[
+                (unsafe { kCTParagraphStyleAttributeName }, unsafe { &*(&*style as *const CTParagraphStyle).cast() }),
+                (ink_key, &ink),
+            ],
+        );
+        // SAFETY: an attributed string, a path.
+        unsafe {
+            let fs = CTFramesetter::with_attributed_string(&*(Retained::as_ptr(&text)).cast());
+            // Frames lay out upward from the bottom: draw in an unflipped
+            // space over the tile.
+            CGContext::translate_ctm(Some(&c), r.origin.x, r.origin.y + r.size.height);
+            CGContext::scale_ctm(Some(&c), 1.0, -1.0);
+            CGContext::set_text_matrix(
+                Some(&c),
+                CGAffineTransform { a: 1.0, b: 0.0, c: 0.0, d: 1.0, tx: 0.0, ty: 0.0 },
+            );
+            let path =
+                CGPath::with_rect(cgr(rect(8.0, 8.0, r.size.width - 16.0, r.size.height - 16.0)), std::ptr::null());
+            fs.frame(objc2_core_foundation::CFRange::new(0, 0), &path, None).draw(&c);
+        }
+        CGContext::set_text_matrix(Some(&c), upright);
+    });
+}
+
+/// `kCTForegroundColorFromContextAttributeName`.
+fn from_context_key() -> &'static objc2_core_foundation::CFString {
+    // SAFETY: the constant is a string.
+    unsafe { objc2_core_text::kCTForegroundColorFromContextAttributeName }
 }
 
 // CoreGraphics: the same kinds of drawing through a CGContext.

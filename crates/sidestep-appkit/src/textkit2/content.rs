@@ -58,6 +58,14 @@ sidestep_runtime::static_class!(pub(crate) NSTEXTCONTENTSTORAGE, NSTEXTCONTENTST
     let _ = NSTextContentStorageImpl::class();
 });
 
+// Posted on macOS when a storage meets an attribute TextKit 2 doesn't
+// support; the name exists here for programs that observe it (nothing
+// posts it: every attribute is kept).
+sidestep_foundation::constant_string!(
+    NSTextContentStorageUnsupportedAttributeAddedNotification =
+        "NSTextContentStorageUnsupportedAttributeAddedNotification"
+);
+
 /// Edits the log keeps before the kept elements are brought up to date at
 /// once.
 const LOG_MAX: usize = 256;

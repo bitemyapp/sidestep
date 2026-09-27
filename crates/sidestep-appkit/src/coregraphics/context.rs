@@ -102,11 +102,11 @@ impl Default for Line {
 impl Line {
     /// The width strokes are drawn with: a negative one draws a line 1
     /// wide, as CoreGraphics draws it (measured on macOS).
-    fn drawn_width(&self) -> f64 {
+    pub(crate) fn drawn_width(&self) -> f64 {
         if self.width < 0.0 { 1.0 } else { self.width }
     }
 
-    fn spec(&self) -> StrokeSpec {
+    pub(crate) fn spec(&self) -> StrokeSpec {
         StrokeSpec {
             width: self.drawn_width() as f32,
             cap: self.cap.0 as u8,
@@ -118,8 +118,8 @@ impl Line {
 }
 
 /// CoreGraphics' text settings, part of the graphics state (the text
-/// matrix isn't: it's the context state's). Text drawing through a
-/// CGContext comes with CoreText.
+/// matrix isn't: it's the context state's). Text is drawn through
+/// CoreText's glyph drawing (`coretext::draw`).
 #[derive(Clone)]
 pub(crate) struct TextState {
     pub font: Option<Retained<super::font::CGFontImpl>>,
@@ -1365,7 +1365,7 @@ pub extern "C-unwind" fn CGContextDrawShading(c: Option<&CGContext>, shading: Op
     with(c, |st| shading.draw(st, stops));
 }
 
-// Text: the settings, kept for CoreText, which draws.
+// Text: the settings, and glyphs drawn in the context's font.
 
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn CGContextSetCharacterSpacing(c: Option<&CGContext>, spacing: CGFloat) {
@@ -1441,25 +1441,60 @@ pub unsafe extern "C-unwind" fn CGContextSelectFont(
     });
 }
 
-/// Text drawing comes with CoreText; these draw nothing yet.
+/// Glyphs of the context's font (`CGContextSetFont`) at its size, drawn
+/// by CoreText's glyph drawing (`coretext::draw`): at `lpositions` in text
+/// space, through the text matrix; the text position stays.
 ///
 /// # Safety
 ///
 /// `glyphs` and `lpositions` hold `count` items.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn CGContextShowGlyphsAtPositions(
-    _c: Option<&CGContext>,
-    _glyphs: *const CGGlyph,
-    _lpositions: *const CGPoint,
-    _count: usize,
+    c: Option<&CGContext>,
+    glyphs: *const CGGlyph,
+    lpositions: *const CGPoint,
+    count: usize,
 ) {
+    // SAFETY: as the caller promises.
+    let (glyphs, positions) = unsafe { (super::slice(glyphs, count), super::slice(lpositions, count)) };
+    if glyphs.len() != positions.len() {
+        return;
+    }
+    let positions: Vec<(f64, f64)> = positions.iter().map(|p| (p.x, p.y)).collect();
+    with(c, |st| crate::coretext::draw::draw_cg_glyphs(st, glyphs, &positions));
+}
+
+/// Glyphs at the text position, one after another by their advances
+/// (with the character spacing), moving the text position on.
+fn show_advancing(st: &mut ContextState, glyphs: &[CGGlyph], advances: &[(f64, f64)]) {
+    let mut positions = Vec::with_capacity(glyphs.len());
+    let (mut x, mut y) = (0.0, 0.0);
+    for &(dx, dy) in advances {
+        positions.push((x, y));
+        (x, y) = (x + dx, y + dy);
+    }
+    // Positions are from the text position (the text matrix's
+    // translation), which then moves on by the advances, through the
+    // matrix.
+    let [a, b, cc, d, e, f] = st.text_matrix.as_coeffs();
+    crate::coretext::draw::draw_cg_glyphs(st, glyphs, &positions);
+    let moved = Affine::new([a, b, cc, d, 0.0, 0.0]) * Point::new(x, y);
+    st.text_matrix = Affine::new([a, b, cc, d, e + moved.x, f + moved.y]);
 }
 
 /// # Safety
 ///
 /// `glyphs` holds `count` glyphs.
 #[unsafe(no_mangle)]
-pub unsafe extern "C-unwind" fn CGContextShowGlyphs(_c: Option<&CGContext>, _g: *const CGGlyph, _count: usize) {}
+pub unsafe extern "C-unwind" fn CGContextShowGlyphs(c: Option<&CGContext>, g: *const CGGlyph, count: usize) {
+    // SAFETY: as the caller promises.
+    let glyphs = unsafe { super::slice(g, count) };
+    with(c, |st| {
+        let advances: Vec<(f64, f64)> =
+            crate::coretext::draw::cg_advances(st, glyphs).into_iter().map(|a| (a, 0.0)).collect();
+        show_advancing(st, glyphs, &advances);
+    });
+}
 
 /// # Safety
 ///
@@ -1469,10 +1504,12 @@ pub unsafe extern "C-unwind" fn CGContextShowGlyphsAtPoint(
     c: Option<&CGContext>,
     x: CGFloat,
     y: CGFloat,
-    _glyphs: *const CGGlyph,
-    _count: usize,
+    glyphs: *const CGGlyph,
+    count: usize,
 ) {
     CGContextSetTextPosition(c, x, y);
+    // SAFETY: as the caller promises.
+    unsafe { CGContextShowGlyphs(c, glyphs, count) };
 }
 
 /// # Safety
@@ -1480,18 +1517,36 @@ pub unsafe extern "C-unwind" fn CGContextShowGlyphsAtPoint(
 /// `glyphs` and `advances` hold `count` items.
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn CGContextShowGlyphsWithAdvances(
-    _c: Option<&CGContext>,
-    _glyphs: *const CGGlyph,
-    _advances: *const CGSize,
-    _count: usize,
+    c: Option<&CGContext>,
+    glyphs: *const CGGlyph,
+    advances: *const CGSize,
+    count: usize,
 ) {
+    // SAFETY: as the caller promises.
+    let (glyphs, advances) = unsafe { (super::slice(glyphs, count), super::slice(advances, count)) };
+    if glyphs.len() != advances.len() {
+        return;
+    }
+    let advances: Vec<(f64, f64)> = advances.iter().map(|a| (a.width, a.height)).collect();
+    with(c, |st| show_advancing(st, glyphs, &advances));
 }
 
+/// Mac Roman text in the context's font, at the text position.
+///
 /// # Safety
 ///
 /// `string` holds `length` bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C-unwind" fn CGContextShowText(_c: Option<&CGContext>, _string: *const c_char, _length: usize) {}
+pub unsafe extern "C-unwind" fn CGContextShowText(c: Option<&CGContext>, string: *const c_char, length: usize) {
+    // SAFETY: as the caller promises.
+    let bytes = unsafe { super::slice(string.cast::<u8>(), length) };
+    with(c, |st| {
+        let glyphs = crate::coretext::draw::cg_glyphs_for_text(st, bytes);
+        let advances: Vec<(f64, f64)> =
+            crate::coretext::draw::cg_advances(st, &glyphs).into_iter().map(|a| (a, 0.0)).collect();
+        show_advancing(st, &glyphs, &advances);
+    });
+}
 
 /// # Safety
 ///
@@ -1501,10 +1556,12 @@ pub unsafe extern "C-unwind" fn CGContextShowTextAtPoint(
     c: Option<&CGContext>,
     x: CGFloat,
     y: CGFloat,
-    _string: *const c_char,
-    _length: usize,
+    string: *const c_char,
+    length: usize,
 ) {
     CGContextSetTextPosition(c, x, y);
+    // SAFETY: as the caller promises.
+    unsafe { CGContextShowText(c, string, length) };
 }
 
 // Antialiasing and fonts' settings.

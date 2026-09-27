@@ -98,19 +98,27 @@ pub(crate) fn load_shell(shell: &'static sidestep_runtime::Class) {
     let _ = unsafe { objc2::ffi::class_getInstanceSize((shell as *const sidestep_runtime::Class).cast()) };
 }
 
+/// Mac Roman bytes as text (for CoreGraphics' `CGContextShowText`).
+#[doc(hidden)]
+pub fn decode_mac_roman(bytes: &[u8]) -> String {
+    cf::string::decode(bytes, cf::string::encoding::MAC_ROMAN, false).unwrap_or_default()
+}
+
 #[doc(hidden)]
 pub mod __private {
     pub use sidestep_runtime::ObjectRef;
 }
 
-/// The CoreFoundation type IDs of CoreGraphics' and ImageIO's types, for
-/// Sidestep's AppKit, which defines them (`CFGetTypeID` works them out from the
-/// object's class, by name).
+/// The CoreFoundation type IDs of CoreGraphics', ImageIO's and CoreText's
+/// types, for Sidestep's AppKit, which defines them (`CFGetTypeID` works
+/// them out from the object's class, by name).
 #[doc(hidden)]
 pub mod cf_type_ids {
     pub use crate::cf::types::id::{
         CG_COLOR, CG_COLOR_SPACE, CG_CONTEXT, CG_DATA_CONSUMER, CG_DATA_PROVIDER, CG_FONT, CG_FUNCTION, CG_GRADIENT,
-        CG_IMAGE, CG_IMAGE_DESTINATION, CG_IMAGE_SOURCE, CG_PATH, CG_PATTERN, CG_SHADING,
+        CG_IMAGE, CG_IMAGE_DESTINATION, CG_IMAGE_SOURCE, CG_PATH, CG_PATTERN, CG_SHADING, CT_FONT, CT_FONT_COLLECTION,
+        CT_FONT_DESCRIPTOR, CT_FRAME, CT_FRAMESETTER, CT_GLYPH_INFO, CT_LINE, CT_PARAGRAPH_STYLE, CT_RUBY_ANNOTATION,
+        CT_RUN, CT_RUN_DELEGATE, CT_TEXT_TAB, CT_TYPESETTER,
     };
 }
 

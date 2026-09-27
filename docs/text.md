@@ -4,7 +4,8 @@ TextKit 1, TextKit 2 and the text view, as Sidestep implements them on
 Linux: `NSTextStorage`, `NSLayoutManager`, `NSTextContainer`, `NSText` and
 `NSTextView` with the field editor controls edit in, `NSUndoManager`, text
 blocks and tables, and TextKit 2's `NSTextLayoutManager`,
-`NSTextContentStorage` and the rest over the same storage and line layout.
+`NSTextContentStorage` and the rest over the same storage and line layout;
+and CoreText's lines and frames, which lay text out with the same code.
 The code is in `crates/sidestep-appkit/src/textkit/` and `textkit2/` (and
 `NSUndoManager` in `crates/sidestep-foundation/src/undo.rs`); it stands on
 the line layout of `text/lines.rs` described in
@@ -838,6 +839,80 @@ matched:
 - After `relocateViewportToTextLocation:`, the fragment there is in state 0
   (1, estimated, on macOS).
 
+## CoreText
+
+CoreText (`crates/sidestep-appkit/src/coretext/`, described in
+[architecture.md](architecture.md#coretext)) is the third way in to the
+same line layout: `CTLineCreateWithAttributedString` reads an attributed
+string's runs as string drawing reads them, and `text/glyphs.rs` lays the
+text out with `text/layout.rs`'s shaping, bidi and font fallback, keeping
+what CoreText reports and TextKit doesn't need: every glyph's position,
+advance and the index of the character it came from, run by run. What a
+program can see was measured on macOS with a font file both platforms have
+(`conformance/tests/coretext.rs`, DejaVu Sans from `fixtures/`):
+
+- **One line.** A `CTLine` is one line whatever its text holds: newlines
+  and control characters are the space's glyph and U+2028 and U+2029 the
+  font's own, each taking no room (in the run of their attributes), and a
+  tab reaches the next of the default stops, 28 points apart. The width counts trailing
+  whitespace, which `CTLineGetTrailingWhitespaceWidth` gives apart (with
+  the tracking after the last glyph); ascent, descent and leading are the
+  largest of the line's fonts' (the fallback's too), unrounded, raised and
+  lowered by baseline offsets.
+- **Runs.** Runs split where the attributes, the face (a character the font
+  lacks falls back as in any text) or the direction change; a
+  right-to-left run keeps its glyphs left to right, their character
+  indices falling (`kCTRunStatusRightToLeft`). A run's string range covers
+  every character its glyphs stand for, a ligature's later ones too. A run's attributes are the
+  attributed string's own dictionary when its font drew the run, else a
+  copy naming the face that did (text without a font is in Helvetica 12,
+  the 12-point interface font here, named in each run's attributes).
+- **Kerning and features.** Kerning is the font's (`GPOS` or `kern`);
+  `kCTKernAttributeName` adds its points after every glyph, the last one
+  too, and 0 turns kerning off (tracking or not); `kCTTrackingAttributeName`
+  adds too, and counts as trailing whitespace at the end. Feature settings on the font
+  (the font feature registry's types and selectors, or OpenType tags)
+  turn OpenType features on and off in the shaper: common ligatures off
+  keeps "fi" two glyphs.
+- **Carets.** Each character has a leading and a trailing edge: its share
+  of its cluster (inside a ligature, its characters share the width
+  evenly), left then right, or right then left in right-to-left text;
+  between two glyphs the edge sits halfway into their kerning (the "AV"
+  pair's caret in the middle of the pull-in). An index's primary offset is
+  the trailing edge of the character before it, its secondary the leading
+  edge of its own: they part where the direction changes. The index for a
+  position is the edge of the half of the character under it.
+- **Truncation and justification.** A truncated line keeps as many whole
+  clusters as fit with the token (the line's trailing whitespace adds to
+  the room): from the start, from the end, or half the room for each end
+  around a middle cut; whitespace next to the token goes, and the token's
+  run stands for (and indexes) the characters it replaced. Without a token
+  nothing takes their place; narrower than the token, there's no line.
+  Justification widens the spaces first (to half an em each), then the
+  gaps between letters and, half as much, the spaces; narrowing takes a
+  little from spaces, then up to 11/128 em from each letter gap, then the
+  rest from the spaces (architecture.md has the stages).
+- **Typesetters and frames.** A typesetter's suggested break is a count of
+  units from the start index: the words that fit, trailing whitespace and
+  a paragraph separator included; a word too long for a line alone is
+  broken where it reaches the width; a cluster break breaks anywhere. It
+  keeps the lines of the paragraph it last broke, so a loop asking for
+  one line after the other lays each paragraph out once. A framesetter
+  lays each paragraph out once, whole, at the width its indents leave
+  (cutting its lines where the range asked for ends), and stacks the lines
+  in the path's bounding box: each as tall as
+  its ascent, descent and leading rounded to whole points (the first
+  baseline its rounded ascent below the top), spaced and aligned by the
+  paragraph's style (`CTParagraphStyle`, or AppKit's `NSParagraphStyle`
+  under the same name). Lines that don't fit whole end the frame's visible
+  range; the suggested size is the widest line without its trailing
+  whitespace and the lines' height.
+
+A line is laid out when it's made, and not cached: making one of 26
+characters takes about 6.5 µs on Linux (see below), and drawing it records
+its glyph runs as string drawing's are recorded, from the render thread's
+glyph cache.
+
 ## Performance
 
 `examples/textbench` (release; median of seven runs; Linux in a VM on an
@@ -919,3 +994,29 @@ time however many an object has, but one each would still cost a weak
 location apiece: with every fragment made, 21 to 22 MB more at peak, 2 to
 2.7 times as long to free the view, and 10 to 30% more for the `setFont:`
 and `setString:` rows (measured on Linux, in two sessions).
+
+`examples/ctbench` (release; median of thousands of runs; Linux in a VM
+on an M-series Mac, and CoreText on the same Mac): what a math renderer
+does for a formula of 26 characters in 18-point DejaVu Sans loaded from a
+file (TrueType outlines), and in Latin Modern Math (CFF outlines, whose
+glyphs have no boxes of their own), given on the command line.
+
+| | Sidestep | CoreText | Sidestep, CFF | CoreText, CFF |
+|---|---:|---:|---:|---:|
+| font from a `CGFont` (made before) | 0.04 µs | 2.8 µs | 0.04 µs | 2.8 µs |
+| glyphs for the characters | 0.17 µs | 0.38 µs | 0.17 µs | 0.42 µs |
+| their advances | 0.12 µs | 0.08 µs | 0.12 µs | 0.08 µs |
+| their bounding rects | 0.21 µs | 0.92 µs | 0.21 µs | 1.08 µs |
+| a line from the attributed string | 6.5 µs | 2.3 µs | 10.5 µs | 108 µs |
+| the line's typographic bounds | 0.00 µs | 0.00 µs | 0.00 µs | 0.00 µs |
+| the line drawn into a bitmap context | 1.8 µs | 2.4 µs | 2.5 µs | 3.0 µs |
+| the glyphs drawn by position | 1.1 µs | 2.0 µs | 1.0 µs | 0.6 µs |
+| a glyph's path | 0.33 µs | 0.12 µs | 1.1 µs | 0.12 µs |
+
+A font from a `CGFont` already made is a cache lookup (the font file is
+found by its contents once, and `NSFont` hands out the same object for the
+same description). A face remembers its glyphs' boxes, so bounding rects
+cost the same for CFF fonts, whose outlines are drawn once each to find
+them (16 to 22 µs a call before). A line is shaped and laid out each time
+it's made, where CoreText seems to keep shaped text; drawing costs what
+string drawing's glyph runs cost.

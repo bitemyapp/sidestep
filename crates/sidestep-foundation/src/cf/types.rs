@@ -62,12 +62,28 @@ pub(crate) mod id {
     // ImageIO's, which Sidestep's AppKit defines too.
     pub const CG_IMAGE_SOURCE: CFTypeID = 113;
     pub const CG_IMAGE_DESTINATION: CFTypeID = 114;
+    // CoreText's, likewise (a font is an `NSFont`, a font descriptor an
+    // `NSFontDescriptor`, as on macOS).
+    pub const CT_FONT: CFTypeID = 120;
+    pub const CT_FONT_DESCRIPTOR: CFTypeID = 121;
+    pub const CT_LINE: CFTypeID = 122;
+    pub const CT_RUN: CFTypeID = 123;
+    pub const CT_TYPESETTER: CFTypeID = 124;
+    pub const CT_FRAMESETTER: CFTypeID = 125;
+    pub const CT_FRAME: CFTypeID = 126;
+    pub const CT_PARAGRAPH_STYLE: CFTypeID = 127;
+    pub const CT_FONT_COLLECTION: CFTypeID = 128;
+    pub const CT_GLYPH_INFO: CFTypeID = 129;
+    pub const CT_RUN_DELEGATE: CFTypeID = 130;
+    pub const CT_TEXT_TAB: CFTypeID = 131;
+    pub const CT_RUBY_ANNOTATION: CFTypeID = 132;
 }
 
-/// CoreGraphics' and ImageIO's types: their classes (Sidestep-private
-/// names, defined by Sidestep's AppKit, where both live) and the names
-/// `CFCopyTypeIDDescription` gives them.
-const CG_TYPES: &[(&str, CFTypeID, &str)] = &[
+/// CoreGraphics', ImageIO's and CoreText's types: their classes (defined
+/// by Sidestep's AppKit, where they live: Sidestep-private names, and
+/// `NSFont` and `NSFontDescriptor`, which CoreText's fonts and descriptors
+/// are) and the names `CFCopyTypeIDDescription` gives them.
+const FRAMEWORK_TYPES: &[(&str, CFTypeID, &str)] = &[
     ("_SidestepCGColorSpace", id::CG_COLOR_SPACE, "CGColorSpace"),
     ("_SidestepCGColor", id::CG_COLOR, "CGColor"),
     ("_SidestepCGPath", id::CG_PATH, "CGPath"),
@@ -82,6 +98,19 @@ const CG_TYPES: &[(&str, CFTypeID, &str)] = &[
     ("_SidestepCGPattern", id::CG_PATTERN, "CGPattern"),
     ("_SidestepCGImageSource", id::CG_IMAGE_SOURCE, "CGImageSource"),
     ("_SidestepCGImageDestination", id::CG_IMAGE_DESTINATION, "CGImageDestination"),
+    ("NSFont", id::CT_FONT, "CTFont"),
+    ("NSFontDescriptor", id::CT_FONT_DESCRIPTOR, "CTFontDescriptor"),
+    ("_SidestepCTLine", id::CT_LINE, "CTLine"),
+    ("_SidestepCTRun", id::CT_RUN, "CTRun"),
+    ("_SidestepCTTypesetter", id::CT_TYPESETTER, "CTTypesetter"),
+    ("_SidestepCTFramesetter", id::CT_FRAMESETTER, "CTFramesetter"),
+    ("_SidestepCTFrame", id::CT_FRAME, "CTFrame"),
+    ("_SidestepCTParagraphStyle", id::CT_PARAGRAPH_STYLE, "CTParagraphStyle"),
+    ("_SidestepCTFontCollection", id::CT_FONT_COLLECTION, "CTFontCollection"),
+    ("_SidestepCTGlyphInfo", id::CT_GLYPH_INFO, "CTGlyphInfo"),
+    ("_SidestepCTRunDelegate", id::CT_RUN_DELEGATE, "CTRunDelegate"),
+    ("_SidestepCTTextTab", id::CT_TEXT_TAB, "CTTextTab"),
+    ("_SidestepCTRubyAnnotation", id::CT_RUBY_ANNOTATION, "CTRubyAnnotation"),
 ];
 
 /// Class names with CoreFoundation counterparts.
@@ -117,7 +146,7 @@ pub(crate) fn type_of(object: &AnyObject) -> CFTypeID {
             }
             return id;
         }
-        if let Some(&(_, id, _)) = CG_TYPES.iter().find(|(n, ..)| n.as_bytes() == name) {
+        if let Some(&(_, id, _)) = FRAMEWORK_TYPES.iter().find(|(n, ..)| n.as_bytes() == name) {
             return id;
         }
         class = c.superclass();
@@ -190,8 +219,8 @@ pub unsafe extern "C-unwind" fn CFCopyTypeIDDescription(type_id: CFTypeID) -> *m
         id::RUN_LOOP => "CFRunLoop",
         id::RUN_LOOP_TIMER => "CFRunLoopTimer",
         id::RUN_LOOP_OBSERVER => "CFRunLoopObserver",
-        id if CG_TYPES.iter().any(|t| t.1 == id) => {
-            let name = CG_TYPES.iter().find(|t| t.1 == id).map_or("", |t| t.2);
+        id if FRAMEWORK_TYPES.iter().any(|t| t.1 == id) => {
+            let name = FRAMEWORK_TYPES.iter().find(|t| t.1 == id).map_or("", |t| t.2);
             return owned(NSString::from_str(name));
         }
         _ => BRIDGED.iter().find(|(_, id)| *id == type_id).map_or("", |(n, _)| n.strip_prefix("NS").unwrap_or(n)),

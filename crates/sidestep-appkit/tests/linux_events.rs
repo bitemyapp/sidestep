@@ -897,6 +897,64 @@ mod linux {
 
     type Test = (&'static str, fn(MainThreadMarker));
 
+    thread_local!(static TEXT_MATRICES: RefCell<Vec<(&'static str, [f64; 6])>> = const { RefCell::new(Vec::new()) });
+
+    define_class!(
+        /// A view that writes down the text matrix its drawing starts
+        /// with, then leaves another behind.
+        #[unsafe(super(NSView, NSResponder, NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "LinuxEventsTextMatrixProbe"]
+        #[ivars = &'static str]
+        pub(crate) struct TextMatrixProbe;
+
+        impl TextMatrixProbe {
+            #[unsafe(method(drawRect:))]
+            fn draw_rect(&self, _dirty: NSRect) {
+                use objc2_core_graphics::CGContext;
+                let cg = objc2_app_kit::NSGraphicsContext::currentContext().expect("a context").CGContext();
+                let m = CGContext::text_matrix(Some(&cg));
+                TEXT_MATRICES.with(|t| t.borrow_mut().push((*self.ivars(), [m.a, m.b, m.c, m.d, m.tx, m.ty])));
+                let scaled = objc2_core_foundation::CGAffineTransform { a: 3.0, b: 0.0, c: 0.0, d: 3.0, tx: 1.0, ty: 1.0 };
+                CGContext::set_text_matrix(Some(&cg), scaled);
+                CGContext::set_text_position(Some(&cg), 7.0, 8.0);
+            }
+        }
+
+        unsafe impl NSObjectProtocol for TextMatrixProbe {}
+    );
+
+    /// Each view's drawing in a window starts with the identity text
+    /// matrix, whatever the views drawn before it left (as each has a
+    /// layer of its own on macOS).
+    fn each_view_starts_with_the_identity_text_matrix(mtm: MainThreadMarker) {
+        let probe = |name: &'static str, frame: NSRect| -> Retained<TextMatrixProbe> {
+            let this = TextMatrixProbe::alloc(mtm).set_ivars(name);
+            unsafe { msg_send![super(this), initWithFrame: frame] }
+        };
+        let content = probe("content", rect(0.0, 0.0, 300.0, 200.0));
+        let a = probe("a", rect(10.0, 10.0, 50.0, 50.0));
+        let b = probe("b", rect(70.0, 10.0, 50.0, 50.0));
+        let inner = probe("inner", rect(5.0, 5.0, 20.0, 20.0));
+        a.addSubview(&inner);
+        content.addSubview(&a);
+        content.addSubview(&b);
+        let (w, _) = shown(mtm, &content);
+        TEXT_MATRICES.with(|t| t.borrow_mut().clear());
+        content.setNeedsDisplay(true);
+        testing::display_now(&w);
+        let seen = TEXT_MATRICES.with(|t| std::mem::take(&mut *t.borrow_mut()));
+        let names: Vec<&str> = seen.iter().map(|s| s.0).collect();
+        for name in ["content", "a", "inner", "b"] {
+            assert!(names.contains(&name), "{name} drew: {names:?}");
+        }
+        for (name, m) in seen {
+            assert_eq!(m, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], "{name}");
+        }
+        w.close();
+        testing::settle();
+    }
+
     pub(crate) fn main() {
         let mtm = MainThreadMarker::new().expect("runs on the main thread");
         testing::use_null_backend();
@@ -921,6 +979,7 @@ mod linux {
             ("modal_loops_take_only_their_input", modal_loops_take_only_their_input),
             ("tool_tips_show_after_a_rest", tool_tips_show_after_a_rest),
             ("the_main_menu_has_key_equivalents_after_the_window", the_main_menu_has_key_equivalents_after_the_window),
+            ("each_view_starts_with_the_identity_text_matrix", each_view_starts_with_the_identity_text_matrix),
         ];
         let only = std::env::args().nth(1).filter(|a| !a.starts_with('-'));
         for (name, test) in tests {

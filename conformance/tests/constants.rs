@@ -963,6 +963,7 @@ strings! {
     objc2_app_kit::NSApplicationFileType = "app",
     objc2_app_kit::NSFilesystemFileType = "NXFilesystemFileType",
     objc2_app_kit::NSShellCommandFileType = "NXShellCommandFileType",
+    objc2_app_kit::NSTextContentStorageUnsupportedAttributeAddedNotification = "NSTextContentStorageUnsupportedAttributeAddedNotification",
 }
 
 optional_strings! {

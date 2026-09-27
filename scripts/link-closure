@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Write crates/sidestep/tests/link_closure.rs: a test that references every
-extern static and function objc2-foundation, objc2-app-kit and
-objc2-core-foundation declare under the features Sidestep's crates enable
-on Linux, except the known gaps below (docs/abi.md, "Known gaps"); and
-crates/sidestep/tests/link_closure_imageio.rs, the same for objc2-image-io.
-A symbol Sidestep stops exporting then fails the test's link.
+extern static and function objc2-foundation, objc2-app-kit,
+objc2-core-foundation and objc2-core-text declare under the features
+Sidestep's crates enable on Linux, except the known gaps below (docs/abi.md,
+"Known gaps"); and crates/sidestep/tests/link_closure_imageio.rs, the same
+for objc2-image-io. A symbol Sidestep stops exporting then fails the test's
+link.
 
 Run from the checkout after tools/objc2-overlay has written .objc2-overlay/:
 
@@ -29,6 +30,7 @@ GROUPS = {
         "objc2-foundation": "objc2_foundation",
         "objc2-app-kit": "objc2_app_kit",
         "objc2-core-foundation": "objc2_core_foundation",
+        "objc2-core-text": "objc2_core_text",
     },
     "link_closure_imageio.rs": {
         "objc2-image-io": "objc2_image_io",
@@ -88,6 +90,11 @@ def enabled_features():
             if "apple" in key and "not" not in key:
                 continue
             for name, spec in table.get("dependencies", {}).items():
+                # CoreFoundation's functions are Foundation's to export: the
+                # features other crates enable for the types their bindings
+                # name (AppKit's CoreGraphics and CoreText) don't add to them.
+                if name == "objc2-core-foundation" and manifest != "crates/sidestep-foundation":
+                    continue
                 if name in enabled and isinstance(spec, dict):
                     enabled[name].update(spec.get("features", []))
     tables = {c: tomllib.loads((overlay_dir(c) / "Cargo.toml").read_text()).get("features", {}) for c in CRATES}
@@ -99,6 +106,12 @@ def enabled_features():
                 for implied in tables[crate].get(feature, []):
                     dep, _, feat = implied.partition("/")
                     dep, feat = (dep.rstrip("?"), feat) if feat else (crate, dep)
+                    # CoreText's features pull in the CoreFoundation types its
+                    # declarations name (character sets, sets, bundles); which
+                    # CoreFoundation functions are exported is up to the
+                    # CoreFoundation features Sidestep's crates enable.
+                    if crate == "objc2-core-text" and dep != crate:
+                        continue
                     if dep in enabled and not feat.startswith("dep:") and feat not in enabled[dep]:
                         enabled[dep].add(feat)
                         changed = True

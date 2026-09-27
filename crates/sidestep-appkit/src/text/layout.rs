@@ -50,9 +50,9 @@ use icu_properties::props::{
 use icu_properties::{CodePointMapData, CodePointSetData};
 use parley::setting::Tag;
 use parley::{
-    Alignment, AlignmentOptions, FontFamily, FontFamilyName, FontFeature, FontFeatures, FontStyle, FontWeight,
-    FontWidth, GenericFamily, InlineBox, InlineBoxKind, Layout, OverflowWrap, PositionedLayoutItem, TextStyle,
-    TextWrapMode, WordBreak,
+    Alignment, AlignmentOptions, FontFamily, FontFamilyName, FontFeature, FontFeatures, FontStyle, FontVariation,
+    FontVariations, FontWeight, FontWidth, GenericFamily, InlineBox, InlineBoxKind, Layout, OverflowWrap,
+    PositionedLayoutItem, TextStyle, TextWrapMode, WordBreak,
 };
 
 use super::fonts::{self, Face, Features};
@@ -1135,7 +1135,7 @@ pub(crate) fn segment_lines(
     let mode = req.tail.map_or(para.line_break, |(mode, _)| mode);
     let wraps = opts.all_lines && req.tail.is_none() && matches!(mode, LineBreak::WordWrap | LineBreak::CharWrap);
     let truncates = mode.truncates() && right.is_finite();
-    let settings = Settings { mode, wraps, direction: req.direction, context: req.context };
+    let settings = Settings { mode, wraps, direction: req.direction, context: req.context, own_emoji: false };
 
     let (mut layout, shift) = build(ctx, text, attrs, runs, &settings);
     break_and_tab(&mut layout, text, shift, para, right, first_indent, rest_indent);
@@ -1181,11 +1181,15 @@ pub(crate) fn segment_lines(
     lines
 }
 
-struct Settings {
-    mode: LineBreak,
-    wraps: bool,
-    direction: Direction,
-    context: Option<Strong>,
+pub(super) struct Settings {
+    pub mode: LineBreak,
+    pub wraps: bool,
+    pub direction: Direction,
+    pub context: Option<Strong>,
+    /// An emoji the text's face has a glyph for takes that glyph, as
+    /// CoreText lays emoji out; else a color emoji face comes first, as
+    /// AppKit draws them.
+    pub own_emoji: bool,
 }
 
 fn alignment(align: Align) -> Alignment {
@@ -1200,7 +1204,13 @@ fn alignment(align: Align) -> Alignment {
 
 /// A parley layout of `text`, and how many bytes of direction marks
 /// precede the text in it.
-fn build(ctx: &mut Ctx, text: &str, attrs: &[Attrs], runs: &[Run], settings: &Settings) -> (Layout<Brush>, usize) {
+pub(super) fn build(
+    ctx: &mut Ctx,
+    text: &str,
+    attrs: &[Attrs],
+    runs: &[Run],
+    settings: &Settings,
+) -> (Layout<Brush>, usize) {
     // A leading mark sets an explicit base direction; parley otherwise
     // takes it from the first strong character, as "natural" asks. Text
     // from inside a paragraph gets a second mark after it standing for the
@@ -1294,6 +1304,16 @@ fn build(ctx: &mut Ctx, text: &str, attrs: &[Attrs], runs: &[Run], settings: &Se
     let mut used: Vec<(u32, Piece, bool)> = pieces.iter().map(|p| (p.2, p.3, p.4)).collect();
     used.sort_unstable();
     used.dedup();
+    let variations: Vec<Vec<FontVariation>> = used
+        .iter()
+        .map(|&(i, _, _)| {
+            let face = &attrs[i as usize].font.face;
+            face.set_variations
+                .iter()
+                .map(|&(tag, value)| FontVariation::new(Tag::new(&tag.to_be_bytes()), value))
+                .collect()
+        })
+        .collect();
     let features: Vec<Vec<FontFeature>> = used
         .iter()
         .map(|&(i, _, apart)| {
@@ -1313,25 +1333,30 @@ fn build(ctx: &mut Ctx, text: &str, attrs: &[Attrs], runs: &[Run], settings: &Se
             [FontFamilyName::Generic(GenericFamily::Emoji), family]
         })
         .collect();
+    let own_emoji = settings.own_emoji;
     let mut builder = ctx.lcx.style_run_builder(&mut ctx.fcx, full, 1.0, false);
     builder.reserve(used.len(), pieces.len());
     let styles: Vec<u16> = used
         .iter()
-        .zip(features.iter().zip(&families))
-        .map(|(&(i, kind, _), (features, families))| {
+        .zip(features.iter().zip(&families).zip(&variations))
+        .map(|(&(i, kind, _), ((features, families), variations))| {
             let a = &attrs[i as usize];
+            let settings = (features.as_slice(), variations.as_slice(), settings);
             match kind {
-                Piece::Text => {
-                    builder.push_style(text_style(a, i, FontFamily::Single(families[1].clone()), features, settings))
-                }
+                Piece::Text => builder.push_style(text_style(a, i, FontFamily::Single(families[1].clone()), settings)),
                 // Emoji look for a color emoji face first, as on macOS,
                 // where they'd otherwise take the text's face's plain
                 // glyphs.
                 Piece::Emoji => {
-                    builder.push_style(text_style(a, i, FontFamily::List(Cow::Borrowed(families)), features, settings))
+                    let list = if own_emoji {
+                        Cow::Owned(vec![families[1].clone(), families[0].clone()])
+                    } else {
+                        Cow::Borrowed(&families[..])
+                    };
+                    builder.push_style(text_style(a, i, FontFamily::List(list), settings))
                 }
                 Piece::Hidden => {
-                    let style = text_style(a, i, FontFamily::Single(families[1].clone()), features, settings);
+                    let style = text_style(a, i, FontFamily::Single(families[1].clone()), settings);
                     builder.push_style(TextStyle { font_size: HIDDEN_SIZE, letter_spacing: 0.0, ..style })
                 }
             }
@@ -1460,7 +1485,7 @@ enum Piece {
 
 /// The font size control characters are laid out at: small enough that
 /// their space takes no room, large enough to shape.
-const HIDDEN_SIZE: f32 = 1.0 / 64.0;
+pub(super) const HIDDEN_SIZE: f32 = 1.0 / 64.0;
 
 /// Byte ranges of `text` to draw as emoji: characters shown as emoji by
 /// default, others asked to be with U+FE0F, flags and keycaps, with the
@@ -1521,8 +1546,7 @@ fn text_style<'a>(
     attrs: &'a Attrs,
     index: u32,
     font_family: FontFamily<'a>,
-    features: &'a [FontFeature],
-    settings: &Settings,
+    (features, variations, settings): (&'a [FontFeature], &'a [FontVariation], &Settings),
 ) -> TextStyle<'a, 'a, Brush> {
     let face = &attrs.font.face;
     TextStyle {
@@ -1532,6 +1556,7 @@ fn text_style<'a>(
         font_style: if face.italic { FontStyle::Italic } else { FontStyle::Normal },
         font_weight: FontWeight::new(face.weight),
         font_features: FontFeatures::List(Cow::Borrowed(features)),
+        font_variations: FontVariations::List(Cow::Borrowed(variations)),
         brush: Brush(index),
         letter_spacing: attrs.kern.unwrap_or(0.0),
         word_break: if settings.mode == LineBreak::CharWrap { WordBreak::BreakAll } else { WordBreak::Normal },
@@ -1547,7 +1572,7 @@ fn text_style<'a>(
 /// beyond the tab; past the last, stops follow it every
 /// `defaultTabInterval`, or there are none if that is 0 and the tab takes
 /// no room, as in AppKit.
-fn break_and_tab(
+pub(super) fn break_and_tab(
     layout: &mut Layout<Brush>,
     text: &str,
     shift: usize,
@@ -2118,7 +2143,7 @@ fn extract(
 /// glyphs, but ones that a line laid out from anywhere else wouldn't have.
 /// The marks come first in the text, so their clusters are side by side,
 /// at the run's left end, or its right end in a right-to-left run.
-fn mark_glyphs(run: &parley::Run<'_, Brush>, shift: usize) -> std::ops::Range<usize> {
+pub(super) fn mark_glyphs(run: &parley::Run<'_, Brush>, shift: usize) -> std::ops::Range<usize> {
     let (mut at, mut marks) = (0, None::<std::ops::Range<usize>>);
     for cluster in run.visual_clusters() {
         let count = cluster.glyphs().count();

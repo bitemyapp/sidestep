@@ -8,6 +8,7 @@
 //! is all it takes. Functions take `*const c_void`-like raw pointers where
 //! the bindings pass `Option<&T>`, which has the same representation.
 
+mod attributed_string;
 mod base;
 mod collections;
 mod data;

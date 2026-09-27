@@ -101,24 +101,5 @@ pub(crate) fn push(op: Op) {
 /// bounds, so under a path clip (`addClip`) it goes in a group the clip
 /// masks.
 pub(crate) fn with_recorder(f: impl FnOnce(&mut Recorder)) {
-    crate::context::with_state(|st| {
-        let mask = st.gs.mask.clone();
-        let group = mask.is_some();
-        if group {
-            let draw = crate::protocol::Draw {
-                xf: tiny_skia::Transform::identity(),
-                blend: crate::protocol::Blend::SourceOver,
-                aa: true,
-                clip: st.gs.clip,
-                mask,
-                shadow: None,
-            };
-            st.rec.ops.push(Op::BeginGroup { alpha: 1.0, draw });
-        }
-        f(&mut st.rec);
-        if group {
-            st.rec.ops.push(Op::EndGroup);
-        }
-        st.flush();
-    });
+    crate::context::with_state(|st| st.masked(|st| f(&mut st.rec)));
 }

@@ -59,9 +59,7 @@ impl CGFontImpl {
     }
 
     fn string(&self, id: StringId) -> Option<String> {
-        let font = self.font()?;
-        let s: String = font.localized_strings(id).english_or_first()?.chars().collect();
-        (!s.is_empty()).then_some(s)
+        crate::text::fonts::name_of(&self.font()?, id)
     }
 
     fn glyph_named(&self, name: &str) -> u16 {
@@ -181,22 +179,21 @@ pub extern "C-unwind" fn CGFontGetLeading(font: Option<&CGFont>) -> c_int {
     with_font(font, |f| Some(c_int::from(f.hhea().ok()?.line_gap().to_i16())))
 }
 
-/// The top of a character's glyph, in font units: what a height falls
-/// back to when `OS/2` doesn't give it (tables before version 2).
-fn glyph_top(f: &skrifa::FontRef<'_>, c: char) -> Option<c_int> {
-    let glyph = f.charmap().map(c)?;
-    let metrics = f.glyph_metrics(skrifa::instance::Size::unscaled(), skrifa::instance::LocationRef::default());
-    Some(metrics.bounds(glyph)?.y_max.round() as c_int)
+/// The face's cap height and x-height, as CoreText's fonts have them
+/// (`text::fonts::heights`).
+fn heights(f: &skrifa::FontRef<'_>) -> (c_int, c_int) {
+    let (cap, x) = crate::text::fonts::heights(f, &skrifa::instance::Location::default());
+    (cap.round() as c_int, x.round() as c_int)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn CGFontGetCapHeight(font: Option<&CGFont>) -> c_int {
-    with_font(font, |f| f.os2().ok().and_then(|t| t.s_cap_height()).map(c_int::from).or_else(|| glyph_top(f, 'H')))
+    with_font(font, |f| Some(heights(f).0))
 }
 
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn CGFontGetXHeight(font: Option<&CGFont>) -> c_int {
-    with_font(font, |f| f.os2().ok().and_then(|t| t.sx_height()).map(c_int::from).or_else(|| glyph_top(f, 'x')))
+    with_font(font, |f| Some(heights(f).1))
 }
 
 #[unsafe(no_mangle)]
