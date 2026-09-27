@@ -9,7 +9,7 @@
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, MessageReceiver, Sel};
-use objc2::{msg_send, sel};
+use objc2::sel;
 use objc2_foundation::{NSDictionary, NSNotification, NSString};
 
 sidestep_foundation::constant_string!(NSTextDidBeginEditingNotification = "NSTextDidBeginEditingNotification");
@@ -68,10 +68,7 @@ impl Note {
     }
 }
 
-pub(crate) fn responds(obj: &AnyObject, sel: Sel) -> bool {
-    // SAFETY: respondsToSelector: takes a selector.
-    unsafe { msg_send![obj, respondsToSelector: sel] }
-}
+pub(crate) use super::responds;
 
 /// Post `note` from `view`, with `info`, and tell `delegate`.
 pub(crate) fn post(

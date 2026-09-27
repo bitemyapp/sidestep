@@ -1713,6 +1713,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "textkit2bench"
+version = "0.0.0"
+dependencies = [
+ "block2",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "sidestep",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"

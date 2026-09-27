@@ -296,7 +296,7 @@ fn do_command(v: &NSTextViewImpl, selector: Sel) {
 /// The screen rect of the first line piece of `range` (the caret's for an
 /// empty one), and how much of the range it covers.
 fn first_rect(v: &NSTextViewImpl, range: NSRange, actual: *mut NSRange) -> NSRect {
-    let Some(lm) = v.lm_impl() else { return NSRect::ZERO };
+    let Some(lm) = v.geo() else { return NSRect::ZERO };
     let len = v.text_length();
     let loc = range.location.min(len);
     let r = NSRange::new(loc, range.length.min(len - loc));
@@ -334,6 +334,6 @@ fn index_for_screen_point(v: &NSTextViewImpl, p: NSPoint) -> usize {
     let in_window = w.convertPointFromScreen(p);
     let in_view = view.convertPoint_fromView(in_window, None);
     let o = v.origin();
-    let Some(lm) = v.lm_impl() else { return NOT_FOUND };
+    let Some(lm) = v.geo() else { return NOT_FOUND };
     lm.insertion_index(NSPoint::new(in_view.x - o.x, in_view.y - o.y)).0
 }

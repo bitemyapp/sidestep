@@ -420,7 +420,17 @@ with; a keystroke and its layout in 11 MB of text in 0.07 ms at p99
 copied once and cut into paragraphs as reading and layout reach it, and
 attributes are fixed lazily as macOS fixes them (edits of 64 K units or
 more, a stretch at a time when asked for), so setting 11 MB takes 2 ms
-(1.8 ms on macOS; 25 ms before) and 1 MB 0.09 ms. See [text.md](text.md).
+(1.8 ms on macOS; 25 ms before) and 1 MB 0.09 ms. TextKit 2 over the same
+storage and line layout: `NSTextContentStorage` and its elements (a
+delegate's paragraphs and a subclass's elements included),
+`NSTextLayoutManager` with layout fragments and line fragments (a
+delegate's fragment subclasses laid out, placed by their frames and drawn
+through their `drawAtPoint:inContext:`), estimates for what isn't laid out,
+the viewport controller, selections and navigation, `NSTextRange` and
+countable locations; text views in TextKit 2 mode by default as on macOS
+(and the switch to TextKit 1 when a program asks for the layout manager),
+laying out and drawing their viewport: 11 MB, a scroll step and its
+layout in 0.1 ms. See [text.md](text.md).
 
 - `NSExpansion` (advances scaled before line breaking); shadow blur (a
   blurred glyph op); tabs in right-to-left paragraphs, measured from the
@@ -453,15 +463,25 @@ more, a stretch at a time when asked for), so setting 11 MB takes 2 ms
 - Text editing still to do: the find bar and `NSTextFinder`, spelling and
   substitutions, `NSTextList`, text attachments, several text containers,
   text block height dimensions, vertical alignment, row spans and
-  `hidesEmptyCells`, TextKit 2 (`NSTextLayoutManager` and friends),
-  temporary attributes other than a background color drawn,
-  `CGGlyphAtIndex:` and `getGlyphsInRange:…`, laying a long paragraph out
-  again from the edited line rather than whole (the text engine's frames
+  `hidesEmptyCells`, temporary attributes other than a background color
+  drawn, `CGGlyphAtIndex:` and `getGlyphsInRange:…`, laying a long paragraph
+  out again from the edited line rather than whole (the text engine's frames
   do; the layout manager needs a paragraph entry point for it); once text
-  left to fix has been fixed in several stretches, AppKit's effective
-  ranges sometimes end between equal attributes where Sidestep's go on;
-  the layout manager's copy of a subclass's text (one with text of its
-  own) is still read whole through its primitives.
+  left to fix has been fixed in several stretches, AppKit's effective ranges
+  sometimes end between equal attributes where Sidestep's go on; the layout
+  manager's copy of a subclass's text (one with text of its own) is still
+  read whole through its primitives.
+- TextKit 2 still to do: text blocks, lists (`NSTextListElement`) and
+  attachment view providers in fragments; rendering attributes are kept,
+  moved by edits and enumerated but not drawn, and the rendering
+  attributes validator is kept but not called; elements the content
+  storage's delegate filters out of enumeration are still laid out;
+  `NSTextContentManager` subclasses whose locations aren't countable
+  (elements are indexed by UTF-16 offsets); `textSelectionNavigation`'s
+  visual moves in mixed-direction text; the runtime finds a weak location to remove by looking
+  through the object's (TextKit 2 shares one weak reference among a
+  manager's fragments and elements so it never has many). The known
+  differences from macOS are listed in [text.md](text.md#textkit-2).
 
 ## 4. Controls and services
 

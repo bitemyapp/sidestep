@@ -152,6 +152,9 @@ pub(crate) struct Ivars {
     delivering: Cell<Option<Pending>>,
     delegate: RefCell<Weak<AnyObject>>,
     managers: RefCell<Vec<Retained<NSLayoutManager>>>,
+    /// The TextKit 2 content storage told of each change after the layout
+    /// managers (`textStorageObserver`).
+    observer: RefCell<Weak<AnyObject>>,
     /// The live string `string` hands out, made when first asked for.
     string: RefCell<Option<Retained<NSString>>>,
     /// Text whose attributes are left to fix, as one range covering it all.
@@ -176,6 +179,7 @@ impl Ivars {
             delivering: Cell::new(None),
             delegate: RefCell::new(Weak::default()),
             managers: RefCell::new(Vec::new()),
+            observer: RefCell::new(Weak::default()),
             string: RefCell::new(None),
             invalid: Cell::new(None),
             fixing: Cell::new(false),
@@ -641,11 +645,13 @@ define_class!(
 
         #[unsafe(method_id(textStorageObserver))]
         fn text_storage_observer(&self) -> Option<Retained<AnyObject>> {
-            None
+            self.ivars().observer.borrow().load()
         }
 
         #[unsafe(method(setTextStorageObserver:))]
-        fn set_text_storage_observer(&self, _observer: Option<&AnyObject>) {}
+        fn set_text_storage_observer(&self, observer: Option<&AnyObject>) {
+            *self.ivars().observer.borrow_mut() = observer.map_or_else(Weak::default, Weak::new);
+        }
     }
 
     unsafe impl NSObjectProtocol for NSTextStorageImpl {}
@@ -843,11 +849,8 @@ fn keeps_primitives(class: &AnyClass, ours: &AnyClass) -> bool {
         sel!(replaceCharactersInRange:withString:),
         sel!(setAttributes:range:),
     ];
-    let answer = crate::textkit::is_kind(class, ours)
-        && primitives.iter().all(|&s| match (class.instance_method(s), ours.instance_method(s)) {
-            (Some(a), Some(b)) => std::ptr::fn_addr_eq(a.implementation(), b.implementation()),
-            _ => false,
-        });
+    let answer =
+        crate::textkit::is_kind(class, ours) && primitives.iter().all(|&s| crate::textkit::same_method(class, ours, s));
     LAST.with(|c| c.set((key, answer)));
     answer
 }
@@ -986,6 +989,17 @@ fn process_editing(this: &NSTextStorageImpl) {
                 p.delta,
                 invalidated,
             );
+        }
+        // Loaded first: the observer is sent the message with nothing
+        // borrowed.
+        let observer = iv.observer.borrow().load();
+        if let Some(o) = observer {
+            let mask = NSTextStorageEditActions(p.mask);
+            // SAFETY: the observer method takes the storage, the mask, the
+            // range, the change in length and the invalidated range.
+            let _: () = unsafe {
+                msg_send![&*o, processEditingForTextStorage: this.as_storage(), edited: mask, range: p.range, changeInLength: p.delta, invalidatedRange: invalidated]
+            };
         }
         iv.delivering.set(outer);
     }

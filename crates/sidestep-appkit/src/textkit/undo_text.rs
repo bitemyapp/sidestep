@@ -9,7 +9,7 @@
 //! own files; a window keeps its undo manager as an associated object.
 
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObject, Sel};
+use objc2::runtime::{AnyObject, NSObject};
 use objc2::{ClassType, MainThreadMarker, define_class, msg_send, sel};
 use objc2_app_kit::{NSResponder, NSWindow};
 use objc2_foundation::NSUndoManager;
@@ -105,10 +105,7 @@ fn window_undo_manager(window: &NSWindow) -> Option<Retained<NSUndoManager>> {
     Some(um)
 }
 
-pub(crate) fn responds(obj: &AnyObject, sel: Sel) -> bool {
-    // SAFETY: respondsToSelector: takes a selector.
-    unsafe { msg_send![obj, respondsToSelector: sel] }
-}
+pub(crate) use super::responds;
 
 sidestep_runtime::category!("NSResponder"(SidestepUndo), |category| {
     // SAFETY: the helper's method treats its receiver as a responder.

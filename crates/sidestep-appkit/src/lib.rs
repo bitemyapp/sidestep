@@ -96,6 +96,7 @@ pub mod testing;
 mod text;
 #[doc(hidden)]
 pub mod textkit;
+mod textkit2;
 mod theme;
 mod tooltip;
 mod tracking;

@@ -59,6 +59,18 @@ pub(crate) struct Entry {
     pub place: Option<Arc<Place>>,
 }
 
+/// The height a paragraph `len16` units long, in a font `font_size`
+/// points tall, is estimated at before it is laid out, by TextKit 1 and
+/// TextKit 2 alike: a line (of a quarter more than the font's size) for
+/// each `width` points of text at half an em a unit; one line for an
+/// unbounded width.
+pub(crate) fn estimate_height(len16: f32, font_size: f32, width: f32) -> f32 {
+    let line = (font_size * 1.25).round().max(1.0);
+    let lines =
+        if width.is_finite() && width > 0.0 { ((len16 * font_size * 0.5) / width).ceil().max(1.0) } else { 1.0 };
+    line * lines
+}
+
 impl Entry {
     pub fn estimate(height: f32) -> Entry {
         Entry { lead: 0.0, height, trail: 0.0, left: f32::INFINITY, right: 0.0, lines: None, place: None }

@@ -1392,9 +1392,7 @@ impl NSLayoutManagerImpl {
         let width = (g.size.width - 2.0 * g.padding).max(1.0) as f32;
         let estimate = |len: f32, id: AttrId| {
             let size = state.resolved.get(id as usize).map_or(12.0, |a| a.font.size);
-            let line = (size * 1.25).round().max(1.0);
-            let lines = ((len * size * 0.5) / width).ceil().max(1.0);
-            Entry::estimate(line * lines)
+            Entry::estimate(super::layout_cache::estimate_height(len, size, width))
         };
         facts
             .iter()
@@ -2062,28 +2060,7 @@ impl NSLayoutManagerImpl {
     }
 
     fn spans_of(&self, lines: &[LineAt], range: Range<usize>) -> Vec<NSRect> {
-        let mut out = Vec::new();
-        let pad = self.padding();
-        let container_right = self.container_width() - pad;
-        for l in lines {
-            let p = pad + l.left;
-            let right = l.width.map_or(container_right, |w| p + w);
-            let line = l.line();
-            let (from, to) = ((range.start.max(l.start) - l.start) as u32, (range.end - l.start.min(range.end)) as u32);
-            let (y, h) = (l.line_top(), f64::from(line.height));
-            for (x0, x1) in line.spans(from..to) {
-                out.push(rect(p + f64::from(x0), y, f64::from(x1 - x0), h));
-            }
-            let end = line.content_end();
-            if to > end && from <= end {
-                let x0 = if line.rtl { p } else { p + f64::from(line.x + line.width) };
-                let x1 = if line.rtl { p + f64::from(line.x) } else { right };
-                if x1 > x0 {
-                    out.push(rect(x0, y, x1 - x0, h));
-                }
-            }
-        }
-        out
+        spans_of(lines, range, self.padding(), self.container_width())
     }
 
     fn bounding_rect(&self, range: Range<usize>) -> NSRect {
@@ -2359,6 +2336,33 @@ impl NSLayoutManagerImpl {
             self.draw_temporary(&lines, origin);
         }
     }
+}
+
+/// The rects that show `range` selected on `lines` (container points), in a
+/// container `container_width` wide with padding `pad`: the lines' spans,
+/// and on to the line's end where the range takes in a separator.
+pub(crate) fn spans_of(lines: &[LineAt], range: Range<usize>, pad: f64, container_width: f64) -> Vec<NSRect> {
+    let mut out = Vec::new();
+    let container_right = container_width - pad;
+    for l in lines {
+        let p = pad + l.left;
+        let right = l.width.map_or(container_right, |w| p + w);
+        let line = l.line();
+        let (from, to) = ((range.start.max(l.start) - l.start) as u32, (range.end - l.start.min(range.end)) as u32);
+        let (y, h) = (l.line_top(), f64::from(line.height));
+        for (x0, x1) in line.spans(from..to) {
+            out.push(rect(p + f64::from(x0), y, f64::from(x1 - x0), h));
+        }
+        let end = line.content_end();
+        if to > end && from <= end {
+            let x0 = if line.rtl { p } else { p + f64::from(line.x + line.width) };
+            let x1 = if line.rtl { p + f64::from(line.x) } else { right };
+            if x1 > x0 {
+                out.push(rect(x0, y, x1 - x0, h));
+            }
+        }
+    }
+    out
 }
 
 /// A paragraph's text blocks, and its neighbours'.

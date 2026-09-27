@@ -7,10 +7,15 @@
 //! declare the basic methods on; every text view is an `NSTextView`.
 //!
 //! - **The network.** `initWithFrame:textContainer:` takes an existing
-//!   storage, layout manager and container; `initWithFrame:` builds one
-//!   (TextKit 1: Sidestep has no TextKit 2 text view, and
-//!   `initUsingTextLayoutManager:` builds TextKit 1 too). The view keeps
-//!   its storage and container alive.
+//!   storage, layout manager (TextKit 1's or TextKit 2's) and container;
+//!   `initWithFrame:` builds one, TextKit 2's unless the class overrides
+//!   `drawRect:`, as on macOS (`initUsingTextLayoutManager:` chooses).
+//!   The view keeps its storage and container alive; asking a TextKit 2
+//!   view for its `layoutManager` makes it TextKit 1. In TextKit 2 mode
+//!   (`textkit2::view`) the view lays out its viewport before drawing and
+//!   draws the fragments after its `drawRect:`; everything below that
+//!   needs lines (selection, carets, clicks, commands) goes through
+//!   `textkit2::view::Geo`, TextKit 1's layout manager or TextKit 2's.
 //! - **Edits** go through `edit`: one transaction per user edit, with the
 //!   delegate calls, notifications and undo AppKit makes. `setString:` and
 //!   `replaceCharactersInRange:withString:` are programmatic: no delegate
@@ -66,6 +71,7 @@ use super::layout_manager::NSLayoutManagerImpl;
 use super::notify::{self, Note};
 use super::selection;
 use crate::funnel::Funnel;
+use crate::textkit2::view::{Geo, ViewState};
 
 sidestep_runtime::static_class!(pub(crate) NSTEXT, NSTEXT_META = "NSText", || {
     let _ = NSTextImpl::class();
@@ -231,6 +237,8 @@ pub(crate) struct Ivars {
     /// A selection change on its way through an overridden
     /// `setSelectedRanges:affinity:stillSelecting:` (see `funnel`).
     funneled: Cell<Option<Funneled>>,
+    /// TextKit 2: the viewport's fragments.
+    tk2: ViewState,
 }
 
 impl Ivars {
@@ -277,6 +285,7 @@ impl Ivars {
             highlight_attrs: RefCell::new(None),
             result_options: Cell::new(0),
             funneled: Cell::new(None),
+            tk2: ViewState::default(),
         }
     }
 }
@@ -311,8 +320,14 @@ define_class!(
             // SAFETY: NSView's designated initializer.
             let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
             match container {
-                Some(c) => this.attach(c),
-                None => this.build_network(frame),
+                Some(c) => {
+                    WANTS_TK2.set(None);
+                    this.attach(c);
+                }
+                None => {
+                    let tk2 = WANTS_TK2.take().unwrap_or_else(|| !overrides_draw_rect(this.as_object().class()));
+                    this.build_network(frame, tk2);
+                }
             }
             this
         }
@@ -330,14 +345,15 @@ define_class!(
         }
 
         #[unsafe(method_id(initUsingTextLayoutManager:))]
-        fn init_using_text_layout_manager(this: Allocated<Self>, _flag: bool) -> Retained<Self> {
+        fn init_using_text_layout_manager(this: Allocated<Self>, flag: bool) -> Retained<Self> {
+            WANTS_TK2.set(Some(flag));
             // SAFETY: the initializer building a network, as this one does.
             unsafe { msg_send![this, initWithFrame: NSRect::ZERO] }
         }
 
         #[unsafe(method_id(textViewUsingTextLayoutManager:))]
-        fn text_view_using_text_layout_manager(_flag: bool) -> Retained<NSTextView> {
-            new_text_view(main_thread(), NSRect::ZERO)
+        fn text_view_using_text_layout_manager(flag: bool) -> Retained<NSTextView> {
+            new_text_view_with(main_thread(), NSRect::ZERO, flag)
         }
 
         #[unsafe(method(stronglyReferencesTextStorage))]
@@ -377,9 +393,9 @@ define_class!(
         #[unsafe(method(setTextContainer:))]
         fn set_text_container(&self, c: Option<&NSTextContainer>) {
             *self.ivars().container.borrow_mut() = c.map(|c| c.retain());
-            // SAFETY: layoutManager and textStorage take nothing.
-            let storage = c.and_then(|c| unsafe { c.layoutManager() }).and_then(|lm| unsafe { lm.textStorage() });
+            let storage = c.and_then(storage_of_container);
             *self.ivars().storage.borrow_mut() = storage;
+            self.adopt_viewport();
             self.size_to_text();
             self.as_view().setNeedsDisplay(true);
         }
@@ -388,6 +404,10 @@ define_class!(
         fn replace_text_container(&self, c: &NSTextContainer) {
             let old = self.ivars().container.borrow().clone();
             if let Some(old) = &old {
+                if let Some(tlm) = crate::textkit::container::text_layout_manager(old) {
+                    // SAFETY: setTextContainer: takes a container.
+                    let _: () = unsafe { msg_send![&*tlm, setTextContainer: c] };
+                }
                 // SAFETY: layoutManager takes nothing.
                 if let Some(lm) = unsafe { old.layoutManager() } {
                     let containers = lm.textContainers();
@@ -401,8 +421,12 @@ define_class!(
             self.attach(c);
         }
 
+        /// A TextKit 2 view asked for its layout manager becomes TextKit 1.
         #[unsafe(method_id(layoutManager))]
         fn layout_manager(&self) -> Option<Retained<NSLayoutManager>> {
+            if self.tlm().is_some() {
+                self.switch_to_text_kit_1();
+            }
             self.manager()
         }
 
@@ -413,12 +437,46 @@ define_class!(
 
         #[unsafe(method_id(textLayoutManager))]
         fn text_layout_manager(&self) -> Option<Retained<AnyObject>> {
-            None
+            self.tlm()
         }
 
         #[unsafe(method_id(textContentStorage))]
         fn text_content_storage(&self) -> Option<Retained<AnyObject>> {
-            None
+            self.tlm()
+                .and_then(|tlm| {
+                    // SAFETY: textContentManager takes nothing.
+                    let c: Option<Retained<AnyObject>> = unsafe { msg_send![&*tlm, textContentManager] };
+                    c
+                })
+                .filter(|c| crate::textkit2::content::as_storage(c).is_some())
+        }
+
+        // The viewport controller's delegate (TextKit 2).
+
+        #[unsafe(method(viewportBoundsForTextViewportLayoutController:))]
+        fn viewport_bounds_for_controller(&self, _controller: &AnyObject) -> NSRect {
+            self.viewport_bounds()
+        }
+
+        // The controller keeps the fragments it configured, which the view
+        // draws: these are here for a subclass's `super`.
+
+        #[unsafe(method(textViewportLayoutControllerWillLayout:))]
+        fn viewport_will_layout(&self, _controller: &AnyObject) {}
+
+        #[unsafe(method(textViewportLayoutController:configureRenderingSurfaceForTextLayoutFragment:))]
+        fn viewport_configure(&self, _controller: &AnyObject, _fragment: &objc2_app_kit::NSTextLayoutFragment) {}
+
+        #[unsafe(method(textViewportLayoutControllerDidLayout:))]
+        fn viewport_did_layout(&self, _controller: &AnyObject) {
+            self.viewport_laid_out();
+        }
+
+        #[unsafe(method(viewWillDraw))]
+        fn view_will_draw(&self) {
+            self.lay_out_viewport_if_needed();
+            // SAFETY: NSView's viewWillDraw.
+            let _: () = unsafe { msg_send![super(self), viewWillDraw] };
         }
 
         #[unsafe(method(textContainerInset))]
@@ -439,7 +497,7 @@ define_class!(
         /// it (see `origin`).
         #[unsafe(method(textContainerOrigin))]
         fn text_container_origin(&self) -> NSPoint {
-            self.own_origin()
+            self.inset_origin()
         }
 
         /// Nothing to do: the origin isn't kept, it is worked out from the
@@ -745,9 +803,15 @@ define_class!(
             self.set(flag::V_RESIZABLE, on);
         }
 
+        /// TextKit 2 lays out the start of the text first (a short text
+        /// whole, as macOS lays out all of it; a long one's rest is
+        /// estimated).
         #[unsafe(method(sizeToFit))]
         fn size_to_fit(&self) {
             self.ivars().needs_size.set(false);
+            if let Some(Geo::Two(tlm)) = self.geo() {
+                tlm.lay_out_to_size();
+            }
             self.size_to_text();
         }
 
@@ -827,6 +891,7 @@ define_class!(
             // SAFETY: -copy of a dictionary is an immutable dictionary.
             let copy: Retained<Dict> = unsafe { msg_send![attrs, copy] };
             *self.ivars().typing.borrow_mut() = Some(copy);
+            self.typing_changed();
             let delegate = self.delegate_object();
             notify::post(self.as_object(), delegate.as_deref(), Note::ChangeTypingAttributes, None);
         }
@@ -1472,11 +1537,95 @@ pub(crate) fn fill(rect: NSRect, color: &NSColor) {
 }
 
 /// A new text view with a network of its own, as `initWithFrame:` makes
-/// it.
+/// it (TextKit 2).
 pub(crate) fn new_text_view(mtm: MainThreadMarker, frame: NSRect) -> Retained<NSTextView> {
     crate::load_shell::<NSTextView>();
     // SAFETY: the initializer building a network.
     unsafe { msg_send![NSTextView::alloc(mtm), initWithFrame: frame] }
+}
+
+/// A new text view with a network of its own, TextKit 2's or TextKit 1's.
+pub(crate) fn new_text_view_with(mtm: MainThreadMarker, frame: NSRect, tk2: bool) -> Retained<NSTextView> {
+    WANTS_TK2.set(Some(tk2));
+    new_text_view(mtm, frame)
+}
+
+thread_local! {
+    /// The network the next `initWithFrame:textContainer:` without a
+    /// container builds, when an initializer asked for one.
+    static WANTS_TK2: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+/// Whether `class` overrides `drawRect:`: such a text view starts in
+/// TextKit 1, as on macOS.
+fn overrides_draw_rect(class: &AnyClass) -> bool {
+    overrides(class, sel!(drawRect:))
+}
+
+fn overrides(class: &AnyClass, sel: Sel) -> bool {
+    !super::same_method(class, <NSTextViewImpl as ClassType>::class(), sel)
+}
+
+/// Scroll the clip view enclosing `view` by `dy` (its bounds' origin),
+/// whether it did.
+fn scroll_by(view: &NSView, dy: f64) -> bool {
+    // SAFETY: superview takes nothing.
+    let Some(clip) = (unsafe { view.superview() }).and_then(|s| s.downcast::<NSClipView>().ok()) else { return false };
+    let b = clip.bounds();
+    let target = clip.constrainBoundsRect(NSRect::new(NSPoint::new(b.origin.x, b.origin.y + dy), b.size));
+    if target.origin == b.origin {
+        return false;
+    }
+    clip.scrollToPoint(target.origin);
+    // SAFETY: superview takes nothing.
+    if let Some(scroll) = unsafe { clip.superview() }.and_then(|s| s.downcast::<NSScrollView>().ok()) {
+        scroll.reflectScrolledClipView(&clip);
+    }
+    true
+}
+
+/// The clip view enclosing `view`, if any.
+fn enclosing_clip(view: &NSView) -> Option<Retained<NSClipView>> {
+    // SAFETY: superview takes nothing.
+    let mut cur = unsafe { view.superview() };
+    while let Some(v) = cur {
+        match v.downcast::<NSClipView>() {
+            Ok(clip) => return Some(clip),
+            // SAFETY: superview takes nothing.
+            Err(v) => cur = unsafe { v.superview() },
+        }
+    }
+    None
+}
+
+/// The text storage laid out in `c`: its layout manager's, or its text
+/// layout manager's content storage's.
+fn storage_of_container(c: &NSTextContainer) -> Option<Retained<NSTextStorage>> {
+    if let Some(tlm) = crate::textkit::container::text_layout_manager(c) {
+        // SAFETY: textContentManager takes nothing.
+        let content: Option<Retained<AnyObject>> = unsafe { msg_send![&*tlm, textContentManager] };
+        return content.and_then(|m| crate::textkit2::content::as_storage(&m).and_then(|cs| cs.text_storage_now()));
+    }
+    // SAFETY: layoutManager and textStorage take nothing.
+    unsafe { c.layoutManager() }.and_then(|lm| unsafe { lm.textStorage() })
+}
+
+/// Whether a TextKit 2 text view was ever made: until then no view is
+/// checked (checking would load the text view's class).
+static ANY_TEXT_KIT_2: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether `view` is a text view in TextKit 2 mode, whose fragments draw
+/// above what its `drawRect:` draws.
+pub(crate) fn draws_text_kit_2(view: &AnyObject) -> bool {
+    ANY_TEXT_KIT_2.load(std::sync::atomic::Ordering::Relaxed) && as_impl(view).is_some_and(|tv| tv.tlm().is_some())
+}
+
+/// Draw a TextKit 2 text view's fragments, marked text and caret, over
+/// `dirty` (the view's points), after its `drawRect:`.
+pub(crate) fn draw_content(view: &AnyObject, dirty: NSRect) {
+    if let Some(tv) = as_impl(view) {
+        tv.draw_content(dirty);
+    }
 }
 
 /// A scroll view with a text view as its document, set up as AppKit's
@@ -1602,13 +1751,26 @@ impl NSTextViewImpl {
     fn attach(&self, c: &NSTextContainer) {
         c.setTextView(Some(self.as_text_view()));
         *self.ivars().container.borrow_mut() = Some(c.retain());
-        // SAFETY: layoutManager and textStorage take nothing.
-        let storage = unsafe { c.layoutManager() }.and_then(|lm| unsafe { lm.textStorage() });
-        *self.ivars().storage.borrow_mut() = storage;
+        *self.ivars().storage.borrow_mut() = storage_of_container(c);
+        self.adopt_viewport();
     }
 
-    /// Build a storage, layout manager and container of the view's own.
-    fn build_network(&self, frame: NSRect) {
+    /// Build a storage, layout manager and container of the view's own:
+    /// TextKit 2's or TextKit 1's.
+    fn build_network(&self, frame: NSRect, tk2: bool) {
+        if tk2 {
+            crate::load_shell::<objc2_app_kit::NSTextContentStorage>();
+            crate::load_shell::<objc2_app_kit::NSTextLayoutManager>();
+            crate::load_shell::<NSTextContainer>();
+            let cs = objc2_app_kit::NSTextContentStorage::new();
+            let tlm = objc2_app_kit::NSTextLayoutManager::new();
+            let c = NSTextContainer::initWithSize(NSTextContainer::alloc(), NSSize::new(frame.size.width, HUGE));
+            c.setWidthTracksTextView(true);
+            tlm.setTextContainer(Some(&c));
+            cs.addTextLayoutManager(&tlm);
+            self.attach(&c);
+            return;
+        }
         crate::load_shell::<NSTextStorage>();
         crate::load_shell::<NSLayoutManager>();
         crate::load_shell::<NSTextContainer>();
@@ -1621,18 +1783,19 @@ impl NSTextViewImpl {
         self.attach(&c);
     }
 
-    /// The text container's origin in the view, from `textContainerOrigin`
-    /// when a subclass overrides it.
+    /// The text container's origin in the view: `textContainerOrigin`, by
+    /// message when a subclass overrides it, else the inset.
     pub(crate) fn origin(&self) -> NSPoint {
         if ORIGIN.overridden(self, sel!(textContainerOrigin)) {
             // SAFETY: the method takes nothing and returns a point.
             unsafe { msg_send![self, textContainerOrigin] }
         } else {
-            self.own_origin()
+            self.inset_origin()
         }
     }
 
-    fn own_origin(&self) -> NSPoint {
+    /// The container's origin as the inset puts it.
+    pub(crate) fn inset_origin(&self) -> NSPoint {
         let i = self.ivars().inset.get();
         NSPoint::new(i.width, i.height)
     }
@@ -1641,7 +1804,7 @@ impl NSTextViewImpl {
     /// view.
     fn insertion_index_at(&self, p: NSPoint) -> usize {
         let o = self.origin();
-        self.lm_impl().map_or(0, |lm| lm.insertion_index(NSPoint::new(p.x - o.x, p.y - o.y)).0)
+        self.geo().map_or(0, |g| g.insertion_index(NSPoint::new(p.x - o.x, p.y - o.y)).0)
     }
 
     /// Where a drop at `p` (in the view) would go: from
@@ -1762,6 +1925,7 @@ impl NSTextViewImpl {
         let typing = self.typing_attributes_dict();
         let new = super::attrs::with_value(&typing, key, Some(value));
         *self.ivars().typing.borrow_mut() = Some(new);
+        self.typing_changed();
     }
 
     /// Set (or, for none, remove) one attribute over `range`.
@@ -1809,6 +1973,7 @@ impl NSTextViewImpl {
         }
         let typing = self.typing_attributes_dict();
         *self.ivars().typing.borrow_mut() = Some(super::attrs::with_value(&typing, key, Some(style)));
+        self.typing_changed();
     }
 
     /// `setString:`: all the text replaced, in the first character's
@@ -1998,6 +2163,7 @@ impl NSTextViewImpl {
         }
         if list.len() > 1 {
             *self.ivars().ranges.borrow_mut() = list;
+            self.mirror_selection();
         }
     }
 
@@ -2056,6 +2222,7 @@ impl NSTextViewImpl {
         }
         self.ivars().selection.set(range);
         *self.ivars().ranges.borrow_mut() = vec![range];
+        self.mirror_selection();
         self.redraw_selection_change(old, range, false);
         if !from_edit {
             self.set_coalescing(None);
@@ -2127,7 +2294,7 @@ impl NSTextViewImpl {
         if view.window().is_none() {
             return;
         }
-        let Some(lm) = self.lm_impl() else { return };
+        let Some(lm) = self.geo() else { return };
         let o = self.origin();
         let upstream = self.ivars().affinity.get() == NSSelectionAffinity::Upstream;
         for r in [old, new] {
@@ -2171,6 +2338,7 @@ impl NSTextViewImpl {
     /// draw again what changed, and size to the text if its extent may
     /// have (for background layout, `idle`, at most every so often).
     fn layout_changed_here(&self, idle: bool) {
+        self.ivars().tk2.dirty();
         if self.ivars().transactions.get() > 0 {
             self.ivars().needs_size.set(true);
             return;
@@ -2179,7 +2347,7 @@ impl NSTextViewImpl {
     }
 
     fn apply_layout_damage(&self, idle: bool) {
-        let Some(lm) = self.lm_impl() else { return };
+        let Some(lm) = self.geo() else { return };
         let damage = lm.take_damage();
         let resize = damage.is_some_and(|d| d.2) || self.ivars().size_owed.get();
         if resize {
@@ -2218,7 +2386,7 @@ impl NSTextViewImpl {
         if !self.has(flag::V_RESIZABLE) && !self.has(flag::H_RESIZABLE) {
             return;
         }
-        let Some(lm) = self.lm_impl() else { return };
+        let Some(lm) = self.geo() else { return };
         let inset = self.ivars().inset.get();
         let height = lm.height() + 2.0 * inset.height;
         let width = lm.used_width() + 2.0 * inset.width;
@@ -2260,7 +2428,14 @@ impl NSTextViewImpl {
         if unsafe { self.as_view().superview() }.is_none() {
             return;
         }
-        let Some(lm) = self.lm_impl() else { return };
+        let Some(lm) = self.geo() else { return };
+        if let Geo::Two(tlm) = &lm {
+            // TextKit 2 lays out the fragment at the range's start (only what
+            // is measured below: a long range isn't laid out whole), and the
+            // view grows to take in what that moved.
+            tlm.ensure_range(range.location..range.location);
+            self.size_to_text();
+        }
         let o = self.origin();
         let rect = if range.length == 0 {
             lm.caret_rect(range.location, false)
@@ -2278,10 +2453,15 @@ impl NSTextViewImpl {
         let view = self.as_text_view();
         // SAFETY: the method's own types; a subclass may override it.
         let _: () = unsafe { msg_send![view, drawViewBackgroundInRect: dirty] };
+        if let Some(Geo::Two(tlm)) = self.geo() {
+            // TextKit 2: the selection here; the fragments, marked text and
+            // caret above what the view draws (`draw_content`).
+            self.draw_selection(&Geo::Two(tlm), dirty);
+            return;
+        }
         let Some(lm) = self.manager() else { return };
         let o = self.origin();
         let (y0, y1) = (dirty.origin.y - o.y, dirty.origin.y + dirty.size.height - o.y);
-        let sel = self.selection();
         let ours = self.lm_impl();
         // Text blocks' boxes go under the selection.
         if let Some(ours) = &ours
@@ -2289,24 +2469,8 @@ impl NSTextViewImpl {
         {
             ours.draw_blocks_in_y(y0, y1, o);
         }
-        if sel.length > 0
-            && self.has(flag::SELECTABLE)
-            && let Some(ours) = &ours
-        {
-            let attrs: Retained<Dict> = view.selectedTextAttributes();
-            // SAFETY: the key is a constant string AppKit exports.
-            let bg = attrs.objectForKey(unsafe { objc2_app_kit::NSBackgroundColorAttributeName });
-            if let Some(color) = bg.and_then(|c| c.downcast::<NSColor>().ok()) {
-                let color = if self.is_active() {
-                    color
-                } else {
-                    NSColor::colorWithSRGBRed_green_blue_alpha(0.86, 0.86, 0.86, 1.0)
-                };
-                // Only the lines in the dirty rect are measured.
-                for r in ours.selection_rects_in(sel.location..sel.location + sel.length, y0, y1) {
-                    fill(offset(r, o), &color);
-                }
-            }
+        if let Some(ours) = &ours {
+            self.draw_selection(&Geo::One(ours.clone()), dirty);
         }
         match &ours {
             // Sidestep's own layout manager, drawing as it does: the lines in
@@ -2323,9 +2487,41 @@ impl NSTextViewImpl {
                 lm.drawGlyphsForGlyphRange_atPoint(glyphs, o);
             }
         }
-        if let (Some(marked), Some(ours)) = (self.marked_range(), &ours) {
+        if let Some(ours) = ours {
+            self.draw_marked_and_caret(&Geo::One(ours), dirty);
+        }
+    }
+
+    /// The selection's highlight in `dirty`, under the text.
+    fn draw_selection(&self, geo: &Geo, dirty: NSRect) {
+        let view = self.as_text_view();
+        let o = self.origin();
+        let (y0, y1) = (dirty.origin.y - o.y, dirty.origin.y + dirty.size.height - o.y);
+        let sel = self.selection();
+        if sel.length == 0 || !self.has(flag::SELECTABLE) {
+            return;
+        }
+        let attrs: Retained<Dict> = view.selectedTextAttributes();
+        // SAFETY: the key is a constant string AppKit exports.
+        let bg = attrs.objectForKey(unsafe { objc2_app_kit::NSBackgroundColorAttributeName });
+        let Some(color) = bg.and_then(|c| c.downcast::<NSColor>().ok()) else { return };
+        let color =
+            if self.is_active() { color } else { NSColor::colorWithSRGBRed_green_blue_alpha(0.86, 0.86, 0.86, 1.0) };
+        // Only the lines in the dirty rect are measured.
+        for r in geo.selection_rects_in(sel.location..sel.location + sel.length, y0, y1) {
+            fill(offset(r, o), &color);
+        }
+    }
+
+    /// The marked text's underline and the caret, over the text.
+    fn draw_marked_and_caret(&self, geo: &Geo, dirty: NSRect) {
+        let view = self.as_text_view();
+        let o = self.origin();
+        let (y0, y1) = (dirty.origin.y - o.y, dirty.origin.y + dirty.size.height - o.y);
+        let sel = self.selection();
+        if let Some(marked) = self.marked_range() {
             let color = NSColor::textColor();
-            for r in ours.selection_rects_in(marked.location..marked.location + marked.length, y0, y1) {
+            for r in geo.selection_rects_in(marked.location..marked.location + marked.length, y0, y1) {
                 let r = offset(r, o);
                 let line = NSRect::new(
                     NSPoint::new(r.origin.x, r.origin.y + r.size.height - 1.0),
@@ -2335,17 +2531,197 @@ impl NSTextViewImpl {
             }
         }
         let on = self.ivars().caret.borrow().on;
-        if sel.length == 0
-            && on
-            && self.caret_wanted()
-            && let Some(ours) = &ours
-        {
+        if sel.length == 0 && on && self.caret_wanted() {
             let upstream = self.ivars().affinity.get() == NSSelectionAffinity::Upstream;
-            let rect = offset(ours.caret_rect(sel.location, upstream), o);
+            let rect = offset(geo.caret_rect(sel.location, upstream), o);
             let color: Retained<NSColor> = view.insertionPointColor();
             // SAFETY: the method's own types; a subclass may override it.
             let _: () = unsafe { msg_send![view, drawInsertionPointInRect: rect, color: &*color, turnedOn: true] };
         }
+    }
+
+    // TextKit 2.
+
+    /// The typing attributes changed: an empty TextKit 2 text's extra line
+    /// fragment takes them.
+    fn typing_changed(&self) {
+        if let Some(Geo::Two(tlm)) = self.geo() {
+            tlm.typing_changed();
+        }
+    }
+
+    /// TextKit 2: the text layout manager's selections are the view's.
+    fn mirror_selection(&self) {
+        let Some(tlm) = self.tlm() else { return };
+        let ranges = self.ivars().ranges.borrow().clone();
+        let affinity =
+            if ranges.iter().any(|r| r.length > 0) || self.ivars().affinity.get() == NSSelectionAffinity::Downstream {
+                objc2_app_kit::NSTextSelectionAffinity::Downstream
+            } else {
+                objc2_app_kit::NSTextSelectionAffinity::Upstream
+            };
+        let text_ranges: Vec<Retained<objc2_app_kit::NSTextRange>> =
+            ranges.iter().map(|r| crate::textkit2::location::range(r.location, r.location + r.length)).collect();
+        let selection = crate::textkit2::selection::new_selection(
+            &NSArray::from_retained_slice(&text_ranges),
+            affinity,
+            objc2_app_kit::NSTextSelectionGranularity::Character,
+        );
+        let list = NSArray::from_retained_slice(&[selection]);
+        // SAFETY: setTextSelections: takes an array of selections.
+        let _: () = unsafe { msg_send![&*tlm, setTextSelections: &*list] };
+    }
+
+    /// The TextKit 2 layout manager, when the view is in TextKit 2 mode.
+    pub(crate) fn tlm(&self) -> Option<Retained<AnyObject>> {
+        let c = self.container()?;
+        crate::textkit::container::text_layout_manager(&c)
+    }
+
+    /// The layout, TextKit 1's or TextKit 2's.
+    pub(crate) fn geo(&self) -> Option<Geo> {
+        if let Some(t) = self.tlm() {
+            return crate::textkit2::view::manager_of(&t).map(Geo::Two);
+        }
+        self.lm_impl().map(Geo::One)
+    }
+
+    /// The viewport's bounds, as AppKit's text view works them out.
+    fn viewport_bounds(&self) -> NSRect {
+        let view = self.as_view();
+        // What the clip view shows, not cut to the view (the viewport runs on
+        // below a view that hasn't grown yet, as on macOS).
+        let visible = match enclosing_clip(view) {
+            Some(clip) => Some(view.convertRect_fromView(clip.bounds(), Some(&clip))),
+            None => view.window().is_some().then(|| view.visibleRect()),
+        };
+        crate::textkit2::view::viewport_bounds(view.bounds(), visible, self.origin())
+    }
+
+    /// Take over a TextKit 2 container's viewport: the view is its
+    /// controller's delegate and keeps the network alive.
+    fn adopt_viewport(&self) {
+        let Some(tlm) = self.tlm() else {
+            *self.ivars().tk2.network.borrow_mut() = None;
+            return;
+        };
+        ANY_TEXT_KIT_2.store(true, std::sync::atomic::Ordering::Relaxed);
+        // SAFETY: the layout manager's own accessors.
+        let (vp, content): (Option<Retained<AnyObject>>, Option<Retained<AnyObject>>) =
+            unsafe { (msg_send![&*tlm, textViewportLayoutController], msg_send![&*tlm, textContentManager]) };
+        if let Some(vp) = vp {
+            // SAFETY: setDelegate: takes the delegate.
+            let _: () = unsafe { msg_send![&*vp, setDelegate: self.as_object()] };
+        }
+        // The view sizes to the whole text, estimates included, as AppKit's
+        // does.
+        if let Some(m) = crate::textkit2::view::manager_of(&tlm) {
+            m.estimate_document();
+        }
+        *self.ivars().tk2.network.borrow_mut() = Some((tlm, content));
+        self.ivars().tk2.dirty();
+    }
+
+    /// Lay the viewport out before drawing when layout changed or the view
+    /// scrolled since it last was. Text that showed before stays where it
+    /// is on screen when laying out what is above it changes its place
+    /// (estimates replaced by layout): the view scrolls by as much.
+    fn lay_out_viewport_if_needed(&self) {
+        let Some(tlm) = self.tlm() else { return };
+        // SAFETY: the layout manager's accessor.
+        let vp: Option<Retained<AnyObject>> = unsafe { msg_send![&*tlm, textViewportLayoutController] };
+        let Some(vp) = vp else { return };
+        let manager = crate::textkit2::view::manager_of(&tlm);
+        // Only what laying the viewport out moves is kept in place: an edit
+        // or a program's invalidation moves text as it should.
+        let touched = manager.as_ref().is_some_and(|m| m.take_touched());
+        // Scrolling to keep text in place moves the bounds, which can bring
+        // text laid out only as estimates into view: lay out again, until
+        // the bounds stay put. Each round replaces estimates above what
+        // shows with layout, so a round or two settles it; after three,
+        // what is left waits for the next draw.
+        for _ in 0..3 {
+            // SAFETY: the view's own method (a subclass may override it).
+            let bounds: NSRect = unsafe { msg_send![self, viewportBoundsForTextViewportLayoutController: &*vp] };
+            if self.ivars().tk2.clean.get() == Some(bounds) {
+                return;
+            }
+            let (y0, y1) = (bounds.origin.y, bounds.origin.y + bounds.size.height);
+            let anchor = if touched { None } else { manager.as_ref().and_then(|m| m.first_laid_in(y0, y1)) };
+            // SAFETY: layoutViewport takes nothing.
+            let _: () = unsafe { msg_send![&*vp, layoutViewport] };
+            let (Some(m), Some((o, top))) = (&manager, anchor) else { return };
+            let (start, now) = m.anchor_at(o);
+            let delta = now - top;
+            if start != o || delta.abs() < 0.5 || !scroll_by(self.as_view(), delta) {
+                return;
+            }
+        }
+    }
+
+    /// The viewport was laid out: the view sizes to the text and draws
+    /// again what moved.
+    fn viewport_laid_out(&self) {
+        if let Some(tlm) = self.tlm() {
+            // SAFETY: the layout manager's own accessor.
+            let vp: Option<Retained<AnyObject>> = unsafe { msg_send![&*tlm, textViewportLayoutController] };
+            if let Some(vp) = vp {
+                // SAFETY: viewportBounds takes nothing.
+                let bounds: NSRect = unsafe { msg_send![&*vp, viewportBounds] };
+                self.ivars().tk2.clean.set(Some(bounds));
+            }
+        }
+        if self.ivars().transactions.get() > 0 {
+            self.ivars().needs_size.set(true);
+            return;
+        }
+        self.apply_layout_damage(false);
+    }
+
+    /// Draw the viewport's fragments, the marked text and the caret, over
+    /// what `drawRect:` drew.
+    pub(crate) fn draw_content(&self, dirty: NSRect) {
+        let Some(geo) = self.geo() else { return };
+        if !matches!(geo, Geo::Two(_)) {
+            return;
+        }
+        if self.ivars().tk2.clean.get().is_none() {
+            self.lay_out_viewport_if_needed();
+        }
+        // SAFETY: the layout manager's own accessor.
+        let vp: Option<Retained<AnyObject>> =
+            self.tlm().and_then(|tlm| unsafe { msg_send![&*tlm, textViewportLayoutController] });
+        let fragments = vp.map(|vp| crate::textkit2::viewport::configured(&vp)).unwrap_or_default();
+        crate::textkit2::view::draw_fragments(&fragments, self.origin(), dirty);
+        self.draw_marked_and_caret(&geo, dirty);
+    }
+
+    /// Become TextKit 1 (a program asked for the layout manager): a layout
+    /// manager takes over the container and the storage, between the
+    /// notifications AppKit posts.
+    fn switch_to_text_kit_1(&self) {
+        let Some(c) = self.container() else { return };
+        // SAFETY: the name is a constant string AppKit exports.
+        let will = unsafe { objc2_app_kit::NSTextViewWillSwitchToNSLayoutManagerNotification };
+        sidestep_foundation::notification_center::post(will, Some(self.as_object()), None);
+        crate::load_shell::<NSLayoutManager>();
+        let lm = NSLayoutManager::new();
+        let storage = self.storage();
+        crate::textkit::container::set_text_layout_manager(&c, None);
+        if let Some(s) = &storage {
+            s.addLayoutManager(&lm);
+        }
+        lm.addTextContainer(&c);
+        c.setTextView(Some(self.as_text_view()));
+        // The text layout manager and its content manager stay alive, as
+        // on macOS (`conformance/tests/textkit2_view.rs`,
+        // `switch_to_text_kit_1`, in release builds too).
+        self.ivars().tk2.dirty();
+        self.size_to_text();
+        self.as_view().setNeedsDisplay(true);
+        // SAFETY: the name is a constant string AppKit exports.
+        let did = unsafe { objc2_app_kit::NSTextViewDidSwitchToNSLayoutManagerNotification };
+        sidestep_foundation::notification_center::post(did, Some(self.as_object()), None);
     }
 
     /// First responder in the key window.
@@ -2434,7 +2810,7 @@ impl NSTextViewImpl {
         if sel.length > 0 {
             return;
         }
-        if let Some(lm) = self.lm_impl() {
+        if let Some(lm) = self.geo() {
             let r = lm.caret_rect(sel.location, self.ivars().affinity.get() == NSSelectionAffinity::Upstream);
             self.as_view().setNeedsDisplayInRect(offset(grow(r, 1.0), self.origin()));
         }
@@ -2455,7 +2831,7 @@ impl NSTextViewImpl {
             w.makeFirstResponder(Some(view));
         }
         let o = self.origin();
-        let Some(lm) = self.lm_impl() else { return };
+        let Some(lm) = self.geo() else { return };
         let at = |e: &NSEvent| {
             let p = view.convertPoint_fromView(e.locationInWindow(), None);
             NSPoint::new(p.x - o.x, p.y - o.y)
@@ -2638,16 +3014,10 @@ impl NSTextViewImpl {
 /// Whether `lm`'s class draws as Sidestep's does (no override of the
 /// drawing methods), so the view can find lines by height.
 fn keeps_drawing(lm: &NSLayoutManager) -> bool {
-    let class = lm.class();
-    let ours = <NSLayoutManagerImpl as ClassType>::class();
-    std::ptr::eq(class, ours)
-        || [sel!(drawGlyphsForGlyphRange:atPoint:), sel!(drawBackgroundForGlyphRange:atPoint:)].iter().all(|&s| match (
-            class.instance_method(s),
-            ours.instance_method(s),
-        ) {
-            (Some(a), Some(b)) => std::ptr::fn_addr_eq(a.implementation(), b.implementation()),
-            _ => false,
-        })
+    let (class, ours) = (lm.class(), <NSLayoutManagerImpl as ClassType>::class());
+    [sel!(drawGlyphsForGlyphRange:atPoint:), sel!(drawBackgroundForGlyphRange:atPoint:)]
+        .iter()
+        .all(|&s| super::same_method(class, ours, s))
 }
 
 /// The stretches one of two ranges covers and the other doesn't.

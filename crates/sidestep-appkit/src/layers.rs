@@ -830,10 +830,18 @@ pub(crate) fn record(view: &NSViewImpl, xf: Xf, clip: Rect, area: Rect, ring: Op
             // A fresh graphics state and the view's appearance for its
             // drawRect:, which may draw outside its bounds if it doesn't
             // clip.
-            let mark = crate::context::begin_view(view, xf, if clips { target } else { clip.intersect(&area) });
+            let region = if clips { target } else { clip.intersect(&area) };
+            let mark = crate::context::begin_view(view, xf, region);
             // SAFETY: drawRect: takes an NSRect.
             unsafe { msg_send![view, drawRect: xf.inverse_rect(target)] }
             crate::context::end_view(mark);
+            // A TextKit 2 text view's fragments go above what it draws, as
+            // AppKit draws them in views of their own.
+            if crate::textkit::text_view::draws_text_kit_2(views::as_view(view)) {
+                let mark = crate::context::begin_view(view, xf, region);
+                crate::textkit::text_view::draw_content(views::as_view(view), xf.inverse_rect(target));
+                crate::context::end_view(mark);
+            }
         }
         // A promoted clip view's document is in its layer.
         if mode == Mode::Inline || !(views::is_clip(view) && promoted(view)) {

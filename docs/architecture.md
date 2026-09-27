@@ -2133,6 +2133,30 @@ positions in points. `crates/sidestep-appkit/src/text/` holds the stack.
   paragraph, or from it down when it moved what follows); the text view
   runs AppKit's edit transactions, commands, input methods and undo over
   them. [text.md](text.md) has the details.
+- **TextKit 2.** `crates/sidestep-appkit/src/textkit2/` is a layer over
+  the same storage and line layout, not a second engine: a content
+  storage presents the storage's paragraphs as elements (kept, and moved
+  along with edits, in a chunked sequence), and `NSTextLayoutManager`
+  keeps an index of estimated stretches and elements with their fragments,
+  laying out an element at a time through `text/lines.rs` (stacked as
+  TextKit 2 stacks paragraphs) only where asked: the viewport, a range, a
+  point, placed by the estimates above. Program-defined elements (a
+  content storage subclass grouping paragraphs, a delegate's paragraphs)
+  and fragments (a delegate's subclasses, whose `layoutFragmentFrame`
+  places what follows and where its lines are for carets, selections and
+  clicks, and whose `drawAtPoint:inContext:` is called) take part as on
+  macOS. A text view in TextKit 2 mode (the default, as on macOS) reaches
+  its layout through one adapter (`textkit2::view::Geo`) for selection,
+  carets, clicks and commands, lays out its viewport in `viewWillDraw`, and
+  draws the fragments its viewport controller configured after its
+  `drawRect:` (the display pass's `layers::record` calls it), as macOS
+  draws them in views above it: each at the point zero, the drawing state's
+  origin moved to its frame's (`textkit2::draw::with_cg_context_at`, which
+  hands out the current context's `CGContext`). Their default drawing goes
+  through `textkit2::draw::with_context_state`, the one place CoreGraphics'
+  context state plugs in. A layout manager's fragments and a content
+  storage's elements share one weak reference to it
+  (`textkit2::SharedWeak`), so freeing many of them costs what they are.
 
 parley was chosen over cosmic-text, the other complete pure-Rust stack.
 parley takes styles as ranges over the text, which is what an attributed

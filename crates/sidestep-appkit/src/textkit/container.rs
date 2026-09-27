@@ -29,6 +29,8 @@ pub(crate) struct Ivars {
     manager: RefCell<Weak<NSLayoutManager>>,
     view: RefCell<Weak<NSTextView>>,
     exclusion: RefCell<Option<Retained<AnyObject>>>,
+    /// The TextKit 2 layout manager laying text out in it, if any.
+    text_layout: RefCell<Weak<AnyObject>>,
 }
 
 /// The default: as good as unbounded both ways, as AppKit's
@@ -54,6 +56,7 @@ define_class!(
                 manager: RefCell::new(Weak::default()),
                 view: RefCell::new(Weak::default()),
                 exclusion: RefCell::new(None),
+                text_layout: RefCell::new(Weak::default()),
             });
             // SAFETY: NSObject's initializer.
             unsafe { msg_send![super(this), init] }
@@ -233,7 +236,7 @@ define_class!(
 
         #[unsafe(method_id(textLayoutManager))]
         fn text_layout_manager(&self) -> Option<Retained<AnyObject>> {
-            None
+            self.ivars().text_layout.borrow().load()
         }
     }
 
@@ -257,6 +260,10 @@ impl NSTextContainerImpl {
         let manager = self.ivars().manager.borrow().load();
         if let Some(m) = manager {
             m.textContainerChangedGeometry(self.as_container());
+        }
+        let text_layout = self.ivars().text_layout.borrow().load();
+        if let Some(m) = text_layout {
+            crate::textkit2::layout_manager::container_changed(&m);
         }
     }
 }
@@ -308,6 +315,34 @@ pub(crate) fn geometry(c: &NSTextContainer) -> Geometry {
         max_lines: c.maximumNumberOfLines(),
         line_break: c.lineBreakMode(),
     }
+}
+
+/// Set (or clear) the TextKit 2 layout manager of `c`, which its
+/// `setTextContainer:` does.
+pub(crate) fn set_text_layout_manager(c: &NSTextContainer, manager: Option<&objc2_app_kit::NSTextLayoutManager>) {
+    if let Some(iv) = kind(c) {
+        *iv.text_layout.borrow_mut() = manager.map_or_else(Weak::default, |m| Weak::new(m as &AnyObject));
+    }
+}
+
+/// The TextKit 2 layout manager of `c`, read without a message.
+pub(crate) fn text_layout_manager(c: &NSTextContainer) -> Option<Retained<AnyObject>> {
+    match kind(c) {
+        Some(iv) => iv.text_layout.borrow().load(),
+        None => {
+            // SAFETY: textLayoutManager takes nothing.
+            let m: Option<Retained<AnyObject>> = unsafe { msg_send![c, textLayoutManager] };
+            m
+        }
+    }
+}
+
+/// The container's instance variables, if it is this class or a subclass.
+fn kind(c: &NSTextContainer) -> Option<&Ivars> {
+    let ours = NSTextContainerImpl::class();
+    // SAFETY: an instance of the class or a subclass.
+    super::is_kind(c.class(), ours)
+        .then(|| unsafe { &*(c as *const NSTextContainer).cast::<NSTextContainerImpl>() }.ivars())
 }
 
 /// The container's instance variables, if its class is exactly this one.

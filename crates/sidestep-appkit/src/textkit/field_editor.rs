@@ -65,7 +65,7 @@ use objc2_foundation::{NSPoint, NSRange, NSRect, NSSize, NSString};
 
 use super::commands::movement;
 use super::notify::responds;
-use super::text_view::{NSTextViewImpl, as_impl, new_text_view};
+use super::text_view::{NSTextViewImpl, as_impl, new_text_view_with};
 
 /// Keys a window keeps its editors under, as associated objects.
 static SHARED_KEY: u8 = 1;
@@ -192,7 +192,8 @@ pub(crate) fn field_editor(window: &NSWindow, create: bool, object: Option<&AnyO
     if !create {
         return None;
     }
-    let editor = new_text_view(MainThreadMarker::from(window), NSRect::ZERO);
+    // TextKit 2, but for a secure field's (as on macOS).
+    let editor = new_text_view_with(MainThreadMarker::from(window), NSRect::ZERO, !secure);
     editor.setFieldEditor(true);
     if secure && let Some(v) = as_impl(&editor) {
         v.set_secure(true);

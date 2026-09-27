@@ -343,6 +343,20 @@ pub(crate) fn lay_out_paragraph(styled: Styled<'_>, container: &Container, from:
     super::with_ctx(|ctx| paragraph(ctx, styled, 0, container, from, container.max_lines))
 }
 
+/// Lay out the paragraph starting at byte `byte` of `styled.text`, UTF-16
+/// unit `base`, whose spans cover the whole text: a paragraph of a text
+/// holding several (a TextKit 2 element's), with the lines' offsets from
+/// that paragraph's start.
+pub(crate) fn lay_out_paragraph_in(
+    styled: Styled<'_>,
+    byte: usize,
+    base: u32,
+    container: &Container,
+) -> ParagraphLines {
+    let rest = Styled { text: &styled.text[byte..], ..styled };
+    super::with_ctx(|ctx| paragraph(ctx, rest, base, container, 0, container.max_lines))
+}
+
 /// Lay out the paragraph starting `styled.text` from `from`, at most
 /// `limit` lines (0 for all). `base` is the text's start in the spans'
 /// UTF-16 coordinates.

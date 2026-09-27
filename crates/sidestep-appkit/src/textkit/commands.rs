@@ -348,7 +348,7 @@ define_class!(
         fn select_line(&self, _s: Option<&AnyObject>) {
             let v = tv(self);
             let sel = v.selection();
-            let Some(lm) = v.lm_impl() else { return };
+            let Some(lm) = v.geo() else { return };
             let first = lm.line_at(sel.location, false).map(|l| l.range());
             let last = lm.line_at((sel.location + sel.length).saturating_sub(usize::from(sel.length > 0)), false).map(|l| l.range());
             if let (Some(a), Some(b)) = (first, last) {
@@ -735,7 +735,7 @@ fn by_word(v: &NSTextViewImpl, forward: bool, extend: bool) {
 /// The visual line holding `index`: where it starts, where its characters
 /// end, and where it ends with its separator.
 fn line_bounds(v: &NSTextViewImpl, index: usize) -> (usize, usize, usize) {
-    let Some(lm) = v.lm_impl() else { return (index, index, index) };
+    let Some(lm) = v.geo() else { return (index, index, index) };
     match lm.line_at(index, v.affinity() == objc2_app_kit::NSSelectionAffinity::Upstream) {
         Some(l) => {
             let r = l.range();
@@ -801,7 +801,7 @@ fn by_paragraph(v: &NSTextViewImpl, forward: bool) {
 
 /// Up or down a line, aiming for the goal x.
 fn vertical(v: &NSTextViewImpl, dir: i32, extend: bool) {
-    let Some(lm) = v.lm_impl() else { return };
+    let Some(lm) = v.geo() else { return };
     let sel = v.selection();
     let from = if extend {
         v.moving_end()
@@ -829,7 +829,7 @@ fn vertical(v: &NSTextViewImpl, dir: i32, extend: bool) {
 
 /// A page: the visible height, less a line.
 fn page(v: &NSTextViewImpl, dir: i32, extend: bool) {
-    let Some(lm) = v.lm_impl() else { return };
+    let Some(lm) = v.geo() else { return };
     let visible = v.as_view().visibleRect();
     let step = (visible.size.height - 16.0).max(16.0);
     let sel = v.selection();

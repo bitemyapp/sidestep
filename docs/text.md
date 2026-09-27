@@ -1,18 +1,21 @@
 # Text editing
 
-TextKit 1 and the text view, as Sidestep implements them on Linux:
-`NSTextStorage`, `NSLayoutManager`, `NSTextContainer`, `NSText` and
-`NSTextView` with the field editor controls edit in, `NSUndoManager`, and
-text blocks and tables. The code is in
-`crates/sidestep-appkit/src/textkit/` (and `NSUndoManager` in
-`crates/sidestep-foundation/src/undo.rs`); it stands on the line layout of
-`text/lines.rs` described in [architecture.md](architecture.md#text).
+TextKit 1, TextKit 2 and the text view, as Sidestep implements them on
+Linux: `NSTextStorage`, `NSLayoutManager`, `NSTextContainer`, `NSText` and
+`NSTextView` with the field editor controls edit in, `NSUndoManager`, text
+blocks and tables, and TextKit 2's `NSTextLayoutManager`,
+`NSTextContentStorage` and the rest over the same storage and line layout.
+The code is in `crates/sidestep-appkit/src/textkit/` and `textkit2/` (and
+`NSUndoManager` in `crates/sidestep-foundation/src/undo.rs`); it stands on
+the line layout of `text/lines.rs` described in
+[architecture.md](architecture.md#text).
 
 What the classes do was measured on macOS, not read from Apple's headers
 or documentation: each behavior below that a program can see is checked
 by a conformance test that runs against AppKit first and Sidestep second
 (`conformance/tests/text_storage.rs`, `text_fixing.rs`, `text_layout.rs`,
-`text_blocks.rs`, `undo_manager.rs`, `text_view.rs`).
+`text_blocks.rs`, `undo_manager.rs`, `text_view.rs`, `textkit2.rs`,
+`textkit2_view.rs`).
 
 ## Text storage
 
@@ -489,6 +492,257 @@ declares the type but writes nothing and answers NO, where Sidestep's
 writes it). `writeSelectionToPasteboard:type:` writes one type beside
 those already declared.
 
+## TextKit 2
+
+TextKit 2 is a layer over TextKit 1's pieces (`textkit2/`), not a second
+layout engine: the content storage presents the text storage's paragraph
+tree as elements, and the layout manager lays each element out through the
+paragraph engine TextKit 1 uses (`text/lines.rs`), stacked as TextKit 2
+stacks paragraphs. As for TextKit 1, what a program can see was measured
+on macOS (`conformance/tests/textkit2.rs` and `textkit2_view.rs`).
+
+**Locations and ranges.** A content storage's locations are
+`NSCountableTextLocation`s, offsets in UTF-16 units that compare, hash and
+describe themselves by number ("12"); moving one outside the document gives
+nil. An `NSTextRange` holds two locations (nil if the end comes first; its
+description is "2...5"), and keeps their offsets when both are countable,
+so comparing, containing and intersecting cost no messages (locations of
+other kinds go through `compare:`). A range contains its start and not its
+end; an empty range contains nothing and intersects nothing, and is
+contained in a range whose start it sits at but not one whose end it sits
+at; ranges that only touch don't intersect; a union spans the gap between
+ranges.
+
+**Elements.** `NSTextContentStorage` (with a text storage of its own when
+made, and its storage's `textStorageObserver`) hands out an
+`NSTextParagraph` for each of the storage's paragraphs, separator included
+in its range: the content range leaves the separator out ("\r\n" is two
+units; U+2028 separates nothing), the separator range is empty for the last
+paragraph without one. Elements are made when first asked for and kept, in a
+chunked sequence of elements and gaps over the text, so the same paragraph
+is the same object (with the same layout fragment) until an edit touches it:
+an edit drops the elements of the paragraphs it touched (attributes changing
+too: an element's text includes its attributes), and the ranges of those
+after it move, brought up to date from a log of edits when asked for rather
+than by visiting every element (every few hundred edits the kept ones are
+brought up to date at once). The delegate's
+`textContentStorage:textParagraphWithRange:` is asked once per paragraph,
+with its range; a paragraph it returns (its own text, perhaps several
+paragraphs of it) stands for the storage's, given the range and the content
+storage, its separator measured from its own text; its range is the
+paragraph's even when its text is shorter (the content and separator ranges
+divide the paragraph's), and its fragment, once laid out, covers only its
+own text (no fragment holds the rest).
+`textContentManager:shouldEnumerateTextElement:options:` is asked of each
+element enumerated, with the options, and filters what the block gets.
+`textElementsForRange:` gives the elements, from the range's start, that
+start inside the range, up to the first that doesn't (so a range starting
+inside an element, or an empty one, finds none); an element made by
+`textElementForAttributedString:` has no range or content manager yet. A
+content storage subclass may hand out elements of its own (grouping
+paragraphs, say) by overriding the enumeration; laying out the document's
+last element asks a paragraph for its `paragraphSeparatorRange` (AppKit's
+own measures neither range for an element its content storage didn't make,
+so such subclasses answer both themselves). Enumerating forward from a
+location starts with the element holding it and returns the end of the last
+element given to the block (the one it stopped on included; the location
+itself when there was none; nil in an empty document); in reverse, it starts
+with the element holding the unit before the location, returns the start of
+the last one given, and from nil gives nothing.
+`performEditingTransactionUsingBlock:` only marks the transaction
+(`hasEditingTransaction`): the storage processes each edit in it as it
+comes.
+
+**Layout fragments.** `NSTextLayoutManager` keeps an index over the
+document (`seq.rs`): stretches known only by an estimate of their height,
+and elements with their fragments, laid out or not, in chunks with lazily
+summed lengths and heights. A fragment's place is the height of what comes
+before it, estimates included: laying out only what is asked for (the
+viewport, a range, a point) places it where the rest's estimates put it,
+as TextKit 2 does on macOS (a far fragment laid out alone is placed by the
+estimates above it). Estimates are TextKit 1's (a line of the paragraph's
+font per container width of text, at half an em a unit, a raw stretch of
+the storage at a time for text not yet cut into paragraphs), scaled by how
+the fragments laid out so far compared with their estimates, so the
+document's height settles as more of it is laid out. Near the start (the
+first 16 K units) what comes before a fragment is laid out first, so short
+texts are placed exactly. Stretches turn into elements when something
+needs them: the layout manager asks the content manager for the elements
+from an offset (its own content storage directly; anything else, a
+subclass grouping paragraphs into elements included, through
+`enumerateTextElementsFromLocation:options:usingBlock:`) and the delegate's
+`textLayoutManager:textLayoutFragmentForLocation:inTextElement:` for each
+fragment. Edits turn what they touched back into stretches (one element for
+one keeps its height as the estimate); `invalidateLayoutForRange:` does the
+same, keeping the fragments for their elements' return: an element the
+content manager hands out again keeps its fragment, the same object, which
+is what macOS shows (state 0, the frame kept until laid out again).
+
+A fragment not laid out is in state 0 with a zero frame and no lines; laid
+out, state 3. Laying one out reads its element's text (a content storage's
+paragraph straight from the paragraph tree and attribute table, anything
+else through its attributed string) and stacks its paragraphs as measured:
+line spacing above every line but the document's first (so between lines,
+and before a paragraph's first line with its spacing before), the spacing
+after a paragraph below its last line except at the document's end, the
+document's first element with nothing above it, and the document's last
+element ending in an empty line when its text ends in a separator (spaced
+as a paragraph of its own; the extra line fragment is inside the fragment,
+and `EnsuresExtraLineFragment` only adds a fragment to an empty document).
+The frame is as wide as the lines reach, from the leftmost line's start
+(padding, indents and alignment move it) to the furthest one's end,
+trailing spaces included. Then the layout manager asks the fragment its
+`layoutFragmentFrame`, so a subclass's frame (taller, or of no height) is
+what places the fragments below, as on macOS; usage bounds are the frames
+laid out, down to the document's estimated end once a view sizing to it
+asked (a text view does). Line fragments' character ranges are in their
+element's text, their typographic bounds in the layout fragment's frame,
+their glyph origin the baseline's height; `locationForCharacterAtIndex:`
+is from the typographic origin, at the baseline;
+`textLineFragmentForVerticalOffset:requiresExactMatch:` finds the line
+whose box holds the offset (or, inexactly, the first whose bottom is below
+it); `characterIndexForPoint:` is the character under the point (the first
+left of the line, `NSNotFound` past its end). The rendering surface is the
+frame with each line's box widened by its height across and a quarter of it
+up and down. `textLayoutFragmentForLocation:` finds nothing at the
+document's end.
+
+**Where lines are** is where their fragment's `layoutFragmentFrame` puts
+them (a subclass's own, moved or taller than its lines): carets, segments,
+selection highlights and clicks go by it, as drawing does. A click in a
+fragment's frame below its lines (a subclass's padding) finds the end of its
+last line, as `NSTextSelectionNavigation` does on macOS. An empty document
+has no fragments, but its extra line fragment is laid out (at the padding,
+of no width and a line of the typing attributes' height) when a caret or
+a range asks for it, or a viewport shows it (configured, with an empty
+range), and the usage bounds are its frame then; a click in an empty
+document makes no selection. Enumeration of fragments forward
+from a location starts with the fragment holding it, in reverse with the one
+before it (from nil, the end), and returns the end (the start, in reverse)
+of the last one given; `EnsuresLayout` lays out each as it goes, and a
+fragment laid out moves with the index as what is above it changes.
+`enumerateTextSegmentsInRange:type:options:usingBlock:` gives a caret no
+width and a segment per line the range meets, measured as follows. A
+selection or highlight segment stops at the line's trailing edge (the
+container's width less its padding), reaches it where the range goes on
+past the line or takes in its separator, starts at the leading edge on
+every line but the first, and starts down where the one before it ends.
+`HeadSegmentExtended` starts every segment but the first at the leading
+edge; `TailSegmentExtended` takes the segments the range goes on past to
+the trailing edge, and the last one where the range reaches its line's end
+(where the range stops short of the end of a paragraph's last line, an
+empty segment at that line's end reaches from its text's end to the edge);
+`MiddleFragmentsExcluded` keeps the first and last lines' segments (a
+selection's last reaching up to the first's); `RangeNotRequired` passes no
+range. The layout manager answers `NSTextSelectionDataSource`'s questions
+from its layout. Rendering attributes are kept over ranges (set, added to,
+removed), moved by edits before them and enumerated from a location (the
+run there cut at it) or back from it; they aren't drawn yet.
+
+**Selection navigation** moves as measured: up and down go a line by
+character (from a selection's start), and like forward and back by
+anything larger; a caret moves from where it is, a selection collapses to
+its edge by character and moves from its edge otherwise; extending by
+character moves a selection's end from its start, by anything larger its
+end forward or its start back; a move to a line's end, and a larger
+extension back, are upstream. Deletion ranges are the selection, or for a
+caret the move's span.
+
+**Drawing.** The default `drawAtPoint:inContext:` draws a fragment's lines
+(backgrounds, then glyphs) with its frame's origin at the point, a line
+fragment's with its typographic origin there, through
+`textkit2::draw::with_context_state(cg, f)`: the one door from a
+`CGContext` to the drawing state. A text view hands each fragment the point
+zero and a context whose origin is moved to the fragment's frame origin, as
+macOS does (`textkit2::draw::with_cg_context_at`). That context is the
+current graphics context's `CGContext`, the same graphics state, so a
+subclass's CoreGraphics calls and the default drawing land in the same
+place; a fragment drawn into another `CGContext` (a program's bitmap
+context) draws with that context made the current one for the call
+(`coregraphics::context::drawing_into`).
+
+**The viewport.** `NSTextViewportLayoutController` (none until the layout
+manager has a container, as on macOS) lays out as measured: the delegate's
+`textViewportLayoutControllerWillLayout:`, its viewport bounds, the
+fragments the bounds meet laid out and handed to
+`textViewportLayoutController:configureRenderingSurfaceForTextLayoutFragment:`
+top to bottom, then `textViewportLayoutControllerDidLayout:`; the viewport
+range is theirs together. Bounds of no height (no delegate, say) lay out
+nothing and leave no range; an empty document's viewport holds its extra
+line fragment. `adjustViewportByVerticalOffset:` moves the bounds and lays
+out nothing; `relocateViewportToTextLocation:` moves them to where the
+fragment holding the location is estimated to be, makes the range the empty
+range there, and returns that height, laying nothing out and asking the
+delegate nothing. The fragments a layout configured are kept by the
+controller, and a text view draws those, whatever its subclass's delegate
+methods do.
+
+**Text views.** A text view is TextKit 2 when made with `initWithFrame:`
+(and `init`, `new`, `scrollableTextView`, `fieldEditor`,
+`initUsingTextLayoutManager:YES`, `textViewUsingTextLayoutManager:YES`),
+unless its class overrides `drawRect:`; given a container, it is in the
+container's mode whatever its class (a text layout manager's is TextKit 2).
+The window's field editor is TextKit 2, the secure one TextKit 1. Asking a
+TextKit 2 view for its `layoutManager` switches it to TextKit 1 for good: an
+`NSLayoutManager` takes the same container and storage, and
+`textLayoutManager` and `textContentStorage` are nil from then on (the text
+layout manager keeps its container and content). A TextKit 2 view is its
+viewport controller's delegate (a subclass's `viewportBoundsFor…` calling
+`super` gets the view's): its viewport is what its clip view shows in
+container coordinates, its whole width across, from the top of what shows
+(not above its bounds) for the clip view's height (on past the view's
+bottom); in a window and no clip view, its visible rect; in neither, as good
+as unbounded, so laying the viewport out lays out all of the text, as on
+macOS (20 000 lines in 0.4 s there). The viewport is laid out before the
+view draws (`viewWillDraw`) when layout changed or the view scrolled; text
+that showed before stays in place on screen when laying out what is above it
+moves it (the view scrolls by as much). The fragments configured draw after
+the view's `drawRect:` (as macOS draws them above it, in views of their
+own), with the marked text and the caret above them, so a subclass drawing
+in `drawRect:` draws under the text. The view sizes to the usage bounds (the
+document as estimated), and its selection, caret, clicks, commands, input
+method rects and scrolling go through the text layout manager's lines; the
+text layout manager's `textSelections` follow the view's selection. Edits go
+through the storage as in TextKit 1; the content storage hears of them and
+tells the layout manager, which lays out again only the edited element (in
+place when it keeps its height). A subclass overriding `textContainerOrigin`
+is asked for the origin (in TextKit 1 too). `sizeToFit` lays out the start
+of the text first (a short text whole, so its height is exact, and an empty
+one's extra line); scrolling a range into view lays out the fragment at its
+start, not the whole range. The switch to TextKit 1 posts
+`NSTextViewWillSwitchToNSLayoutManagerNotification` and
+`NSTextViewDidSwitchToNSLayoutManagerNotification` around it.
+
+**Known differences from macOS**, measured, and kept on purpose or not yet
+matched:
+
+- A laid-out fragment below an edit moves to its place when enumerated;
+  macOS keeps its old frame (overlapping the one above) until the viewport
+  is laid out.
+- Near the start (the first 16 K units) laying out a fragment lays out
+  what comes before it; macOS lays out it and what follows it. Where each
+  goes is the same.
+- A fresh layout manager's `textSelections` is an empty array (nil on
+  macOS, which objc2's non-null binding can't return).
+- Elements the content storage's delegate filters out of enumeration are
+  still laid out (macOS skips them in layout too).
+- In a fragment a subclass moved, `characterIndexForInsertionAtPoint:`
+  answers what selection navigation does; macOS answers the fragment's
+  start for any point in it. macOS also places the fragments after a moved
+  one from its moved origin (its `super` frame is moved too).
+- Segments: macOS repeats the last segment of a range reaching the
+  document's end, and with `MiddleFragmentsExcluded` and
+  `TailSegmentExtended` treats a tail at the document's end by type.
+- `sizeToFit` of a long text: macOS lays all of it out (0.7 s for 60 000
+  lines); Sidestep lays out the first 16 K units and estimates the rest.
+- `textLineFragmentForTextLocation:isUpstreamAffinity:` for the location
+  just before its fragment: the fragment's first line on macOS, nil here
+  (nil on both further before).
+- Through a text view, macOS makes new fragments for the paragraphs after
+  an edit; Sidestep keeps them (both do through the storage alone).
+- After `relocateViewportToTextLocation:`, the fragment there is in state 0
+  (1, estimated, on macOS).
+
 ## Performance
 
 `examples/textbench` (release; median of seven runs; Linux in a VM on an
@@ -539,3 +793,32 @@ isn't in a window, so drawing isn't measured. Rich text's writers and
 readers pass each paragraph and run once, so their time grows with the
 text (the rich text rows: 18 182 paragraphs of nine runs, as copying from
 and pasting into a rich text view writes and reads them).
+
+`examples/textkit2bench` (release; median of seven runs, Linux in a VM on
+an M-series Mac and AppKit on the same Mac): the same 11 MB in a TextKit 2
+view as `scrollableTextView` makes it, 800 × 600 points, not in a window,
+laying out its viewport. The last three rows make every fragment first
+(enumerating them all, as scrolling through the text also does), then
+free them all: a new font, a new text, and the view itself (dropped, and
+its autorelease pool drained). AppKit's figures for them were taken with
+the machine busy with other work, so they are rough.
+
+| | Sidestep | AppKit |
+|---|---:|---:|
+| `setString:` | 1.1 ms | 2.4 ms |
+| first viewport layout | 0.83 ms (41 fragments) | 1.8 ms (40 fragments) |
+| scroll 40 points and lay out (p50 / p99) | 0.10 / 0.14 ms | 41 / 59 ms |
+| jump to the middle and lay out | 0.99 ms | 99 ms |
+| keystroke and lay out (p50 / p99) | 0.11 / 0.21 ms | 165 / 257 ms |
+| `setFont:`, every fragment made | 121 ms | 203 ms |
+| `setString:`, every fragment made | 83 ms | 550 ms |
+| freeing the view, every fragment made | 20 ms | 30 s |
+
+Only the viewport is laid out: the rest of the 200 000 paragraphs stay
+estimates (the view is 3 000 015 points tall as estimated; 3 200 016 on
+macOS), and nothing runs in the background. A keystroke lays out again the
+edited paragraph and places the viewport's fragments. Freeing fragments and
+elements costs what they are: a layout manager's fragments share one weak
+reference to it, as a content storage's elements do (each holding its own
+made the runtime look through 200 000 weak locations to remove each, 5 s
+for 200 000 fragments).

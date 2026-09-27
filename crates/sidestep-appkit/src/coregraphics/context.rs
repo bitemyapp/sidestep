@@ -269,9 +269,7 @@ pub(crate) fn with_state<R>(cg: &CGContext, f: impl FnOnce(&mut ContextState) ->
 /// Run `f` with `cg` the current graphics context (an `NSGraphicsContext`
 /// wrapping it), so that AppKit's drawing (strings, images, paths) goes
 /// into it; the context that was current before is current again after.
-// For text layout fragments drawing `inContext:` (TextKit 2), which come
-// separately.
-#[allow(dead_code)]
+// For text layout fragments drawing `inContext:` (TextKit 2).
 pub(crate) fn drawing_into<R>(cg: &CGContext, f: impl FnOnce() -> R) -> R {
     /// Puts the previous context back, however `f` ends.
     struct Current;
