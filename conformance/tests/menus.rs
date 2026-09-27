@@ -921,7 +921,12 @@ fn application_validation(mtm: MainThreadMarker, app: &NSApplication) {
         assert_eq!(by_menu, by_ui, "{action:?}");
         by_menu
     };
-    assert!(!answer(sel!(unhideAllApplications:)));
+    // Showing all applications again depends on whether another one is
+    // hidden: macOS enables it then. Sidestep sees no other applications.
+    let unhide_all = answer(sel!(unhideAllApplications:));
+    if !cfg!(target_vendor = "apple") {
+        assert!(!unhide_all);
+    }
     assert!(!answer(sel!(hide:)));
     for action in [sel!(terminate:), sel!(unhide:), sel!(orderFrontStandardAboutPanel:)] {
         assert!(answer(action), "{action:?}");

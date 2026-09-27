@@ -629,11 +629,13 @@ fn api_surface() {
     assert_eq!(got, contents(&d));
     let text: Retained<NSString> = unsafe { d.descriptionWithLocale(None) };
     assert_eq!(text.to_string(), description(&d));
-    let pairs = RefCell::new(0);
-    let each =
-        RcBlock::new(|_k: NonNull<NSString>, _v: NonNull<NSNumber>, _stop: NonNull<Bool>| *pairs.borrow_mut() += 1);
+    // Concurrent enumeration may call the block on several threads at once.
+    let pairs = std::sync::atomic::AtomicUsize::new(0);
+    let each = RcBlock::new(|_k: NonNull<NSString>, _v: NonNull<NSNumber>, _stop: NonNull<Bool>| {
+        pairs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    });
     d.enumerateKeysAndObjectsWithOptions_usingBlock(objc2_foundation::NSEnumerationOptions::Concurrent, &each);
-    assert_eq!(*pairs.borrow(), 2);
+    assert_eq!(pairs.load(std::sync::atomic::Ordering::Relaxed), 2);
     let all = RcBlock::new(|_k: NonNull<NSString>, _v: NonNull<NSNumber>, _stop: NonNull<Bool>| Bool::YES);
     assert_eq!(
         d.keysOfEntriesWithOptions_passingTest(objc2_foundation::NSEnumerationOptions::Concurrent, &all).count(),

@@ -927,11 +927,14 @@ fn api_surface() {
     let ms = NSMutableSet::setWithArray(&numbers(&[1, 2]));
     ms.setSet(&NSSet::from_retained_slice(&[n(7)]));
     assert_eq!(ms.count(), 1);
-    let members = RefCell::new(0);
-    let each = RcBlock::new(|_x: NonNull<NSNumber>, _stop: NonNull<Bool>| *members.borrow_mut() += 1);
+    // Concurrent enumeration may call the block on several threads at once.
+    let members = std::sync::atomic::AtomicUsize::new(0);
+    let each = RcBlock::new(|_x: NonNull<NSNumber>, _stop: NonNull<Bool>| {
+        members.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    });
     s.enumerateObjectsUsingBlock(&each);
     s.enumerateObjectsWithOptions_usingBlock(NSEnumerationOptions::Concurrent, &each);
-    assert_eq!(*members.borrow(), 4);
+    assert_eq!(members.load(std::sync::atomic::Ordering::Relaxed), 4);
     let e = unsafe { s.objectEnumerator() };
     assert_eq!(e.allObjects().count(), 2);
     let d: Retained<NSString> = unsafe { s.descriptionWithLocale(None) };
