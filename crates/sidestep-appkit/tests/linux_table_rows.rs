@@ -112,7 +112,7 @@ mod linux {
         w.makeFirstResponder(Some(&t));
         testing::note_painted_text(true);
         w.makeKeyAndOrderFront(None);
-        testing::settle();
+        testing::settle_first_frames();
         assert!(w.isKeyWindow());
         let id = testing::showing_id(&w);
         (w, id, t, src)

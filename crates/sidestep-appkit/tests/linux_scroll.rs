@@ -184,14 +184,7 @@ mod linux {
         unsafe { w.setReleasedWhenClosed(false) };
         w.setContentView(Some(&content));
         w.makeKeyAndOrderFront(None);
-        testing::settle();
-        // The first frame waits a moment for the desktop's light or dark,
-        // which the null render thread never tells.
-        thread_local!(static WAITED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
-        if !WAITED.with(|w| w.replace(true)) {
-            testing::run_for(200);
-            testing::settle();
-        }
+        testing::settle_first_frames();
         let id = testing::showing_id(&w);
         (w, id, content)
     }

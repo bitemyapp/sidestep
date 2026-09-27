@@ -34,11 +34,7 @@ fn main() {
     sv.setDocumentView(Some(&document));
     w.setContentView(Some(&sv));
     w.makeKeyAndOrderFront(None);
-    testing::settle();
-    // The first frame waits a moment for the desktop's light or dark, which
-    // the null render thread never tells.
-    testing::run_for(200);
-    testing::settle();
+    testing::settle_first_frames();
     assert_eq!(testing::scroll_layers(&w).len(), 1, "a scroll layer, which tells the render thread when it goes");
     println!("test exit_with_windows_on_screen ... ok");
 }

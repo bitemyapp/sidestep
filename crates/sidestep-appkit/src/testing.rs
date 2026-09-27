@@ -126,6 +126,22 @@ pub fn settle() {
     }
 }
 
+/// [`settle`], and before that keep running the main loop until first
+/// frames stop waiting for the desktop's light or dark, which the null
+/// render thread never tells (they give up after a moment): after this, a
+/// window shown before it has drawn its first frame, however slow the
+/// machine.
+pub fn settle_first_frames() {
+    settle();
+    let give_up = Instant::now() + Duration::from_secs(10);
+    while !crate::settings::ready() {
+        assert!(Instant::now() < give_up, "sidestep: first frames kept waiting for the desktop's appearance");
+        let until = crate::settings::deadline().unwrap_or_else(Instant::now).min(give_up);
+        event_loop::run_until(Mode::DEFAULT, until);
+    }
+    settle();
+}
+
 /// Run the main loop in the default mode for `ms` milliseconds, sending
 /// events as the application's main loop does.
 pub fn run_for(ms: u64) {
