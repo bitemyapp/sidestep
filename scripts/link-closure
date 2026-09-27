@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Write crates/sidestep/tests/link_closure.rs: a test that references every
 extern static and function objc2-foundation, objc2-app-kit,
-objc2-core-foundation and objc2-core-text declare under the features
-Sidestep's crates enable on Linux, except the known gaps below (docs/abi.md,
-"Known gaps"); and crates/sidestep/tests/link_closure_imageio.rs, the same
-for objc2-image-io. A symbol Sidestep stops exporting then fails the test's
-link.
+objc2-core-foundation, objc2-core-text and objc2-quartz-core declare under
+the features Sidestep's crates enable on Linux, except the known gaps below
+(docs/abi.md, "Known gaps"); and crates/sidestep/tests/link_closure_imageio.rs,
+the same for objc2-image-io. A symbol Sidestep stops exporting then fails
+the test's link.
 
 Run from the checkout after tools/objc2-overlay has written .objc2-overlay/:
 
@@ -31,6 +31,7 @@ GROUPS = {
         "objc2-app-kit": "objc2_app_kit",
         "objc2-core-foundation": "objc2_core_foundation",
         "objc2-core-text": "objc2_core_text",
+        "objc2-quartz-core": "objc2_quartz_core",
     },
     "link_closure_imageio.rs": {
         "objc2-image-io": "objc2_image_io",

@@ -56,6 +56,11 @@ pub enum Seen {
         window: u32,
         parent: Option<u32>,
     },
+    /// Display links asked for each frame of the window, or stopped.
+    FrameTicks {
+        window: u32,
+        on: bool,
+    },
 }
 
 /// A run of text the main thread asked the null render thread to paint.
@@ -359,4 +364,92 @@ pub fn take_accessibility_notifications() -> Vec<(
         .into_iter()
         .map(|p| (p.element.load(), p.name.to_string(), p.user_info))
         .collect()
+}
+
+// Core Animation (see `quartzcore`).
+
+/// A layer as the render thread shows it at a time.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PresentedLayer {
+    pub opacity: f64,
+    pub position: [f64; 2],
+    pub bounds: [f64; 4],
+    pub transform: [f64; 16],
+    pub corner_radius: f64,
+    pub background: Option<[f64; 4]>,
+    pub hidden: bool,
+}
+
+/// `layer` as the null render thread would show it at the media time `t`
+/// (none if it never got there).
+pub fn presented_layer(layer: &objc2_quartz_core::CALayer, t: f64) -> Option<PresentedLayer> {
+    let id = crate::quartzcore::layer::imp(layer).id();
+    let ca = null::CA.lock().unwrap_or_else(|e| e.into_inner());
+    let p = ca.as_ref()?.presented(id, t)?;
+    Some(PresentedLayer {
+        opacity: p.opacity,
+        position: p.position,
+        bounds: p.bounds,
+        transform: p.transform,
+        corner_radius: p.corner_radius,
+        background: p.background_color,
+        hidden: p.hidden,
+    })
+}
+
+/// How many layers the null render thread holds.
+pub fn render_layer_count() -> usize {
+    null::CA.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(0, |ca| ca.layer_count())
+}
+
+/// Keep the pixels of windows shown from now on (at scale 1) as the null
+/// render thread would draw them, composites included, or stop.
+pub fn capture_pixels(on: bool) {
+    *null::PIXELS.lock().unwrap_or_else(|e| e.into_inner()) = on.then(Default::default);
+}
+
+/// A shown window's captured pixels: width, height and premultiplied RGBA
+/// bytes, as canvases hold them, row by row from the top left.
+pub fn window_pixels(window: &NSWindow) -> Option<(u32, u32, Vec<[u8; 4]>)> {
+    let id = showing_id(window);
+    let pixels = null::PIXELS.lock().unwrap_or_else(|e| e.into_inner());
+    let (w, h, px) = pixels.as_ref()?.get(&id)?;
+    Some((*w, *h, px.iter().map(|p| p.to_ne_bytes()).collect()))
+}
+
+/// Have the null render thread draw `window`'s layer trees as they show at
+/// the media time `t` (as a frame would), and wait for it.
+pub fn composite_at(window: &NSWindow, t: f64) {
+    crate::app::send(crate::protocol::ToRender::Composite { window: showing_id(window), at: Some(t) });
+    settle();
+}
+
+/// `CACurrentMediaTime()`.
+pub fn media_time() -> f64 {
+    crate::quartzcore::math::media_now()
+}
+
+/// Play the render thread's part: a frame of `window` showed at the media
+/// time `time` (what display links hear).
+pub fn inject_tick(window: u32, time: f64) {
+    event_loop::inject(FromRender::Tick { window, time });
+}
+
+/// Commit Core Animation's changes now (`+[CATransaction flush]` from
+/// outside any transaction).
+pub fn commit_layers() {
+    crate::quartzcore::transaction::commit_now();
+}
+
+/// Whether Core Animation's main-thread timer waits to end (or begin) an
+/// animation.
+pub fn layer_endings_scheduled() -> bool {
+    crate::quartzcore::transaction::ending_scheduled()
+}
+
+/// Whether the null render thread would draw a frame of `window`'s layer
+/// trees now (something in them changed, or animates where it shows).
+pub fn layers_want_frame(window: &NSWindow) -> bool {
+    let id = showing_id(window);
+    null::CA.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|ca| ca.wants_frame(id))
 }

@@ -83,7 +83,7 @@ pub(crate) fn modal_mode() -> Mode {
 /// Where the display pass comes among a run's observers: late, after the
 /// program's own before-waiting observers (Core Animation's commit has the
 /// same place on macOS).
-const DISPLAY_ORDER: isize = 2_000_000;
+pub(crate) const DISPLAY_ORDER: isize = 2_000_000;
 
 thread_local! {
     /// The event source's signal, once [`install`] has made it.
@@ -266,6 +266,10 @@ fn next_message() -> Option<FromRender> {
                 FromRender::Key { window, key } if key.repeat => {
                     inbox.iter().any(|m| matches!(m, FromRender::Key { window: w, .. } if w == window))
                 }
+                // A stalled loop hears only the latest of a window's frames.
+                FromRender::Tick { window, .. } => {
+                    inbox.iter().any(|m| matches!(m, FromRender::Tick { window: w, .. } if w == window))
+                }
                 _ => false,
             };
             if !superseded {
@@ -365,6 +369,21 @@ fn handle(msg: FromRender) {
         FromRender::WindowOutputs { window, outputs } => {
             if let Some(w) = app::find_window(window) {
                 crate::screen::window_outputs(&w, outputs);
+            }
+        }
+        // Core Animation (quartzcore).
+        FromRender::Tick { window, time } => crate::quartzcore::display_link::tick(window, time),
+        FromRender::Repaint { window, target, rects } => {
+            if let Some(w) = app::find_window(window) {
+                let key = match target {
+                    crate::protocol::Target::Root => crate::protocol::ROOT_LAYER,
+                    crate::protocol::Target::Tiles(l) => l,
+                    crate::protocol::Target::Overlay(l) => crate::layers::damage_key(l, true),
+                    crate::protocol::Target::Content(_) => return,
+                };
+                for r in rects {
+                    window::imp(&w).invalidate(key, r);
+                }
             }
         }
     }

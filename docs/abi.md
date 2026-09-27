@@ -21,7 +21,7 @@ at the end, which `tools/objc2-overlay` applies; other versions are untested.
 | Weak references | `objc_storeWeak`, `objc_initWeak`, `objc_destroyWeak`, `objc_loadWeak`, `objc_loadWeakRetained`, `objc_copyWeak`, `objc_moveWeak` |
 | Other | `objc_setAssociatedObject`, `objc_getAssociatedObject`, `objc_removeAssociatedObjects` (every association policy), `objc_sync_enter`, `objc_sync_exit`, `objc_enumerationMutation`, `objc_setEnumerationMutationHandler`, `objc_exception_throw`, `imp_implementationWithBlock`, `imp_getBlock`, `imp_removeBlock` |
 | Blocks | `_Block_copy`, `_Block_release`, `_Block_object_assign`, `_Block_object_dispose`, `_Block_has_signature`, `_Block_signature`, and the classes `_NSConcreteStackBlock`, `_NSConcreteMallocBlock`, `_NSConcreteGlobalBlock` |
-| Class symbols | `._OBJC_CLASS_<Name>` and `._OBJC_METACLASS_<Name>` for `NSObject` and `NSProxy` (runtime) and each Foundation and AppKit class, each also listed in the `sidestep_classes` linker section |
+| Class symbols | `._OBJC_CLASS_<Name>` and `._OBJC_METACLASS_<Name>` for `NSObject` and `NSProxy` (runtime) and each Foundation, AppKit and QuartzCore class, each also listed in the `sidestep_classes` linker section |
 | Categories | `._SIDESTEP_CATEGORY_<Class>_<Name>` for each category a framework links, also listed in the `sidestep_categories` linker section |
 | libdispatch | `dispatch_get_global_queue`, `_dispatch_main_q`, `_dispatch_queue_attr_concurrent`, `dispatch_queue_create(_with_target)`, `dispatch_queue_attr_make_*`, `dispatch_(barrier_)async(_f)`, `dispatch_(barrier_)sync(_f)`, `dispatch_(barrier_)async_and_wait(_f)`, `dispatch_apply(_f)`, `dispatch_after(_f)`, `dispatch_once(_f)`, `dispatch_group_*`, `dispatch_semaphore_*`, `dispatch_source_*` (data add/or/replace, timer, vnode), `dispatch_time`, `dispatch_walltime`, `dispatch_retain`/`release`/`suspend`/`resume`/`activate`, `dispatch_set_context`/`get_context`/`set_finalizer_f`/`set_target_queue`, `dispatch_queue_set_specific`/`get_specific`, `dispatch_assert_queue*`, `dispatch_main` |
 | CoreFoundation | Retain/release/equality (`CFRetain`, `CFRelease`, `CFAutorelease`, `CFEqual`, `CFHash`, `CFGetTypeID`, `CFCopyDescription`, `CFShow`); the run loop (`CFRunLoop*`, `CFRunLoopTimer*`, `CFRunLoopObserver*`, `kCFRunLoopDefaultMode`, `kCFRunLoopCommonModes`); and toll-free `CFString`, `CFData`, `CFDate`, `CFError`, `CFURL`, `CFDictionary` and `CFArray` (mutable ones too), `CFNumber`, `CFPreferences`; the `kCFAllocator*` constants and the `kCFType…CallBacks` |
@@ -47,19 +47,21 @@ at the end, which `tools/objc2-overlay` applies; other versions are untested.
 | CoreText: paragraph styles and the rest | `CTParagraphStyle…`: `GetTypeID`, `Create`, `CreateCopy`, `GetValueForSpecifier`; `CTTextTab…`: `GetTypeID`, `Create`, `GetAlignment`, `GetLocation`, `GetOptions`; `CTGlyphInfo…`: `GetTypeID`, `CreateWithGlyphName`, `CreateWithGlyph`, `CreateWithCharacterIdentifier`, `GetGlyphName`, `GetGlyph`, `GetCharacterIdentifier`, `GetCharacterCollection`; `CTRunDelegate…`: `GetTypeID`, `Create`, `GetRefCon`; `CTRubyAnnotation…`: `GetTypeID`, `CreateWithAttributes`, `CreateCopy`, `GetAlignment`, `GetOverhang`, `GetSizeFactor`, `GetTextForPosition` |
 | CoreText: constants | `CTGetCoreTextVersion`; every string constant objc2-core-text declares (129), with macOS's value: the string attribute names (`kCTFontAttributeName`, `kCTForegroundColorAttributeName`, `kCTKernAttributeName`, …, several of them AppKit's names), font descriptor attributes (`kCTFontNameAttribute`, `kCTFontFeatureSettingsAttribute`, …), name, feature, variation and trait keys, baseline classes, frame, typesetter, ruby and collection options, and the font manager's keys, domain and notification |
 | CoreFoundation: attributed strings | `CFAttributedString…`: `GetTypeID`, `Create`, `CreateWithSubstring`, `CreateCopy`, `GetString`, `GetLength`, `GetAttributes`, `GetAttribute`, `GetAttributesAndLongestEffectiveRange`, `GetAttributeAndLongestEffectiveRange`, `CreateMutableCopy`, `CreateMutable`, `ReplaceString`, `GetMutableString`, `SetAttributes`, `SetAttribute`, `RemoveAttribute`, `ReplaceAttributedString`, `BeginEditing`, `EndEditing`, `GetBidiLevelsAndResolvedDirections`, `GetStatisticalWritingDirections` |
+| QuartzCore | `CACurrentMediaTime`, `CAFrameRateRangeMake`, `CAFrameRateRangeIsEqualToRange`; `CATransform3D…`: `IsIdentity`, `EqualToTransform`, `MakeTranslation`, `MakeScale`, `MakeRotation`, `Translate`, `Scale`, `Rotate`, `Concat`, `Invert`, `MakeAffineTransform`, `IsAffine`, `GetAffineTransform`; the constants `CATransform3DIdentity`, `CAFrameRateRangeDefault` and every string constant objc2-quartz-core declares under Sidestep's features, with macOS's value (gravities, filters, contents formats, corner curves, fill modes, calculation and rotation modes, transition types and directions, timing function names, value functions, fill rules, line joins and caps, gradient types, transaction keys, tone map modes, dynamic ranges, `kCAOnOrderIn`, `kCAOnOrderOut`, `kCATransition`) |
 
 `crates/sidestep/tests/link_closure.rs` references every extern static and
-function that objc2-foundation, objc2-app-kit, objc2-core-foundation and
-objc2-core-text declare under the features Sidestep's crates enable, but
-for the known gaps below, so a symbol that stops being exported fails a
-Linux build of the test; `scripts/link-closure` writes it from the
-overlay's crates when the features or the exports change.
+function that objc2-foundation, objc2-app-kit, objc2-core-foundation,
+objc2-core-text and objc2-quartz-core declare under the features Sidestep's
+crates enable, but for the known gaps below, so a symbol that stops being
+exported fails a Linux build of the test; `scripts/link-closure` writes it
+from the overlay's crates when the features or the exports change.
 CoreFoundation's functions count as declared by the features
 sidestep-foundation enables (`CFRunLoop`, `CFDate`, `CFAttributedString`,
 `CFDictionary`): the ones AppKit's crates turn on for the types their
 bindings name (CoreGraphics' and CoreText's) don't add to them (see Known
-gaps). `conformance/tests/constants.rs` and `conformance/tests/coretext.rs`
-check the string constants' values against macOS's.
+gaps). `conformance/tests/constants.rs`, `conformance/tests/coretext.rs`
+and `conformance/tests/quartzcore.rs` check the string constants' values
+against macOS's.
 
 dispatch2 links `-ldispatch` on Linux (objc2-foundation 0.3.2 doesn't
 depend on dispatch2; objc2-core-foundation and objc2-core-graphics do
@@ -97,6 +99,12 @@ describes them. A `CTFont` is an `NSFont` and a `CTFontDescriptor` an
 the other types are Sidestep-private classes (`_SidestepCTLine`, …), as
 CoreGraphics' are. `CGContextShowGlyphs…` and `CGContextShowText…` draw
 through CoreText's glyph drawing.
+
+The QuartzCore functions (16, and 83 constants) come from sidestep-appkit's
+`quartzcore` module, with the signatures objc2-quartz-core 0.3.2 declares;
+[architecture.md](architecture.md#core-animation) describes them.
+`NSValue`'s `CATransform3D` methods are the category
+`SidestepCATransform3D`.
 
 ## Conventions
 
@@ -251,6 +259,11 @@ through CoreText's glyph drawing.
   arrays of objects can't: a program reading them as integers gets the
   numbers' pointers). The rest of what CoreText does differently is in
   [architecture.md](architecture.md#coretext).
+- QuartzCore: only the classes and symbols of the features Sidestep enables
+  (see Symbols): no `CATextLayer`, `CATransformLayer`, `CAReplicatorLayer`,
+  `CAScrollLayer`, `CATiledLayer`, `CAEmitterLayer`, `CAEmitterCell`,
+  `CAMetalLayer`, `CAOpenGLLayer`, `CAEDRMetadata`, `CARenderer` or
+  `CAConstraint`, and none of the constants their features declare.
 
 ## Fixed in the objc2 fork, pending upstream
 
@@ -299,8 +312,7 @@ The tool's README maps each patch and rule to its commit.
   of these rules follow `sidestep-main`'s version of the commit; the tag's
   generator emits no bridging and doesn't map malloc zones. Sidestep
   builds the four crates and AppKit's methods with their types on Linux,
-  and implements CoreGraphics, ImageIO and CoreText (see Symbols) but
-  not yet QuartzCore.
+  and implements all four (see Symbols).
 - **`NSStringEncoding` on GNUstep** (commit 4). GNUstep declares it as a C
   enum without a fixed type: an `int`, which Clang encodes as `i`.
   objc2-foundation bound it as `NSUInteger` while objc2's own helpers used

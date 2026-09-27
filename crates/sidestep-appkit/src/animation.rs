@@ -1,9 +1,12 @@
 //! `NSAnimationContext` and `animator`.
 //!
-//! Sidestep doesn't animate yet: a change made through a view's or a
-//! window's `animator` (which is the view or window itself, as objc2 types
-//! it) applies at once, as AppKit's do with a duration of 0. What programs
-//! can see of grouping still behaves as AppKit's: each thread has one
+//! A change made through a view's or a window's `animator` (which is the
+//! view or window itself, as objc2 types it) applies at once, as AppKit's
+//! do with a duration of 0. A group is also a Core Animation transaction
+//! with its duration and timing function, so layers the program changes
+//! in it animate over them, and so do layer-backed views' changes while
+//! `allowsImplicitAnimation` is set (`quartzcore::backing`). What programs
+//! can see of grouping behaves as AppKit's: each thread has one
 //! context whose settings (duration, implicit animation, completion
 //! handler) are saved and restored around each group, a group starts with
 //! its enclosing group's settings, and completion handlers never run
@@ -33,13 +36,20 @@ struct Group {
     duration: NSTimeInterval,
     implicit: bool,
     completion: Option<Completion>,
+    function: Option<Retained<objc2_quartz_core::CAMediaTimingFunction>>,
 }
 
 impl Default for Group {
     fn default() -> Self {
         // AppKit's defaults.
-        Group { duration: 0.25, implicit: false, completion: None }
+        Group { duration: 0.25, implicit: false, completion: None, function: None }
     }
+}
+
+/// Whether the current group allows implicit animation (of views'
+/// layers: `quartzcore::backing`).
+pub(crate) fn allows_implicit() -> bool {
+    STATE.with(|s| s.try_borrow().map(|s| s.1.last().is_some_and(|g| g.implicit) && s.1.len() > 1).unwrap_or(false))
 }
 
 thread_local! {
@@ -103,6 +113,25 @@ define_class!(
         fn set_duration(&self, duration: NSTimeInterval) {
             // Kept as given, as AppKit keeps it; a negative one is none.
             with_group(|g| g.duration = duration);
+            // A group is a Core Animation transaction: its animations take
+            // its duration.
+            if in_group() {
+                crate::quartzcore::transaction::set_duration(duration.max(0.0));
+            }
+        }
+
+        #[unsafe(method_id(timingFunction))]
+        fn timing_function(&self) -> Option<Retained<objc2_quartz_core::CAMediaTimingFunction>> {
+            with_group(|g| g.function.clone())
+        }
+
+        #[unsafe(method(setTimingFunction:))]
+        fn set_timing_function(&self, function: Option<&objc2_quartz_core::CAMediaTimingFunction>) {
+            let function = function.map(objc2::Message::retain);
+            with_group(|g| g.function = function.clone());
+            if in_group() {
+                crate::quartzcore::transaction::set_function(function);
+            }
         }
 
         #[unsafe(method(allowsImplicitAnimation))]
@@ -144,13 +173,26 @@ fn current() -> Retained<NSAnimationContext> {
     this
 }
 
-/// Open a group with the enclosing one's settings, but no completion.
+/// Open a group with the enclosing one's settings, but no completion: a
+/// Core Animation transaction with its duration and timing function.
 fn begin() {
-    STATE.with(|s| {
+    let (duration, function) = STATE.with(|s| {
         let mut s = s.borrow_mut();
         let inner = Group { completion: None, ..s.1.last().cloned().unwrap_or_default() };
+        let settings = (inner.duration, inner.function.clone());
         s.1.push(inner);
+        settings
     });
+    crate::quartzcore::transaction::begin();
+    crate::quartzcore::transaction::set_duration(duration.max(0.0));
+    if function.is_some() {
+        crate::quartzcore::transaction::set_function(function);
+    }
+}
+
+/// Whether a group is open.
+fn in_group() -> bool {
+    STATE.with(|s| s.borrow().1.len() > 1)
 }
 
 /// Close the innermost group, scheduling its completion handler (and
@@ -162,6 +204,9 @@ fn end(extra: Option<Completion>) {
         // nothing.
         if s.1.len() > 1 { s.1.pop() } else { None }
     });
+    if group.is_some() {
+        crate::quartzcore::transaction::commit();
+    }
     let duration = group.as_ref().map_or(0.0, |g| g.duration.max(0.0));
     for handler in group.and_then(|g| g.completion).into_iter().chain(extra) {
         schedule(duration, handler);

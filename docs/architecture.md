@@ -611,6 +611,9 @@ everything that touches pixels or the display server to a render thread.
   enough to be worth it whose document overflows it adds one holding its
   document (see [Scroll views and layers](#scroll-views-and-layers)).
   `setNeedsDisplayInRect:` records damage per layer, in layer points.
+  Core Animation's layers are another thing: layer-backed views and the
+  layers programs add are composited and animated on the render thread
+  (see [Core Animation](#core-animation)).
 - **Display.** Once the render thread reports the last frame shown, the
   window places its scroll layers, calls `drawRect:` only for damaged areas,
   sends the operations and presents; a pass that changed nothing presents
@@ -1326,10 +1329,14 @@ compositor.
   symbol names to Sidestep's own line drawings, template images drawn by
   a handler, sized and weighted by an `NSImageSymbolConfiguration`. No SF
   Symbols artwork is used; other names give nil.
-- **Animation.** Nothing animates yet: `animator` is the view or window
-  itself, so changes apply at once, and `NSAnimationContext` keeps its
-  settings per group and runs completion handlers from the run loop once
-  a group's duration has passed.
+- **Animation.** `animator` is the view or window itself (as objc2 types
+  it), so changes made through it apply at once. An `NSAnimationContext`
+  group is a Core Animation transaction with the group's duration and
+  timing function: layers changed in it animate over them, and so do
+  layer-backed views' frame and alpha changes while the group allows
+  implicit animation (see [Core Animation](#core-animation)). The context
+  keeps its settings per group and runs completion handlers from the run
+  loop once a group's duration has passed.
 
 ### CoreGraphics
 
@@ -2178,6 +2185,196 @@ end uploads the line, and a caret blinking in a scroll view commits two
 surfaces. `SIDESTEP_TRACE_FRAMES=1` prints, for each pass, the main
 thread's time and the tiles it recorded, and for each present the bytes
 uploaded to tiles, overlays and the window and the surfaces committed.
+
+### Core Animation
+
+QuartzCore (`quartzcore/`) follows Core Animation as
+`conformance/tests/quartzcore.rs` measures it on macOS: `CALayer` and its
+geometry, tree, conversions and hit testing, `CAShapeLayer`,
+`CAGradientLayer`, `CAMediaTiming`, `CABasicAnimation`,
+`CAKeyframeAnimation`, `CASpringAnimation`, `CATransition`,
+`CAAnimationGroup`, `CAValueFunction`, `CAMediaTimingFunction`,
+`CATransaction`, `CADisplayLink`, the `CATransform3D` functions and
+`CACurrentMediaTime` (the clock `systemUptime` reads). Timing is checked on
+paused layers stepped by `timeOffset`; the order of delegate calls and
+completion blocks is checked on the clock, but only their order.
+
+**Model and presentation.** A layer keeps what it draws with as plain data
+(`props::Props`) beside the objects it was given, so a getter hands back
+what the setter took. `addAnimation:forKey:` freezes a copy of the
+animation (changing the added one raises, as on macOS, though a key that
+isn't a property can still be set) and turns it into an `AnimSpec`, also
+plain data, with the transaction's duration and timing function when it
+has none; a new animation's begin time of 0 becomes the layer's time (0
+at the least) at the commit that starts it. `spec::present` evaluates
+specs against a layer's properties at a time: the media timing of each
+animation (begin, speed, offset, repeats, autoreverse, fill), its timing
+function (the cubic Bézier solved for x, or a spring's closed form, which
+also gives `settlingDuration`), and what it animates: from/to/by with the
+additive and cumulative rules (each whole repeat adds the end value, and
+nothing while it autoreverses), a `CAValueFunction` making the
+interpolated number (or three, for a scale or translation) into the
+transform, keyframes (linear, discrete, paced, cubic and cubic paced,
+with key times and per-segment functions; key times of another count
+than the values take their common prefix, discrete takes one more; a
+single value animates nothing; a `path` is its elements, a curve followed
+by its parameter; paced times are worked out once when frozen), groups in
+their own time, and transitions. A BOOL switches as soon as its animation
+leaves the start; no color at one end shows none. Two affine transforms
+interpolate as the CSS Transforms specification's 2-D decomposition does
+(scale, the shorter rotation angle, a skew remainder; a mirror flips one
+axis), which is what macOS's interpolation measures as, half turns and
+shears included; other transforms decompose in three dimensions
+(translation, scale, skew, perspective, a quaternion slerped).
+`presentationLayer` is a copy made with the class's `initWithLayer:`,
+read only, showing the properties last committed under the animations
+(changes not committed yet don't show, as on macOS), answering its
+model's `animationKeys`, and holding its model weakly (the model caches
+its copy, which mustn't keep it); a layer never committed into a
+window's tree has none, as on macOS, and gets no implicit animations
+either. A mask's superlayer is the layer it masks; putting a layer under
+itself or its descendant raises (Core Animation raises, or on some runs
+loops, which Sidestep doesn't).
+
+**Transactions.** Each thread has a stack of `begin`/`commit` transactions
+whose settings are looked up innermost first, and an implicit one that a
+run loop observer commits before the loop waits (just ahead of AppKit's
+display pass on the main thread); `flush` commits now, and the outermost
+commit runs with its settings still in force. A change to a live layer
+outside disabled actions asks `actionForKey:` (delegate, `actions`,
+`style`, `+defaultActionForKey:`, then the default) before the change and
+runs the action after it; the default adds an implicit `CABasicAnimation`
+from the old value, or a fade for the keys macOS fades (`hidden`,
+`sublayers` and the like); keys with no default action are asked too
+(`cornerCurve`, `speed`, `opaque`, `style`, …). A layer joining a
+superlayer asks it for `sublayers` and itself for `onOrderIn`, leaving asks
+`onOrderOut` (live or not, as measured), and layout asks `onLayout`.
+Setting a completion block starts a completion group: only the animations
+added from then on count for it (in its transaction or nested ones), a
+replaced block still runs when its own animations end, and a block runs
+before its animations' delegates hear they stopped. A commit lays out and
+displays what needs it (a view's layer through its view), then, for each
+layer changed since the last commit: in the tree of a window with a
+backing (a deferred window has none until shown), it becomes live, its
+properties are what its presentation shows from then on, and its new
+animations start (delegates hear `animationDidStart:` from the run loop
+afterwards, not on a paused layer); in no such tree, its animations stop
+unfinished and go (`animationDidStop:finished:NO`, as macOS stops them);
+and the layers of windows on screen go, whole, to the render thread in one
+`ToRender::Commit`. Animations removed before they end report
+`animationDidStop:finished:NO` at the next commit; a layer that goes
+reports its running ones the same way. The main thread doesn't follow
+animations frame by frame: one timer fires at the earliest end among
+running animations (or the earliest begin time to come, to wake the render
+thread), to tell delegates, remove what is removed on completion, mark
+the rest ended (so nothing waits for them again) and run completion
+blocks. `NSAnimationContext` opens a transaction with its duration and
+timing function, and `allowsImplicitAnimation` lets a view's layer
+animate its changes, including those of the view's frame and alpha
+(otherwise a view answers `NSNull` for its layer's actions).
+
+**Layer-backed views** (`backing.rs`). A view that wants a layer, or whose
+superview has one, gets a backing layer (`makeBackingLayer`) and keeps its
+geometry to the view's (anchor at the origin, its bounds the view's, a
+bounds size other than the frame's as a scale transform, flipped where the
+view's flippedness differs from its superview's, hidden, alpha and
+clipping); the view's layer holds the layers the program added, then its
+subviews' layers in their order. A view keeps its layer when it leaves its
+superview, and the layer holds the view weakly (it may outlive it).
+`setLayer:` hosts a layer the same way. In the display pass the topmost
+layer-backed view of a branch records an `Op::Composite` where its tree
+belongs in paint order, and each layer-backed view's `drawRect:` goes into
+its layer's canvas on the render thread (`Target::Content` paints, redrawn
+where the view was invalidated; a canvas more than 4096 pixels a side
+holds a window of that size placed on a 512-point grid around what's
+visible, moved only when what's visible leaves it). A view that
+`wantsUpdateLayer` (a plain view does; one that draws doesn't) gets
+`updateLayer` when its layer displays at a commit, as on macOS: at the
+first commit that finds it in a window, and after each time it or its
+layer needs display; `-[CALayer display]` on a view's layer goes to its
+view the same way. A promoted scroll view's document isn't composited (its
+tiles are its backing store), nor are views drawn into an overlay.
+
+**On the render thread** (`quartzcore/tree.rs`), the render server, the
+committed trees are copied (properties, sublayers, animations, contents as
+pixels, canvases; contents go again only when they change), and a
+transition new in a commit first snapshots how its layer looked. Paints
+containing composites are kept per target (the window surface, a scroll
+layer's tiles or overlay), each with the rectangles later paints haven't
+covered (and without the tiles the main thread drops); each host's
+composite is indexed from them, and hosts no kept paint composites are
+forgotten. After a commit, a canvas paint, or a frame callback while
+something animates, each host is walked as it shows at that frame's time;
+a layer that looks different from last frame damages the boxes it and its
+sublayers covered and cover now (shadows, strokes and transition moves
+included), and the kept paints are drawn again there (`render::emit`:
+shadow, background with circular or continuous corners, contents by
+gravity (whose edges are the layer space's, y up, whichever way it shows)
+and contents rectangle (from the image's bottom left where the layer's
+contents show upright, its top left where they're flipped), shape or
+gradient (a radial one an ellipse), sublayers through the sublayer
+transform about the anchor point ordered by `zPosition`, masks to bounds,
+border, mask layer (nothing shows outside it), opacity as a group; a 3-D
+transform as the affine map it gives the plane). Damage no kept paint
+covers goes to the main thread to repaint. The render thread paces itself
+by frame callbacks and tells the main thread about a frame only when the
+main thread is waiting for one, so a running animation costs the main
+thread nothing. It draws no frames for animations whose time stands still
+(a speed of 0 on the way down), that haven't begun, or that can't show
+(under a hidden or transparent layer whose visibility doesn't animate),
+and presents only frames that drew something. While the main thread owes
+a window a frame (it resized, or a display pass is sending its commit and
+paints, or will draw a view's new canvas), the window's layer trees wait
+for its `Present`, so no frame shows half of what it draws.
+`CADisplayLink`s made by a view or window ask the render thread for a tick
+each frame the window shows (`ToRender::FrameTicks`, `FromRender::Tick`, a
+stalled loop hearing only the latest), calling their targets in the
+link's run loop modes; a screen's link ticks from a timer at its refresh
+rate; a link in a run loop is kept alive until invalidated, and its
+`duration` is 0 before its first frame. `renderInContext:` draws the model
+tree through the same `emit` into a CGContext, the layer's own flip
+turning its contents over as macOS does.
+
+With `SIDESTEP_TRACE_FRAMES=1`, each commit prints its main-thread time
+and layers sent, and each animated frame its render-thread time, the
+redraws and the area redrawn. `examples/layer-demo` (a 480 × 320 window: a
+card breathing on a spring with continuous corners, a border and a shadow,
+a rotating square, a stroke drawing itself, a dot paced along a path, a
+fade transition each second), in a release build under headless sway on
+this project's Linux container at scale 1 (on a host whose other
+containers kept more than a core busy): about 58 frames a second, each
+2.0 to 2.3 ms of the render thread at the median (3.6 to 4.0 ms at the
+90th percentile, redrawing about 90 000 square points in one redraw and
+one present), 13 to 14 % of a core in all; one display pass on the main
+thread in seven seconds, and a commit on each timer tick, 0.02 ms at the
+median (0.06 ms at most), the main thread's time under one clock tick in
+four seconds.
+
+Known differences: perspective is an affine approximation (no depth
+between layers beyond sibling `zPosition` order, `doubleSided` only for
+layers turned away as a whole); `rotationMode`, `contentsCenter`, filters
+(`filters`, `backgroundFilters`, `compositingFilter`) and conic gradients
+(drawn axial) aren't drawn; `shouldRasterize` and `drawsAsynchronously`
+change nothing; keyframe timing functions along a path apply per flattened
+piece of a curve; `tensionValues`, `continuityValues` and `biasValues` are
+kept but not applied (cubic keyframes are Catmull–Rom), and cubic paced
+keyframes are paced by sampling (a few hundredths off macOS's); a spring
+that allows overdamping settles and moves as the damped equation says,
+which isn't macOS's (its overdamped springs overshoot), and a perceptual
+duration of 0 is taken as half a second; a layer's own duration, repeat
+count and autoreversing don't limit its sublayers' time; the `frame` key
+path doesn't animate, and gradient `colors` and `locations` don't when
+the model has none; a value function given a value macOS raises for (a
+lone number for a scale or translation, a missing `from` or `to`) does
+nothing; changes made through `animator` apply at once; the continuous
+corner curve (`render::rounded_rect`'s table, of which only the reach is
+measured) is tighter near the edge than macOS's; `renderInContext:` follows the screen where macOS's
+`renderInContext:` doesn't (it draws sublayers by `zPosition`, and honors
+`shadowPath` and `maskedCorners`); a layer asks no action for a key path
+set by key-value coding (`transform.scale`), for other keys set that way,
+or for `contents` when it displays; and there is no `CATextLayer`,
+`CAReplicatorLayer`, `CAScrollLayer`, `CATiledLayer`, `CATransformLayer`,
+`CAEmitterLayer`, `CAMetalLayer` or `CAOpenGLLayer`.
 
 ### Funnel points
 

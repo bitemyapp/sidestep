@@ -79,6 +79,7 @@ mod pasteboard_item;
 mod pasteboard_types;
 mod path;
 mod protocol;
+mod quartzcore;
 mod raster;
 mod responder;
 mod rich;

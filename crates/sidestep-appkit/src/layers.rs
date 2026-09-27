@@ -350,6 +350,22 @@ pub(crate) fn display(window: &NSWindowImpl, present: impl FnOnce(bool)) -> bool
     };
     let plans = plan(window);
     counts.placed += apply_promotions(window, &mut layers, &plans);
+    // Scroll layers' documents and overlays' views are drawn there, not in
+    // the layer trees composited around them.
+    let mut skip = Vec::new();
+    for plan in &plans {
+        for doc in views::subviews(views::imp(&plan.clip)).iter() {
+            if let Some(l) = crate::quartzcore::backing::layer_of(views::imp(doc)) {
+                skip.push(crate::quartzcore::layer::imp(&l).id());
+            }
+        }
+        for v in &plan.overlay_views {
+            if let Some(l) = crate::quartzcore::backing::layer_of(views::imp(v)) {
+                skip.push(crate::quartzcore::layer::imp(&l).id());
+            }
+        }
+    }
+    crate::quartzcore::backing::set_skipped(skip);
     let mut damage = window.take_damage();
     let scale = window.scale();
     let ring = crate::controls::focus::ring_view(window);
@@ -801,6 +817,12 @@ pub(crate) fn record(view: &NSViewImpl, xf: Xf, clip: Rect, area: Rect, ring: Op
         // Its overlay draws it.
         return;
     }
+    // A layer-backed view is composited from its layer tree, where the
+    // render thread animates it (see `quartzcore::backing`).
+    if mode != Mode::Inline && crate::quartzcore::backing::composited(view) {
+        record_composite(view, xf, clip, area, ring);
+        return;
+    }
     let visible = clip.intersect(&xf.rect(views::bounds(view)));
     let target = visible.intersect(&area);
     let is_ring = ring.is_some_and(|r| std::ptr::eq(views::imp(r), view));
@@ -861,6 +883,46 @@ pub(crate) fn record(view: &NSViewImpl, xf: Xf, clip: Rect, area: Rect, ring: Op
         crate::controls::focus::draw_ring(views::as_view(view));
         crate::context::end_view(mark);
     }
+}
+
+/// Record a layer-backed view as the composite of its layer tree, if the
+/// tree reaches `area`, and the focus ring of a view in it over it.
+fn record_composite(view: &NSViewImpl, xf: Xf, clip: Rect, area: Rect, ring: Option<&NSView>) {
+    let mut reach = xf.rect(views::reach(view));
+    if let Some(r) = crate::quartzcore::backing::reach(view) {
+        reach = reach.union(&xf.rect(r));
+    }
+    if !reach.intersect(&clip).intersect(&area).is_empty()
+        && let Some(op) = crate::quartzcore::backing::composite_op(view, xf, clip)
+    {
+        graphics::push(op);
+    }
+    // A focus ring of the view or one below it goes over the composite.
+    if let Some(ring) = ring
+        && let Some(ring_xf) = xf_below(view, xf, views::imp(ring))
+    {
+        let r = views::imp(ring);
+        let mark = crate::context::begin_view(r, ring_xf, clip.intersect(&area));
+        crate::controls::focus::draw_ring(views::as_view(r));
+        crate::context::end_view(mark);
+    }
+}
+
+/// The map of `target`, a view in `view`'s subtree, to the layer `xf`
+/// maps `view` to.
+fn xf_below(view: &NSViewImpl, xf: Xf, target: &NSViewImpl) -> Option<Xf> {
+    let mut chain = vec![target];
+    let mut cur = target;
+    while !std::ptr::eq(cur, view) {
+        cur = views::superview_of(cur)?;
+        chain.push(cur);
+    }
+    let mut out = xf;
+    for pair in chain.windows(2).rev() {
+        let (child, parent) = (pair[0], pair[1]);
+        out = views::step(child, views::is_flipped(parent), views::frame(child)).then(&out);
+    }
+    Some(out)
 }
 
 /// Draw the damaged parts of the window's own surface.

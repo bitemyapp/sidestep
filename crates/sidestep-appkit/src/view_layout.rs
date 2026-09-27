@@ -207,6 +207,11 @@ pub(crate) fn keeps_content_on_resize(view: &NSViewImpl) -> bool {
     )
 }
 
+/// Whether the view wants a layer (`wantsLayer`).
+pub(crate) fn wants_layer(view: &NSViewImpl) -> bool {
+    has(view, WANTS_LAYER)
+}
+
 /// Whether `view` is drawn in a scroll layer's overlay.
 pub(crate) fn in_overlay(view: &NSViewImpl) -> bool {
     has(view, IN_OVERLAY)
@@ -529,6 +534,8 @@ pub(crate) fn bounds(view: &NSViewImpl) -> NSRect {
 fn set_bounds_size(view: &NSViewImpl, size: NSSize) {
     let frame = views::frame(view).size;
     state(view).bounds_size.set((size != frame).then_some(size));
+    // A layer-backed view's layer takes the scale.
+    crate::quartzcore::backing::geometry_changed(view);
 }
 
 /// The frame changed from `old`; the new one is set.
@@ -543,6 +550,7 @@ pub(crate) fn frame_changed(view: &NSViewImpl, old: NSRect) {
                 scale(b.height, new.size.height, old.size.height),
             );
             state(view).bounds_size.set((size != new.size).then_some(size));
+            crate::quartzcore::backing::geometry_changed(view);
         }
         needs_layout(view);
         if views::is_clip(view) {
@@ -1009,7 +1017,10 @@ define_class!(
 
         #[unsafe(method(setWantsLayer:))]
         fn set_wants_layer(&self, flag: bool) {
-            set_flag(me(self), WANTS_LAYER, flag);
+            if has(me(self), WANTS_LAYER) != flag {
+                set_flag(me(self), WANTS_LAYER, flag);
+                crate::quartzcore::backing::wants_layer_changed(me(self));
+            }
         }
 
         #[unsafe(method(layerContentsRedrawPolicy))]

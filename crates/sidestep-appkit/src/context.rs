@@ -340,7 +340,7 @@ impl ContextState {
                 draw(d, true);
             }
             Op::Glyphs(run) => fade(&mut run.color),
-            Op::EndGroup => {}
+            Op::EndGroup | Op::Composite(_) => {}
         }
     }
 

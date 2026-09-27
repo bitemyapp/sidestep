@@ -1292,7 +1292,13 @@ pub extern "C-unwind" fn CGContextSetShadowWithColor(
     let color = color.map(|c| color_imp(c).resolve()).filter(|c| c[3] > 0.0);
     // Layer points run down; the offset's height runs up.
     let spec = color.map(|color| {
-        Arc::new(ShadowSpec { dx: offset.width as f32, dy: -offset.height as f32, blur: blur.max(0.0) as f32, color })
+        Arc::new(ShadowSpec {
+            dx: offset.width as f32,
+            dy: -offset.height as f32,
+            blur: blur.max(0.0) as f32,
+            color,
+            only: false,
+        })
     });
     with(c, |st| st.gs.shadow = spec);
 }
@@ -1305,6 +1311,7 @@ pub extern "C-unwind" fn CGContextSetShadow(c: Option<&CGContext>, offset: CGSiz
         dy: -offset.height as f32,
         blur: blur.max(0.0) as f32,
         color: [0.0, 0.0, 0.0, 1.0 / 3.0],
+        only: false,
     });
     with(c, |st| st.gs.shadow = Some(spec));
 }

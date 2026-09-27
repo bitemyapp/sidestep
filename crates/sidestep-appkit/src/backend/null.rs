@@ -51,6 +51,49 @@ pub(crate) static LOG: Mutex<Vec<Seen>> = Mutex::new(Vec::new());
 /// The text painted, oldest first, while a test notes it.
 pub(crate) static TEXT: Mutex<Option<Vec<PaintedText>>> = Mutex::new(None);
 
+/// Core Animation's layer trees as this render thread has them (see
+/// `quartzcore::tree`), for tests to look at.
+pub(crate) static CA: Mutex<Option<crate::quartzcore::tree::Compositor>> = Mutex::new(None);
+
+/// Windows' pixels, at scale 1, while a test captures them
+/// (`testing::capture_pixels`): what their paints drew, composites
+/// included.
+pub(crate) static PIXELS: Mutex<Option<HashMap<WindowId, Captured>>> = Mutex::new(None);
+
+/// A window's captured width, height and pixels.
+pub(crate) type Captured = (u32, u32, Vec<u32>);
+
+fn with_ca<R>(f: impl FnOnce(&mut crate::quartzcore::tree::Compositor) -> R) -> R {
+    let mut ca = CA.lock().unwrap_or_else(|e| e.into_inner());
+    f(ca.get_or_insert_with(Default::default))
+}
+
+/// Draw `ops` into a captured window's pixels.
+fn capture(window: WindowId, rects: &[crate::protocol::Rect], ops: &[Op], glyphs: &mut crate::raster::Glyphs) {
+    let mut pixels = PIXELS.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(all) = pixels.as_mut() else { return };
+    let Some((w, h, px)) = all.get_mut(&window) else { return };
+    let mut canvas = crate::raster::Canvas::new(px, *w, *h, 0.0, 1.0);
+    crate::raster::paint(&mut canvas, glyphs, rects, ops);
+}
+
+/// A window's frame of its layer trees at `at`, drawn into its captured
+/// pixels.
+fn composite(window: WindowId, at: Option<f64>, glyphs: &mut crate::raster::Glyphs) {
+    let redraws = with_ca(|ca| {
+        let clock = std::mem::replace(&mut ca.clock, at);
+        let now = ca.now();
+        let (redraws, _) = ca.frame(window, now);
+        ca.clock = clock;
+        redraws
+    });
+    for r in redraws {
+        if r.target == crate::protocol::Target::Root {
+            capture(window, &r.rects, &r.ops, glyphs);
+        }
+    }
+}
+
 pub(crate) fn request() {
     REQUESTED.store(true, Ordering::Relaxed);
 }
@@ -82,6 +125,7 @@ struct Win {
 
 fn run(channel: Channel<ToRender>, to_main: MainSender) {
     let mut windows: HashMap<WindowId, Win> = HashMap::new();
+    let mut glyphs = crate::raster::Glyphs::default();
     let mut focused: Option<WindowId> = None;
     let send = |msg| {
         let _ = to_main.send(msg);
@@ -109,6 +153,9 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
     while let Ok(msg) = channel.recv() {
         match msg {
             ToRender::CreateWindow { window, width, height, popup, sheet_of, .. } => {
+                if let Some(all) = PIXELS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                    all.insert(window, (width, height, vec![0; width as usize * height as usize]));
+                }
                 let win = Win { width, height, state: WindowState::default(), bar: 0 };
                 send(configure(window, &win));
                 windows.insert(window, win);
@@ -121,6 +168,7 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
             }
             ToRender::CloseWindow { window } => {
                 windows.remove(&window);
+                with_ca(|ca| ca.drop_window(window));
                 if focused == Some(window) {
                     focus(&mut focused, None);
                 }
@@ -128,9 +176,20 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
             }
             ToRender::Present { window } => {
                 if windows.contains_key(&window) {
+                    composite(window, None, &mut glyphs);
                     send(FromRender::Frame { window });
                 }
             }
+            ToRender::Commit(commit) => {
+                // Drawn at once, as a compositor that is always ready for a
+                // frame would have them.
+                with_ca(|ca| ca.apply(*commit));
+                for window in windows.keys() {
+                    composite(*window, None, &mut glyphs);
+                }
+            }
+            ToRender::Composite { window, at } => composite(window, at, &mut glyphs),
+            ToRender::FrameTicks { window, on } => note(Seen::FrameTicks { window, on }),
             ToRender::Request { window, request } => {
                 note(Seen::Request { window, request: format!("{request:?}") });
                 let Some(win) = windows.get_mut(&window) else { continue };
@@ -138,6 +197,12 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
                     WindowRequest::Activate => focus(&mut focused, Some(window)),
                     WindowRequest::Resize(w, h) => {
                         (win.width, win.height) = (w.max(1), h.max(1));
+                        if let Some(all) = PIXELS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                            all.insert(
+                                window,
+                                (win.width, win.height, vec![0; win.width as usize * win.height as usize]),
+                            );
+                        }
                         send(configure(window, win));
                     }
                     WindowRequest::Maximize(on) => {
@@ -154,7 +219,14 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
             ToRender::SetCursor { window, cursor } => note(Seen::Cursor { window, name: cursor.name().into() }),
             ToRender::HideCursor { hidden, until_moved } => note(Seen::CursorHidden { hidden, until_moved }),
             ToRender::SetParent { window, parent } => note(Seen::Parent { window, parent }),
-            ToRender::Paint { window, ops, .. } => {
+            ToRender::Paint { window: _, target: crate::protocol::Target::Content(layer), rects, ops } => {
+                with_ca(|ca| ca.paint_content(layer, &rects, &ops, &mut glyphs));
+            }
+            ToRender::Paint { window, target, rects, ops } => {
+                let ops = with_ca(|ca| ca.paint(window, target, &rects, ops));
+                if target == crate::protocol::Target::Root {
+                    capture(window, &rects, &ops, &mut glyphs);
+                }
                 if let Some(text) = TEXT.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
                     let runs = ops.iter().filter_map(|op| match op {
                         Op::Glyphs(run) => Some(PaintedText { window, color: run.color, x: run.x, y: run.y }),

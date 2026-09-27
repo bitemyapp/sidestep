@@ -204,6 +204,16 @@ define_class!(
             }
         }
 
+        /// A link ticking at the rate the screen refreshes at.
+        #[unsafe(method_id(displayLinkWithTarget:selector:))]
+        fn display_link_with_target(&self, target: &AnyObject, selector: objc2::runtime::Sel) -> Retained<objc2_quartz_core::CADisplayLink> {
+            let fps = match self.ivars().geometry.get().refresh_mhz {
+                0 => 60,
+                mhz => ((mhz + 500) / 1000) as isize,
+            };
+            crate::quartzcore::display_link::new_link(target, selector, Some(crate::quartzcore::display_link::Owner::Screen(fps)))
+        }
+
         #[unsafe(method(safeAreaInsets))]
         fn safe_area_insets(&self) -> NSEdgeInsets {
             NSEdgeInsets { top: 0.0, left: 0.0, bottom: 0.0, right: 0.0 }

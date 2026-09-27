@@ -241,6 +241,13 @@ pub(crate) fn drop_tiles(state: &mut State, window: WindowId, id: LayerId, keys:
     }
 }
 
+/// The rectangles (layer points, margins included) of a scroll layer's
+/// tiles.
+pub(crate) fn tile_rects(layers: &Layers, id: LayerId, keys: &[TileKey], scale: f64) -> Vec<Rect> {
+    let Some(layer) = layers.layers.get(&id) else { return Vec::new() };
+    keys.iter().map(|k| layer.place.grid.padded(*k, scale)).collect()
+}
+
 /// The window's scale changed: every tile and overlay was drawn at the
 /// old one, and the main thread draws them again.
 pub(crate) fn rescaled(layers: &mut Layers) {

@@ -902,6 +902,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "layer-demo"
+version = "0.0.0"
+dependencies = [
+ "block2",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation",
+ "objc2-quartz-core",
+ "sidestep",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1493,6 +1507,7 @@ dependencies = [
  "objc2-core-text",
  "objc2-foundation",
  "objc2-image-io",
+ "objc2-quartz-core",
  "sidestep-appkit",
  "sidestep-foundation",
  "sidestep-runtime",
@@ -1546,6 +1561,7 @@ dependencies = [
  "objc2-core-text",
  "objc2-foundation",
  "objc2-image-io",
+ "objc2-quartz-core",
  "sidestep",
 ]
 

@@ -215,6 +215,7 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
         // The environment isn't changed: other threads may be reading it.
         startup_token: std::env::var("XDG_ACTIVATION_TOKEN").ok().filter(|t| !t.is_empty()),
         empty_region: None,
+        ca: crate::quartzcore::tree::Compositor::default(),
         exit: false,
     };
     seat::bind_existing(&mut state, &globals);
@@ -263,6 +264,8 @@ pub(crate) struct State {
     /// An input region with nothing in it, made the first time a window
     /// lets pointer input through.
     empty_region: Option<Region>,
+    /// Core Animation's layer trees, animated here (see `quartzcore::tree`).
+    ca: crate::quartzcore::tree::Compositor,
     exit: bool,
 }
 
@@ -313,6 +316,17 @@ pub(crate) struct Win {
     /// Counts presents; a frame callback names the present it belongs to.
     frame_seq: u64,
     frame_signalled: bool,
+    /// The main thread presented and waits to hear the frame showed.
+    main_waiting: bool,
+    /// Display links want to hear of every frame (`FromRender::Tick`).
+    ticks: bool,
+    /// Layer trees changed or animate while a frame was on its way: draw
+    /// them when it shows.
+    ca_pending: bool,
+    /// The main thread owes the window a frame (it resized, or a display
+    /// pass is sending its paints): layer trees wait for its `Present`
+    /// rather than showing half of what it draws.
+    held: bool,
     style: Style,
     limits: SizeLimits,
     state: WindowState,
@@ -492,15 +506,65 @@ impl State {
             }
             ToRender::HideCursor { hidden, until_moved } => seat::hide_cursor(self, hidden, until_moved),
             ToRender::Paint { window, target, rects, ops } => match target {
-                Target::Root => self.paint(window, rects, ops),
-                Target::Tiles(layer) => tiles::paint(self, window, layer, false, &rects, &ops),
-                Target::Overlay(layer) => tiles::paint(self, window, layer, true, &rects, &ops),
+                Target::Content(layer) => {
+                    // Canvases are painted in a display pass, whose Present
+                    // shows them.
+                    self.ca.paint_content(layer, &rects, &ops, &mut self.glyphs);
+                    self.hold(window);
+                }
+                target => {
+                    let ops = self.ca.paint(window, target, &rects, ops);
+                    self.paint_target(window, target, rects, ops);
+                }
             },
             ToRender::PlaceLayer { window, layer, place } => tiles::place(self, window, layer, place),
-            ToRender::DropLayer { window, layer } => tiles::drop_layer(self, window, layer),
-            ToRender::DropTiles { window, layer, tiles } => tiles::drop_tiles(self, window, layer, &tiles),
-            ToRender::Present { window } => self.present(window),
-            ToRender::CloseWindow { window } => self.close_window(window),
+            ToRender::DropLayer { window, layer } => {
+                self.ca.drop_target(window, Target::Tiles(layer));
+                self.ca.drop_target(window, Target::Overlay(layer));
+                tiles::drop_layer(self, window, layer)
+            }
+            ToRender::DropTiles { window, layer, tiles } => {
+                // The kept paints no longer draw into the dropped tiles.
+                let rects = self
+                    .windows
+                    .get(&window)
+                    .map(|w| tiles::tile_rects(&w.layers, layer, &tiles, w.scale))
+                    .unwrap_or_default();
+                self.ca.drop_rects(window, Target::Tiles(layer), &rects);
+                tiles::drop_tiles(self, window, layer, &tiles)
+            }
+            ToRender::Present { window } => {
+                if let Some(win) = self.windows.get_mut(&window) {
+                    win.main_waiting = true;
+                    win.held = false;
+                }
+                self.ca_frame(window);
+                self.present(window)
+            }
+            ToRender::CloseWindow { window } => {
+                self.ca.drop_window(window);
+                self.close_window(window)
+            }
+            ToRender::Commit(commit) => {
+                for w in &commit.hold {
+                    self.hold(*w);
+                }
+                self.ca.apply(*commit);
+                self.animate_all();
+            }
+            ToRender::FrameTicks { window, on } => {
+                let Some(win) = self.windows.get_mut(&window) else { return };
+                win.ticks = on;
+                if on && win.configured && win.frame_signalled {
+                    self.request_frame(window);
+                }
+            }
+            ToRender::Composite { window, at } => {
+                let clock = std::mem::replace(&mut self.ca.clock, at);
+                self.ca_frame(window);
+                self.ca.clock = clock;
+                self.present(window);
+            }
             ToRender::SetSelection { contents } => selection::set(self, contents),
             ToRender::ReadSelection { mime, token, source, drag } => selection::read(self, mime, token, source, drag),
             ToRender::SelectionData { token, data } => selection::provided(self, token, data),
@@ -605,6 +669,10 @@ impl State {
                 layers: tiles::Layers::default(),
                 frame_seq: 0,
                 frame_signalled: false,
+                main_waiting: false,
+                ticks: false,
+                ca_pending: false,
+                held: false,
                 style,
                 limits,
                 state: WindowState::default(),
@@ -788,6 +856,8 @@ impl State {
             win.canvas = vec![BACKGROUND; (pw * ph) as usize];
             win.buffers.clear();
             win.damage.clear();
+            // The main thread draws it all again; layer trees wait for that.
+            win.held = true;
         }
         self.report(window);
         if resized {
@@ -869,6 +939,102 @@ impl State {
         let mut canvas = Canvas::new(&mut win.canvas, win.px_width, win.px_height, 0.0, scale as f32);
         raster::paint(&mut canvas, &mut self.glyphs, &rects, &ops);
         win.damage.extend(rects.iter().map(|r| to_px(r, scale)));
+    }
+
+    /// Draw a paint into its target.
+    fn paint_target(&mut self, window: WindowId, target: Target, rects: Vec<Rect>, ops: Vec<Op>) {
+        match target {
+            Target::Root => self.paint(window, rects, ops),
+            Target::Tiles(layer) => tiles::paint(self, window, layer, false, &rects, &ops),
+            Target::Overlay(layer) => tiles::paint(self, window, layer, true, &rects, &ops),
+            Target::Content(_) => {}
+        }
+    }
+
+    /// The main thread owes the window a frame: its layer trees wait for
+    /// its `Present`.
+    fn hold(&mut self, window: WindowId) {
+        if let Some(win) = self.windows.get_mut(&window) {
+            win.held = true;
+        }
+    }
+
+    /// Draw what changed of a window's layer trees now, and tell the main
+    /// thread what the render thread can't draw again itself. Returns how
+    /// many redraws it made.
+    fn ca_frame(&mut self, window: WindowId) -> usize {
+        let start = std::time::Instant::now();
+        let now = self.ca.now();
+        let (redraws, uncovered) = self.ca.frame(window, now);
+        let mut area = 0.0;
+        let count = redraws.len();
+        for r in redraws {
+            area += r.rects.iter().map(|q| f64::from((q.x1 - q.x0) * (q.y1 - q.y0))).sum::<f64>();
+            self.paint_target(window, r.target, r.rects, r.ops);
+        }
+        if crate::layers::tracing() && count > 0 {
+            eprintln!(
+                "sidestep ca frame: window {window} render: {:.3} ms, {count} redraws, {area:.0} points squared",
+                start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        if !uncovered.is_empty() {
+            let mut by_target: Vec<(Target, Vec<Rect>)> = Vec::new();
+            for (t, r) in uncovered {
+                match by_target.iter_mut().find(|(bt, _)| *bt == t) {
+                    Some((_, rs)) => rs.push(r),
+                    None => by_target.push((t, vec![r])),
+                }
+            }
+            for (target, rects) in by_target {
+                self.send(FromRender::Repaint { window, target, rects });
+            }
+        }
+        if let Some(win) = self.windows.get_mut(&window) {
+            win.ca_pending = false;
+        }
+        count
+    }
+
+    /// Windows whose layer trees changed or animate draw a frame, now if
+    /// their last one showed, else when it does.
+    fn animate_all(&mut self) {
+        let windows: Vec<WindowId> = self.windows.keys().copied().collect();
+        for window in windows {
+            if self.ca.wants_frame(window) {
+                self.animate(window);
+            }
+        }
+    }
+
+    fn animate(&mut self, window: WindowId) {
+        let Some(win) = self.windows.get_mut(&window) else { return };
+        if !win.configured {
+            return;
+        }
+        if win.held || (!win.frame_signalled && win.frame_seq > 0) {
+            win.ca_pending = true;
+            return;
+        }
+        if self.ca_frame(window) > 0 {
+            self.present(window);
+        } else if self.ca.wants_frame(window) {
+            // Animating but nothing looked different: the next frame's
+            // time, without presenting.
+            self.request_frame(window);
+        }
+    }
+
+    /// Ask for a frame callback without new content (display links tick
+    /// with nothing to draw).
+    fn request_frame(&mut self, window: WindowId) {
+        let Some(win) = self.windows.get_mut(&window) else { return };
+        win.frame_seq += 1;
+        win.frame_signalled = false;
+        let seq = win.frame_seq;
+        let surface = win.surface().clone();
+        surface.frame(&self.qh, FrameTag { window, seq });
+        surface.commit();
     }
 
     /// Whether buffers take canvas pixels as they are. Canvases are RGBA
@@ -1285,7 +1451,22 @@ impl Dispatch<WlCallback, FrameTag> for State {
         let Some(win) = state.windows.get_mut(&tag.window) else { return };
         if win.frame_seq == tag.seq && !win.frame_signalled {
             win.frame_signalled = true;
-            let _ = state.to_main.send(FromRender::Frame { window: tag.window });
+            // The main thread hears only of frames it waits for, so an
+            // animation the render thread draws alone costs it nothing.
+            if std::mem::replace(&mut win.main_waiting, false) {
+                let _ = state.to_main.send(FromRender::Frame { window: tag.window });
+            }
+            let ticks = win.ticks;
+            let pending = win.ca_pending;
+            if ticks {
+                let time = crate::quartzcore::math::media_now();
+                let _ = state.to_main.send(FromRender::Tick { window: tag.window, time });
+            }
+            if pending || state.ca.wants_frame(tag.window) {
+                state.animate(tag.window);
+            } else if ticks {
+                state.request_frame(tag.window);
+            }
         }
     }
 }

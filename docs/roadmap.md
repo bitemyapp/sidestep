@@ -222,7 +222,9 @@ pictures on macOS for comparison):
   `NSImageCurrentFrame` and their durations); images read from and
   written to pasteboards (TIFF, the other image types, image files).
 - `NSGradient`, `NSShadow`, `NSVisualEffectView` (an opaque material),
-  `alphaValue`, and `NSAnimationContext` (changes apply at once).
+  `alphaValue`, and `NSAnimationContext` (a Core Animation transaction, in
+  which layer-backed views' frame and alpha changes animate while it
+  allows implicit animation; changes through `animator` apply at once).
 - CoreGraphics (`coregraphics/`, the gallery's `SCENARIO=cg` page):
   `CGContext` sharing `NSGraphicsContext`'s graphics state (paths, fills,
   strokes, dashes, clips and clips to masks, blend modes, alpha, shadows,
@@ -249,6 +251,23 @@ pictures on macOS for comparison):
   (as glyph runs where they stay upright, as outlines otherwise),
   CoreGraphics' glyph drawing, `CFAttributedString` over
   `NSAttributedString`, and the string constants.
+- Core Animation (`quartzcore/`, `examples/layer-demo`): `CALayer` with
+  macOS's geometry, tree, conversions, hit testing, contents and delegate
+  drawing, `CAShapeLayer` and `CAGradientLayer`, the media timing of
+  `CABasicAnimation`, `CAKeyframeAnimation` (values or a path, every
+  calculation mode), `CASpringAnimation`, `CATransition` and
+  `CAAnimationGroup`, `CAMediaTimingFunction`, implicit actions,
+  `CATransaction` (nesting, completion groups, the implicit transaction,
+  the order of delegate calls and blocks), presentation layers,
+  `CAValueFunction`, `CATransform3D` and `NSValue`'s (affine transforms
+  interpolating as macOS's do, mirrors and half turns included),
+  `onOrderIn`/`onOrderOut`/`onLayout` actions, masks, `CADisplayLink` from
+  views, windows and screens, layer-backed views (`wantsLayer`,
+  `setLayer:`, `updateLayer` at commits, their frame and alpha animating
+  in implicit-animation groups) and `renderInContext:`. The render thread
+  composites and animates committed layer trees by itself: a running
+  animation costs the main thread nothing, and nothing that shows moving
+  (paused, hidden or not yet begun) draws no frames.
 
 Events and window behaviour since (`examples/appkit-events` shows sheets,
 modal windows and tooltips; `examples/eventbench` measures):
@@ -347,7 +366,7 @@ Next:
   pasteboards.
 - Drawing: text under a rotated transform (glyph runs take a translation
   only), pattern colors (and `patternImage` on threads other than the
-  image's), `-[NSView lockFocus]`, animations over time, blur behind
+  image's), `-[NSView lockFocus]`, `animator` animating over time, blur behind
   visual effect views (no Wayland protocol yet), and batching a bitmap
   context's operations instead of rasterizing each at once (layouts other
   than RGBA are unpacked and packed for each).
@@ -364,6 +383,15 @@ Next:
   management by profile (CMYK, contexts in wide spaces, images and bitmaps
   in calibrated spaces both ways), images of files in their own layouts,
   macOS's upscaling filter, and radial gradients whose circles cross.
+- Core Animation: perspective (an affine approximation now, without depth
+  between layers), `rotationMode`, `contentsCenter`, filters, conic
+  gradients, the continuous corner's exact curve, keyframes' tension,
+  continuity and bias, overdamped springs as macOS moves them, a layer's
+  own duration and repeats, `animator` animating, `CATextLayer`,
+  `CAReplicatorLayer`, `CAScrollLayer`, `CATransformLayer`, `CATiledLayer`
+  and `CAEmitterLayer` (`CAMetalLayer` and `CAOpenGLLayer` wait for a GPU
+  renderer), and drawing layer trees with a GPU (see architecture.md's
+  known differences).
 - Scroll views: rubber-banding (Linux desktops don't), rulers
   (`NSRulerView`), the find bar, animated `pageDown:`, drawing at a
   magnification (it scales the clip view's bounds, which drawing doesn't
@@ -588,11 +616,7 @@ libobjc2 v2 ABI's `__objc_load` path) the runtime would then need to accept.
 - Keep the fallback declarations crate from [legal.md](legal.md) ready:
   prototype the Cargo mechanics early.
 - CI on Linux x86_64 and aarch64 and on macOS.
-- QuartzCore: with the fork, its crate and AppKit's methods with its
-  types (`-[NSView layer]` and the rest) build on Linux, and
-  sidestep-appkit depends on it. Supply the classes and functions behind
-  them next, as CoreGraphics', CoreText's and ImageIO's are: CALayer and
-  CADisplayLink. ImageIO's sources and destinations are done (see
+- ImageIO's sources and destinations are done (see
   [architecture.md](architecture.md#imageio)); still to do there:
   `CGImageMetadata`, `CGAnimateImage…`, auxiliary data, TIFF pages, ICO
   images and APNG frames past the first, metadata and profiles in files

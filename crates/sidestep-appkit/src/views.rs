@@ -70,6 +70,8 @@ pub(crate) struct ViewIvars {
     /// The layout pass's flags and the rest of the view contract's state
     /// (see `view_layout`).
     pub(crate) state: crate::view_layout::ViewState,
+    /// Its Core Animation layer (see `quartzcore::backing`).
+    pub(crate) layer: crate::quartzcore::backing::ViewLayer,
 }
 
 impl ViewIvars {
@@ -95,6 +97,7 @@ impl ViewIvars {
             focus_ring: Cell::new(objc2_app_kit::NSFocusRingType::Default),
             a11y: Default::default(),
             state: crate::view_layout::ViewState::default(),
+            layer: Default::default(),
         }
     }
 }
@@ -193,6 +196,7 @@ define_class!(
             invalidate_reach(self);
             moved(self);
             crate::view_layout::hidden_changed(self, hidden);
+            crate::quartzcore::backing::sync_geometry(self);
         }
 
         #[unsafe(method(isHiddenOrHasHiddenAncestor))]
@@ -287,6 +291,8 @@ define_class!(
                 self.ivars().clips.set(clips);
                 reach_changed(self, true);
                 invalidate_reach(self);
+                // A layer-backed view's layer masks to its bounds with it.
+                crate::quartzcore::backing::sync_geometry(self);
             }
         }
 
@@ -306,6 +312,68 @@ define_class!(
 
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty: NSRect) {}
+
+        // Core Animation (see `quartzcore::backing`).
+
+        #[unsafe(method_id(layer))]
+        fn layer(&self) -> Option<Retained<objc2_quartz_core::CALayer>> {
+            crate::quartzcore::backing::layer(self)
+        }
+
+        #[unsafe(method(setLayer:))]
+        fn set_layer(&self, layer: Option<&objc2_quartz_core::CALayer>) {
+            crate::quartzcore::backing::set_layer(self, layer);
+        }
+
+        #[unsafe(method_id(makeBackingLayer))]
+        fn make_backing_layer(&self) -> Retained<objc2_quartz_core::CALayer> {
+            crate::load_shell::<objc2_quartz_core::CALayer>();
+            objc2_quartz_core::CALayer::new()
+        }
+
+        /// A view that doesn't draw (`drawRect:`) updates its layer itself
+        /// (measured).
+        #[unsafe(method(wantsUpdateLayer))]
+        fn wants_update_layer(&self) -> bool {
+            !crate::layers::overrides_draw_rect(self)
+        }
+
+        #[unsafe(method(updateLayer))]
+        fn update_layer(&self) {}
+
+        #[unsafe(method(canDrawSubviewsIntoLayer))]
+        fn can_draw_subviews_into_layer(&self) -> bool {
+            self.ivars().layer.draws_subviews.get()
+        }
+
+        #[unsafe(method(setCanDrawSubviewsIntoLayer:))]
+        fn set_can_draw_subviews_into_layer(&self, flag: bool) {
+            self.ivars().layer.draws_subviews.set(flag);
+        }
+
+        #[unsafe(method(layerUsesCoreImageFilters))]
+        fn layer_uses_core_image_filters(&self) -> bool {
+            self.ivars().layer.uses_filters.get()
+        }
+
+        #[unsafe(method(setLayerUsesCoreImageFilters:))]
+        fn set_layer_uses_core_image_filters(&self, flag: bool) {
+            self.ivars().layer.uses_filters.set(flag);
+        }
+
+        #[unsafe(method_id(actionForLayer:forKey:))]
+        fn action_for_layer(
+            &self,
+            _layer: &objc2_quartz_core::CALayer,
+            _key: &objc2_foundation::NSString,
+        ) -> Option<Retained<AnyObject>> {
+            crate::quartzcore::backing::action_for_layer(self)
+        }
+
+        #[unsafe(method_id(displayLinkWithTarget:selector:))]
+        fn display_link_with_target(&self, target: &AnyObject, selector: objc2::runtime::Sel) -> Retained<objc2_quartz_core::CADisplayLink> {
+            crate::quartzcore::display_link::new_link(target, selector, Some(crate::quartzcore::display_link::Owner::View(as_view(self))))
+        }
 
         #[unsafe(method(convertPoint:fromView:))]
         fn convert_point_from_view(&self, point: NSPoint, view: Option<&NSView>) -> NSPoint {
@@ -461,7 +529,12 @@ define_class!(
         fn set_alpha_value(&self, alpha: f64) {
             // Kept as given, as AppKit keeps it; drawing clamps it.
             if self.ivars().alpha.replace(alpha) != alpha {
-                invalidate(self, bounds(self));
+                // A layer-backed view's layer takes it (and shows it, when
+                // composited); another redraws.
+                crate::quartzcore::backing::sync_geometry(self);
+                if !crate::quartzcore::backing::composited(self) {
+                    invalidate(self, bounds(self));
+                }
             }
         }
 
@@ -713,6 +786,7 @@ pub(crate) fn link(this: &NSViewImpl, view: &NSView, index: usize) {
     drop(subviews);
     // As if it had been there, covering nothing outside `this`.
     footprint_changed(v, Some(bounds(this)), footprint(v));
+    crate::quartzcore::backing::subview_linked(this, v);
 }
 
 /// Take `view` out of its superview's subviews, redrawing where it was if
@@ -740,6 +814,8 @@ pub(crate) fn unlink(view: &NSViewImpl, display: bool) {
     view.ivars().superview.set(None);
     // SAFETY: clearing the link.
     unsafe { as_view(view).setNextResponder(None) };
+    crate::quartzcore::backing::removed(view);
+    crate::quartzcore::backing::sync_sublayers(sup);
     drop(removed);
 }
 
@@ -748,6 +824,7 @@ pub(crate) fn reorder(this: &NSViewImpl, order: Vec<Retained<NSView>>) {
     debug_assert_eq!(order.len(), this.ivars().subviews.borrow().len());
     let old = this.ivars().subviews.replace(Rc::new(order));
     drop(old);
+    crate::quartzcore::backing::sync_sublayers(this);
     invalidate_reach(this);
 }
 
@@ -1125,6 +1202,10 @@ pub(crate) static SET_NEEDS_DISPLAY_IN_RECT: crate::funnel::Funnel = crate::funn
 /// Mark part of a view (in its coordinates, and within its bounds) for
 /// redrawing.
 pub(crate) fn invalidate(view: &NSViewImpl, rect: NSRect) {
+    // A layer-backed view's drawing is in its layer's canvas.
+    if crate::quartzcore::backing::invalidate(view, rect) {
+        return;
+    }
     let Some(window) = window_of(view) else { return };
     let Some(p) = placement(view) else { return };
     let r = p.xf.rect(rect).intersect(&p.xf.rect(bounds(view))).intersect(&p.clip).round_out();
@@ -1159,6 +1240,7 @@ fn change_frame(view: &NSViewImpl, new: NSRect) {
         invalidate_reach(view);
     }
     view.ivars().frame.set(new);
+    crate::quartzcore::backing::geometry_changed(view);
     frame_reach_changed(view, old);
     // Bounds scaling, the layout flag, autoresizing and Auto Layout.
     crate::view_layout::frame_changed(view, old);
@@ -1193,6 +1275,7 @@ fn change_bounds_origin(view: &NSViewImpl, origin: NSPoint) {
         invalidate_reach(view);
     }
     view.ivars().bounds_origin.set(origin);
+    crate::quartzcore::backing::geometry_changed(view);
     reach_changed(view, false);
     if is_clip(view) {
         crate::view_layout::clip_moved(view);

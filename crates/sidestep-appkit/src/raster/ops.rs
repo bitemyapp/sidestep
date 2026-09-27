@@ -238,7 +238,8 @@ fn draw_op(canvas: &mut Canvas, glyphs: &mut Glyphs, st: &mut State, damage: &Re
         Op::Image { image, src, dst, alpha, quality, tint, tiled, draw } => {
             super::images::draw(canvas, st, damage, image, (src, dst), *alpha, *quality, *tint, *tiled, draw)
         }
-        Op::BeginGroup { .. } | Op::EndGroup => {}
+        // Composites are drawn out before rasterizing (`quartzcore::tree`).
+        Op::BeginGroup { .. } | Op::EndGroup | Op::Composite(_) => {}
     }
 }
 
@@ -286,6 +287,7 @@ pub(crate) fn contents(canvas: &Canvas, damage: &Rect, ops: &[Op]) -> Option<(us
                 super::images::dst_bounds(dst).and_then(|b| region(canvas, damage, draw, b, 1.0))
             }
             Op::Image { draw, tiled: true, .. } => canvas.clip_pixels(draw, damage),
+            Op::Composite(c) => canvas.pixels(&c.clip.intersect(damage)),
         };
         if let Some(r) = reach {
             all = Some(all.map_or(r, |a| union_region(a, r)));
@@ -369,6 +371,9 @@ fn shape(canvas: &mut Canvas, st: &mut State, damage: &Rect, draw: &Draw, shape:
                 super::effects::shadow(pm, shadow, origin.2, mask, |target, moved| {
                     paint_shape(target, shape, &caster, draw.aa, xf.post_concat(moved), None)
                 });
+            }
+            if shadow.only {
+                return;
             }
         }
         let Some(mut paint) = to_paint(paint) else { return };
@@ -1003,7 +1008,8 @@ mod tests {
     #[test]
     fn shadows_do_not_depend_on_how_damage_is_cut() {
         let mut d = draw(Rect::new(0.0, 0.0, 40.0, 40.0));
-        d.shadow = Some(Arc::new(ShadowSpec { dx: 0.0, dy: 12.0, blur: 4.0, color: [0.0, 0.0, 0.0, 1.0] }));
+        d.shadow =
+            Some(Arc::new(ShadowSpec { dx: 0.0, dy: 12.0, blur: 4.0, color: [0.0, 0.0, 0.0, 1.0], only: false }));
         let op =
             Op::FillPath { path: square(10.0, 2.0, 30.0, 12.0), even_odd: false, paint: Paint::Solid(RED), draw: d };
         let paint_in = |rects: &[Rect]| {
@@ -1057,7 +1063,7 @@ mod tests {
     #[test]
     fn shadows_fall_beside_their_shapes() {
         let mut d = draw(Rect::new(0.0, 0.0, 20.0, 20.0));
-        d.shadow = Some(Arc::new(ShadowSpec { dx: 5.0, dy: 5.0, blur: 0.0, color: [0.0, 0.0, 0.0, 1.0] }));
+        d.shadow = Some(Arc::new(ShadowSpec { dx: 5.0, dy: 5.0, blur: 0.0, color: [0.0, 0.0, 0.0, 1.0], only: false }));
         let op = Op::FillPath { path: square(2.0, 2.0, 8.0, 8.0), even_odd: false, paint: Paint::Solid(RED), draw: d };
         let px = render(20, 20, 1.0, &[op]);
         assert_eq!(channels(px[4 * 20 + 4]), [255, 0, 0, 255], "the shape on top");

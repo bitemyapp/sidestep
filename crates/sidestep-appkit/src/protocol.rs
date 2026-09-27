@@ -137,7 +137,7 @@ pub(crate) struct LayerPlace {
 }
 
 /// What a paint draws into.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Target {
     /// The window's own surface; rectangles in window points.
     Root,
@@ -145,6 +145,10 @@ pub(crate) enum Target {
     Tiles(LayerId),
     /// A scroll layer's overlay; rectangles in window points.
     Overlay(LayerId),
+    /// The canvas of a view's Core Animation layer, named by the layer's
+    /// id: rectangles in its points from its top left (see
+    /// `quartzcore::backing`).
+    Content(CaLayerId),
 }
 
 /// A rectangle, top-left origin: in a layer's points in every message
@@ -242,6 +246,29 @@ pub(crate) enum Op {
     },
     EndGroup,
     Glyphs(GlyphRun),
+    /// A Core Animation layer tree drawn here, as the render thread has it
+    /// when it draws (see `quartzcore::tree`).
+    Composite(Arc<CompositeOp>),
+}
+
+/// A Core Animation layer's id (`quartzcore`), not to be confused with a
+/// scroll layer's [`LayerId`].
+pub(crate) type CaLayerId = u64;
+
+/// A layer tree composited in paint order: the tree of `root`, placed by
+/// `base` (the host view's superview's space to layer points, as an
+/// affine map a, b, c, d, tx, ty), `down` when that space's y runs down,
+/// clipped to `clip` (and `mask`), leaving out the layers in `skip`
+/// (scroll layers' documents and views drawn in overlays, drawn
+/// elsewhere).
+#[derive(Debug)]
+pub(crate) struct CompositeOp {
+    pub root: CaLayerId,
+    pub base: [f64; 6],
+    pub down: bool,
+    pub clip: Rect,
+    pub mask: Option<Arc<[ClipPath]>>,
+    pub skip: Arc<[CaLayerId]>,
 }
 
 pub(crate) use crate::raster::images::ImageData;
@@ -398,6 +425,9 @@ pub(crate) struct ShadowSpec {
     pub dy: f32,
     pub blur: f32,
     pub color: Color,
+    /// Draw the shadow alone, not the shape casting it (a layer's
+    /// `shadowPath`).
+    pub only: bool,
 }
 
 /// How images are resampled (`NSImageInterpolation`).
@@ -708,6 +738,20 @@ pub(crate) enum ToRender {
         height: u32,
         ops: Vec<Op>,
     },
+    /// Core Animation layers that changed, whole (see `quartzcore::tree`).
+    Commit(Box<crate::quartzcore::tree::Commit>),
+    /// Report each frame the window shows (`FromRender::Tick`), for
+    /// display links, or stop.
+    FrameTicks {
+        window: WindowId,
+        on: bool,
+    },
+    /// Draw the window's layer trees as they show at the media time `at`
+    /// (now for none), and present (tests fix the time with it).
+    Composite {
+        window: WindowId,
+        at: Option<f64>,
+    },
 }
 
 /// Where a scroll is in a touchpad gesture; `None` for wheels and other
@@ -887,6 +931,20 @@ pub(crate) enum FromRender {
     WindowOutputs {
         window: WindowId,
         outputs: Vec<u32>,
+    },
+    /// A frame of the window showed at the media time `time` (while display
+    /// links ask for ticks).
+    Tick {
+        window: WindowId,
+        time: f64,
+    },
+    /// Parts of a target the render thread can't draw again on its own (a
+    /// layer animated outside where its tree was recorded): the main
+    /// thread repaints them.
+    Repaint {
+        window: WindowId,
+        target: Target,
+        rects: Vec<Rect>,
     },
 }
 

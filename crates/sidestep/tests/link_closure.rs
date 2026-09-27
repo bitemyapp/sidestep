@@ -1,9 +1,9 @@
 //! Every extern static and function objc2-foundation, objc2-app-kit,
-//! objc2-core-foundation and objc2-core-text declare under the features
-//! Sidestep's crates enable, referenced so a Linux build links each: one
-//! Sidestep stops exporting fails this test's link. The known gaps
-//! (docs/abi.md) are left out. Written by `scripts/link-closure`; run it
-//! again when the features or the exports change.
+//! objc2-core-foundation, objc2-core-text and objc2-quartz-core declare
+//! under the features Sidestep's crates enable, referenced so a Linux build
+//! links each: one Sidestep stops exporting fails this test's link. The
+//! known gaps (docs/abi.md) are left out. Written by `scripts/link-closure`;
+//! run it again when the features or the exports change.
 #![cfg(not(target_vendor = "apple"))]
 #![allow(deprecated, unused_unsafe, clippy::fn_to_numeric_cast_any)]
 
@@ -20,7 +20,7 @@ macro_rules! addresses {
             for (name, address) in statics.iter().chain(functions) {
                 assert_ne!(*address, 0, "{name}");
             }
-            assert_eq!(statics.len() + functions.len(), 1916);
+            assert_eq!(statics.len() + functions.len(), 2015);
         }
     };
 }
@@ -1561,6 +1561,89 @@ addresses! {
         objc2_core_text::kCTTypesetterOptionAllowUnboundedLayout,
         objc2_core_text::kCTTypesetterOptionDisableBidiProcessing,
         objc2_core_text::kCTTypesetterOptionForcedEmbeddingLevel,
+        objc2_quartz_core::kCAAnimationLinear,
+        objc2_quartz_core::kCAAnimationDiscrete,
+        objc2_quartz_core::kCAAnimationPaced,
+        objc2_quartz_core::kCAAnimationCubic,
+        objc2_quartz_core::kCAAnimationCubicPaced,
+        objc2_quartz_core::kCAAnimationRotateAuto,
+        objc2_quartz_core::kCAAnimationRotateAutoReverse,
+        objc2_quartz_core::kCATransitionFade,
+        objc2_quartz_core::kCATransitionMoveIn,
+        objc2_quartz_core::kCATransitionPush,
+        objc2_quartz_core::kCATransitionReveal,
+        objc2_quartz_core::kCATransitionFromRight,
+        objc2_quartz_core::kCATransitionFromLeft,
+        objc2_quartz_core::kCATransitionFromTop,
+        objc2_quartz_core::kCATransitionFromBottom,
+        objc2_quartz_core::CAFrameRateRangeDefault,
+        objc2_quartz_core::kCAGradientLayerAxial,
+        objc2_quartz_core::kCAGradientLayerRadial,
+        objc2_quartz_core::kCAGradientLayerConic,
+        objc2_quartz_core::CAToneMapModeAutomatic,
+        objc2_quartz_core::CAToneMapModeNever,
+        objc2_quartz_core::CAToneMapModeIfSupported,
+        objc2_quartz_core::CADynamicRangeAutomatic,
+        objc2_quartz_core::CADynamicRangeStandard,
+        objc2_quartz_core::CADynamicRangeConstrainedHigh,
+        objc2_quartz_core::CADynamicRangeHigh,
+        objc2_quartz_core::kCAGravityCenter,
+        objc2_quartz_core::kCAGravityTop,
+        objc2_quartz_core::kCAGravityBottom,
+        objc2_quartz_core::kCAGravityLeft,
+        objc2_quartz_core::kCAGravityRight,
+        objc2_quartz_core::kCAGravityTopLeft,
+        objc2_quartz_core::kCAGravityTopRight,
+        objc2_quartz_core::kCAGravityBottomLeft,
+        objc2_quartz_core::kCAGravityBottomRight,
+        objc2_quartz_core::kCAGravityResize,
+        objc2_quartz_core::kCAGravityResizeAspect,
+        objc2_quartz_core::kCAGravityResizeAspectFill,
+        objc2_quartz_core::kCAContentsFormatRGBA8Uint,
+        objc2_quartz_core::kCAContentsFormatRGBA16Float,
+        objc2_quartz_core::kCAContentsFormatGray8Uint,
+        objc2_quartz_core::kCAContentsFormatAutomatic,
+        objc2_quartz_core::kCAFilterNearest,
+        objc2_quartz_core::kCAFilterLinear,
+        objc2_quartz_core::kCAFilterTrilinear,
+        objc2_quartz_core::kCACornerCurveCircular,
+        objc2_quartz_core::kCACornerCurveContinuous,
+        objc2_quartz_core::kCAOnOrderIn,
+        objc2_quartz_core::kCAOnOrderOut,
+        objc2_quartz_core::kCATransition,
+        objc2_quartz_core::kCAFillModeForwards,
+        objc2_quartz_core::kCAFillModeBackwards,
+        objc2_quartz_core::kCAFillModeBoth,
+        objc2_quartz_core::kCAFillModeRemoved,
+        objc2_quartz_core::kCAMediaTimingFunctionLinear,
+        objc2_quartz_core::kCAMediaTimingFunctionEaseIn,
+        objc2_quartz_core::kCAMediaTimingFunctionEaseOut,
+        objc2_quartz_core::kCAMediaTimingFunctionEaseInEaseOut,
+        objc2_quartz_core::kCAMediaTimingFunctionDefault,
+        objc2_quartz_core::kCAFillRuleNonZero,
+        objc2_quartz_core::kCAFillRuleEvenOdd,
+        objc2_quartz_core::kCALineJoinMiter,
+        objc2_quartz_core::kCALineJoinRound,
+        objc2_quartz_core::kCALineJoinBevel,
+        objc2_quartz_core::kCALineCapButt,
+        objc2_quartz_core::kCALineCapRound,
+        objc2_quartz_core::kCALineCapSquare,
+        objc2_quartz_core::kCATransactionAnimationDuration,
+        objc2_quartz_core::kCATransactionDisableActions,
+        objc2_quartz_core::kCATransactionAnimationTimingFunction,
+        objc2_quartz_core::kCATransactionCompletionBlock,
+        objc2_quartz_core::CATransform3DIdentity,
+        objc2_quartz_core::kCAValueFunctionRotateX,
+        objc2_quartz_core::kCAValueFunctionRotateY,
+        objc2_quartz_core::kCAValueFunctionRotateZ,
+        objc2_quartz_core::kCAValueFunctionScale,
+        objc2_quartz_core::kCAValueFunctionScaleX,
+        objc2_quartz_core::kCAValueFunctionScaleY,
+        objc2_quartz_core::kCAValueFunctionScaleZ,
+        objc2_quartz_core::kCAValueFunctionTranslate,
+        objc2_quartz_core::kCAValueFunctionTranslateX,
+        objc2_quartz_core::kCAValueFunctionTranslateY,
+        objc2_quartz_core::kCAValueFunctionTranslateZ,
     ]
     functions: [
         objc2_foundation::NSGetUncaughtExceptionHandler,
@@ -1945,5 +2028,21 @@ addresses! {
         objc2_core_text::CTTypesetterSuggestLineBreak,
         objc2_core_text::CTTypesetterSuggestClusterBreakWithOffset,
         objc2_core_text::CTTypesetterSuggestClusterBreak,
+        objc2_quartz_core::CACurrentMediaTime,
+        objc2_quartz_core::CAFrameRateRangeMake,
+        objc2_quartz_core::CAFrameRateRangeIsEqualToRange,
+        objc2_quartz_core::CATransform3DIsIdentity,
+        objc2_quartz_core::CATransform3DEqualToTransform,
+        objc2_quartz_core::CATransform3DMakeTranslation,
+        objc2_quartz_core::CATransform3DMakeScale,
+        objc2_quartz_core::CATransform3DMakeRotation,
+        objc2_quartz_core::CATransform3DTranslate,
+        objc2_quartz_core::CATransform3DScale,
+        objc2_quartz_core::CATransform3DRotate,
+        objc2_quartz_core::CATransform3DConcat,
+        objc2_quartz_core::CATransform3DInvert,
+        objc2_quartz_core::CATransform3DMakeAffineTransform,
+        objc2_quartz_core::CATransform3DIsAffine,
+        objc2_quartz_core::CATransform3DGetAffineTransform,
     ]
 }

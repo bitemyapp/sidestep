@@ -97,6 +97,7 @@ define_class!(
                     dy: -offset.height as f32,
                     blur: self.ivars().blur.get().max(0.0) as f32,
                     color,
+                    only: false,
                 })
             });
             crate::context::with_state(|st| st.gs.shadow = spec);

@@ -121,6 +121,9 @@ pub(crate) struct WindowIvars {
     parent: Cell<Option<NonNull<NSWindow>>>,
     children: RefCell<Vec<Retained<NSWindow>>>,
     configured: Cell<bool>,
+    /// Made deferred and not shown since: it has no backing yet, so the
+    /// layers in its views' trees aren't live (see `quartzcore`).
+    deferred: Cell<bool>,
     /// A frame was presented and the render thread hasn't shown it yet.
     frame_pending: Cell<bool>,
     needs_display: Cell<bool>,
@@ -248,7 +251,7 @@ define_class!(
             rect: NSRect,
             style: NSWindowStyleMask,
             _backing: NSBackingStoreType,
-            _defer: bool,
+            defer: bool,
         ) -> Retained<Self> {
             app::load_shells();
             static NEXT_NUMBER: AtomicU32 = AtomicU32::new(1);
@@ -278,6 +281,7 @@ define_class!(
                 parent: Cell::new(None),
                 children: RefCell::new(Vec::new()),
                 configured: Cell::new(false),
+                deferred: Cell::new(defer),
                 frame_pending: Cell::new(false),
                 needs_display: Cell::new(false),
                 damage: RefCell::new(HashMap::new()),
@@ -996,6 +1000,12 @@ define_class!(
         #[unsafe(method_id(title))]
         fn title(&self) -> Retained<NSString> {
             self.ivars().title.borrow().clone()
+        }
+
+        /// A link following this window's frames.
+        #[unsafe(method_id(displayLinkWithTarget:selector:))]
+        fn display_link_with_target(&self, target: &AnyObject, selector: objc2::runtime::Sel) -> Retained<objc2_quartz_core::CADisplayLink> {
+            crate::quartzcore::display_link::new_link(target, selector, Some(crate::quartzcore::display_link::Owner::Window(as_window(self))))
         }
 
         /// A new title for a window on screen renames its Window menu item.
@@ -1838,6 +1848,12 @@ impl NSWindowImpl {
         self.ivars().needs_display.set(true);
     }
 
+    /// Something (a layer-backed view's canvas) has drawing for the next
+    /// display pass.
+    pub(crate) fn needs_display_pass(&self) {
+        self.ivars().needs_display.set(true);
+    }
+
     /// A scroll layer moved or resized: place it again at the next frame.
     pub(crate) fn layers_moved(&self) {
         self.ivars().needs_display.set(true);
@@ -1888,6 +1904,12 @@ impl NSWindowImpl {
     /// The window is on screen (ordered in).
     pub(crate) fn on_screen(&self) -> bool {
         self.ivars().visible.get()
+    }
+
+    /// The window has a backing: it wasn't made deferred, or it has been
+    /// shown since (Core Animation's layers in its trees can be live).
+    pub(crate) fn backed(&self) -> bool {
+        !self.ivars().deferred.get()
     }
 
     /// What the window's views are drawn over.
@@ -2007,6 +2029,12 @@ impl NSWindowImpl {
         if rescaled {
             // The render thread dropped every tile drawn at the old scale.
             ivars.layers.borrow_mut().rescaled();
+            // Layer-backed views' canvases are drawn again at the new one.
+            crate::quartzcore::backing::window_shown(self);
+        }
+        if first {
+            // Display links of its views tick now.
+            crate::quartzcore::display_link::windows_changed();
         }
         if first || resized || rescaled {
             // The render thread made a new canvas: draw it all, now.
@@ -2387,7 +2415,10 @@ fn order_front(window: &NSWindowImpl) {
     // an earlier showing is about surfaces that are gone.
     static NEXT_SHOWING: AtomicU32 = AtomicU32::new(1);
     ivars.showing.set(NEXT_SHOWING.fetch_add(1, Ordering::Relaxed));
+    ivars.deferred.set(false);
     app::add_window(as_window(window));
+    // Its layer trees go to the new render-thread window whole.
+    crate::quartzcore::backing::window_shown(window);
     let sheet_of = crate::window_events::attached_to(window).map(|p| imp(&p).id());
     app::send(ToRender::CreateWindow {
         window: window.id(),
@@ -2451,6 +2482,7 @@ fn order_out(window: &NSWindowImpl) {
     ivars.layers.borrow_mut().reset();
     app::send(ToRender::CloseWindow { window: window.id() });
     app::remove_window(as_window(window));
+    crate::quartzcore::display_link::windows_changed();
 }
 
 fn add_child(parent: &NSWindowImpl, child: &NSWindow) {
@@ -2716,6 +2748,11 @@ pub(crate) fn display_if_needed(window: &NSWindowImpl) {
     }
     // Constraints, layout and viewWillDraw, before anything is drawn.
     crate::view_layout::run(window);
+    // Layers changed by layout go to the render thread before the paints
+    // that composite them; it holds the window's layer trees until this
+    // pass presents.
+    crate::quartzcore::backing::begin_pass(window);
+    crate::quartzcore::transaction::commit_now();
     ivars.needs_display.set(false);
     let id = window.id();
     let titled = ivars.title_dirty.replace(false);
@@ -2723,10 +2760,15 @@ pub(crate) fn display_if_needed(window: &NSWindowImpl) {
         send_title(window);
     }
 
-    // The scroll layers, the damaged parts of every layer, the overlays;
-    // damage made meanwhile waits for the next pass. A pass that changed
-    // nothing the render thread shows commits nothing.
+    // Layer-backed views' canvases, then the scroll layers, the damaged
+    // parts of every layer, the overlays; damage made meanwhile waits for
+    // the next pass. A pass that changed nothing the render thread shows
+    // commits nothing.
+    let canvases = crate::quartzcore::backing::display_canvases(window);
+    // A commit sent in the pass made the render thread wait for its Present.
+    let committed = crate::quartzcore::backing::end_pass();
     let put_off = crate::layers::display(window, |changed| {
+        let changed = changed || canvases || committed;
         if (changed || titled) && ivars.visible.get() {
             app::send(ToRender::Present { window: id });
             ivars.frame_pending.set(true);
