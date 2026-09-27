@@ -46,8 +46,8 @@ use super::cell::{self, Flags, NSCellImpl, Styled, imp as cell_imp};
 use super::control;
 use super::half_up;
 use super::value::{self, Value};
-use crate::protocol::Color;
 use crate::palette::System;
+use crate::protocol::Color;
 use crate::theme::{self, metrics, parts};
 
 /// The look a bezel style and button type come to.
@@ -1227,7 +1227,10 @@ fn image_tint(cell: &NSButtonCellImpl, image: &NSImage, view: &NSView) -> Option
     }
     let look = crate::appearance::current_look();
     let base = cell.base();
-    if cell::as_cell(base).interiorBackgroundStyle() == NSBackgroundStyle::Emphasized {
+    // A badge's interior is always emphasized (`interior_style`), yet its
+    // template draws in the secondary label color, as its title does.
+    let badge = cell.look() == Look::Badge && base.has(Flags::BORDERED);
+    if !badge && cell::as_cell(base).interiorBackgroundStyle() == NSBackgroundStyle::Emphasized {
         return Some(crate::palette::get(System::AlternateSelectedControlText, look));
     }
     let p = theme::palette();
