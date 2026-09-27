@@ -39,6 +39,8 @@ sources listed under "You may not use" above.
 Behavior changes come with a test in `conformance/` that passes on macOS
 against Apple's runtime before it is expected to pass on Linux. If the two
 platforms legitimately differ, the test shouldn't assert the difference.
+[docs/testing.md](docs/testing.md) has the rules that keep a test passing
+on every machine that runs it.
 
 ```sh
 cargo run --release --manifest-path tools/objc2-overlay/Cargo.toml   # first

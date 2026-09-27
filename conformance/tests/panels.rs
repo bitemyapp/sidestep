@@ -92,17 +92,19 @@ fn the_workspace(_mtm: MainThreadMarker) {
     let center = w.notificationCenter();
     assert!(!std::ptr::eq(&*center, &*objc2_foundation::NSNotificationCenter::defaultCenter()));
     assert!(std::ptr::eq(&*center, &*w.notificationCenter()));
-    // Nothing opens a scheme nobody handles, nor a URL without a scheme.
-    let bad = NSURL::URLWithString(&s("nosuchscheme-sidestep://x")).expect("a URL");
-    assert!(!w.openURL(&bad));
-    let relative = NSURL::URLWithString(&s("just/a/path")).expect("a URL");
-    assert!(!w.openURL(&relative));
-    // A file that isn't there opens nothing.
-    let missing = NSURL::fileURLWithPath(&s("/nonexistent-sidestep/x.txt"));
-    assert!(!w.openURL(&missing));
-    #[allow(deprecated)]
-    let opened = w.openFile(&s("/nonexistent-sidestep/x.txt"));
-    assert!(!opened);
+    if opening_allowed() {
+        // Nothing opens a scheme nobody handles, nor a URL without a scheme.
+        let bad = NSURL::URLWithString(&s("nosuchscheme-sidestep://x")).expect("a URL");
+        assert!(!w.openURL(&bad));
+        let relative = NSURL::URLWithString(&s("just/a/path")).expect("a URL");
+        assert!(!w.openURL(&relative));
+        // A file that isn't there opens nothing.
+        let missing = NSURL::fileURLWithPath(&s("/nonexistent-sidestep/x.txt"));
+        assert!(!w.openURL(&missing));
+        #[allow(deprecated)]
+        let opened = w.openFile(&s("/nonexistent-sidestep/x.txt"));
+        assert!(!opened);
+    }
     // Settings the desktop decides: asked, not pinned.
     let _ = (w.accessibilityDisplayShouldReduceMotion(), w.accessibilityDisplayShouldIncreaseContrast());
 }
@@ -123,6 +125,14 @@ fn open_configurations(_mtm: MainThreadMarker) {
     assert!(!copy.activates() && !copy.promptsUserIfNeeded() && copy.addsToRecentItems());
     assert_eq!(copy.arguments().count(), 1);
     assert!(!NSWorkspaceOpenConfiguration::new().hides());
+}
+
+/// Whether the tests may ask the system to open URLs and files. On macOS
+/// a URL nothing handles puts up an alert ("There is no application set to
+/// open the URL …") that stays until someone dismisses it, one per run, so
+/// there it takes SIDESTEP_CONFORMANCE_OPEN_URLS=1.
+fn opening_allowed() -> bool {
+    !cfg!(target_vendor = "apple") || std::env::var_os("SIDESTEP_CONFORMANCE_OPEN_URLS").is_some()
 }
 
 /// Run the main loop until `done`, for at most ten seconds.
@@ -229,15 +239,20 @@ fn main() {
     let mtm = MainThreadMarker::new().expect("runs on the main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-    #[allow(unused_mut)]
     let mut tests: Vec<Test> = vec![
         ("save_panels", save_panels),
         ("open_panels", open_panels),
         ("the_workspace", the_workspace),
         ("open_configurations", open_configurations),
-        ("opening_with_handlers", opening_with_handlers),
         ("the_running_application", the_running_application),
     ];
+    if opening_allowed() {
+        tests.push(("opening_with_handlers", opening_with_handlers));
+    } else {
+        println!(
+            "panels: opening URLs skipped (SIDESTEP_CONFORMANCE_OPEN_URLS=1 runs it, which leaves macOS alerts up)"
+        );
+    }
     #[cfg(target_vendor = "apple")]
     if std::env::var_os("SIDESTEP_CONFORMANCE_WINDOWS").is_some() {
         tests.push(("cancelling_panels", cancelling_panels));
