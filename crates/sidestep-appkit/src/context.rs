@@ -1,7 +1,11 @@
 //! `NSGraphicsContext` and the graphics state everything draws with.
 //!
-//! A context owns a [`ContextState`]: where drawing goes (its target), the
-//! graphics state in force and the ones saved. There are two targets:
+//! The state lives in a CGContext (`coregraphics::context`), and an
+//! `NSGraphicsContext` wraps one: drawing through `-[NSGraphicsContext
+//! CGContext]` and through AppKit's drawing methods is the same drawing,
+//! and their saves and restores interleave, as on macOS. A context's
+//! [`ContextState`] holds where drawing goes (its target), the graphics
+//! state in force and the ones saved. There are three targets:
 //!
 //! - **Record**, for a window's display pass: ops are collected for the
 //!   render thread, in the coordinates of the layer being drawn.
@@ -10,21 +14,28 @@
 //!   each op is rasterized at once, on the calling thread, into the
 //!   representation's pixels. This is also how tests read pixels on Linux
 //!   without a compositor.
+//! - **Surface**, for `CGBitmapContextCreate`: the same, into memory in
+//!   the layout the program asked for (`coregraphics::bitmap`).
 //!
-//! The graphics state ([`GState`]) is what a CGContext keeps too, so that
-//! a CGContext shim can map its calls onto it one to one: the CTM (user
-//! space to layer points, a full affine), the clip (its bounds as a
-//! rectangle, plus paths when it isn't one), fill and stroke colors
-//! already resolved to RGBA, the compositing operation, antialiasing,
-//! image interpolation, the shadow and the pattern phase.
+//! The graphics state ([`GState`]) is what a CGContext keeps, and CGContext
+//! calls map onto it one to one: the CTM (user space to layer points, a
+//! full affine), the clip (its bounds as a rectangle, plus paths when it
+//! isn't one), fill and stroke colors already resolved to RGBA, the
+//! compositing operation, antialiasing, image interpolation, the shadow and
+//! the pattern phase, and CoreGraphics' own part ([`CgState`]: line
+//! settings, the global alpha, color spaces, text settings). What
+//! CoreGraphics keeps outside the graphics state, the current path and the
+//! text matrix, is in the context state.
 //!
 //! The current context is per thread, as in AppKit. Drawing methods
 //! (`-[NSColor setFill]`, `-[NSBezierPath fill]`, `NSRectFill`) reach the
 //! current state through a thread local and a `RefCell`, with no message
-//! sends. Clipping is analytic where it can be: with an axis-aligned CTM a
-//! rectangle clip narrows the clip rectangle, and only rotated rectangles
-//! and paths (`addClip`, `setClip`) produce clip paths, which the
-//! rasterizer turns into masks.
+//! sends; CoreGraphics' functions reach their context's the same way,
+//! through the object they're given. Clipping is analytic where it can be:
+//! with an axis-aligned CTM a rectangle clip narrows the clip rectangle,
+//! and only rotated rectangles and paths (`addClip`, `setClip`,
+//! `CGContextClip`) produce clip paths, which the rasterizer turns into
+//! masks.
 //!
 //! Each view's `drawRect:` starts from a fresh state ([`begin_view`]), so
 //! a color or clip one view leaves set doesn't reach the next, and saves
@@ -41,10 +52,12 @@ use objc2::{AnyThread, DefinedClass, Message, define_class, msg_send};
 use objc2_app_kit::{
     NSBitmapImageRep, NSColor, NSColorRenderingIntent, NSCompositingOperation, NSGraphicsContext, NSImageInterpolation,
 };
+use objc2_core_graphics::CGContext;
 use objc2_foundation::{NSInteger, NSPoint, NSRect, NSSize};
 
+use crate::coregraphics::context::{CGContextImpl, CgState, CtxPath};
 use crate::graphics::{Recorder, Xf};
-use crate::protocol::{Blend, ClipPath, Color, Draw, Op, Rect, ShadowSpec};
+use crate::protocol::{Blend, ClipPath, Color, Draw, Op, Paint, Rect, ShadowSpec};
 
 /// The drawing state `saveGraphicsState` saves and `restoreGraphicsState`
 /// restores.
@@ -64,6 +77,12 @@ pub(crate) struct GState {
     pub shadow: Option<Arc<ShadowSpec>>,
     pub phase: NSPoint,
     pub intent: NSColorRenderingIntent,
+    /// The compositing operation `-[NSGraphicsContext
+    /// compositingOperation]` reports: what AppKit set, which
+    /// `CGContextSetBlendMode` doesn't change (it sets `blend` alone).
+    pub operation: Blend,
+    /// What only CoreGraphics' calls set.
+    pub cg: CgState,
 }
 
 impl GState {
@@ -80,6 +99,8 @@ impl GState {
             shadow: None,
             phase: NSPoint::ZERO,
             intent: NSColorRenderingIntent::RelativeColorimetric,
+            operation: Blend::SourceOver,
+            cg: CgState::default(),
         }
     }
 
@@ -120,10 +141,23 @@ fn nearest_xf(a: Affine) -> Xf {
 }
 
 /// A rectangle's image under an axis-aligned transform.
-fn map_rect(a: Affine, r: NSRect) -> Rect {
+pub(crate) fn map_rect(a: Affine, r: NSRect) -> Rect {
     let p0 = a * kurbo::Point::new(r.origin.x, r.origin.y);
     let p1 = a * kurbo::Point::new(r.origin.x + r.size.width, r.origin.y + r.size.height);
     Rect::new(p0.x.min(p1.x) as f32, p0.y.min(p1.y) as f32, p0.x.max(p1.x) as f32, p0.y.max(p1.y) as f32)
+}
+
+/// The bounds of a rectangle's image under any transform.
+pub(crate) fn map_rect_any(a: Affine, r: NSRect) -> Rect {
+    let (x0, y0) = (r.origin.x, r.origin.y);
+    let (x1, y1) = (x0 + r.size.width, y0 + r.size.height);
+    let pts = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)].map(|(x, y)| a * kurbo::Point::new(x, y));
+    let (mut lo, mut hi) = (pts[0], pts[0]);
+    for p in &pts[1..] {
+        lo = kurbo::Point::new(lo.x.min(p.x), lo.y.min(p.y));
+        hi = kurbo::Point::new(hi.x.max(p.x), hi.y.max(p.y));
+    }
+    Rect::new(lo.x as f32, lo.y as f32, hi.x as f32, hi.y as f32)
 }
 
 /// Where a context's drawing goes.
@@ -132,11 +166,20 @@ pub(crate) enum Target {
     Record,
     /// Ops rasterized at once into a bitmap's pixels.
     Bitmap(Retained<NSBitmapImageRep>),
+    /// Ops rasterized at once into a CoreGraphics bitmap context's memory.
+    Surface(Box<crate::coregraphics::bitmap::Surface>),
 }
 
 pub(crate) struct ContextState {
     pub target: Target,
+    /// Whether AppKit's drawing takes the context as flipped now: the
+    /// current `NSGraphicsContext`'s own flippedness, which for the
+    /// contexts AppKit makes is `view_flipped`.
     pub flipped: bool,
+    /// Whether the view drawing (or the bitmap) is flipped: what
+    /// `NSGraphicsContext`s AppKit makes report, and what `flipped` goes
+    /// back to when one of them is current again.
+    pub view_flipped: bool,
     /// Where a fresh user space (a view's base coordinates: the window's,
     /// or the bitmap's with its origin at the bottom left) maps in the
     /// layer; `-[NSAffineTransform set]` sets the CTM relative to it.
@@ -149,15 +192,56 @@ pub(crate) struct ContextState {
     /// Device pixels per layer point, as far as the main thread knows (the
     /// window's backing scale, or a bitmap's pixels per point).
     pub scale: f64,
+    /// Layer points to CoreGraphics' device space: pixels, the origin at
+    /// the bottom left of the window or bitmap, y up. `CGContextGetCTM` is
+    /// this after the CTM. While a view draws in a window, it's the view's
+    /// own space instead, as macOS draws views into layers of their own:
+    /// the CTM starts out as the identity (measured on macOS).
+    pub device: Affine,
+    /// While a view draws in a window (a recording): whether it's flipped,
+    /// for the user-to-device transform (its layer's pixels).
+    pub view_device: Option<bool>,
+    /// The current path, in layer points, as CoreGraphics builds it (not
+    /// part of the graphics state).
+    pub path: CtxPath,
+    /// CoreGraphics' text matrix, the text position its translation (not
+    /// part of the graphics state).
+    pub text_matrix: Affine,
+    /// `CGContextSetAllowsAntialiasing` and its kin for fonts (smoothing,
+    /// subpixel positioning, subpixel quantization): context settings the
+    /// graphics state's flags can't override.
+    pub allows_aa: bool,
+    pub allows_fonts: [bool; 3],
+    /// Transparency layers (and their groups) open: a bitmap waits for the
+    /// outermost to end before drawing them.
+    pub layers: Vec<usize>,
     /// The ops, and what string drawing reads of the state.
     pub rec: Recorder,
 }
 
 impl ContextState {
-    fn new(target: Target, flipped: bool, base: Affine, clip: Rect, scale: f64) -> ContextState {
-        let rec = Recorder::new(matches!(target, Target::Bitmap(_)));
+    pub(crate) fn new(target: Target, flipped: bool, base: Affine, clip: Rect, scale: f64, device: Affine) -> Self {
+        let immediate = !matches!(target, Target::Record);
+        let rec = Recorder::new(immediate);
         let gs = GState::fresh(base, clip);
-        let mut st = ContextState { target, flipped, base, gs, stack: Vec::new(), view_clip: clip, scale, rec };
+        let mut st = ContextState {
+            target,
+            flipped,
+            view_flipped: flipped,
+            base,
+            gs,
+            stack: Vec::new(),
+            view_clip: clip,
+            scale,
+            device,
+            view_device: None,
+            path: CtxPath::default(),
+            text_matrix: Affine::IDENTITY,
+            allows_aa: true,
+            allows_fonts: [true; 3],
+            layers: Vec::new(),
+            rec,
+        };
         st.sync();
         st
     }
@@ -174,33 +258,90 @@ impl ContextState {
     }
 
     /// Keep what string drawing reads in step with the state.
-    fn sync(&mut self) {
+    pub(crate) fn sync(&mut self) {
         self.rec.xf = nearest_xf(self.gs.ctm);
         self.rec.clip = self.gs.clip;
     }
 
-    pub fn push(&mut self, op: Op) {
+    pub fn push(&mut self, mut op: Op) {
+        if self.gs.cg.alpha < 1.0 || !self.allows_aa {
+            self.adjust(&mut op);
+        }
         self.rec.ops.push(op);
         self.flush();
     }
 
-    /// Rasterize what a bitmap context has recorded.
-    pub fn flush(&mut self) {
-        if let Target::Bitmap(rep) = &self.target
-            && !self.rec.ops.is_empty()
-        {
-            let ops = std::mem::take(&mut self.rec.ops);
-            crate::bitmap::rasterize(rep, &ops);
-            let mut ops = ops;
-            ops.clear();
-            self.rec.ops = ops;
+    /// Apply what applies to every op but the ops don't carry themselves:
+    /// CoreGraphics' global alpha, and antialiasing the context doesn't
+    /// allow.
+    pub(crate) fn adjust(&self, op: &mut Op) {
+        let alpha = self.gs.cg.alpha.clamp(0.0, 1.0);
+        let fade = |c: &mut Color| c[3] *= alpha;
+        let paint = |p: &mut Paint| match p {
+            Paint::Solid(c) => c[3] *= alpha,
+            Paint::Gradient(g) => {
+                let mut spec = (**g).clone();
+                spec.stops.iter_mut().for_each(|(_, c)| c[3] *= alpha);
+                *g = Arc::new(spec);
+            }
+        };
+        // A shape's shadow is as opaque as its paint, faded already; an
+        // image's and a group's shadows are faded here.
+        let draw = |d: &mut Draw, fade_shadow: bool| {
+            d.aa &= self.allows_aa;
+            if fade_shadow
+                && alpha < 1.0
+                && let Some(s) = &mut d.shadow
+            {
+                let mut spec = (**s).clone();
+                spec.color[3] *= alpha;
+                *s = Arc::new(spec);
+            }
+        };
+        match op {
+            Op::Fill { color, .. } => fade(color),
+            Op::FillWith { color, blend, .. } => {
+                if *blend != Blend::Clear {
+                    fade(color);
+                }
+            }
+            Op::FillPath { paint: p, draw: d, .. } | Op::StrokePath { paint: p, draw: d, .. } => {
+                paint(p);
+                draw(d, false);
+            }
+            Op::Image { alpha: a, draw: d, .. } => {
+                *a *= alpha;
+                draw(d, true);
+            }
+            Op::BeginGroup { alpha: a, draw: d } => {
+                *a *= alpha;
+                draw(d, true);
+            }
+            Op::Glyphs(run) => fade(&mut run.color),
+            Op::EndGroup => {}
         }
+    }
+
+    /// Rasterize what a bitmap context has recorded (once no transparency
+    /// layer is open).
+    pub fn flush(&mut self) {
+        if self.rec.ops.is_empty() || !self.layers.is_empty() {
+            return;
+        }
+        match &mut self.target {
+            Target::Record => return,
+            Target::Bitmap(rep) => crate::bitmap::rasterize(rep, &self.rec.ops),
+            Target::Surface(s) => s.rasterize(&self.rec.ops),
+        }
+        self.rec.ops.clear();
     }
 
     pub fn save(&mut self) {
         self.stack.push(self.gs.clone());
     }
 
+    /// Restore the graphics state saved last: a transparency layer's
+    /// save too, as in CoreGraphics (whose layers save on the same stack).
     pub fn restore(&mut self) {
         if let Some(gs) = self.stack.pop() {
             self.gs = gs;
@@ -230,14 +371,14 @@ impl ContextState {
             let edges = [rect.x0, rect.y0, rect.x1, rect.y1];
             let whole = edges.iter().all(|v| (v - v.round()).abs() < 1e-3)
                 || edges.iter().all(|v| (v * s - (v * s).round()).abs() < 1e-3);
-            if whole || !gs.aa {
+            if whole || !(gs.aa && self.allows_aa) {
                 let rect = rect.intersect(&gs.clip);
                 if rect.is_empty() {
                     return;
                 }
                 let op = match blend {
                     Blend::SourceOver => Op::Fill { rect, color },
-                    Blend::Copy if color[3] >= 1.0 => Op::Fill { rect, color },
+                    Blend::Copy if color[3] >= 1.0 && self.gs.cg.alpha >= 1.0 => Op::Fill { rect, color },
                     blend => Op::FillWith { rect, color, blend },
                 };
                 self.push(op);
@@ -252,34 +393,60 @@ impl ContextState {
         };
         let mut draw = self.gs.draw();
         draw.blend = blend;
-        self.push(Op::FillPath {
-            path: Arc::new(path),
-            even_odd: false,
-            paint: crate::protocol::Paint::Solid(color),
-            draw,
-        });
+        self.push(Op::FillPath { path: Arc::new(path), even_odd: false, paint: Paint::Solid(color), draw });
     }
 
-    /// Narrow the clip to `r` (user space).
+    /// Narrow the clip to `r` (user space): analytically when it keeps to
+    /// whole points or pixels (as fills do), with an antialiased clip path
+    /// when its edges fall inside pixels or the CTM turns it.
     pub fn clip_rect(&mut self, r: NSRect) {
         if self.gs.axis_aligned() {
             let rect = map_rect(self.gs.ctm, r);
-            self.gs.clip = self.gs.clip.intersect(&rect);
-            self.sync();
-        } else if let Some(path) =
-            tiny_skia::Rect::from_xywh(r.origin.x as f32, r.origin.y as f32, r.size.width as f32, r.size.height as f32)
-                .map(tiny_skia::PathBuilder::from_rect)
+            let s = self.scale as f32;
+            let edges = [rect.x0, rect.y0, rect.x1, rect.y1];
+            let whole = edges.iter().all(|v| (v - v.round()).abs() < 1e-3)
+                || edges.iter().all(|v| (v * s - (v * s).round()).abs() < 1e-3);
+            if whole || rect.is_empty() || !(self.gs.aa && self.allows_aa) {
+                self.gs.clip = self.gs.clip.intersect(&rect);
+                self.sync();
+                return;
+            }
+        }
+        match tiny_skia::Rect::from_xywh(
+            r.origin.x as f32,
+            r.origin.y as f32,
+            r.size.width as f32,
+            r.size.height as f32,
+        )
+        .map(tiny_skia::PathBuilder::from_rect)
         {
-            self.clip_path(Arc::new(path), false, true);
+            Some(path) => self.clip_path(Arc::new(path), false, false),
+            None => {
+                // An empty rectangle leaves nothing to draw in, where it is.
+                self.gs.clip = self.gs.clip.intersect(&map_rect_any(self.gs.ctm, r));
+                self.sync();
+            }
         }
     }
 
     /// Narrow the clip to a path (user space).
     pub fn clip_path(&mut self, path: Arc<tiny_skia::Path>, even_odd: bool, replace: bool) {
         let xf = to_skia(self.gs.ctm);
+        self.clip_path_with(path, even_odd, replace, xf);
+    }
+
+    /// Narrow the clip to a path whose points `xf` maps to layer points.
+    pub fn clip_path_with(
+        &mut self,
+        path: Arc<tiny_skia::Path>,
+        even_odd: bool,
+        replace: bool,
+        xf: tiny_skia::Transform,
+    ) {
+        let aa = self.gs.aa && self.allows_aa;
         let bounds = path.bounds().transform(xf);
-        let bounds = bounds.map_or(Rect::default(), |b| Rect::new(b.left(), b.top(), b.right(), b.bottom()));
-        let clip = ClipPath { path, even_odd, xf, aa: self.gs.aa };
+        let bounds = bounds.map_or(Rect::NOWHERE, |b| Rect::new(b.left(), b.top(), b.right(), b.bottom()));
+        let clip = ClipPath { path, even_odd, xf, aa, image: None };
         if replace {
             self.gs.clip = self.view_clip.intersect(&bounds);
             self.gs.mask = Some(Arc::from([clip]));
@@ -294,7 +461,11 @@ impl ContextState {
 }
 
 pub(crate) struct ContextIvars {
-    state: RefCell<ContextState>,
+    /// The CGContext holding the state.
+    cg: Retained<CGContextImpl>,
+    /// Flipped or not as `+graphicsContextWithCGContext:flipped:` said;
+    /// `None` for the contexts AppKit makes, which views flip as they draw.
+    flipped: Option<bool>,
 }
 
 define_class!(
@@ -326,7 +497,7 @@ define_class!(
         fn save_graphics_state_class() {
             let current = current();
             if let Some(c) = &current {
-                imp(c).state().save();
+                imp(c).with(ContextState::save);
             }
             CLASS_STACK.with(|s| s.borrow_mut().push(current));
         }
@@ -335,7 +506,7 @@ define_class!(
         fn restore_graphics_state_class() {
             let Some(saved) = CLASS_STACK.with(|s| s.borrow_mut().pop()) else { return };
             if let Some(c) = &saved {
-                imp(c).state().restore();
+                imp(c).with(ContextState::restore);
             }
             set_current(saved);
         }
@@ -345,24 +516,36 @@ define_class!(
             bitmap_context(rep)
         }
 
+        #[unsafe(method_id(graphicsContextWithCGContext:flipped:))]
+        fn with_cg_context(cg: &CGContext, flipped: bool) -> Retained<NSGraphicsContext> {
+            let cg = crate::coregraphics::context::imp(cg).retain();
+            wrap(cg, Some(flipped))
+        }
+
+        // CoreGraphics' types go out as pointers (their own encodings).
+        #[unsafe(method(CGContext))]
+        fn cg_context(&self) -> *mut CGContext {
+            Retained::autorelease_ptr(crate::coregraphics::context::as_cg(&self.ivars().cg).retain())
+        }
+
         #[unsafe(method(saveGraphicsState))]
         fn save_graphics_state(&self) {
-            self.state().save();
+            self.with(ContextState::save);
         }
 
         #[unsafe(method(restoreGraphicsState))]
         fn restore_graphics_state(&self) {
-            self.state().restore();
+            self.with(ContextState::restore);
         }
 
         #[unsafe(method(flushGraphics))]
         fn flush_graphics(&self) {
-            self.state().flush();
+            self.with(ContextState::flush);
         }
 
         #[unsafe(method(isFlipped))]
         fn is_flipped(&self) -> bool {
-            self.state().flipped
+            self.ivars().flipped.unwrap_or_else(|| self.with(|st| st.view_flipped).unwrap_or(false))
         }
 
         #[unsafe(method(isDrawingToScreen))]
@@ -372,52 +555,55 @@ define_class!(
 
         #[unsafe(method(shouldAntialias))]
         fn should_antialias(&self) -> bool {
-            self.state().gs.aa
+            self.with(|st| st.gs.aa).unwrap_or(true)
         }
 
         #[unsafe(method(setShouldAntialias:))]
         fn set_should_antialias(&self, flag: bool) {
-            self.state().gs.aa = flag;
+            self.with(|st| st.gs.aa = flag);
         }
 
         #[unsafe(method(imageInterpolation))]
         fn image_interpolation(&self) -> NSImageInterpolation {
-            self.state().gs.interpolation
+            self.with(|st| st.gs.interpolation).unwrap_or(NSImageInterpolation::Default)
         }
 
         #[unsafe(method(setImageInterpolation:))]
         fn set_image_interpolation(&self, value: NSImageInterpolation) {
-            self.state().gs.interpolation = value;
+            self.with(|st| st.gs.interpolation = value);
         }
 
         #[unsafe(method(compositingOperation))]
         fn compositing_operation(&self) -> NSCompositingOperation {
-            NSCompositingOperation(self.state().gs.blend as usize)
+            NSCompositingOperation(self.with(|st| st.gs.operation).unwrap_or(Blend::SourceOver) as usize)
         }
 
         #[unsafe(method(setCompositingOperation:))]
         fn set_compositing_operation(&self, op: NSCompositingOperation) {
-            self.state().gs.blend = Blend::from_raw(op.0);
+            self.with(|st| {
+                st.gs.blend = Blend::from_raw(op.0);
+                st.gs.operation = st.gs.blend;
+            });
         }
 
         #[unsafe(method(patternPhase))]
         fn pattern_phase(&self) -> NSPoint {
-            self.state().gs.phase
+            self.with(|st| st.gs.phase).unwrap_or(NSPoint::ZERO)
         }
 
         #[unsafe(method(setPatternPhase:))]
         fn set_pattern_phase(&self, phase: NSPoint) {
-            self.state().gs.phase = phase;
+            self.with(|st| st.gs.phase = phase);
         }
 
         #[unsafe(method(colorRenderingIntent))]
         fn color_rendering_intent(&self) -> NSColorRenderingIntent {
-            self.state().gs.intent
+            self.with(|st| st.gs.intent).unwrap_or(NSColorRenderingIntent::Default)
         }
 
         #[unsafe(method(setColorRenderingIntent:))]
         fn set_color_rendering_intent(&self, intent: NSColorRenderingIntent) {
-            self.state().gs.intent = intent;
+            self.with(|st| st.gs.intent = intent);
         }
     }
 
@@ -425,14 +611,12 @@ define_class!(
 );
 
 impl NSGraphicsContextImpl {
-    fn state(&self) -> std::cell::RefMut<'_, ContextState> {
-        self.ivars().state.borrow_mut()
-    }
-}
-
-impl Drop for NSGraphicsContextImpl {
-    fn drop(&mut self) {
-        self.ivars().state.borrow_mut().flush();
+    /// Run `f` on the state; nothing if it's in use further up the stack
+    /// (a data provider's or shading's callback reaching the context it's
+    /// drawing into), rather than panicking out of a method.
+    fn with<R>(&self, f: impl FnOnce(&mut ContextState) -> R) -> Option<R> {
+        let mut st = self.ivars().cg.ivars().state.try_borrow_mut().ok()?;
+        Some(f(&mut st))
     }
 }
 
@@ -441,10 +625,19 @@ fn imp(c: &NSGraphicsContext) -> &NSGraphicsContextImpl {
     unsafe { &*(c as *const NSGraphicsContext).cast::<NSGraphicsContextImpl>() }
 }
 
+/// A new context drawing with `state`: a CGContext holding it and the
+/// `NSGraphicsContext` wrapping that.
 fn make(state: ContextState) -> Retained<NSGraphicsContext> {
+    wrap(crate::coregraphics::context::new_context(state), None)
+}
+
+/// An `NSGraphicsContext` for `cg`'s drawing, flipped as `flipped` says
+/// (or as the views drawing say, for `None`) while it's the current
+/// context: each wrapper has its own flippedness, as in AppKit.
+pub(crate) fn wrap(cg: Retained<CGContextImpl>, flipped: Option<bool>) -> Retained<NSGraphicsContext> {
     crate::load_shell::<NSGraphicsContext>();
     let this: Allocated<NSGraphicsContextImpl> = NSGraphicsContextImpl::alloc();
-    let this = this.set_ivars(ContextIvars { state: RefCell::new(state) });
+    let this = this.set_ivars(ContextIvars { cg, flipped });
     // SAFETY: NSObject's designated initializer.
     let this: Retained<NSGraphicsContextImpl> = unsafe { msg_send![super(this), init] };
     // SAFETY: NSGraphicsContextImpl is the class NSGraphicsContext names.
@@ -463,11 +656,18 @@ pub(crate) fn current() -> Option<Retained<NSGraphicsContext>> {
 }
 
 fn set_current(context: Option<Retained<NSGraphicsContext>>) {
+    // AppKit's drawing takes the state as flipped as the current context
+    // is: one made from a CGContext as it was made, one AppKit made as the
+    // view drawing is.
+    if let Some(c) = &context {
+        let own = imp(c).ivars().flipped;
+        imp(c).with(|st| st.flipped = own.unwrap_or(st.view_flipped));
+    }
     let old = CURRENT.with(|c| std::mem::replace(&mut *c.borrow_mut(), context));
     // What a bitmap context drew is in its pixels once it stops being
     // current.
     if let Some(old) = old
-        && let Ok(mut st) = imp(&old).ivars().state.try_borrow_mut()
+        && let Ok(mut st) = imp(&old).ivars().cg.ivars().state.try_borrow_mut()
     {
         st.flush();
     }
@@ -478,7 +678,7 @@ fn set_current(context: Option<Retained<NSGraphicsContext>>) {
 pub(crate) fn with_state<R>(f: impl FnOnce(&mut ContextState) -> R) -> Option<R> {
     CURRENT.with(|c| {
         let c = c.borrow();
-        let mut st = imp(c.as_ref()?).ivars().state.try_borrow_mut().ok()?;
+        let mut st = imp(c.as_ref()?).ivars().cg.ivars().state.try_borrow_mut().ok()?;
         Some(f(&mut st))
     })
 }
@@ -490,7 +690,8 @@ pub(crate) fn bitmap_context(rep: &NSBitmapImageRep) -> Option<Retained<NSGraphi
     let base = Affine::new([1.0, 0.0, 0.0, -1.0, 0.0, points.height]);
     let clip = Rect::new(0.0, 0.0, points.width as f32, points.height as f32);
     let scale = if points.width > 0.0 { pw as f64 / points.width } else { 1.0 };
-    Some(make(ContextState::new(Target::Bitmap(rep.retain()), false, base, clip, scale)))
+    let device = Affine::new([scale, 0.0, 0.0, -scale, 0.0, points.height * scale]);
+    Some(make(ContextState::new(Target::Bitmap(rep.retain()), false, base, clip, scale, device)))
 }
 
 /// Make a fresh bitmap context flipped: user space's origin at the top
@@ -498,6 +699,7 @@ pub(crate) fn bitmap_context(rep: &NSBitmapImageRep) -> Option<Retained<NSGraphi
 pub(crate) fn flip(context: &NSGraphicsContext) {
     with_state_of(context, |st| {
         st.flipped = true;
+        st.view_flipped = true;
         st.base = Affine::IDENTITY;
         st.set_ctm(Affine::IDENTITY);
     });
@@ -505,7 +707,7 @@ pub(crate) fn flip(context: &NSGraphicsContext) {
 
 /// Run `f` on `context`'s state.
 pub(crate) fn with_state_of<R>(context: &NSGraphicsContext, f: impl FnOnce(&mut ContextState) -> R) -> Option<R> {
-    let mut st = imp(context).ivars().state.try_borrow_mut().ok()?;
+    let mut st = imp(context).ivars().cg.ivars().state.try_borrow_mut().ok()?;
     Some(f(&mut st))
 }
 
@@ -531,13 +733,17 @@ pub(crate) fn end_current() -> Option<Retained<NSGraphicsContext>> {
 pub(crate) fn begin_recording(base: Xf, scale: f64) {
     let base = xf_affine(base);
     let all = Rect::new(f32::MIN, f32::MIN, f32::MAX, f32::MAX);
-    begin_current(make(ContextState::new(Target::Record, false, base, all, scale)));
+    // CoreGraphics' device space: the window's base coordinates in pixels.
+    let device = Affine::scale(scale) * base.inverse();
+    begin_current(make(ContextState::new(Target::Record, false, base, all, scale, device)));
 }
 
 /// The ops recorded since [`begin_recording`], and the recorder with them.
 pub(crate) fn end_recording() -> Recorder {
     match end_current() {
-        Some(c) => std::mem::replace(&mut imp(&c).state().rec, Recorder::new(false)),
+        Some(c) => imp(&c)
+            .with(|st| std::mem::replace(&mut st.rec, Recorder::new(false)))
+            .unwrap_or_else(|| Recorder::new(false)),
         None => Recorder::new(false),
     }
 }
@@ -555,33 +761,67 @@ pub(crate) fn begin_view(view: &crate::views::NSViewImpl, xf: Xf, clip: Rect) ->
         let depth = st.stack.len();
         st.stack.push(st.gs.clone());
         st.gs = GState::fresh(xf_affine(xf), clip);
-        let old_clip = std::mem::replace(&mut st.view_clip, clip);
-        let old_flipped = std::mem::replace(&mut st.flipped, flipped);
+        let saved = Saved {
+            depth,
+            clip: std::mem::replace(&mut st.view_clip, clip),
+            flipped: std::mem::replace(&mut st.flipped, flipped),
+            view_flipped: std::mem::replace(&mut st.view_flipped, flipped),
+            device: st.device,
+            view_device: st.view_device,
+        };
+        // In a window, CoreGraphics sees the view's own space, as macOS
+        // draws views into layers of their own.
+        if matches!(st.target, Target::Record) {
+            let to_layer = xf_affine(xf);
+            if to_layer.determinant() != 0.0 {
+                st.device = to_layer.inverse();
+                st.view_device = Some(flipped);
+            }
+        }
+        st.path = CtxPath::default();
         st.sync();
-        (depth, old_clip, old_flipped)
+        saved
     });
     ViewMark { saved, dirty: prior, _appearance: appearance }
 }
 
 /// What [`begin_view`] replaced.
 pub(crate) struct ViewMark {
-    saved: Option<(usize, Rect, bool)>,
+    saved: Option<Saved>,
     dirty: NSRect,
     _appearance: crate::appearance::Drawing,
+}
+
+/// The state a view's drawing replaced, to put back.
+struct Saved {
+    /// How deep the stack was.
+    depth: usize,
+    clip: Rect,
+    flipped: bool,
+    view_flipped: bool,
+    device: Affine,
+    view_device: Option<bool>,
 }
 
 /// The view's `drawRect:` returned: drop what it saved and didn't
 /// restore, and put back the state from before it.
 pub(crate) fn end_view(mark: ViewMark) {
     DIRTY.with(|d| d.set(mark.dirty));
-    let Some((depth, clip, flipped)) = mark.saved else { return };
+    let Some(saved) = mark.saved else { return };
+    let depth = saved.depth;
     with_state(|st| {
+        // Transparency layers it left open end here.
+        while st.layers.last().is_some_and(|&d| d > depth) {
+            crate::coregraphics::context::end_layer(st);
+        }
         st.stack.truncate(depth + 1);
         if let Some(gs) = st.stack.pop() {
             st.gs = gs;
         }
-        st.view_clip = clip;
-        st.flipped = flipped;
+        st.view_clip = saved.clip;
+        (st.flipped, st.view_flipped) = (saved.flipped, saved.view_flipped);
+        (st.device, st.view_device) = (saved.device, saved.view_device);
+        st.path = CtxPath::default();
         st.sync();
         st.flush();
     });
@@ -864,7 +1104,7 @@ fn draw_view_into(view: &crate::views::NSViewImpl, rect: NSRect, ctx: Retained<N
     crate::window::record(view, xf, area, area, None);
     SNAPSHOT_ROOT.with(|r| r.set(outer));
     if let Some(ctx) = end_current() {
-        imp(&ctx).state().flush();
+        imp(&ctx).with(ContextState::flush);
     }
 }
 

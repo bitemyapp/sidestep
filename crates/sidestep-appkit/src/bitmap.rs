@@ -21,9 +21,9 @@
 //! RGBA with premultiplied alpha last, tiny-skia's own format, and 4-byte
 //! aligned. Other layouts AppKit draws into (gray, gray and alpha, RGB in
 //! four samples, alpha first, 16-bit and floating-point samples) are drawn
-//! through a scratch copy in that format: each op unpacks the rep, draws,
-//! and packs back the pixels it changed, so pixels it didn't touch keep
-//! every bit of their precision.
+//! through a scratch copy (`raster::pixels`): each op unpacks the pixels
+//! it can reach, draws, and packs back the ones it changed, so pixels it
+//! didn't touch keep every bit of their precision.
 //!
 //! Sizes are checked: a layout whose bytes wouldn't fit in memory (a file
 //! claiming 2³¹ × 2³¹ pixels, say) makes no rep, as in AppKit, and pixel
@@ -36,7 +36,6 @@ use std::cell::{Cell, RefCell};
 use std::ffi::c_uchar;
 use std::ptr::NonNull;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyObject, NSObjectProtocol};
@@ -49,10 +48,14 @@ use objc2_foundation::{NSArray, NSDictionary, NSInteger, NSSize, NSString, NSUIn
 
 use objc2_foundation::{NSCopying, NSZone};
 
+use objc2_core_graphics::CGImage;
+
 use crate::color::Space;
+use crate::coregraphics::image::CGImageImpl;
 use crate::image_rep::{RepIvars, rep_ivars};
 use crate::protocol::Op;
 use crate::raster::images::{ImageData, Pixels};
+use crate::raster::pixels::{Colors, Format, Memory, Sample};
 
 // Property keys, with AppKit's values.
 sidestep_foundation::constant_string!(NSImageCompressionMethod = "NSImageCompressionMethod");
@@ -91,7 +94,7 @@ impl Layout {
     }
 
     /// Bytes a plane holds. (Every layout a rep has passed [`sizes`].)
-    fn plane_bytes(&self) -> usize {
+    pub(crate) fn plane_bytes(&self) -> usize {
         self.bpr * self.height
     }
 
@@ -124,7 +127,7 @@ impl Layout {
     /// 8 or 16 bits or 32-bit floats, in native byte order, gray or RGB (in
     /// four samples) with premultiplied alpha or none, as AppKit's
     /// contexts take them.
-    fn drawn_as(&self) -> Option<Samples> {
+    fn drawn_as(&self) -> Option<Format> {
         let foreign = if cfg!(target_endian = "little") {
             NSBitmapFormat::SixteenBitBigEndian | NSBitmapFormat::ThirtyTwoBitBigEndian
         } else {
@@ -155,26 +158,16 @@ impl Layout {
         }
         let alpha = self.alpha.then(|| if self.format.contains(NSBitmapFormat::AlphaFirst) { 0 } else { colors });
         let first = usize::from(alpha == Some(0));
-        Some(Samples { kind, gray: colors == 1, first, alpha })
+        Some(Format {
+            kind,
+            slots,
+            colors: if colors == 1 { Colors::Gray } else { Colors::Rgb },
+            order: [first, first + 1, first + 2],
+            alpha,
+            padding: false,
+            big: cfg!(target_endian = "big"),
+        })
     }
-}
-
-/// How a context's drawing is stored in a layout that isn't its own.
-#[derive(Clone, Copy, Debug)]
-struct Samples {
-    kind: Sample,
-    gray: bool,
-    /// The sample the colors start at.
-    first: usize,
-    /// The alpha's sample, if there's alpha.
-    alpha: Option<usize>,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum Sample {
-    U8,
-    U16,
-    F32,
 }
 
 /// Where a rep's pixels are.
@@ -187,8 +180,6 @@ enum Storage {
     /// A file, decoded on demand, turned upright or not.
     Encoded(Arc<[u8]>, bool),
 }
-
-static KEYS: AtomicU64 = AtomicU64::new(1);
 
 pub(crate) struct BitmapIvars {
     layout: RefCell<Layout>,
@@ -204,6 +195,8 @@ pub(crate) struct BitmapIvars {
     compression: Cell<(NSTIFFCompression, f32)>,
     /// An animated GIF's frames and which one shows.
     frames: RefCell<Option<Box<Frames>>>,
+    /// The CGImage of the pixels (`-CGImage`), and the generation it shows.
+    cg: RefCell<Option<(u64, Retained<CGImageImpl>)>>,
 }
 
 /// An animated file's frames (`NSImageFrameCount` and its kin): which
@@ -229,19 +222,21 @@ impl BitmapIvars {
             layout: RefCell::new(layout),
             space: Cell::new(space),
             storage: RefCell::new(storage),
-            key: KEYS.fetch_add(1, Ordering::Relaxed),
+            key: crate::raster::images::next_key(),
             generation: Cell::new(0),
             snapshot: RefCell::new(None),
             recorded: Cell::new(false),
             properties: RefCell::new(Vec::new()),
             compression: Cell::new((NSTIFFCompression::None, 0.0)),
             frames: RefCell::new(None),
+            cg: RefCell::new(None),
         }
     }
 }
 
-/// `n` zeroed words, or `None` if the memory can't be had.
-fn zeroed_words(n: usize) -> Option<Vec<u32>> {
+/// `n` zeroed words, or `None` if the memory can't be had. The pages come
+/// zeroed from the allocator, not written here.
+pub(crate) fn zeroed_words(n: usize) -> Option<Vec<u32>> {
     if n == 0 {
         return Some(Vec::new());
     }
@@ -513,6 +508,16 @@ define_class!(
         fn copy_with_zone(&self, _zone: *mut NSZone) -> Retained<NSBitmapImageRep> {
             self.duplicate()
         }
+
+        #[unsafe(method_id(initWithCGImage:))]
+        fn init_with_cg_image(this: Allocated<Self>, image: &CGImage) -> Option<Retained<Self>> {
+            init_cg(this, crate::coregraphics::image::image_imp(image), false)
+        }
+
+        #[unsafe(method(CGImage))]
+        fn cg_image(&self) -> *mut CGImage {
+            self.cg().map_or(std::ptr::null_mut(), |i| Retained::autorelease_ptr(i.as_cg().retain()))
+        }
     }
 
     unsafe impl NSObjectProtocol for NSBitmapImageRepImpl {}
@@ -649,6 +654,180 @@ fn init_encoded(
     Some(this)
 }
 
+/// A rep of a CGImage's pixels. An image of a file is a rep of the file
+/// (decoded where it's drawn); an image in a layout a rep keeps (8 or
+/// 16-bit gray or RGB, alpha first or last, premultiplied or not, or a
+/// padding sample last) in a space whose samples are drawn as they are, a
+/// rep of its bytes in that layout, as AppKit keeps them; any other, a rep
+/// of its pixels as 8-bit premultiplied RGBA in sRGB (converted, so the
+/// rep's colors are the image's). With `keep`, `-CGImage` hands back the
+/// image itself until the pixels change (an `NSImage` made from a CGImage
+/// gives it back so). `None` if the memory can't be had.
+fn init_cg(
+    this: Allocated<NSBitmapImageRepImpl>,
+    image: &CGImageImpl,
+    keep: bool,
+) -> Option<Retained<NSBitmapImageRepImpl>> {
+    let il = image.layout();
+    let (w, h) = (il.width, il.height);
+    let this = if let Some((file, upright)) = image.file() {
+        let this = init_encoded(this, file, upright)?;
+        rep_ivars(&*this).size.set(NSSize::new(w as f64, h as f64));
+        this
+    } else {
+        let (layout, space, name, words) = adopted(image).or_else(|| converted(image))?;
+        let (bps, alpha) = (layout.bps, layout.alpha);
+        let this = this.set_ivars(BitmapIvars::new(layout, space, Storage::Owned(words)));
+        // SAFETY: NSImageRep's designated initializer.
+        let this: Retained<NSBitmapImageRepImpl> = unsafe { msg_send![super(this), init] };
+        set_rep(&this, w, h, bps, alpha, name);
+        rep_ivars(&*this).opaque.set(!alpha);
+        this
+    };
+    if keep {
+        *this.ivars().cg.borrow_mut() = Some((this.ivars().generation.get(), image.retain()));
+    }
+    Some(this)
+}
+
+/// The name AppKit gives a rep's space.
+fn rep_space_name(space: Space) -> &'static str {
+    match space {
+        Space::DeviceRgb => "NSDeviceRGBColorSpace",
+        Space::DeviceGray => "NSDeviceWhiteColorSpace",
+        Space::GenericGray | Space::Gamma22Gray | Space::ExtendedGamma22Gray => "NSCalibratedWhiteColorSpace",
+        _ => "NSCalibratedRGBColorSpace",
+    }
+}
+
+/// A rep's layout, space, space name and pixels for a CGImage in a layout
+/// a rep keeps (see [`init_cg`]): its bytes, 8-bit samples in the pixel's
+/// order and 16-bit ones in native byte order.
+fn adopted(image: &CGImageImpl) -> Option<(Layout, Space, &'static str, Vec<u32>)> {
+    use objc2_core_graphics::CGImageAlphaInfo as A;
+    let il = image.layout();
+    let bytes = image.source_bytes()?;
+    let space = il.space.as_ref()?;
+    if !space.samples_are_srgb() || il.decode.is_some() || !matches!(il.bpc, 8 | 16) {
+        return None;
+    }
+    let ns = space.info().ns?;
+    let colors = space.info().components;
+    if il.info & crate::coregraphics::info::FLOAT != 0 {
+        return None;
+    }
+    let alpha_info = A(il.info & crate::coregraphics::info::ALPHA_MASK);
+    let (alpha, first, straight) = match alpha_info {
+        A::None | A::NoneSkipLast => (false, false, false),
+        A::PremultipliedLast => (true, false, false),
+        A::PremultipliedFirst => (true, true, false),
+        A::Last => (true, false, true),
+        A::First => (true, true, true),
+        _ => return None,
+    };
+    let sample = il.bpc / 8;
+    let samples = colors + usize::from(alpha_info != A::None);
+    let pixel = sample * samples;
+    if il.bpp != pixel * 8 {
+        return None;
+    }
+    // How a pixel's bytes are reordered into the rep's: 8-bit samples in a
+    // little-endian word turned around; 16-bit samples into native order.
+    use crate::coregraphics::info::{ORDER_16_BIG, ORDER_16_LITTLE, ORDER_32_BIG, ORDER_32_LITTLE, ORDER_MASK};
+    let native_big = cfg!(target_endian = "big");
+    let (reverse_pixel, swap16) = match (sample, il.info & ORDER_MASK) {
+        (1, 0) => (false, false),
+        (1, ORDER_32_BIG) if pixel == 4 => (false, false),
+        (1, ORDER_16_BIG) if pixel == 2 => (false, false),
+        (1, ORDER_32_LITTLE) if pixel == 4 => (true, false),
+        (1, ORDER_16_LITTLE) if pixel == 2 => (true, false),
+        (2, 0 | ORDER_16_BIG) => (false, !native_big),
+        (2, ORDER_16_LITTLE) => (false, native_big),
+        _ => return None,
+    };
+    let len = il.bpr.checked_mul(il.height)?;
+    let mut words = zeroed_words(len.div_ceil(4))?;
+    let out = crate::raster::as_bytes(&mut words);
+    let row = il.width * pixel;
+    for y in 0..il.height {
+        let src = bytes.get(y * il.bpr..y * il.bpr + row)?;
+        let dst = &mut out[y * il.bpr..y * il.bpr + row];
+        dst.copy_from_slice(src);
+        if reverse_pixel {
+            dst.chunks_exact_mut(pixel).for_each(<[u8]>::reverse);
+        } else if swap16 {
+            dst.as_chunks_mut::<2>().0.iter_mut().for_each(|pair| pair.reverse());
+        }
+    }
+    let mut format = NSBitmapFormat::empty();
+    if first {
+        format |= NSBitmapFormat::AlphaFirst;
+    }
+    if straight {
+        format |= NSBitmapFormat::AlphaNonpremultiplied;
+    }
+    let layout = Layout {
+        width: il.width,
+        height: il.height,
+        bps: il.bpc,
+        spp: colors + usize::from(alpha),
+        alpha,
+        planar: false,
+        format,
+        bpr: il.bpr,
+        bpp: il.bpp,
+    };
+    layout.sizes()?;
+    Some((layout, ns, rep_space_name(ns), words))
+}
+
+/// A rep's layout, space, space name and pixels for any CGImage: its
+/// pixels as 8-bit premultiplied RGBA, rows as long as the pixels, in its
+/// RGB space if its samples are drawn as they are, else converted to sRGB.
+fn converted(image: &CGImageImpl) -> Option<(Layout, Space, &'static str, Vec<u32>)> {
+    let il = image.layout();
+    let (w, h) = (il.width, il.height);
+    let n = w.checked_mul(h)?;
+    let bpr = w.checked_mul(4)?;
+    let space = il
+        .space
+        .as_ref()
+        .filter(|s| s.samples_are_srgb() && s.info().components == 3)
+        .and_then(|s| s.info().ns)
+        .unwrap_or(Space::Srgb);
+    let layout = Layout {
+        width: w,
+        height: h,
+        bps: 8,
+        spp: 4,
+        alpha: true,
+        planar: false,
+        format: NSBitmapFormat::empty(),
+        bpr,
+        bpp: 32,
+    };
+    layout.sizes()?;
+    let mut words = zeroed_words(n)?;
+    let rgba = image.premultiplied()?;
+    let bytes = crate::raster::as_bytes(&mut words);
+    let k = bytes.len().min(rgba.len());
+    bytes[..k].copy_from_slice(&rgba[..k]);
+    Some((layout, space, rep_space_name(space), words))
+}
+
+/// A new rep of a CGImage's pixels (see [`init_cg`]).
+pub(crate) fn from_cg(image: &CGImageImpl, keep: bool) -> Option<Retained<NSBitmapImageRep>> {
+    crate::load_shell::<NSBitmapImageRep>();
+    let this = init_cg(NSBitmapImageRepImpl::alloc(), image, keep)?;
+    // SAFETY: NSBitmapImageRepImpl is the class NSBitmapImageRep names.
+    Some(unsafe { Retained::cast_unchecked(this) })
+}
+
+/// `rep`'s pixels as a CGImage, made again only after they change.
+pub(crate) fn cg_image(rep: &NSBitmapImageRep) -> Option<Retained<CGImageImpl>> {
+    imp(rep).cg()
+}
+
 /// A new rep for a file's bytes.
 pub(crate) fn from_file_bytes(bytes: Arc<[u8]>, orient: bool) -> Option<Retained<NSBitmapImageRep>> {
     crate::load_shell::<NSBitmapImageRep>();
@@ -663,6 +842,108 @@ fn has_pixels(rep: &NSBitmapImageRepImpl) -> bool {
 }
 
 impl NSBitmapImageRepImpl {
+    /// The pixels as a CGImage: the one made last while they haven't
+    /// changed, else a new one. A file not decoded yet stays one (its image
+    /// is of the file, decoded where it's drawn); other pixels are copied,
+    /// in the rep's layout and space when CoreGraphics has them (meshed 8
+    /// or 16-bit or float samples), else as 8-bit premultiplied RGBA in an
+    /// RGB space (the rep's if it's one).
+    fn cg(&self) -> Option<Retained<CGImageImpl>> {
+        let generation = self.ivars().generation.get();
+        if let Some((g, image)) = self.ivars().cg.borrow().as_ref()
+            && *g == generation
+        {
+            return Some(image.clone());
+        }
+        let file = match &*self.ivars().storage.borrow() {
+            Storage::Encoded(file, upright) => Some((file.clone(), *upright)),
+            _ => None,
+        };
+        let image = match file {
+            Some((file, upright)) => crate::coregraphics::image::from_file(file, upright, true)?,
+            None => self.cg_of_pixels()?,
+        };
+        *self.ivars().cg.borrow_mut() = Some((generation, image.clone()));
+        Some(image)
+    }
+
+    /// A CGImage of a copy of the pixels (see [`cg`](Self::cg)).
+    fn cg_of_pixels(&self) -> Option<Retained<CGImageImpl>> {
+        use crate::coregraphics::image::{from_rgba, new_image};
+        let l = self.ivars().layout.borrow().clone();
+        let space = self.ivars().space.get();
+        if let Some(layout) = self.cg_layout(&l, space) {
+            let base = self.plane(0);
+            if base.is_null() {
+                return None;
+            }
+            // SAFETY: plane 0 holds bytesPerRow × pixelsHigh bytes (the
+            // rep's own buffer is that long, `plane` says; the caller's
+            // planes are, as initWithBitmapDataPlanes: requires).
+            let bytes: Arc<[u8]> = Arc::from(unsafe { std::slice::from_raw_parts(base, l.plane_bytes()) });
+            return new_image(layout, crate::coregraphics::data::of_bytes(bytes));
+        }
+        let rgb = if space.components() == 3 { space } else { Space::Srgb };
+        let rgba = self.premultiplied_rgba()?;
+        from_rgba(l.width, l.height, Arc::from(rgba), crate::coregraphics::color::for_ns(rgb))
+    }
+
+    /// The CoreGraphics layout of the rep's pixels, if CoreGraphics has it:
+    /// meshed 8 or 16-bit integer or 32-bit float samples, colors of the
+    /// rep's space, alpha first or last (premultiplied or not) or none, or
+    /// padding after the colors.
+    fn cg_layout(&self, l: &Layout, space: Space) -> Option<crate::coregraphics::image::Layout> {
+        use crate::coregraphics::info::{FLOAT, ORDER_16_BIG, ORDER_16_LITTLE, ORDER_32_BIG, ORDER_32_LITTLE};
+        use objc2_core_graphics::CGImageAlphaInfo as A;
+        if l.planar || l.width == 0 || l.height == 0 {
+            return None;
+        }
+        let float = l.format.contains(NSBitmapFormat::FloatingPointSamples);
+        let big = |flag: NSBitmapFormat, other: NSBitmapFormat| {
+            l.format.contains(flag) || (cfg!(target_endian = "big") && !l.format.contains(other))
+        };
+        let order = match (l.bps, float) {
+            (8, false) => 0,
+            (16, false) => {
+                if big(NSBitmapFormat::SixteenBitBigEndian, NSBitmapFormat::SixteenBitLittleEndian) {
+                    ORDER_16_BIG
+                } else {
+                    ORDER_16_LITTLE
+                }
+            }
+            (32, true) => {
+                let big = big(NSBitmapFormat::ThirtyTwoBitBigEndian, NSBitmapFormat::ThirtyTwoBitLittleEndian);
+                FLOAT | if big { ORDER_32_BIG } else { ORDER_32_LITTLE }
+            }
+            _ => return None,
+        };
+        let colors = l.spp.checked_sub(usize::from(l.alpha))?;
+        if colors != space.components() {
+            return None;
+        }
+        let first = l.format.contains(NSBitmapFormat::AlphaFirst);
+        let straight = l.format.contains(NSBitmapFormat::AlphaNonpremultiplied);
+        let alpha = match (l.alpha, first, straight) {
+            (true, false, false) => A::PremultipliedLast,
+            (true, false, true) => A::Last,
+            (true, true, false) => A::PremultipliedFirst,
+            (true, true, true) => A::First,
+            (false, ..) if l.bpp == l.bps * l.spp => A::None,
+            (false, ..) if l.bpp == l.bps * (l.spp + 1) => A::NoneSkipLast,
+            _ => return None,
+        };
+        Some(crate::coregraphics::image::Layout {
+            width: l.width,
+            height: l.height,
+            bpc: l.bps,
+            bpp: l.bpp,
+            bpr: l.bpr,
+            space: Some(crate::coregraphics::color::for_ns(space)),
+            info: alpha.0 | order,
+            decode: None,
+        })
+    }
+
     fn color(&self, x: NSInteger, y: NSInteger) -> Option<Retained<NSColor>> {
         let [r, g, b, a] = self.read(x, y)?;
         let space = crate::color::space(self.ivars().space.get());
@@ -873,12 +1154,14 @@ impl NSBitmapImageRepImpl {
     fn plane(&self, i: usize) -> *mut u8 {
         let plane_bytes = self.ivars().layout.borrow().plane_bytes();
         match &mut *self.ivars().storage.borrow_mut() {
-            Storage::Owned(buf) => match i.checked_mul(plane_bytes) {
-                Some(at) if at < buf.len() * 4 || (at == 0 && buf.is_empty()) => {
-                    buf.as_mut_ptr().cast::<u8>().wrapping_add(at)
+            // The whole plane must be in the buffer (an empty one only for
+            // planes of no bytes), so callers may take it as that long.
+            Storage::Owned(buf) => {
+                match i.checked_mul(plane_bytes).and_then(|at| Some((at, at.checked_add(plane_bytes)?))) {
+                    Some((at, end)) if end <= buf.len() * 4 => buf.as_mut_ptr().cast::<u8>().wrapping_add(at),
+                    _ => std::ptr::null_mut(),
                 }
-                _ => std::ptr::null_mut(),
-            },
+            }
             Storage::Borrowed(p) => p.get(i).copied().unwrap_or(std::ptr::null_mut()),
             Storage::Encoded(..) => std::ptr::null_mut(),
         }
@@ -1211,169 +1494,29 @@ pub(crate) fn drawable(rep: &NSBitmapImageRep) -> Option<((usize, usize), NSSize
     Some(((l.width, l.height), size))
 }
 
-thread_local! {
-    static GLYPHS: RefCell<crate::raster::Glyphs> = RefCell::default();
-    /// The pixels of a rep not in a context's format, while they're drawn:
-    /// as unpacked, and as drawn.
-    static SCRATCH: RefCell<(Vec<u32>, Vec<u32>)> = RefCell::default();
-}
-
 /// Draw `ops` into the rep's pixels, on this thread.
 pub(crate) fn rasterize(rep: &NSBitmapImageRep, ops: &[Op]) {
     let this = imp(rep);
-    this.decode();
-    let l = this.ivars().layout.borrow().clone();
-    let Some(samples) = l.drawn_as() else { return };
-    let base = this.plane(0);
-    if base.is_null() {
-        return;
-    }
+    let Some(mem) = memory(rep) else { return };
     let size = rep_ivars(this).size.get();
-    let scale = if size.width > 0.0 { (l.width as f64 / size.width) as f32 } else { 1.0 };
-    let damage = crate::protocol::Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
-    let paint = |px: &mut [u32], stride: usize| {
-        let mut canvas = crate::raster::Canvas::new(px, l.width as u32, l.height as u32, 0.0, scale);
-        canvas.stride = stride;
-        GLYPHS.with(|g| {
-            let mut g = g.borrow_mut();
-            crate::raster::paint(&mut canvas, &mut g, &[damage], ops);
-        });
-    };
-    if l.is_canvas() && base.cast::<u32>().is_aligned() {
-        // In place: the rep's own buffer, or the caller's when aligned.
-        let stride = l.bpr / 4;
-        let len = stride * (l.height - 1) + l.width;
-        // SAFETY: plane 0 holds bytesPerRow × pixelsHigh bytes (the rep's
-        // own buffer is that long; the caller's planes are, as
-        // initWithBitmapDataPlanes: requires), which cover `len` u32s; it's
-        // 4-byte aligned, as checked; and nothing else touches it while
-        // the ops draw, this thread using the rep.
-        let px = unsafe { std::slice::from_raw_parts_mut(base.cast::<u32>(), len) };
-        paint(px, stride);
-    } else {
-        SCRATCH.with(|scratch| {
-            let mut fresh = <(Vec<u32>, Vec<u32>)>::default();
-            let mut held = scratch.try_borrow_mut();
-            let (before, px) = match held.as_deref_mut() {
-                Ok(s) => (&mut s.0, &mut s.1),
-                Err(_) => (&mut fresh.0, &mut fresh.1),
-            };
-            before.clear();
-            before.resize(l.width * l.height, 0);
-            // SAFETY: plane 0 holds the layout's rows, as above.
-            unsafe { unpack(&l, samples, base, before) };
-            px.clear();
-            px.extend_from_slice(before);
-            paint(px, l.width);
-            // SAFETY: as above.
-            unsafe { pack(&l, samples, px, before, base) };
-        });
-    }
+    let scale = if size.width > 0.0 { (mem.width as f64 / size.width) as f32 } else { 1.0 };
+    // SAFETY: plane 0 holds bytesPerRow × pixelsHigh bytes (the rep's own
+    // buffer is that long; the caller's planes are, as
+    // initWithBitmapDataPlanes: requires), and nothing else touches them
+    // while the ops draw, this thread using the rep.
+    unsafe { crate::raster::pixels::rasterize(&mem, scale, ops) };
     this.bump();
 }
 
-/// Read a rep's pixels (`samples` in layout `l` at `base`) as premultiplied
-/// RGBA canvas pixels, `l.width` a row.
-///
-/// # Safety
-///
-/// `base` points at `l.bpr × l.height` readable bytes.
-unsafe fn unpack(l: &Layout, samples: Samples, base: *const u8, out: &mut [u32]) {
-    let bytes = l.bpp / 8;
-    for (y, row) in out.chunks_exact_mut(l.width).enumerate() {
-        for (x, p) in row.iter_mut().enumerate() {
-            // SAFETY: pixel (x, y) is inside the rows, as the caller
-            // promises.
-            let px = unsafe { base.add(y * l.bpr + x * bytes) };
-            // SAFETY: sample `i` is inside the pixel.
-            let get = |i: usize| unsafe { read_sample(px, samples.kind, i) };
-            let a = samples.alpha.map_or(255, get);
-            let c = |i: usize| get(samples.first + i).min(a);
-            *p = if samples.gray {
-                let g = c(0);
-                u32::from_ne_bytes([g, g, g, a])
-            } else {
-                u32::from_ne_bytes([c(0), c(1), c(2), a])
-            };
-        }
-    }
-}
-
-/// Write back the canvas pixels of `px` that differ from `before` into the
-/// rep's pixels at `base`: the others keep their bits.
-///
-/// # Safety
-///
-/// `base` points at `l.bpr × l.height` writable bytes.
-unsafe fn pack(l: &Layout, samples: Samples, px: &[u32], before: &[u32], base: *mut u8) {
-    let bytes = l.bpp / 8;
-    for (i, (&p, _)) in px.iter().zip(before).enumerate().filter(|(_, (p, b))| p != b) {
-        let (x, y) = (i % l.width, i / l.width);
-        let [r, g, b, a] = p.to_ne_bytes();
-        // SAFETY: pixel (x, y) is inside the rows, as the caller promises.
-        let out = unsafe { base.add(y * l.bpr + x * bytes) };
-        // SAFETY: sample `k` is inside the pixel.
-        let put = |k: usize, v: u8| unsafe { write_sample(out, samples.kind, k, v) };
-        if samples.gray {
-            put(samples.first, gray8([r, g, b, a]));
-        } else {
-            put(samples.first, r);
-            put(samples.first + 1, g);
-            put(samples.first + 2, b);
-        }
-        match samples.alpha {
-            Some(k) => put(k, a),
-            // RGB's fourth sample is padding, opaque as AppKit leaves it.
-            None if !samples.gray => put(3, 255),
-            None => {}
-        }
-    }
-}
-
-/// Sample `i` of the pixel at `px`, as 8 bits.
-///
-/// # Safety
-///
-/// The sample is inside readable memory.
-unsafe fn read_sample(px: *const u8, kind: Sample, i: usize) -> u8 {
-    // SAFETY: as the caller promises.
-    unsafe {
-        match kind {
-            Sample::U8 => *px.add(i),
-            Sample::U16 => ((u32::from(px.cast::<u16>().add(i).read_unaligned()) * 255 + 32767) / 65535) as u8,
-            Sample::F32 => (px.cast::<f32>().add(i).read_unaligned().clamp(0.0, 1.0) * 255.0).round() as u8,
-        }
-    }
-}
-
-/// Store 8-bit `v` as sample `i` of the pixel at `px`.
-///
-/// # Safety
-///
-/// The sample is inside writable memory.
-unsafe fn write_sample(px: *mut u8, kind: Sample, i: usize, v: u8) {
-    // SAFETY: as the caller promises.
-    unsafe {
-        match kind {
-            Sample::U8 => *px.add(i) = v,
-            Sample::U16 => px.cast::<u16>().add(i).write_unaligned(u16::from(v) * 257),
-            Sample::F32 => px.cast::<f32>().add(i).write_unaligned(f32::from(v) / 255.0),
-        }
-    }
-}
-
-/// A premultiplied canvas pixel's gray, premultiplied: its luminance in
-/// linear light, encoded again (see `color::gray_of`).
-fn gray8([r, g, b, a]: [u8; 4]) -> u8 {
-    if r == g && g == b {
-        return r;
-    }
-    if a == 0 {
-        return 0;
-    }
-    let un = |c: u8| f64::from(c) / f64::from(a);
-    let gray = crate::color::gray_of([un(r), un(g), un(b)]);
-    (gray.clamp(0.0, 1.0) * f64::from(a)).round() as u8
+/// Where `rep`'s pixels are and how they're laid out, if a context can
+/// draw into them.
+pub(crate) fn memory(rep: &NSBitmapImageRep) -> Option<Memory> {
+    let this = imp(rep);
+    this.decode();
+    let l = this.ivars().layout.borrow().clone();
+    let format = l.drawn_as()?;
+    let base = this.plane(0);
+    (!base.is_null()).then_some(Memory { base, width: l.width, height: l.height, bpr: l.bpr, format })
 }
 
 #[cfg(test)]
@@ -1483,28 +1626,5 @@ mod tests {
             crate::context::end_current();
             println!("200 fills into a 1024 × 1024 bitmap on {what}: {ms:.2} ms");
         }
-    }
-
-    #[test]
-    fn unpacking_and_packing_keep_what_isnt_drawn() {
-        // 16-bit gray and alpha, 2 × 1: an odd value no 8-bit round trip
-        // keeps, and a pixel drawn over.
-        let l = layout(2, 1, 16, 2, NSBitmapFormat::empty(), 32);
-        let samples = l.drawn_as().unwrap();
-        let mut px: Vec<u16> = vec![0x1234, 0xffff, 0x0101, 0xffff];
-        px.resize(l.bpr / 2, 0);
-        let base = px.as_mut_ptr().cast::<u8>();
-        let mut before = vec![0u32; 2];
-        // SAFETY: `px` holds the layout's one row.
-        unsafe { unpack(&l, samples, base, &mut before) };
-        assert_eq!(before[0].to_ne_bytes(), [0x12, 0x12, 0x12, 0xff]);
-        let mut after = before.clone();
-        after[1] = u32::from_ne_bytes([255, 255, 255, 255]);
-        // SAFETY: as above.
-        unsafe { pack(&l, samples, &after, &before, base) };
-        assert_eq!(px[..4], [0x1234, 0xffff, 0xffff, 0xffff]);
-        // Gray is luminance in linear light: red is a middle gray.
-        assert!((122..=132).contains(&gray8([255, 0, 0, 255])), "{}", gray8([255, 0, 0, 255]));
-        assert_eq!(gray8([77, 77, 77, 128]), 77);
     }
 }

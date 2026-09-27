@@ -42,6 +42,7 @@ use objc2_app_kit::{
     NSBitmapImageRep, NSColor, NSCompositingOperation, NSCustomImageRep, NSGraphicsContext, NSImage, NSImageCacheMode,
     NSImageRep, NSImageResizingMode, NSImageSymbolConfiguration, NSPasteboard, NSTIFFCompression,
 };
+use objc2_core_graphics::CGImage;
 use objc2_foundation::{NSArray, NSCopying, NSDictionary, NSEdgeInsets, NSPoint, NSRect, NSSize, NSString, NSZone};
 
 use crate::image_rep::{draw_rep_tinted, rep_imp};
@@ -119,6 +120,30 @@ define_class!(
             let this = this.set_ivars(ImageIvars { size: Cell::new(Some(size)), ..Default::default() });
             // SAFETY: NSObject's designated initializer.
             unsafe { msg_send![super(this), init] }
+        }
+
+        #[unsafe(method_id(initWithCGImage:size:))]
+        fn init_with_cg_image(this: Allocated<Self>, image: &CGImage, size: NSSize) -> Retained<Self> {
+            let image = crate::coregraphics::image::image_imp(image);
+            let rep = crate::bitmap::from_cg(image, true);
+            // No size is the image's pixels as points.
+            let l = image.layout();
+            let size = if size.width > 0.0 && size.height > 0.0 {
+                size
+            } else {
+                NSSize::new(l.width as f64, l.height as f64)
+            };
+            if let Some(rep) = &rep {
+                rep.setSize(size);
+            }
+            let this = referencing(this, rep);
+            this.ivars().size.set(Some(size));
+            this
+        }
+
+        #[unsafe(method(CGImageForProposedRect:context:hints:))]
+        fn cg_image_for(&self, proposed: *mut NSRect, context: Option<&AnyObject>, _hints: Option<&AnyObject>) -> *mut CGImage {
+            self.cg_image(proposed, context).map_or(std::ptr::null_mut(), |i| Retained::autorelease_ptr(i.as_cg().retain()))
         }
 
         #[unsafe(method_id(initWithData:))]
@@ -696,6 +721,23 @@ impl NSImageImpl {
         });
         let best = covering.min_by(|a, b| area(a).total_cmp(&area(b)));
         best.or_else(|| reps.iter().max_by(|a, b| area(a).total_cmp(&area(b)))).cloned()
+    }
+
+    /// The best representation's pixels for the proposed rectangle (the
+    /// image's size for none) as a CGImage.
+    fn cg_image(
+        &self,
+        proposed: *mut NSRect,
+        context: Option<&AnyObject>,
+    ) -> Option<Retained<crate::coregraphics::image::CGImageImpl>> {
+        let size = crate::image_rep::proposed_size(proposed).unwrap_or_else(|| self.image_size());
+        if size.width <= 0.0 || size.height <= 0.0 {
+            return None;
+        }
+        let pixels = crate::image_rep::pixels_for(size, context);
+        let scale = pixels.0 as f64 / size.width.abs().max(1e-9);
+        let rep = self.best_rep(size, scale)?;
+        crate::image_rep::cg_image(&rep, pixels)
     }
 
     /// Draw `from` (image points; empty for all of it) into `rect`.

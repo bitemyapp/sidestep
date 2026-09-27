@@ -46,7 +46,38 @@ pub(crate) mod id {
     pub(crate) const LOCALE: CFTypeID = 46;
     pub(crate) const TIME_ZONE: CFTypeID = 47;
     pub(crate) const RUN_LOOP_SOURCE: CFTypeID = 48;
+    // CoreGraphics' types, whose classes Sidestep's AppKit defines.
+    pub const CG_COLOR_SPACE: CFTypeID = 101;
+    pub const CG_COLOR: CFTypeID = 102;
+    pub const CG_PATH: CFTypeID = 103;
+    pub const CG_CONTEXT: CFTypeID = 104;
+    pub const CG_IMAGE: CFTypeID = 105;
+    pub const CG_GRADIENT: CFTypeID = 106;
+    pub const CG_DATA_PROVIDER: CFTypeID = 107;
+    pub const CG_DATA_CONSUMER: CFTypeID = 108;
+    pub const CG_FONT: CFTypeID = 109;
+    pub const CG_SHADING: CFTypeID = 110;
+    pub const CG_FUNCTION: CFTypeID = 111;
+    pub const CG_PATTERN: CFTypeID = 112;
 }
+
+/// CoreGraphics' types: their classes (Sidestep-private names, defined by
+/// Sidestep's AppKit, where CoreGraphics lives) and the names
+/// `CFCopyTypeIDDescription` gives them.
+const CG_TYPES: &[(&str, CFTypeID, &str)] = &[
+    ("_SidestepCGColorSpace", id::CG_COLOR_SPACE, "CGColorSpace"),
+    ("_SidestepCGColor", id::CG_COLOR, "CGColor"),
+    ("_SidestepCGPath", id::CG_PATH, "CGPath"),
+    ("_SidestepCGContext", id::CG_CONTEXT, "CGContext"),
+    ("_SidestepCGImage", id::CG_IMAGE, "CGImage"),
+    ("_SidestepCGGradient", id::CG_GRADIENT, "CGGradient"),
+    ("_SidestepCGDataProvider", id::CG_DATA_PROVIDER, "CGDataProvider"),
+    ("_SidestepCGDataConsumer", id::CG_DATA_CONSUMER, "CGDataConsumer"),
+    ("_SidestepCGFont", id::CG_FONT, "CGFont"),
+    ("_SidestepCGShading", id::CG_SHADING, "CGShading"),
+    ("_SidestepCGFunction", id::CG_FUNCTION, "CGFunction"),
+    ("_SidestepCGPattern", id::CG_PATTERN, "CGPattern"),
+];
 
 /// Class names with CoreFoundation counterparts.
 const BRIDGED: &[(&str, CFTypeID)] = &[
@@ -79,6 +110,9 @@ pub(crate) fn type_of(object: &AnyObject) -> CFTypeID {
             if id == id::NUMBER && is_boolean(object) {
                 return id::BOOLEAN;
             }
+            return id;
+        }
+        if let Some(&(_, id, _)) = CG_TYPES.iter().find(|(n, ..)| n.as_bytes() == name) {
             return id;
         }
         class = c.superclass();
@@ -151,6 +185,10 @@ pub unsafe extern "C-unwind" fn CFCopyTypeIDDescription(type_id: CFTypeID) -> *m
         id::RUN_LOOP => "CFRunLoop",
         id::RUN_LOOP_TIMER => "CFRunLoopTimer",
         id::RUN_LOOP_OBSERVER => "CFRunLoopObserver",
+        id if CG_TYPES.iter().any(|t| t.1 == id) => {
+            let name = CG_TYPES.iter().find(|t| t.1 == id).map_or("", |t| t.2);
+            return owned(NSString::from_str(name));
+        }
         _ => BRIDGED.iter().find(|(_, id)| *id == type_id).map_or("", |(n, _)| n.strip_prefix("NS").unwrap_or(n)),
     };
     let name = if name.starts_with("CF") || name.is_empty() { name.to_string() } else { format!("CF{name}") };

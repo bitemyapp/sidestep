@@ -23,8 +23,9 @@ use std::sync::{Arc, Mutex};
 use kurbo::{Affine, BezPath, ParamCurveNearest, PathEl, Point, Shape};
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{NSObject, NSObjectProtocol};
-use objc2::{AnyThread, ClassType, DefinedClass, define_class, msg_send};
+use objc2::{AnyThread, ClassType, DefinedClass, Message, define_class, msg_send};
 use objc2_app_kit::{NSBezierPath, NSBezierPathElement, NSLineCapStyle, NSLineJoinStyle, NSWindingRule};
+use objc2_core_graphics::CGPath;
 use objc2_foundation::{NSAffineTransform, NSCopying, NSInteger, NSPoint, NSRect, NSSize, NSZone};
 
 use crate::protocol::{Op, Paint, StrokeSpec};
@@ -112,13 +113,46 @@ define_class!(
             imp(&p).append_rounded_rect(r, rx, ry);
             p
         }
+
+        #[unsafe(method_id(bezierPathWithCGPath:))]
+        fn with_cg_path(path: &CGPath) -> Retained<NSBezierPath> {
+            // Element for element, as AppKit converts them.
+            let shape = crate::coregraphics::path::path_imp(path).snapshot();
+            from_bez(&shape.path)
+        }
+    }
+
+    // CoreGraphics' paths.
+    impl NSBezierPathImpl {
+        #[unsafe(method(CGPath))]
+        fn cg_path(&self) -> *mut CGPath {
+            let shape = crate::coregraphics::path::Shape::from_path(self.ivars().path.borrow().clone());
+            let path = crate::coregraphics::path::new_path(Arc::new(shape), false);
+            Retained::autorelease_ptr(path.as_cg().retain())
+        }
+
+        #[unsafe(method(setCGPath:))]
+        fn set_cg_path(&self, path: &CGPath) {
+            let shape = crate::coregraphics::path::path_imp(path).snapshot();
+            let start = shape.path.elements().iter().rev().find_map(|el| match el {
+                PathEl::MoveTo(p) => Some(*p),
+                _ => None,
+            });
+            self.edit(|p| *p = shape.path.clone());
+            self.ivars().start.set(start);
+        }
     }
 
     // Drawing with the class defaults.
     impl NSBezierPathImpl {
         #[unsafe(method(fillRect:))]
         fn fill_rect(r: NSRect) {
-            crate::context::with_state(|st| st.fill_rect(r, st.gs.fill, st.gs.blend));
+            crate::context::with_state(|st| {
+                // As CoreGraphics' drawing does, AppKit's takes CoreGraphics'
+                // current path.
+                st.path = Default::default();
+                st.fill_rect(r, st.gs.fill, st.gs.blend)
+            });
         }
 
         #[unsafe(method(strokeRect:))]
@@ -376,6 +410,7 @@ define_class!(
             let Some(path) = self.drawn() else { return };
             let even_odd = self.ivars().style.borrow().rule == NSWindingRule::EvenOdd;
             crate::context::with_state(|st| {
+                st.fill_leftover(even_odd);
                 let op = Op::FillPath { path, even_odd, paint: Paint::Solid(st.gs.fill), draw: st.gs.draw() };
                 st.push(op);
             });
@@ -649,7 +684,7 @@ fn rect_elements(r: NSRect) -> Vec<PathEl> {
 
 /// How far a cubic's control points sit along the tangents, as a fraction
 /// of the radius, to draw an arc of `angle` radians.
-fn kappa(angle: f64) -> f64 {
+pub(crate) fn kappa(angle: f64) -> f64 {
     4.0 / 3.0 * (angle / 4.0).tan()
 }
 
@@ -950,6 +985,7 @@ fn stroke_path(path: &Option<Arc<tiny_skia::Path>>, style: &Style) {
     };
     let stroke = Arc::new(spec);
     crate::context::with_state(|st| {
+        st.stroke_leftover(&stroke);
         let op = Op::StrokePath { path: path.clone(), stroke, paint: Paint::Solid(st.gs.stroke), draw: st.gs.draw() };
         st.push(op);
     });
@@ -957,7 +993,7 @@ fn stroke_path(path: &Option<Arc<tiny_skia::Path>>, style: &Style) {
 
 /// The tight bounds: curve extrema, not control points; a lone move
 /// counts as a point.
-fn tight_bounds(path: &BezPath) -> Option<kurbo::Rect> {
+pub(crate) fn tight_bounds(path: &BezPath) -> Option<kurbo::Rect> {
     let mut bounds: Option<kurbo::Rect> = None;
     let mut add = |r: kurbo::Rect| bounds = Some(bounds.map_or(r, |b| b.union(r)));
     for seg in path.segments() {
@@ -972,7 +1008,7 @@ fn tight_bounds(path: &BezPath) -> Option<kurbo::Rect> {
 }
 
 /// Whether `p` lies on one of `path`'s segments, to within rounding.
-fn on_outline(path: &BezPath, p: Point) -> bool {
+pub(crate) fn on_outline(path: &BezPath, p: Point) -> bool {
     let eps = 1e-9 * (1.0 + p.x.abs().max(p.y.abs()));
     path.segments().any(|seg| {
         let b = seg.bounding_box().inflate(eps, eps);
@@ -981,7 +1017,7 @@ fn on_outline(path: &BezPath, p: Point) -> bool {
 }
 
 /// The path with every open subpath closed, as filling sees it.
-fn closed(path: &BezPath) -> BezPath {
+pub(crate) fn closed(path: &BezPath) -> BezPath {
     let mut out = BezPath::new();
     let mut open = false;
     for el in path.iter() {

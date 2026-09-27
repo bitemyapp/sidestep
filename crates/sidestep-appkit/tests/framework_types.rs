@@ -1,8 +1,10 @@
 //! objc2-app-kit's methods that take or return CoreGraphics, QuartzCore and
 //! CoreText types, and those framework crates, build on Linux with objc2's
-//! fork (tools/objc2-overlay, docs/abi.md). Sidestep doesn't implement the
-//! frameworks yet, so this only checks that everything type-checks and
-//! links: nothing here sends a message or calls a function. The crates'
+//! fork (tools/objc2-overlay, docs/abi.md). Sidestep implements
+//! CoreGraphics (conformance/tests/coregraphics*.rs test it); QuartzCore
+//! and CoreText aren't yet, so this only checks that everything
+//! type-checks and links: nothing here sends a message or calls a
+//! function. The crates'
 //! Darwin-only `libc` items are compiled too, through the dev-dependencies'
 //! `libc` features, so one that lost its Apple gate would fail the build.
 

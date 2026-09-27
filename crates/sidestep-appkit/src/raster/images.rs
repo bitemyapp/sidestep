@@ -46,6 +46,11 @@ pub(crate) enum Pixels {
     Rgba(Arc<[u8]>),
     /// A file to decode, turned upright by its orientation or not.
     Encoded(Arc<[u8]>, bool),
+    /// Part of another image: its pixels from `x`, `y` (this image's
+    /// size), cropped from the other's cache entry the first time it's
+    /// drawn, so a file is decoded once however many parts are drawn, and
+    /// where drawing happens.
+    Part(Arc<ImageData>, u32, u32),
 }
 
 /// A cached image: its pixels, its halvings and its tinted copies.
@@ -102,6 +107,13 @@ impl Default for Cache {
 
 thread_local!(static CACHE: RefCell<Cache> = RefCell::default());
 
+static KEYS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// A key naming a new image's pixels in the caches.
+pub(crate) fn next_key() -> u64 {
+    KEYS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Drop what this thread cached for the representations `keys`. (A
 /// thread that is ending, its cache already gone, has nothing to drop.)
 pub(crate) fn forget(keys: &[u64]) {
@@ -136,7 +148,13 @@ impl Cache {
             self.bytes -= e.bytes;
         }
         if !self.entries.contains_key(&image.key) {
-            let base = to_base(image)?;
+            let base = match &image.pixels {
+                Pixels::Part(parent, x, y) => {
+                    let whole = self.entry(parent)?.level(0);
+                    crop(whole, *x, *y, image.width, image.height)?
+                }
+                _ => to_base(image)?,
+            };
             let bytes = base_cost(&base);
             self.bytes += bytes;
             self.entries.insert(
@@ -165,6 +183,20 @@ impl Cache {
     }
 }
 
+/// `w` × `h` of `p` from `x`, `y`, as pixels of their own.
+fn crop(p: PixmapRef, x: u32, y: u32, w: u32, h: u32) -> Option<Base> {
+    if x.checked_add(w)? > p.width() || y.checked_add(h)? > p.height() {
+        return None;
+    }
+    let mut out = Pixmap::new(w, h)?;
+    let (sw, w) = (p.width() as usize * 4, w as usize * 4);
+    for (row, dst) in out.data_mut().chunks_exact_mut(w).enumerate() {
+        let at = (y as usize + row) * sw + x as usize * 4;
+        dst.copy_from_slice(&p.data()[at..at + w]);
+    }
+    Some(Base::Owned(out))
+}
+
 fn to_base(image: &ImageData) -> Option<Base> {
     match &image.pixels {
         Pixels::Rgba(data) => {
@@ -177,6 +209,8 @@ fn to_base(image: &ImageData) -> Option<Base> {
             let size = tiny_skia::IntSize::from_wh(decoded.width, decoded.height)?;
             Pixmap::from_vec(decoded.rgba, size).map(Base::Owned)
         }
+        // Made from the cache (`Cache::entry`).
+        Pixels::Part(..) => None,
     }
 }
 
@@ -229,7 +263,8 @@ pub(crate) fn dst_bounds(dst: &Rect) -> Option<tiny_skia::Rect> {
 }
 
 /// Draw `src` (pixels, top-left origin) of `image` into `dst`, a
-/// rectangle in the op's user space whose `y0` edge takes the image's top.
+/// rectangle in the op's user space whose `y0` edge takes the image's top;
+/// or, `tiled`, repeated from there over all of the clip.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn draw(
     canvas: &mut Canvas,
@@ -240,6 +275,7 @@ pub(crate) fn draw(
     alpha: f32,
     quality: Quality,
     tint: Option<Color>,
+    tiled: bool,
     draw: &Draw,
 ) {
     let (sw, sh) = (src.x1 - src.x0, src.y1 - src.y0);
@@ -247,7 +283,8 @@ pub(crate) fn draw(
         return;
     }
     let Some(bounds) = dst_bounds(dst) else { return };
-    let Some(region) = region(canvas, damage, draw, bounds, 1.0) else { return };
+    let region = if tiled { canvas.clip_pixels(draw, damage) } else { region(canvas, damage, draw, bounds, 1.0) };
+    let Some(region) = region else { return };
     let base = canvas.transform().pre_concat(draw.xf);
     // Image pixels to user space.
     let placed = Transform::from_row((dst.x1 - dst.x0) / sw, 0.0, 0.0, (dst.y1 - dst.y0) / sh, dst.x0, dst.y0)
@@ -305,6 +342,28 @@ pub(crate) fn draw(
             // layer's grid, for masks).
             let xf = base.post_translate(-(region.0 as f32), -(region.1 as f32));
             let mask = masks.get(draw.mask.as_ref(), pm.width(), pm.height(), origin);
+            if tiled {
+                // The pattern repeated over the whole region, in its pixels.
+                let whole = tiny_skia::Rect::from_xywh(0.0, 0.0, pm.width() as f32, pm.height() as f32);
+                let paint = tiny_skia::Paint {
+                    shader: tiny_skia::Pattern::new(
+                        pixmap,
+                        SpreadMode::Repeat,
+                        filter(quality),
+                        alpha.clamp(0.0, 1.0),
+                        xf.pre_concat(pattern_xf),
+                    ),
+                    blend_mode: super::ops::blend_mode(draw.blend),
+                    anti_alias: false,
+                    ..Default::default()
+                };
+                if let Some(whole) = whole {
+                    super::ops::masked(pm, spare, mask, draw.blend, |pm, mask| {
+                        pm.fill_rect(whole, &paint, Transform::identity(), mask)
+                    });
+                }
+                return;
+            }
             let paint = |opacity: f32, blend| tiny_skia::Paint {
                 shader: tiny_skia::Pattern::new(pixmap, SpreadMode::Pad, filter(quality), opacity, pattern_xf),
                 blend_mode: blend,
@@ -360,6 +419,7 @@ mod tests {
                 pixels: match &img.pixels {
                     Pixels::Rgba(d) => Pixels::Rgba(d.clone()),
                     Pixels::Encoded(d, u) => Pixels::Encoded(d.clone(), *u),
+                    Pixels::Part(p, x, y) => Pixels::Part(p.clone(), *x, *y),
                 },
             }),
             src,
@@ -367,6 +427,7 @@ mod tests {
             alpha: 1.0,
             quality: Quality::None,
             tint,
+            tiled: false,
             draw: d,
         };
         crate::raster::paint(
@@ -431,6 +492,7 @@ mod tests {
             alpha: 1.0,
             quality: Quality::Medium,
             tint: None,
+            tiled: false,
             draw: d,
         };
         crate::raster::paint(
@@ -466,6 +528,7 @@ mod tests {
                     pixels: match &img.pixels {
                         Pixels::Rgba(d) => Pixels::Rgba(d.clone()),
                         Pixels::Encoded(d, u) => Pixels::Encoded(d.clone(), *u),
+                        Pixels::Part(p, x, y) => Pixels::Part(p.clone(), *x, *y),
                     },
                 }),
                 src: Rect::new(0.0, 0.0, 64.0, 64.0),
@@ -473,6 +536,7 @@ mod tests {
                 alpha: 1.0,
                 quality: Quality::Medium,
                 tint: Some(tint),
+                tiled: false,
                 draw: Draw {
                     xf: Transform::identity(),
                     blend: Blend::Copy,

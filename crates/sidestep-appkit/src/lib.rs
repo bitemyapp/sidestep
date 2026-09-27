@@ -55,6 +55,7 @@ mod bitmap;
 mod codec;
 mod color;
 mod context;
+mod coregraphics;
 mod effect_view;
 mod gradient;
 mod image;

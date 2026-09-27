@@ -223,6 +223,19 @@ pictures on macOS for comparison):
   written to pasteboards (TIFF, the other image types, image files).
 - `NSGradient`, `NSShadow`, `NSVisualEffectView` (an opaque material),
   `alphaValue`, and `NSAnimationContext` (changes apply at once).
+- CoreGraphics (`coregraphics/`, the gallery's `SCENARIO=cg` page):
+  `CGContext` sharing `NSGraphicsContext`'s graphics state (paths, fills,
+  strokes, dashes, clips and clips to masks, blend modes, alpha, shadows,
+  transparency layers, gradients and shadings, images, the text state),
+  bitmap contexts in CoreGraphics' layouts, `CGPath` with CoreGraphics'
+  element structure, `CGColor` and `CGColorSpace` (named, indexed, ICC and
+  extended spaces, by model), `CGImage` in every layout it reads (masks,
+  parts, masking), data providers and consumers, `CGGradient`,
+  `CGFunction`, `CGShading`, `CGFont`, the geometry and affine functions,
+  and AppKit's bridges (`-[NSColor CGColor]`, `-[NSGraphicsContext
+  CGContext]`, `-[NSImage CGImageForProposedRect:context:hints:]`,
+  `-[NSBitmapImageRep CGImage]`, `-[NSBezierPath CGPath]` and their
+  inverses).
 
 Events and window behaviour since (`examples/appkit-events` shows sheets,
 modal windows and tooltips; `examples/eventbench` measures):
@@ -325,6 +338,13 @@ Next:
   visual effect views (no Wayland protocol yet), and batching a bitmap
   context's operations instead of rasterizing each at once (layouts other
   than RGBA are unpacked and packed for each).
+- CoreGraphics: text drawing (`CGContextShowGlyphsAtPositions` and its kin
+  do nothing until CoreText), pattern colors, conic gradients, the path
+  set operations, `CGLayer`, PDF, CMYK and 5-bit bitmap contexts, 16-bit
+  and float contexts at their full precision, dithered gradients, color
+  management by profile (CMYK, contexts in wide spaces, images and bitmaps
+  in calibrated spaces both ways), images of files in their own layouts,
+  macOS's upscaling filter, and radial gradients whose circles cross.
 - Scroll views: rubber-banding (Linux desktops don't), rulers
   (`NSRulerView`), the find bar, animated `pageDown:`, drawing at a
   magnification (it scales the clip view's bounds, which drawing doesn't
@@ -515,13 +535,12 @@ libobjc2 v2 ABI's `__objc_load` path) the runtime would then need to accept.
 - Keep the fallback declarations crate from [legal.md](legal.md) ready:
   prototype the Cargo mechanics early.
 - CI on Linux x86_64 and aarch64 and on macOS.
-- CoreGraphics, QuartzCore, CoreText and ImageIO: with the fork, their
-  crates and AppKit's methods with their types (`-[NSGraphicsContext
-  CGContext]`, `-[NSColor CGColor]`, `-[NSView layer]` and the rest) build
+- QuartzCore, CoreText and ImageIO: with the fork, their crates and
+  AppKit's methods with their types (`-[NSView layer]` and the rest) build
   on Linux, and sidestep-appkit depends on them. Supply the classes and
-  functions behind them next: CGContext (its graphics state is shaped for a
-  one-to-one mapping), CGPath and CGImage, CALayer and CADisplayLink, CTLine
-  and CTFont, CGImageSource.
+  functions behind them next, as CoreGraphics' are: CALayer and
+  CADisplayLink, CTLine and CTFont (which CoreGraphics' text drawing
+  waits for), CGImageSource.
 - Ask objc2 to link objc2-core-services and -natural-language (and any
   framework crate without GNUstep support) to their frameworks only on
   Apple targets; needs the maintainer's go-ahead like the fork's commits.

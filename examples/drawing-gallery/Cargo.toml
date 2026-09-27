@@ -8,7 +8,9 @@ publish = false
 objc2.workspace = true
 block2.workspace = true
 objc2-foundation = { workspace = true, features = ["NSString", "NSObject", "NSThread", "NSTimer", "NSDate", "NSDictionary", "NSGeometry", "NSNotification", "NSZone", "NSArray", "NSAffineTransform", "block2", "objc2-core-foundation"] }
-objc2-app-kit = { workspace = true, features = ["NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics", "NSGraphicsContext", "NSColor", "NSColorSpace", "NSFont", "NSFontDescriptor", "NSBezierPath", "NSStringDrawing", "NSAttributedString", "NSRunningApplication", "NSAffineTransform", "NSAppearance", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSCustomImageRep", "NSGradient", "NSShadow", "NSAnimationContext", "NSAnimation", "block2", "objc2-core-foundation"] }
+objc2-app-kit = { workspace = true, features = ["NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics", "NSGraphicsContext", "NSColor", "NSColorSpace", "NSFont", "NSFontDescriptor", "NSBezierPath", "NSStringDrawing", "NSAttributedString", "NSRunningApplication", "NSAffineTransform", "NSAppearance", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSCustomImageRep", "NSGradient", "NSShadow", "NSAnimationContext", "NSAnimation", "block2", "objc2-core-foundation", "objc2-core-graphics"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "objc2", "CFCGTypes"] }
+objc2-core-graphics = { workspace = true, features = ["CGBitmapContext", "CGColor", "CGColorSpace", "CGContext", "CGGradient", "CGImage", "CGPath", "bitflags", "objc2"] }
 sidestep.workspace = true
 # For writing PNG files (GALLERY_PNG) and for make-image-fixtures, which
 # writes the conformance tests' image files (never made with Apple's

@@ -30,6 +30,7 @@ use objc2::{AnyThread, ClassType, DefinedClass, Message, define_class, msg_send}
 use objc2_app_kit::{
     NSBitmapFormat, NSBitmapImageRep, NSCompositingOperation, NSCustomImageRep, NSImageInterpolation, NSImageRep,
 };
+use objc2_core_graphics::CGImage;
 use objc2_foundation::{NSArray, NSCopying, NSDictionary, NSInteger, NSPoint, NSRect, NSSize, NSString, NSZone};
 
 use crate::appearance;
@@ -112,6 +113,13 @@ define_class!(
         #[unsafe(method(drawInRect:))]
         fn draw_in_rect(&self, r: NSRect) -> bool {
             draw_rep(self.as_rep(), NSRect::ZERO, r, Blend::SourceOver, 1.0, false)
+        }
+
+        #[unsafe(method(CGImageForProposedRect:context:hints:))]
+        fn cg_image_for(&self, proposed: *mut NSRect, context: Option<&AnyObject>, _hints: Option<&AnyObject>) -> *mut CGImage {
+            let size = proposed_size(proposed).unwrap_or(self.ivars().size.get());
+            let pixels = pixels_for(size, context);
+            cg_image(self.as_rep(), pixels).map_or(std::ptr::null_mut(), |i| Retained::autorelease_ptr(i.as_cg().retain()))
         }
 
         #[unsafe(method(drawInRect:fromRect:operation:fraction:respectFlipped:hints:))]
@@ -586,6 +594,7 @@ pub(crate) fn draw_rep_tinted(
             alpha: fraction.clamp(0.0, 1.0) as f32,
             quality,
             tint,
+            tiled: false,
             draw,
         });
         matches!(st.target, crate::context::Target::Record)
@@ -594,6 +603,40 @@ pub(crate) fn draw_rep_tinted(
         crate::bitmap::mark_recorded(&bitmap);
     }
     true
+}
+
+/// The size of the rectangle `CGImageForProposedRect:` proposes, if one.
+pub(crate) fn proposed_size(proposed: *const NSRect) -> Option<NSSize> {
+    // SAFETY: the caller passes null or a rectangle.
+    let r = (!proposed.is_null()).then(|| unsafe { *proposed })?;
+    (r.size.width > 0.0 && r.size.height > 0.0).then_some(r.size)
+}
+
+/// The pixels `size` points take in `context` (an `NSGraphicsContext`, or
+/// one pixel a point without one).
+pub(crate) fn pixels_for(size: NSSize, context: Option<&AnyObject>) -> (usize, usize) {
+    let scale = context
+        .and_then(|c| c.downcast_ref::<objc2_app_kit::NSGraphicsContext>())
+        .and_then(|c| crate::context::with_state_of(c, |st| device_scale(st)))
+        .unwrap_or(1.0);
+    let px = |v: f64| (v.abs() * scale).ceil().max(1.0) as usize;
+    (px(size.width), px(size.height))
+}
+
+/// A representation's pixels as a CGImage: a bitmap's own, or a custom
+/// rep's drawing at `pixels`.
+pub(crate) fn cg_image(
+    rep: &NSImageRep,
+    pixels: (usize, usize),
+) -> Option<Retained<crate::coregraphics::image::CGImageImpl>> {
+    if let Some(bitmap) = rep.downcast_ref::<NSBitmapImageRep>() {
+        return crate::bitmap::cg_image(bitmap);
+    }
+    let custom = rep.downcast_ref::<NSCustomImageRep>()?;
+    // SAFETY: every NSCustomImageRep is an NSCustomImageRepImpl.
+    let custom = unsafe { &*(custom as *const NSCustomImageRep).cast::<NSCustomImageRepImpl>() };
+    let bitmap = custom.rendered(pixels)?;
+    crate::bitmap::cg_image(&bitmap)
 }
 
 /// Device pixels per user-space unit, roughly, where drawing goes now.

@@ -9,7 +9,9 @@
 //! compositing; `symbols`: symbol images, tinted; `alpha`: views with
 //! `alphaValue`, set through `animator`;
 //! `bench`: a frame of 2,000 rounded-rect fills, 1,000 strokes and 300
-//! image draws (half of them downscaled), timed.
+//! image draws (half of them downscaled), timed; `cg`: CoreGraphics, the
+//! same kinds of drawing through `-[NSGraphicsContext CGContext]`;
+//! `cgbench`: the bench frame through CoreGraphics calls.
 //! GALLERY_QUIT_AFTER: seconds until the app terminates itself.
 //! GALLERY_APPEARANCE: `light` or `dark` sets the application's
 //! appearance (else it follows the desktop's).
@@ -36,6 +38,12 @@ use objc2_app_kit::{
     NSGradient, NSGradientDrawingOptions, NSGraphicsContext, NSImage, NSLineCapStyle, NSLineJoinStyle, NSRectFill,
     NSRectFillUsingOperation, NSResponder, NSShadow, NSStringDrawing, NSView, NSWindingRule, NSWindow,
     NSWindowStyleMask,
+};
+use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
+use objc2_core_graphics::{
+    CGBitmapContextCreate, CGBitmapContextCreateImage, CGBlendMode, CGColor, CGColorSpace, CGContext, CGGradient,
+    CGGradientDrawingOptions, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo, CGLineCap, CGLineJoin, CGMutablePath,
+    CGPath, CGPathDrawingMode, kCGColorSpaceSRGB,
 };
 use objc2_foundation::{
     NSAffineTransform, NSArray, NSDictionary, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize,
@@ -642,6 +650,8 @@ define_class!(
                 "symbols" => symbols(),
                 "alpha" => label("alpha 1, 0.6, 0.3 (through animator); 0.5 inside 0.5; 0 (not drawn)", NSPoint::new(GAP, GAP)),
                 "bench" => bench_frame(),
+                "cg" => coregraphics(),
+                "cgbench" => cg_bench_frame(),
                 _ => shapes(),
             }
             let i = self.ivars();
@@ -662,6 +672,412 @@ impl Canvas {
     fn take_average(&self) -> f64 {
         let i = self.ivars();
         i.drawing.replace(0.0) * 1000.0 / f64::from(i.frames.replace(0).max(1))
+    }
+}
+
+// CoreGraphics: the same kinds of drawing through a CGContext.
+
+/// The current context's CGContext.
+fn cg() -> Retained<CGContext> {
+    NSGraphicsContext::currentContext().expect("a context in drawRect:").CGContext()
+}
+
+fn cgr(r: NSRect) -> CGRect {
+    CGRect::new(CGPoint::new(r.origin.x, r.origin.y), CGSize::new(r.size.width, r.size.height))
+}
+
+fn cg_srgb() -> CFRetained<CGColorSpace> {
+    CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB })).expect("sRGB")
+}
+
+/// A `w` × `h` CGImage drawn by `f` into a BGRA bitmap context (the byte
+/// order Macs draw in), user space's origin at its bottom left.
+fn cg_image(w: usize, h: usize, f: impl FnOnce(&CGContext)) -> CFRetained<CGImage> {
+    let info = CGImageAlphaInfo::PremultipliedFirst.0 | CGImageByteOrderInfo::Order32Little.0;
+    // SAFETY: no data: the context allocates.
+    let c =
+        unsafe { CGBitmapContextCreate(std::ptr::null_mut(), w, h, 8, 0, Some(&cg_srgb()), info) }.expect("a context");
+    f(&c);
+    CGBitmapContextCreateImage(Some(&c)).expect("an image")
+}
+
+/// Draw `image` into `r` of a flipped view the right way up.
+fn draw_upright(c: &CGContext, r: NSRect, image: &CGImage) {
+    CGContext::save_g_state(Some(c));
+    CGContext::translate_ctm(Some(c), r.origin.x, r.origin.y + r.size.height);
+    CGContext::scale_ctm(Some(c), 1.0, -1.0);
+    CGContext::draw_image(Some(c), CGRect::new(CGPoint::ZERO, CGSize::new(r.size.width, r.size.height)), Some(image));
+    CGContext::restore_g_state(Some(c));
+}
+
+fn gradient(stops: &[[f64; 4]]) -> CFRetained<CGGradient> {
+    let comps: Vec<f64> = stops.iter().flatten().copied().collect();
+    // SAFETY: four components a stop; no locations.
+    unsafe { CGGradient::with_color_components(Some(&cg_srgb()), comps.as_ptr(), std::ptr::null(), stops.len()) }
+        .expect("a gradient")
+}
+
+fn coregraphics() {
+    let c = cg();
+    let red = CGColor::new_srgb(0.88, 0.11, 0.14, 1.0);
+    let blue = CGColor::new_srgb(0.21, 0.52, 0.89, 1.0);
+    let green = CGColor::new_srgb(0.18, 0.76, 0.49, 1.0);
+    let ink = NSColor::labelColor().CGColor();
+    with_tile(0, "fills", |r| {
+        CGContext::set_fill_color_with_color(Some(&c), Some(&red));
+        CGContext::fill_rect(Some(&c), cgr(rect(r.origin.x + 10.0, r.origin.y + 10.0, 60.0, 60.0)));
+        CGContext::set_rgb_fill_color(Some(&c), 0.21, 0.52, 0.89, 0.6);
+        CGContext::fill_rect(Some(&c), cgr(rect(r.origin.x + 40.0, r.origin.y + 40.0, 70.0, 70.0)));
+        CGContext::set_fill_color_with_color(Some(&c), Some(&green));
+        CGContext::fill_ellipse_in_rect(Some(&c), cgr(rect(r.origin.x + 80.0, r.origin.y + 80.0, 60.0, 60.0)));
+    });
+    with_tile(1, "rounded CGPaths", |r| {
+        CGContext::set_fill_color_with_color(Some(&c), Some(&NSColor::systemBlueColor().CGColor()));
+        for (k, radius) in [2.0, 8.0, 15.0].into_iter().enumerate() {
+            let y = r.origin.y + 8.0 + k as f64 * 35.0;
+            // SAFETY: no transform.
+            let p = unsafe {
+                CGPath::with_rounded_rect(cgr(rect(r.origin.x + 8.0, y, 134.0, 30.0)), radius, radius, std::ptr::null())
+            };
+            CGContext::add_path(Some(&c), Some(&p));
+            CGContext::fill_path(Some(&c));
+        }
+        let p = CGMutablePath::new();
+        // SAFETY: no transform.
+        unsafe {
+            CGMutablePath::add_rounded_rect(
+                Some(&p),
+                std::ptr::null(),
+                cgr(rect(r.origin.x + 8.0, r.origin.y + 113.0, 134.0, 30.0)),
+                15.0,
+                15.0,
+            )
+        };
+        CGContext::set_stroke_color_with_color(Some(&c), Some(&ink));
+        CGContext::set_line_width(Some(&c), 2.0);
+        CGContext::add_path(Some(&c), Some(&p));
+        CGContext::stroke_path(Some(&c));
+    });
+    with_tile(2, "caps, joins, dashes", |r| {
+        CGContext::set_stroke_color_with_color(Some(&c), Some(&ink));
+        let styles = [
+            (CGLineCap::Butt, CGLineJoin::Miter),
+            (CGLineCap::Round, CGLineJoin::Round),
+            (CGLineCap::Square, CGLineJoin::Bevel),
+        ];
+        CGContext::set_line_width(Some(&c), 9.0);
+        for (k, (cap, join)) in styles.into_iter().enumerate() {
+            let x = r.origin.x + 20.0 + k as f64 * 45.0;
+            CGContext::set_line_cap(Some(&c), cap);
+            CGContext::set_line_join(Some(&c), join);
+            CGContext::move_to_point(Some(&c), x, r.origin.y + 20.0);
+            CGContext::add_line_to_point(Some(&c), x + 25.0, r.origin.y + 60.0);
+            CGContext::add_line_to_point(Some(&c), x, r.origin.y + 100.0);
+            CGContext::stroke_path(Some(&c));
+        }
+        CGContext::set_line_width(Some(&c), 3.0);
+        CGContext::set_line_cap(Some(&c), CGLineCap::Butt);
+        for (k, pattern) in [[6.0, 3.0], [2.0, 4.0]].iter().enumerate() {
+            // SAFETY: two lengths.
+            unsafe { CGContext::set_line_dash(Some(&c), 0.0, pattern.as_ptr(), 2) };
+            let y = r.origin.y + 120.0 + k as f64 * 14.0;
+            CGContext::move_to_point(Some(&c), r.origin.x + 10.0, y);
+            CGContext::add_line_to_point(Some(&c), r.origin.x + 140.0, y);
+            CGContext::stroke_path(Some(&c));
+        }
+    });
+    with_tile(3, "arcs and curves", |r| {
+        let (cx, cy) = (r.origin.x + 45.0, r.origin.y + 45.0);
+        CGContext::set_fill_color_with_color(Some(&c), Some(&red));
+        CGContext::set_stroke_color_with_color(Some(&c), Some(&ink));
+        CGContext::set_line_width(Some(&c), 2.0);
+        CGContext::move_to_point(Some(&c), cx, cy);
+        CGContext::add_arc(Some(&c), cx, cy, 35.0, 0.3, 5.2, 0);
+        CGContext::close_path(Some(&c));
+        CGContext::draw_path(Some(&c), CGPathDrawingMode::FillStroke);
+        CGContext::move_to_point(Some(&c), r.origin.x + 90.0, r.origin.y + 10.0);
+        CGContext::add_arc_to_point(
+            Some(&c),
+            r.origin.x + 140.0,
+            r.origin.y + 10.0,
+            r.origin.x + 140.0,
+            r.origin.y + 80.0,
+            25.0,
+        );
+        CGContext::add_line_to_point(Some(&c), r.origin.x + 140.0, r.origin.y + 80.0);
+        CGContext::stroke_path(Some(&c));
+        CGContext::set_stroke_color_with_color(Some(&c), Some(&blue));
+        CGContext::set_line_width(Some(&c), 3.0);
+        CGContext::move_to_point(Some(&c), r.origin.x + 10.0, r.origin.y + 140.0);
+        CGContext::add_curve_to_point(
+            Some(&c),
+            r.origin.x + 40.0,
+            r.origin.y + 60.0,
+            r.origin.x + 110.0,
+            r.origin.y + 150.0,
+            r.origin.x + 140.0,
+            r.origin.y + 100.0,
+        );
+        CGContext::add_quad_curve_to_point(
+            Some(&c),
+            r.origin.x + 100.0,
+            r.origin.y + 80.0,
+            r.origin.x + 60.0,
+            r.origin.y + 100.0,
+        );
+        CGContext::stroke_path(Some(&c));
+    });
+    with_tile(4, "gradients", |r| {
+        let g = gradient(&[[0.95, 0.3, 0.2, 1.0], [0.95, 0.8, 0.2, 1.0], [0.2, 0.6, 0.95, 1.0]]);
+        CGContext::save_g_state(Some(&c));
+        CGContext::clip_to_rect(Some(&c), cgr(rect(r.origin.x + 8.0, r.origin.y + 8.0, 134.0, 60.0)));
+        CGContext::draw_linear_gradient(
+            Some(&c),
+            Some(&g),
+            CGPoint::new(r.origin.x + 8.0, 0.0),
+            CGPoint::new(r.origin.x + 142.0, 0.0),
+            CGGradientDrawingOptions::empty(),
+        );
+        CGContext::restore_g_state(Some(&c));
+        let both = CGGradientDrawingOptions::DrawsBeforeStartLocation | CGGradientDrawingOptions::DrawsAfterEndLocation;
+        CGContext::save_g_state(Some(&c));
+        CGContext::clip_to_rect(Some(&c), cgr(rect(r.origin.x + 8.0, r.origin.y + 76.0, 134.0, 66.0)));
+        CGContext::draw_radial_gradient(
+            Some(&c),
+            Some(&g),
+            CGPoint::new(r.origin.x + 60.0, r.origin.y + 100.0),
+            4.0,
+            CGPoint::new(r.origin.x + 75.0, r.origin.y + 109.0),
+            50.0,
+            both,
+        );
+        CGContext::restore_g_state(Some(&c));
+    });
+    with_tile(5, "shadows and layers", |r| {
+        let shadow = CGColor::new_generic_gray(0.0, 0.6);
+        CGContext::save_g_state(Some(&c));
+        CGContext::set_shadow_with_color(Some(&c), CGSize::new(4.0, -4.0), 4.0, Some(&shadow));
+        CGContext::set_fill_color_with_color(Some(&c), Some(&blue));
+        CGContext::fill_rect(Some(&c), cgr(rect(r.origin.x + 12.0, r.origin.y + 12.0, 50.0, 50.0)));
+        CGContext::restore_g_state(Some(&c));
+        // Two overlapping squares faded as one, with one shadow.
+        CGContext::save_g_state(Some(&c));
+        CGContext::set_alpha(Some(&c), 0.6);
+        CGContext::set_shadow_with_color(Some(&c), CGSize::new(3.0, -3.0), 3.0, Some(&shadow));
+        // SAFETY: no auxiliary info.
+        unsafe { CGContext::begin_transparency_layer(Some(&c), None) };
+        CGContext::set_fill_color_with_color(Some(&c), Some(&red));
+        CGContext::fill_rect(Some(&c), cgr(rect(r.origin.x + 70.0, r.origin.y + 60.0, 50.0, 50.0)));
+        CGContext::set_fill_color_with_color(Some(&c), Some(&green));
+        CGContext::fill_rect(Some(&c), cgr(rect(r.origin.x + 90.0, r.origin.y + 85.0, 50.0, 50.0)));
+        CGContext::end_transparency_layer(Some(&c));
+        CGContext::restore_g_state(Some(&c));
+    });
+    with_tile(6, "clips", |r| {
+        CGContext::save_g_state(Some(&c));
+        CGContext::add_ellipse_in_rect(Some(&c), cgr(rect(r.origin.x + 8.0, r.origin.y + 8.0, 134.0, 70.0)));
+        CGContext::add_ellipse_in_rect(Some(&c), cgr(rect(r.origin.x + 48.0, r.origin.y + 28.0, 54.0, 30.0)));
+        CGContext::eo_clip(Some(&c));
+        for k in 0..10 {
+            let color = if k % 2 == 0 { &red } else { &blue };
+            CGContext::set_fill_color_with_color(Some(&c), Some(color));
+            CGContext::fill_rect(Some(&c), cgr(rect(r.origin.x + k as f64 * 15.0, r.origin.y, 15.0, 90.0)));
+        }
+        CGContext::restore_g_state(Some(&c));
+        // A clip to a mask: a gray image, drawn with a radial gradient.
+        let gray = CGColorSpace::new_device_gray().expect("gray");
+        // SAFETY: no data: the context allocates.
+        let m =
+            unsafe { CGBitmapContextCreate(std::ptr::null_mut(), 64, 64, 8, 0, Some(&gray), CGImageAlphaInfo::None.0) }
+                .expect("a gray context");
+        let g = gradient(&[[1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 1.0]]);
+        let after = CGGradientDrawingOptions::DrawsAfterEndLocation;
+        CGContext::draw_radial_gradient(
+            Some(&m),
+            Some(&g),
+            CGPoint::new(32.0, 32.0),
+            0.0,
+            CGPoint::new(32.0, 32.0),
+            32.0,
+            after,
+        );
+        let mask = CGBitmapContextCreateImage(Some(&m)).expect("a mask");
+        CGContext::save_g_state(Some(&c));
+        let area = cgr(rect(r.origin.x + 40.0, r.origin.y + 90.0, 70.0, 56.0));
+        CGContext::clip_to_mask(Some(&c), area, Some(&mask));
+        CGContext::set_fill_color_with_color(Some(&c), Some(&green));
+        CGContext::fill_rect(Some(&c), area);
+        CGContext::restore_g_state(Some(&c));
+    });
+    with_tile(7, "images from bitmap contexts", |r| {
+        let image = cg_image(48, 48, |m| {
+            CGContext::set_rgb_fill_color(Some(m), 0.95, 0.95, 0.95, 1.0);
+            CGContext::fill_rect(Some(m), CGRect::new(CGPoint::ZERO, CGSize::new(48.0, 48.0)));
+            CGContext::set_rgb_fill_color(Some(m), 0.88, 0.11, 0.14, 1.0);
+            CGContext::fill_rect(Some(m), CGRect::new(CGPoint::ZERO, CGSize::new(24.0, 24.0)));
+            CGContext::set_rgb_fill_color(Some(m), 0.21, 0.52, 0.89, 1.0);
+            CGContext::fill_ellipse_in_rect(Some(m), CGRect::new(CGPoint::new(20.0, 20.0), CGSize::new(26.0, 26.0)));
+        });
+        draw_upright(&c, rect(r.origin.x + 8.0, r.origin.y + 8.0, 48.0, 48.0), &image);
+        draw_upright(&c, rect(r.origin.x + 64.0, r.origin.y + 8.0, 78.0, 96.0), &image);
+        // Upside down, as CGContextDrawImage draws in a flipped view.
+        CGContext::draw_image(Some(&c), cgr(rect(r.origin.x + 8.0, r.origin.y + 64.0, 48.0, 48.0)), Some(&image));
+        let part =
+            CGImage::with_image_in_rect(Some(&image), CGRect::new(CGPoint::new(0.0, 24.0), CGSize::new(24.0, 24.0)));
+        if let Some(part) = part {
+            draw_upright(&c, rect(r.origin.x + 8.0, r.origin.y + 118.0, 24.0, 24.0), &part);
+        }
+    });
+    with_tile(8, "blend modes", |r| {
+        let modes = [
+            CGBlendMode::Normal,
+            CGBlendMode::Multiply,
+            CGBlendMode::Screen,
+            CGBlendMode::Difference,
+            CGBlendMode::XOR,
+            CGBlendMode::PlusLighter,
+        ];
+        for (k, mode) in modes.into_iter().enumerate() {
+            let (x, y) = (r.origin.x + 6.0 + (k % 2) as f64 * 72.0, r.origin.y + 6.0 + (k / 2) as f64 * 48.0);
+            CGContext::save_g_state(Some(&c));
+            CGContext::set_fill_color_with_color(Some(&c), Some(&blue));
+            CGContext::fill_rect(Some(&c), cgr(rect(x, y, 40.0, 40.0)));
+            CGContext::set_blend_mode(Some(&c), mode);
+            CGContext::set_rgb_fill_color(Some(&c), 0.95, 0.6, 0.1, 1.0);
+            CGContext::fill_ellipse_in_rect(Some(&c), cgr(rect(x + 20.0, y + 10.0, 40.0, 36.0)));
+            CGContext::restore_g_state(Some(&c));
+        }
+    });
+    with_tile(9, "transforms", |r| {
+        CGContext::save_g_state(Some(&c));
+        CGContext::translate_ctm(Some(&c), r.origin.x + 75.0, r.origin.y + 75.0);
+        for k in 0..12 {
+            CGContext::rotate_ctm(Some(&c), std::f64::consts::TAU / 12.0);
+            let t = k as f64 / 12.0;
+            CGContext::set_rgb_fill_color(Some(&c), 0.2 + 0.7 * t, 0.4, 0.9 - 0.6 * t, 0.85);
+            CGContext::fill_rect(Some(&c), CGRect::new(CGPoint::new(20.0, -5.0), CGSize::new(45.0, 10.0)));
+        }
+        CGContext::scale_ctm(Some(&c), 1.5, 0.7);
+        CGContext::set_fill_color_with_color(Some(&c), Some(&ink));
+        CGContext::fill_ellipse_in_rect(Some(&c), CGRect::new(CGPoint::new(-10.0, -10.0), CGSize::new(20.0, 20.0)));
+        CGContext::restore_g_state(Some(&c));
+    });
+    with_tile(10, "system colors as CGColors", |r| {
+        let named = [
+            NSColor::systemRedColor,
+            NSColor::systemOrangeColor,
+            NSColor::systemYellowColor,
+            NSColor::systemGreenColor,
+            NSColor::systemTealColor,
+            NSColor::systemBlueColor,
+            NSColor::systemIndigoColor,
+            NSColor::systemPurpleColor,
+            NSColor::systemPinkColor,
+        ];
+        for (k, make) in named.iter().enumerate() {
+            let (x, y) = (r.origin.x + 8.0 + (k % 3) as f64 * 46.0, r.origin.y + 8.0 + (k / 3) as f64 * 46.0);
+            CGContext::set_fill_color_with_color(Some(&c), Some(&make().CGColor()));
+            // SAFETY: no transform.
+            let p = unsafe { CGPath::with_rounded_rect(cgr(rect(x, y, 40.0, 40.0)), 8.0, 8.0, std::ptr::null()) };
+            CGContext::add_path(Some(&c), Some(&p));
+            CGContext::fill_path(Some(&c));
+        }
+    });
+    with_tile(11, "stroked and dashed CGPaths", |r| {
+        // SAFETY: no transform.
+        let star = unsafe {
+            let p = CGMutablePath::new();
+            for k in 0..10 {
+                let a = std::f64::consts::FRAC_PI_2 + k as f64 * std::f64::consts::PI / 5.0;
+                let radius = if k % 2 == 0 { 40.0 } else { 16.0 };
+                let (x, y) = (r.origin.x + 75.0 + radius * a.cos(), r.origin.y + 50.0 - radius * a.sin());
+                if k == 0 {
+                    CGMutablePath::move_to_point(Some(&p), std::ptr::null(), x, y)
+                } else {
+                    CGMutablePath::add_line_to_point(Some(&p), std::ptr::null(), x, y)
+                }
+            }
+            CGMutablePath::close_subpath(Some(&p));
+            p
+        };
+        // SAFETY: no transform.
+        let outline = unsafe {
+            CGPath::new_copy_by_stroking_path(
+                Some(&star),
+                std::ptr::null(),
+                8.0,
+                CGLineCap::Round,
+                CGLineJoin::Round,
+                10.0,
+            )
+        };
+        if let Some(outline) = outline {
+            CGContext::set_fill_color_with_color(Some(&c), Some(&blue));
+            CGContext::add_path(Some(&c), Some(&outline));
+            CGContext::fill_path(Some(&c));
+        }
+        let lengths = [8.0, 4.0];
+        // SAFETY: no transform; two lengths.
+        let dashed = unsafe {
+            CGPath::new_copy_by_dashing_path(
+                Some(&CGPath::with_ellipse_in_rect(
+                    cgr(rect(r.origin.x + 20.0, r.origin.y + 100.0, 110.0, 44.0)),
+                    std::ptr::null(),
+                )),
+                std::ptr::null(),
+                0.0,
+                lengths.as_ptr(),
+                2,
+            )
+        };
+        if let Some(dashed) = dashed {
+            CGContext::set_stroke_color_with_color(Some(&c), Some(&ink));
+            CGContext::set_line_width(Some(&c), 2.0);
+            CGContext::add_path(Some(&c), Some(&dashed));
+            CGContext::stroke_path(Some(&c));
+        }
+    });
+}
+
+thread_local!(static CG_BENCH_IMAGES: OnceCell<(Retained<CGImage>, Retained<CGImage>)> = const { OnceCell::new() });
+
+/// A checkerboard `n` pixels square as a CGImage.
+fn card_image(n: usize) -> Retained<CGImage> {
+    let image = card(n);
+    // SAFETY: no proposed rectangle, context or hints.
+    unsafe { image.CGImageForProposedRect_context_hints(std::ptr::null_mut(), None, None) }.expect("a CGImage")
+}
+
+/// The bench frame through a CGContext: the same 2,000 rounded-rect fills
+/// (a CGPath each, added and filled), 1,000 strokes and 300 images.
+fn cg_bench_frame() {
+    let c = cg();
+    let (small, big) = CG_BENCH_IMAGES.with(|i| i.get_or_init(|| (card_image(32), card_image(256))).clone());
+    let colors = [
+        CGColor::new_srgb(0.88, 0.11, 0.14, 1.0),
+        CGColor::new_srgb(0.21, 0.52, 0.89, 1.0),
+        CGColor::new_srgb(0.18, 0.76, 0.49, 0.8),
+    ];
+    for k in 0..2000 {
+        let (x, y) = ((k % 50) as f64 * 19.0 + 4.0, (k / 50) as f64 * 9.0 + 4.0);
+        CGContext::set_fill_color_with_color(Some(&c), Some(&colors[k % 3]));
+        // SAFETY: no transform.
+        let p = unsafe { CGPath::with_rounded_rect(cgr(rect(x, y, 16.0, 7.0)), 3.0, 3.0, std::ptr::null()) };
+        CGContext::add_path(Some(&c), Some(&p));
+        CGContext::fill_path(Some(&c));
+    }
+    CGContext::set_stroke_color_with_color(Some(&c), Some(&NSColor::labelColor().CGColor()));
+    CGContext::set_line_width(Some(&c), 1.0);
+    for k in 0..1000 {
+        let (x, y) = ((k % 40) as f64 * 24.0 + 2.0, (k / 40) as f64 * 14.0 + 2.0);
+        CGContext::move_to_point(Some(&c), x, y);
+        CGContext::add_line_to_point(Some(&c), x + 20.0, y + 12.0);
+        CGContext::stroke_path(Some(&c));
+    }
+    for k in 0..300 {
+        let (x, y) = ((k % 25) as f64 * 38.0 + 4.0, (k / 25) as f64 * 30.0 + 4.0);
+        let image = if k % 2 == 0 { &small } else { &big };
+        CGContext::draw_image(Some(&c), cgr(rect(x, y, 28.0, 28.0)), Some(image));
     }
 }
 
@@ -789,7 +1205,7 @@ impl Delegate {
         window.setTitle(ns_string!("Sidestep drawing gallery"));
         window.setContentView(Some(&canvas));
 
-        if scenario == "bench" {
+        if scenario == "bench" || scenario == "cgbench" {
             // Redraw every frame for a second, then time drawing into
             // bitmaps at 1× and 2×.
             let redraw = canvas.clone();
@@ -857,7 +1273,7 @@ fn content(mtm: MainThreadMarker, scenario: &str) -> Retained<Canvas> {
 fn headless(mtm: MainThreadMarker, path: &str) {
     let scenario = std::env::var("SCENARIO").unwrap_or_else(|_| "shapes".into());
     let canvas = content(mtm, &scenario);
-    if scenario == "bench" {
+    if scenario == "bench" || scenario == "cgbench" {
         for scale in [1.0, 2.0] {
             let total = time_bitmap(&canvas, scale);
             println!(

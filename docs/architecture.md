@@ -1321,6 +1321,208 @@ compositor.
   settings per group and runs completion handlers from the run loop once
   a group's duration has passed.
 
+### CoreGraphics
+
+CoreGraphics is a module tree in sidestep-appkit (`coregraphics/`): the C
+functions objc2-core-graphics declares, exported with their exact
+signatures (`#[unsafe(no_mangle)] pub extern "C-unwind"`, listed in
+[abi.md](abi.md#symbols)), and the AppKit methods that hand its objects in
+and out, which live with their classes and call in.
+
+- **Objects.** CoreFoundation objects are Objective-C objects in Sidestep,
+  and so are CoreGraphics': each type is a class with a Sidestep-private
+  name (`_SidestepCGColor`, `_SidestepCGPath`, `_SidestepCGContext`, …).
+  sidestep-foundation's `cf::types` knows the names and gives each its own
+  type ID (101 to 112, `cf_type_ids`), which `CGColorGetTypeID` and its
+  kin return, so `CFGetTypeID`, `CFCopyTypeIDDescription` and
+  objc2-core-foundation's downcasts work. `CFRetain` and `CFRelease` are the
+  runtime's retain and release; `CFEqual`, `CFHash` and `CFCopyDescription`
+  send `isEqual:`, `hash` and `description`, which the classes answer as
+  CoreGraphics does (colors equal by space and components, paths by
+  elements). Create and Copy functions return +1 references, Get functions
+  ones their argument keeps alive; functions given NULL or refused input
+  return NULL, zero or nothing, as CoreGraphics' do.
+- **One context, two interfaces.** A `CGContext` holds a
+  `context::ContextState`, the state `NSGraphicsContext` draws with, in a
+  `RefCell`. An `NSGraphicsContext` wraps one: `-CGContext` returns the same
+  object each time, the current context's drawing reaches the state through
+  it, and `+graphicsContextWithCGContext:flipped:` wraps any CGContext (a
+  bitmap context, say) so AppKit's drawing (paths, images, text) goes into
+  it. Drawing through either is the same drawing: one graphics state, whose
+  saves and restores interleave, in a window's display pass, a snapshot or
+  a bitmap. What CoreGraphics keeps beyond AppKit (line settings, the
+  global alpha, the fill and stroke color spaces, the text settings) is in
+  the graphics state as `CgState`; the text matrix, the current path and
+  the context-wide antialiasing and font settings are on the context. Each
+  function borrows the state and maps onto it one to one, with no message
+  sends: fills, strokes, clips, images, gradients and shadows become the
+  same ops `NSBezierPath`, `NSImage` and `NSGradient` record, and cost
+  the same (a recording-only benchmark in `coregraphics::context`'s tests
+  times a real application's most common calls both ways). A context is used by one
+  thread at a time. Program code (data provider callbacks, shading
+  functions) runs before the state is borrowed, so it may draw into the
+  same context; a call made while the state is borrowed does nothing, and
+  `NSGraphicsContext`'s methods don't panic then either. Each
+  `NSGraphicsContext` has its own flippedness: AppKit's drawing takes the
+  state as flipped as the current context is (a wrapper as it was made,
+  one AppKit made as the view drawing is), so a flipped wrapper of a view's
+  own CGContext made current and restored leaves the view as it was.
+  AppKit's drawing takes CoreGraphics' current path as macOS's does: a
+  path's fill or stroke draws what's left there too, a rectangle fill drops
+  it.
+- **Coordinates.** The context state's transform maps user space to layer
+  points, top-left origin; each context also has a device transform from
+  layer points to CoreGraphics' device space, and `CGContextGetCTM` is the
+  two together, as macOS reports it (measured): identity in a fresh bitmap
+  context (pixels from the bottom left, y up); in a view's `drawRect:` in a
+  snapshot (`cacheDisplayInRect:`), the bitmap's scale and the view's
+  place, with a flip folded in for flipped views; in a window's display
+  pass, the view's own space, as macOS draws each view into a layer of its
+  own: identity at the start of `drawRect:`, flipped view or not, with the
+  user-to-device transform the layer's pixels (the backing scale, turned
+  over for a flipped view). Elsewhere
+  `CGContextGetUserSpaceToDeviceSpaceTransform` and the conversions work
+  in pixels from the top left, as macOS's do. (macOS reports a view's clip
+  in a window as the window's frame; Sidestep's is the view's visible part,
+  which is what drawing is clipped to.) The current path is kept in
+  layer points, transformed by the CTM as each element is added, so
+  changing the CTM afterwards doesn't move it; a `CGPath` added whole to an
+  empty path is kept shared with the transform it was added under, so
+  filling it draws the path's own tiny-skia path, as `-[NSBezierPath
+  fill]` does. Strokes are made in user space when stroked, so the line
+  width scales with the CTM; a width of 0 draws nothing, a negative one a
+  line 1 wide. The rectangle functions (fills, strokes, clears, clips to
+  rectangles and masks) take the current path, as the path functions do;
+  clipping to a path with no elements leaves the clip, to one of no area
+  leaves nothing (at its bounds). Rectangle clips on whole points or pixels
+  narrow the clip rectangle; others (fractional edges, a turned CTM) become
+  antialiased clip paths, whose pixels the rasterizer rounds out.
+- **Paths.** `CGPath` and `CGMutablePath` are one class holding elements
+  (the tiny-skia path made once, when first drawn, as `NSBezierPath`'s is).
+  An immutable path's shape never changes after it's made, so it's shared
+  with its copies and read from any thread; a mutable one's is copied on
+  write. Rectangles, ellipses, rounded
+  rectangles and arcs are built with macOS's elements and starting points
+  (quarter-circle curves, the start and direction each takes), moves
+  collapse and a line with no current point is dropped, and the bounding
+  box and containment follow CoreGraphics' (`conformance/tests/coregraphics.rs`
+  pins them); an arc of more than a thousand turns adds nothing. Drawn
+  strokes and dashes are tiny-skia's; the stroking and flattening copies
+  use kurbo's stroker and flattener, and the dashing copies a dasher of
+  CoreGraphics' own rules (a closed subpath's last dash doesn't join its
+  first, which kurbo's would; a million dashes at most). Reading a path
+  doesn't touch its `RefCell`'s count, so threads may share a finished
+  mutable path for drawing.
+- **Bitmap contexts and images.** `CGBitmapContextCreate` draws into the
+  program's memory (or its own) in the layout asked for, rasterizing each
+  op at once on the calling thread (`raster::pixels`, shared with
+  `NSBitmapImageRep`): 8-bit RGB with alpha or padding first or last in
+  either byte order, 16-bit and float RGB, 8, 16 and float gray, gray with
+  alpha or padding and alpha alone, big-endian unless the byte order says
+  little. A padding sample holds alpha as CoreGraphics writes and reads it,
+  without holding the colors to it. The context's own rows are 32-byte
+  aligned by default; the program's memory needs a row length (a context
+  over it with none would overrun it, and none is made, as on macOS). A
+  layout it can't draw (a byte order that doesn't fit the samples, an
+  extended space without floats, CMYK, 5-bit RGB) makes no context. The
+  release callback gets the memory, the context's own too.
+  `CGImage` is immutable pixels in a layout from a data provider; drawing
+  takes it as premultiplied 8-bit RGBA, worked out the first time it's
+  drawn (row by row for the common 8-bit layouts, sample by sample on the
+  stack for the others) and shared through the image cache as a bitmap
+  snapshot is. An image of a PNG or JPEG file keeps the file and is
+  decoded where it's drawn, as `NSImage`'s are; a part of an image
+  (`CGImageCreateWithImageInRect`) is cropped from its image's cache entry
+  where it's drawn, so a sprite sheet decodes once, and its provider holds
+  its rows. Pixels asked for on the calling thread (masks, the bridges) are
+  worked out once and kept. `CGBitmapContextCreateImage` copies (a context
+  of alpha alone makes an image mask); `-[NSBitmapImageRep initWithCGImage:]`
+  keeps the image's layout and bytes where a rep has them (8 and 16-bit
+  gray and RGB, alpha first or last, straight or premultiplied, or padding
+  last) and converts others to 8-bit premultiplied sRGB, so colors survive
+  the trip; an image of a file makes a rep of the file. `-[NSBitmapImageRep
+  CGImage]` copies the rep's bytes in its layout where CoreGraphics has it,
+  and `-[NSImage CGImageForProposedRect:context:hints:]` gives the
+  representation's image (a file's stays a file). Image masks paint the
+  fill color where their samples are low; `CGContextClipToMask` clips to
+  an image mask's stencil, an image's alpha, a gray image's levels or a
+  color image's gray, sampled as images are drawn (nearest with no
+  interpolation), carried with each op as a clip image the rasterizer
+  samples. A decode array maps each color sample's range onto 0 to 1
+  (leaving alpha), as macOS does.
+- **Effects.** Shadows use AppKit's (offsets in base units, not moved by the
+  CTM; CoreGraphics' default is black at a third), as opaque as the paint
+  casting them. Color burn and soft light follow macOS's formulas (measured:
+  soft light's quadratic form, color burn not held at black before it's
+  mixed), composited by hand as plus-darker is; the other modes are
+  tiny-skia's. Gradients and shadings are the gradient code `NSGradient`
+  uses (shadings sampled into stops, the program's function called before
+  the state is borrowed); colors interpolate in the gradient's space
+  (sampled into stops for spaces that don't map to sRGB linearly);
+  locations outside 0 to 1 make no gradient; radial gradients have hard
+  edges, take pixels whose centers are on their circles, and leave what's
+  inside an end circle inside the start circle to after the end. Huge or
+  infinite radii cost nothing extra. Transparency layers are AppKit's
+  groups: an op list composited when the layer ends, with the alpha, blend
+  mode and shadow in force when it began; beginning one saves the graphics
+  state on the stack the program's saves use and ending it restores
+  whatever's on top, as on macOS, and a layer's rectangle narrows the
+  clip.
+- **Text.** The text settings (font, size, spacing, drawing mode, matrix
+  and position) are kept and read back; drawing glyphs through a
+  CGContext does nothing until CoreText arrives. `CGFont` reads a font
+  file's tables with skrifa (metrics, bounds, names, glyph names from
+  `post` or CFF, advances and boxes, tables by tag).
+- **TextKit's way in.** `coregraphics::context::with_state(cg, f)` runs `f`
+  with the context's `ContextState` (None if it's in use), for pushing ops
+  on it directly; `drawing_into(cg, f)` runs `f` with an
+  `NSGraphicsContext` wrapping `cg` current (and puts the previous one back
+  however `f` ends), for AppKit's drawing (strings, paths, images) into it.
+  Inside `with_state`, AppKit's drawing through the current context would
+  find the state borrowed and draw nothing: use `drawing_into` for that.
+
+CoreGraphics is in sidestep-appkit because a CGContext *is* AppKit's
+context state: it shares the graphics state, the ops, the rasterizer, the
+image cache and (with CoreText) the text. Splitting it into a crate below
+AppKit would take moving `context::ContextState` and `GState`,
+`protocol`'s ops, `raster` (with `raster::images` and `raster::pixels`),
+`gradient` and `color`'s conversions down with it, making the current
+context a hook AppKit installs, and turning the bridges (`-[NSColor
+CGColor]`, `-[NSBezierPath CGPath]`, `-[NSImage CGImageFor…]`, the bitmap
+and graphics context methods) into AppKit's side of an interface; nothing
+in `coregraphics/` uses AppKit's classes but those bridges and the
+current context.
+
+Colors are managed by formula, not ICC profiles (as `NSColor`'s are, the
+two sharing the conversions): sRGB and device RGB as they are; linear
+spaces through sRGB's curve; Display P3 through its matrix; Generic RGB
+and Generic Gray through their gamma of 1.8 and (RGB) the primaries macOS
+converts them with (measured with `CGColorCreateCopyByMatchingToColorSpace`),
+so `CGColorCreateGenericRGB` and calibrated `NSColor`s draw as on macOS;
+Lab and XYZ through D50. Image samples in Generic RGB or gray are drawn as
+they are, because AppKit's bitmaps in calibrated spaces hold what was drawn
+into them unconverted (macOS converts both ways).
+
+Known differences, each measured against macOS: a fill with antialiasing
+off covers the pixels whose centers it covers (macOS covers each pixel it
+touches); 16-bit and float bitmap contexts draw at 8-bit precision, and
+contexts in P3 or other RGB spaces take sRGB values unconverted;
+gradients aren't dithered (macOS dithers short ones by up to 18 levels),
+two-circle radial gradients whose circles cross take the larger of the two
+parameters where macOS takes the smaller, and a linear gradient of no
+length draws nothing; images are upscaled bilinearly (macOS's filter is
+smoother); CMYK converts naively; images of PNG files report 8-bit RGBA
+whatever the file holds; `CGImageCreateWithMask` stretches a mask of
+another size (macOS scales it only across); a color image with alpha as a
+clip mask clips by its alpha (macOS sometimes ignores it);
+`+[NSColor colorWithCGColor:]` converts a color in a space `NSColorSpace`
+doesn't have (linear sRGB, say) to sRGB, where macOS keeps it;
+`NSBitmapImageRep` keeps float and 1-sample mask layouts from CGImages as
+8-bit RGBA. CMYK and 5-bit RGB bitmap contexts, patterns, conic gradients,
+the path set operations (`CGPathCreateCopyByNormalizing` too), `CGLayer`
+and PDF aren't there (the functions making them return NULL, or aren't
+exported).
+
 ### Colors and appearance
 
 `NSColor` is one immutable class: components in a color space, a system

@@ -23,10 +23,12 @@
 //! such a color in extended sRGB, as AppKit does); drawing clamps them, and
 //! so does converting into a space that isn't extended.
 //!
-//! There's no color management: device, calibrated and generic RGB are
-//! all taken as sRGB, and Display P3 converts to sRGB through its matrix.
-//! Gray is RGB's luminance, weighed in linear light and encoded again.
-//! Color spaces are shared instances, one per kind.
+//! Color management is by formula, not profiles: device RGB is taken as
+//! sRGB; Display P3 converts to sRGB through its matrix; calibrated
+//! (Generic) RGB and gray through their gamma of 1.8, and RGB through the
+//! matrix macOS converts Generic RGB to sRGB with (measured on macOS); CMYK
+//! subtracts from white. Gray is RGB's luminance, weighed in linear light
+//! and encoded again. Color spaces are shared instances, one per kind.
 
 use std::ptr::NonNull;
 use std::sync::OnceLock;
@@ -39,6 +41,7 @@ use objc2_app_kit::{
     NSAppearance, NSColor, NSColorListName, NSColorName, NSColorSpace, NSColorSpaceModel, NSColorSpaceName,
     NSColorSystemEffect, NSColorType, NSControlTint,
 };
+use objc2_core_graphics::CGColor;
 use objc2_foundation::{NSArray, NSCopying, NSInteger, NSRect, NSString, NSUInteger, NSZone};
 
 use crate::palette::{self, System};
@@ -110,7 +113,7 @@ impl Space {
     }
 
     /// Components, alpha not counted.
-    fn components(self) -> usize {
+    pub(crate) fn components(self) -> usize {
         match self.model() {
             Model::Gray => 1,
             Model::Rgb => 3,
@@ -300,22 +303,26 @@ pub(crate) fn space_of(s: &NSColorSpace) -> Space {
     unsafe { &*(s as *const NSColorSpace).cast::<NSColorSpaceImpl>() }.ivars().space
 }
 
-// Conversions. RGB spaces other than Display P3 are sRGB here.
+// Conversions. RGB spaces other than Display P3 and Generic RGB are sRGB
+// here.
 
-fn to_srgb(space: Space, c: &[f64]) -> [f64; 3] {
+pub(crate) fn to_srgb(space: Space, c: &[f64]) -> [f64; 3] {
     match space.model() {
+        Model::Gray if space == Space::GenericGray => [encoded(gamma18(c[0])); 3],
         Model::Gray => [c[0]; 3],
         Model::Cmyk => {
             let k = 1.0 - c[3];
             [(1.0 - c[0]) * k, (1.0 - c[1]) * k, (1.0 - c[2]) * k]
         }
         Model::Rgb if space == Space::DisplayP3 => p3_to_srgb([c[0], c[1], c[2]]),
+        Model::Rgb if space == Space::GenericRgb => generic_to_srgb([c[0], c[1], c[2]]),
         Model::Rgb => [c[0], c[1], c[2]],
     }
 }
 
-fn from_srgb(space: Space, rgb: [f64; 3]) -> Vec<f64> {
+pub(crate) fn from_srgb(space: Space, rgb: [f64; 3]) -> Vec<f64> {
     match space.model() {
+        Model::Gray if space == Space::GenericGray => vec![ungamma18(luminance(rgb))],
         Model::Gray => vec![gray_of(rgb)],
         Model::Cmyk => {
             let k = 1.0 - rgb[0].max(rgb[1]).max(rgb[2]);
@@ -323,24 +330,75 @@ fn from_srgb(space: Space, rgb: [f64; 3]) -> Vec<f64> {
             vec![f(rgb[0]), f(rgb[1]), f(rgb[2]), k]
         }
         Model::Rgb if space == Space::DisplayP3 => srgb_to_p3(rgb).to_vec(),
+        Model::Rgb if space == Space::GenericRgb => srgb_to_generic(rgb).to_vec(),
         Model::Rgb => rgb.to_vec(),
     }
+}
+
+/// The luminance of sRGB `rgb`, in linear light.
+fn luminance(rgb: [f64; 3]) -> f64 {
+    0.2126 * linear(rgb[0]) + 0.7152 * linear(rgb[1]) + 0.0722 * linear(rgb[2])
 }
 
 /// The gray of sRGB `rgb`: its luminance, weighed in linear light, encoded
 /// again as sRGB encodes.
 pub(crate) fn gray_of(rgb: [f64; 3]) -> f64 {
-    encoded(0.2126 * linear(rgb[0]) + 0.7152 * linear(rgb[1]) + 0.0722 * linear(rgb[2]))
+    encoded(luminance(rgb))
+}
+
+/// Generic RGB's and Generic Gray's transfer curve, undone: a power of 1.8
+/// with no linear part. Neither space is extended, so values are clamped
+/// first, as macOS clamps them.
+pub(crate) fn gamma18(v: f64) -> f64 {
+    v.clamp(0.0, 1.0).powf(1.8)
+}
+
+fn ungamma18(v: f64) -> f64 {
+    v.clamp(0.0, 1.0).powf(1.0 / 1.8)
+}
+
+/// Linear Generic RGB to linear sRGB: the columns are Generic RGB's
+/// primaries as macOS converts them into extended linear sRGB (measured with
+/// `CGColorCreateCopyByMatchingToColorSpace`); each row adds up to 1, so
+/// white stays white.
+const GENERIC_TO_SRGB: [[f64; 3]; 3] =
+    [[1.025_242, -0.026_545, 0.001_304], [0.019_401, 0.948_009, 0.032_590], [-0.001_762, -0.001_434, 1.003_197]];
+
+/// Its inverse.
+const SRGB_TO_GENERIC: [[f64; 3]; 3] = [
+    [0.974_859_3, 0.027_293_6, -0.002_153_8],
+    [-0.020_008_4, 1.054_230_3, -0.034_221_9],
+    [0.001_683_6, 0.001_554_9, 0.996_760_5],
+];
+
+/// Linear Generic RGB (Generic RGB's primaries, no curve) to sRGB.
+pub(crate) fn generic_linear_to_srgb(c: [f64; 3]) -> [f64; 3] {
+    mat(GENERIC_TO_SRGB, c).map(encoded)
+}
+
+/// Generic RGB (calibrated RGB) to sRGB.
+pub(crate) fn generic_to_srgb(c: [f64; 3]) -> [f64; 3] {
+    generic_linear_to_srgb(c.map(gamma18))
+}
+
+/// sRGB to Generic RGB, clamped to it.
+pub(crate) fn srgb_to_generic(c: [f64; 3]) -> [f64; 3] {
+    mat(SRGB_TO_GENERIC, c.map(linear)).map(ungamma18)
+}
+
+/// sRGB to linear Generic RGB.
+pub(crate) fn srgb_to_generic_linear(c: [f64; 3]) -> [f64; 3] {
+    mat(SRGB_TO_GENERIC, c.map(linear))
 }
 
 /// sRGB's transfer curve, undone; odd, so extended values keep their sign.
-fn linear(v: f64) -> f64 {
+pub(crate) fn linear(v: f64) -> f64 {
     let a = v.abs();
     let l = if a <= 0.04045 { a / 12.92 } else { ((a + 0.055) / 1.055).powf(2.4) };
     l.copysign(v)
 }
 
-fn encoded(v: f64) -> f64 {
+pub(crate) fn encoded(v: f64) -> f64 {
     let a = v.abs();
     let e = if a <= 0.003_130_8 { a * 12.92 } else { 1.055 * a.powf(1.0 / 2.4) - 0.055 };
     e.copysign(v)
@@ -351,13 +409,18 @@ fn mat(m: [[f64; 3]; 3], v: [f64; 3]) -> [f64; 3] {
 }
 
 /// Display P3 (sRGB's transfer curve, P3 primaries, D65) to sRGB.
-fn p3_to_srgb(c: [f64; 3]) -> [f64; 3] {
-    const M: [[f64; 3]; 3] =
-        [[1.224_940_2, -0.224_940_2, 0.0], [-0.042_056_9, 1.042_056_9, 0.0], [-0.019_637_6, -0.078_636_1, 1.098_273_7]];
-    mat(M, c.map(linear)).map(encoded)
+pub(crate) fn p3_to_srgb(c: [f64; 3]) -> [f64; 3] {
+    p3_linear_to_srgb(c.map(linear))
 }
 
-fn srgb_to_p3(c: [f64; 3]) -> [f64; 3] {
+/// Linear Display P3 to sRGB.
+pub(crate) fn p3_linear_to_srgb(c: [f64; 3]) -> [f64; 3] {
+    const M: [[f64; 3]; 3] =
+        [[1.224_940_2, -0.224_940_2, 0.0], [-0.042_056_9, 1.042_056_9, 0.0], [-0.019_637_6, -0.078_636_1, 1.098_273_7]];
+    mat(M, c).map(encoded)
+}
+
+pub(crate) fn srgb_to_p3(c: [f64; 3]) -> [f64; 3] {
     const M: [[f64; 3]; 3] =
         [[0.822_461_9, 0.177_538_1, 0.0], [0.033_194_2, 0.966_805_8, 0.0], [0.017_082_6, 0.072_397_4, 0.910_519_9]];
     mat(M, c.map(linear)).map(encoded)
@@ -428,6 +491,11 @@ pub(crate) enum Repr {
 
 pub(crate) struct ColorIvars {
     repr: Repr,
+    /// The CGColor a color of components is, made the first time it's
+    /// asked for.
+    cg: OnceLock<Retained<crate::coregraphics::color::CGColorImpl>>,
+    /// The CGColor another color resolved to last, and the value it has.
+    resolved: std::sync::Mutex<Option<(Color, Retained<crate::coregraphics::color::CGColorImpl>)>>,
 }
 
 define_class!(
@@ -467,7 +535,10 @@ define_class!(
 
         #[unsafe(method_id(colorWithWhite:alpha:))]
         fn white_alpha(w: f64, a: f64) -> Retained<NSColor> {
-            gray(Space::Gamma22Gray, w, a)
+            // Beyond 0 to 1 in extended gray, as colorWithRed:… goes to
+            // extended sRGB.
+            let space = if (0.0..=1.0).contains(&w) { Space::Gamma22Gray } else { Space::ExtendedGamma22Gray };
+            gray(space, w, a)
         }
 
         #[unsafe(method_id(colorWithGenericGamma22White:alpha:))]
@@ -532,6 +603,11 @@ define_class!(
                 c[n] = given[n];
             }
             make(Repr::Components { space, c })
+        }
+
+        #[unsafe(method_id(colorWithCGColor:))]
+        fn with_cg_color(color: &CGColor) -> Option<Retained<NSColor>> {
+            from_cg(crate::coregraphics::color::color_imp(color))
         }
 
         #[unsafe(method_id(colorWithPatternImage:))]
@@ -1203,23 +1279,56 @@ define_class!(
             // Immutable: a copy is the color itself.
             self.as_color().retain()
         }
+
+        // CoreGraphics' types go out as pointers (their own encodings), not
+        // as objects.
+        #[unsafe(method(CGColor))]
+        fn cg_color(&self) -> *mut CGColor {
+            use crate::coregraphics::color::{for_ns, new_color, srgb_color};
+            let cg = match &self.ivars().repr {
+                // Components are the color's for good: made once.
+                Repr::Components { space, c } => self
+                    .ivars()
+                    .cg
+                    .get_or_init(|| new_color(for_ns(*space), &c[..=space.components()]))
+                    .clone(),
+                // A pattern has no color CoreGraphics can hold: black, as
+                // AppKit hands out.
+                Repr::Pattern(..) => crate::coregraphics::color::black(),
+                // The others follow the appearance: resolved now, the last
+                // one kept while it's what they resolve to.
+                _ => {
+                    let value = resolve_impl(self);
+                    let mut last = self.ivars().resolved.lock().unwrap_or_else(|e| e.into_inner());
+                    match &*last {
+                        Some((v, cg)) if *v == value => cg.clone(),
+                        _ => {
+                            let cg = srgb_color(value.map(f64::from));
+                            *last = Some((value, cg.clone()));
+                            cg
+                        }
+                    }
+                }
+            };
+            Retained::autorelease_ptr(cg.as_cg().retain())
+        }
     }
 
     // Components.
     impl NSColorImpl {
         #[unsafe(method(redComponent))]
         fn red_component(&self) -> f64 {
-            self.srgb3()[0]
+            self.own_rgb()[0]
         }
 
         #[unsafe(method(greenComponent))]
         fn green_component(&self) -> f64 {
-            self.srgb3()[1]
+            self.own_rgb()[1]
         }
 
         #[unsafe(method(blueComponent))]
         fn blue_component(&self) -> f64 {
-            self.srgb3()[2]
+            self.own_rgb()[2]
         }
 
         #[unsafe(method(alphaComponent))]
@@ -1234,17 +1343,17 @@ define_class!(
 
         #[unsafe(method(hueComponent))]
         fn hue_component(&self) -> f64 {
-            rgb_to_hsb(self.srgb3())[0]
+            rgb_to_hsb(self.own_rgb())[0]
         }
 
         #[unsafe(method(saturationComponent))]
         fn saturation_component(&self) -> f64 {
-            rgb_to_hsb(self.srgb3())[1]
+            rgb_to_hsb(self.own_rgb())[1]
         }
 
         #[unsafe(method(brightnessComponent))]
         fn brightness_component(&self) -> f64 {
-            rgb_to_hsb(self.srgb3())[2]
+            rgb_to_hsb(self.own_rgb())[2]
         }
 
         #[unsafe(method(cyanComponent))]
@@ -1269,7 +1378,7 @@ define_class!(
 
         #[unsafe(method(getRed:green:blue:alpha:))]
         fn get_rgba(&self, r: *mut f64, g: *mut f64, b: *mut f64, a: *mut f64) {
-            let [rr, gg, bb] = self.srgb3();
+            let [rr, gg, bb] = self.own_rgb();
             // SAFETY: each pointer is null or writable, as the caller
             // promises.
             unsafe { store(&[(r, rr), (g, gg), (b, bb), (a, self.alpha())]) };
@@ -1277,7 +1386,7 @@ define_class!(
 
         #[unsafe(method(getHue:saturation:brightness:alpha:))]
         fn get_hsba(&self, h: *mut f64, s: *mut f64, b: *mut f64, a: *mut f64) {
-            let [hh, ss, bb] = rgb_to_hsb(self.srgb3());
+            let [hh, ss, bb] = rgb_to_hsb(self.own_rgb());
             // SAFETY: as above.
             unsafe { store(&[(h, hh), (s, ss), (b, bb), (a, self.alpha())]) };
         }
@@ -1336,10 +1445,16 @@ fn equal(this: &NSColorImpl, other: &AnyObject) -> bool {
     }
 }
 
+/// The mix of two colors, in calibrated (Generic) RGB, as AppKit mixes
+/// them.
 fn blend_colors(this: &NSColorImpl, fraction: f64, other: &NSColor) -> Retained<NSColor> {
-    let (a, b) = (resolve_impl(this), resolve(other));
+    let in_generic = |c: Color| {
+        let [r, g, b] = srgb_to_generic([c[0], c[1], c[2]].map(f64::from));
+        [r, g, b, f64::from(c[3])]
+    };
+    let (a, b) = (in_generic(resolve_impl(this)), in_generic(resolve(other)));
     let t = fraction.clamp(0.0, 1.0);
-    let mix = |i: usize| f64::from(a[i]) * (1.0 - t) + f64::from(b[i]) * t;
+    let mix = |i: usize| a[i] * (1.0 - t) + b[i] * t;
     rgba(Space::GenericRgb, mix(0), mix(1), mix(2), mix(3))
 }
 
@@ -1460,6 +1575,17 @@ impl NSColorImpl {
         }
     }
 
+    /// Red, green and blue as the component getters give them: a color of
+    /// components in an RGB space gives its own (in that space, as AppKit's
+    /// do), a gray its level three times, any other its sRGB.
+    fn own_rgb(&self) -> [f64; 3] {
+        match &self.ivars().repr {
+            Repr::Components { space, c } if space.model() == Model::Rgb => [c[0], c[1], c[2]],
+            Repr::Components { space, c } if space.model() == Model::Gray => [c[0]; 3],
+            _ => self.srgb3(),
+        }
+    }
+
     fn alpha(&self) -> f64 {
         match &self.ivars().repr {
             Repr::Components { space, c } => c[space.components()],
@@ -1487,7 +1613,8 @@ impl NSColorImpl {
 
 fn make(repr: Repr) -> Retained<NSColor> {
     crate::load_shell::<NSColor>();
-    let this = NSColorImpl::alloc().set_ivars(ColorIvars { repr });
+    let this =
+        NSColorImpl::alloc().set_ivars(ColorIvars { repr, cg: OnceLock::new(), resolved: std::sync::Mutex::new(None) });
     // SAFETY: NSObject's designated initializer.
     let this: Retained<NSColorImpl> = unsafe { msg_send![super(this), init] };
     // SAFETY: NSColorImpl is the class NSColor names.
@@ -1620,6 +1747,28 @@ fn resolve_impl(c: &NSColorImpl) -> Color {
         // pattern paints.
         Repr::Pattern(..) => [0.5, 0.5, 0.5, 1.0],
     }
+}
+
+/// A color of a CGColor's components: in its space, if that's one
+/// `NSColorSpace` has, else converted to sRGB (a space `NSColorSpace`
+/// doesn't have, such as linear sRGB, isn't kept); none for indexed and
+/// pattern colors.
+fn from_cg(cg: &crate::coregraphics::color::CGColorImpl) -> Option<Retained<NSColor>> {
+    use crate::coregraphics::color::Model as CgModel;
+    let comps = cg.components();
+    Some(match cg.space().info().ns {
+        Some(space) if comps.len() == space.components() + 1 => {
+            let mut c = [0.0; 5];
+            c[..comps.len()].copy_from_slice(comps);
+            make(Repr::Components { space, c })
+        }
+        // AppKit makes no color of an indexed or pattern color.
+        _ if matches!(cg.space().info().model, CgModel::Indexed | CgModel::Pattern) => return None,
+        _ => {
+            let [r, g, b, a] = cg.resolve().map(f64::from);
+            rgba(Space::Srgb, r, g, b, a)
+        }
+    })
 }
 
 /// `c` as a gradient hands it back: a component color in `space`; a

@@ -36,6 +36,16 @@ gaps below, so a symbol that stops being exported fails a Linux build of
 the test; `scripts/link-closure` writes it from the overlay's crates when
 the features or the exports change. `conformance/tests/constants.rs`
 checks the string constants' values against macOS's.
+| CoreGraphics: geometry | `CGPoint…`: `EqualToPoint`, `CreateDictionaryRepresentation`, `MakeWithDictionaryRepresentation`, `ApplyAffineTransform`; `CGSize…`: `EqualToSize`, `CreateDictionaryRepresentation`, `MakeWithDictionaryRepresentation`, `ApplyAffineTransform`; `CGRect…`: `GetMinX`, `GetMidX`, `GetMaxX`, `GetMinY`, `GetMidY`, `GetMaxY`, `GetWidth`, `GetHeight`, `EqualToRect`, `Standardize`, `IsEmpty`, `IsNull`, `IsInfinite`, `Inset`, `Integral`, `Union`, `Intersection`, `Offset`, `Divide`, `ContainsPoint`, `ContainsRect`, `IntersectsRect`, `CreateDictionaryRepresentation`, `MakeWithDictionaryRepresentation`, `ApplyAffineTransform`; `CGAffineTransform…`: `Make`, `MakeTranslation`, `MakeScale`, `MakeRotation`, `IsIdentity`, `Translate`, `Scale`, `Rotate`, `Invert`, `Concat`, `EqualToTransform`, `Decompose`, `MakeWithComponents` |
+| CoreGraphics: colors | `CGColorSpace…`: `GetTypeID`, `CreateDeviceGray`, `CreateDeviceRGB`, `CreateDeviceCMYK`, `CreateWithName`, `GetName`, `CopyName`, `GetNumberOfComponents`, `GetModel`, `GetBaseColorSpace`, `CopyBaseColorSpace`, `GetColorTableCount`, `GetColorTable`, `CreateIndexed`, `CreatePattern`, `CreateWithICCData`, `CreateWithICCProfile`, `CreateICCBased`, `CopyICCData`, `CopyICCProfile`, `CreateLinearized`, `CreateExtended`, `CreateExtendedLinearized`, `CreateCopyWithStandardRange`, `UsesExtendedRange`, `IsWideGamutRGB`, `IsHDR`, `UsesITUR_2100TF`, `IsPQBased`, `IsHLGBased`, `SupportsOutput`; `CGColor…`: `GetTypeID`, `Create`, `CreateGenericGray`, `CreateGenericRGB`, `CreateGenericCMYK`, `CreateGenericGrayGamma2_2`, `CreateSRGB`, `CreateWithContentHeadroom`, `GetContentHeadroom`, `GetConstantColor`, `CreateWithPattern`, `CreateCopy`, `CreateCopyWithAlpha`, `CreateCopyByMatchingToColorSpace`, `EqualToColor`, `GetNumberOfComponents`, `GetComponents`, `GetAlpha`, `GetColorSpace`, `GetPattern`; `CGPattern…`: `GetTypeID`, `Create` |
+| CoreGraphics: paths | `CGPath…`: `GetTypeID`, `CreateMutable`, `CreateCopy`, `CreateMutableCopy`, `CreateCopyByTransformingPath`, `CreateMutableCopyByTransformingPath`, `CreateWithRect`, `CreateWithEllipseInRect`, `CreateWithRoundedRect`, `AddRoundedRect`, `CreateCopyByDashingPath`, `CreateCopyByStrokingPath`, `CreateCopyByFlattening`, `EqualToPath`, `MoveToPoint`, `AddLineToPoint`, `AddQuadCurveToPoint`, `AddCurveToPoint`, `CloseSubpath`, `AddRect`, `AddRects`, `AddLines`, `AddEllipseInRect`, `AddRelativeArc`, `AddArc`, `AddArcToPoint`, `AddPath`, `IsEmpty`, `IsRect`, `GetCurrentPoint`, `GetBoundingBox`, `GetPathBoundingBox`, `ContainsPoint`, `Apply`, `ApplyWithBlock` |
+| CoreGraphics: contexts | `CGContext…`: `GetTypeID`, `SaveGState`, `RestoreGState`, `ScaleCTM`, `TranslateCTM`, `RotateCTM`, `ConcatCTM`, `GetCTM`, `SetLineWidth`, `SetLineCap`, `SetLineJoin`, `SetMiterLimit`, `SetLineDash`, `SetFlatness`, `SetAlpha`, `SetBlendMode`, `BeginPath`, `MoveToPoint`, `AddLineToPoint`, `AddCurveToPoint`, `AddQuadCurveToPoint`, `ClosePath`, `AddRect`, `AddRects`, `AddLines`, `AddEllipseInRect`, `AddArc`, `AddArcToPoint`, `AddPath`, `ReplacePathWithStrokedPath`, `IsPathEmpty`, `GetPathCurrentPoint`, `GetPathBoundingBox`, `CopyPath`, `PathContainsPoint`, `DrawPath`, `FillPath`, `EOFillPath`, `StrokePath`, `FillRect`, `FillRects`, `StrokeRect`, `StrokeRectWithWidth`, `ClearRect`, `FillEllipseInRect`, `StrokeEllipseInRect`, `StrokeLineSegments`, `Clip`, `EOClip`, `ResetClip`, `ClipToMask`, `GetClipBoundingBox`, `ClipToRect`, `ClipToRects`, `SetFillColorWithColor`, `SetStrokeColorWithColor`, `SetFillColorSpace`, `SetStrokeColorSpace`, `SetFillColor`, `SetStrokeColor`, `SetFillPattern`, `SetStrokePattern`, `SetPatternPhase`, `SetGrayFillColor`, `SetGrayStrokeColor`, `SetRGBFillColor`, `SetRGBStrokeColor`, `SetCMYKFillColor`, `SetCMYKStrokeColor`, `SetRenderingIntent`, `DrawImage`, `DrawTiledImage`, `GetInterpolationQuality`, `SetInterpolationQuality`, `SetShadowWithColor`, `SetShadow`, `DrawLinearGradient`, `DrawRadialGradient`, `DrawShading`, `SetCharacterSpacing`, `SetTextPosition`, `GetTextPosition`, `SetTextMatrix`, `GetTextMatrix`, `SetTextDrawingMode`, `SetFont`, `SetFontSize`, `SelectFont`, `ShowGlyphsAtPositions`, `ShowGlyphs`, `ShowGlyphsAtPoint`, `ShowGlyphsWithAdvances`, `ShowText`, `ShowTextAtPoint`, `SetShouldAntialias`, `SetAllowsAntialiasing`, `SetShouldSmoothFonts`, `SetAllowsFontSmoothing`, `SetShouldSubpixelPositionFonts`, `SetAllowsFontSubpixelPositioning`, `SetShouldSubpixelQuantizeFonts`, `SetAllowsFontSubpixelQuantization`, `BeginTransparencyLayer`, `BeginTransparencyLayerWithRect`, `EndTransparencyLayer`, `Flush`, `Synchronize`, `SynchronizeAttributes`, `BeginPage`, `EndPage`, `SetEDRTargetHeadroom`, `GetEDRTargetHeadroom`, `GetUserSpaceToDeviceSpaceTransform`, `ConvertPointToDeviceSpace`, `ConvertPointToUserSpace`, `ConvertSizeToDeviceSpace`, `ConvertSizeToUserSpace`, `ConvertRectToDeviceSpace`, `ConvertRectToUserSpace` |
+| CoreGraphics: bitmap contexts | `CGBitmapContext…`: `Create`, `CreateWithData`, `GetData`, `GetWidth`, `GetHeight`, `GetBitsPerComponent`, `GetBitsPerPixel`, `GetBytesPerRow`, `GetColorSpace`, `GetAlphaInfo`, `GetBitmapInfo`, `CreateImage` |
+| CoreGraphics: images | `CGImage…`: `GetTypeID`, `Create`, `MaskCreate`, `CreateCopy`, `CreateCopyWithColorSpace`, `CreateWithJPEGDataProvider`, `CreateWithPNGDataProvider`, `CreateWithImageInRect`, `CreateWithMask`, `CreateWithMaskingColors`, `CreateWithContentHeadroom`, `CreateCopyWithContentHeadroom`, `GetContentHeadroom`, `CalculateContentHeadroom`, `IsMask`, `GetWidth`, `GetHeight`, `GetBitsPerComponent`, `GetBitsPerPixel`, `GetBytesPerRow`, `GetColorSpace`, `GetAlphaInfo`, `GetDataProvider`, `GetDecode`, `GetShouldInterpolate`, `GetRenderingIntent`, `GetBitmapInfo`, `GetByteOrderInfo`, `GetPixelFormatInfo`, `ShouldToneMap`, `ContainsImageSpecificToneMappingMetadata`, `GetUTType` |
+| CoreGraphics: data | `CGDataProvider…`: `GetTypeID`, `CreateSequential`, `CreateDirect`, `CreateWithData`, `CreateWithCFData`, `CreateWithURL`, `CreateWithFilename`, `CopyData`, `GetInfo`; `CGDataConsumer…`: `GetTypeID`, `Create`, `CreateWithURL`, `CreateWithCFData` |
+| CoreGraphics: gradients and shadings | `CGGradient…`: `GetTypeID`, `CreateWithColorComponents`, `CreateWithContentHeadroom`, `CreateWithColors`, `GetContentHeadroom`; `CGFunction…`: `GetTypeID`, `Create`; `CGShading…`: `GetTypeID`, `CreateAxial`, `CreateAxialWithContentHeadroom`, `CreateRadial`, `CreateRadialWithContentHeadroom`, `GetContentHeadroom` |
+| CoreGraphics: fonts | `CGFont…`: `GetTypeID`, `CreateWithDataProvider`, `CreateWithFontName`, `CreateCopyWithVariations`, `CreateWithPlatformFont`, `GetNumberOfGlyphs`, `GetUnitsPerEm`, `CopyPostScriptName`, `CopyFullName`, `GetAscent`, `GetDescent`, `GetLeading`, `GetCapHeight`, `GetXHeight`, `GetFontBBox`, `GetItalicAngle`, `GetStemV`, `CopyVariationAxes`, `CopyVariations`, `GetGlyphAdvances`, `GetGlyphBBoxes`, `GetGlyphWithGlyphName`, `CopyGlyphNameForGlyph`, `CanCreatePostScriptSubset`, `CopyTableTags`, `CopyTableForTag` |
+| CoreGraphics: constants | `CGPointZero`, `CGSizeZero`, `CGRectZero`, `CGRectNull`, `CGRectInfinite`, `CGAffineTransformIdentity`, `kCGColorWhite`, `kCGColorBlack`, `kCGColorClear`, `kCGFontVariationAxisName`, `…MinValue`, `…MaxValue`, `…DefaultValue`, and the color space names `kCGColorSpace…`: `GenericGray`, `GenericRGB`, `GenericCMYK`, `DisplayP3`, `GenericRGBLinear`, `AdobeRGB1998`, `SRGB`, `GenericGrayGamma2_2`, `GenericXYZ`, `GenericLab`, `ACESCGLinear`, `ITUR_709`, `ITUR_709_PQ`, `ITUR_709_HLG`, `ITUR_2020`, `ITUR_2020_sRGBGamma`, `ROMMRGB`, `DCIP3`, `LinearITUR_2020`, `ExtendedITUR_2020`, `ExtendedLinearITUR_2020`, `LinearDisplayP3`, `ExtendedDisplayP3`, `ExtendedLinearDisplayP3`, `ITUR_2100_PQ`, `ITUR_2100_HLG`, `DisplayP3_PQ`, `DisplayP3_HLG`, `ITUR_2020_PQ`, `ITUR_2020_HLG`, `DisplayP3_PQ_EOTF`, `ITUR_2020_PQ_EOTF`, `ExtendedSRGB`, `LinearSRGB`, `ExtendedLinearSRGB`, `ExtendedGray`, `LinearGray`, `ExtendedLinearGray`, `CoreMedia709`, `ExtendedRange` |
 
 dispatch2 links `-ldispatch` on Linux (objc2-foundation 0.3.2 doesn't
 depend on dispatch2; objc2-core-foundation and objc2-core-graphics do
@@ -45,6 +55,13 @@ succeeds, and the symbols above come from Sidestep itself.
 
 The blocks runtime follows Clang's published Block Implementation
 Specification.
+
+The CoreGraphics functions (349, and 53 constants) come from
+sidestep-appkit's `coregraphics` module, with the signatures
+objc2-core-graphics 0.3.2 declares; [architecture.md](architecture.md#coregraphics)
+describes them. Their objects are Objective-C objects of Sidestep-private
+classes (`_SidestepCGColor`, …) with type IDs of their own, so the
+CoreFoundation functions above retain, release, compare and describe them.
 
 ## Conventions
 
@@ -165,6 +182,18 @@ Specification.
   declares it (C declares the array itself).
 - Protocol objects have a null `isa`, so retaining one (which
   objc2-foundation's `NSProtocolFromString` wrapper does) crashes.
+- CoreGraphics: nothing for PDF (`CGPDF…`, `CGPSConverter…`), `CGLayer`,
+  conic gradients (`CGContextDrawConicGradient`), the path set operations
+  (`CGPathCreateCopyByUnioningPath` and its kin, `CGPathIntersectsPath`,
+  `CGPathCreateSeparateComponents`, `CGPathCreateCopyByNormalizing`),
+  `CGColorConversionInfo`,
+  `CGConvertColorDataWithFormat`, color spaces from property lists or
+  platform spaces, adaptive bitmap contexts, tone mapping
+  (`CGContextDrawImageApplyingToneMapping`, `…ContentToneMappingInfo`, the
+  light-level functions and HDR keys), `CGErrorSetCallback`, or `CGEvent`,
+  `CGDisplay`, `CGWindow` and the other window-server functions;
+  objc2-core-graphics declares them, so an app calling one fails to link.
+  `CGColorCreateWithPattern` returns NULL.
 
 ## Fixed in the objc2 fork, pending upstream
 
@@ -212,7 +241,7 @@ The tool's README maps each patch and rule to its commit.
   of these rules follow `sidestep-main`'s version of the commit; the tag's
   generator emits no bridging and doesn't map malloc zones. Sidestep
   builds the four crates and AppKit's methods with their types on Linux,
-  but implements none of the frameworks yet.
+  and implements CoreGraphics (see Symbols) but not yet the other three.
 - **`NSStringEncoding` on GNUstep** (commit 4). GNUstep declares it as a C
   enum without a fixed type: an `int`, which Clang encodes as `i`.
   objc2-foundation bound it as `NSUInteger` while objc2's own helpers used

@@ -23,7 +23,7 @@ use std::sync::Arc;
 use tiny_skia::{BlendMode, FillRule, Mask, PixmapMut, PixmapPaint, Transform};
 
 use super::{Canvas, Glyphs, as_bytes, premultiplied};
-use crate::protocol::{Blend, ClipPath, Draw, Op, Paint, Rect, StrokeSpec};
+use crate::protocol::{Blend, ClipImage, ClipPath, Draw, Op, Paint, Rect, ShadowSpec, StrokeSpec};
 
 /// What a thread keeps between ops: scratch pixels, spare layers and the
 /// last clip mask.
@@ -122,7 +122,7 @@ pub(crate) fn run(canvas: &mut Canvas, glyphs: &mut Glyphs, damage: &Rect, ops: 
                         ..canvas.reborrow()
                     };
                     // What the group's ops can reach, within its clip.
-                    let clip = probe.pixels(&draw.clip.intersect(damage));
+                    let clip = probe.clip_pixels(draw, damage);
                     let reach = contents(&probe, damage, &ops[i + 1..]);
                     let (x0, y0, x1, y1) = clip
                         .zip(reach)
@@ -145,7 +145,7 @@ pub(crate) fn run(canvas: &mut Canvas, glyphs: &mut Glyphs, damage: &Rect, ops: 
                 }
                 Op::EndGroup => {
                     if let Some(layer) = layers.pop() {
-                        close_group(canvas, &mut layers, st, layer);
+                        close_group(canvas, &mut layers, st, layer, damage);
                     }
                 }
                 op => match layers.last_mut() {
@@ -155,13 +155,14 @@ pub(crate) fn run(canvas: &mut Canvas, glyphs: &mut Glyphs, damage: &Rect, ops: 
             }
         }
         while let Some(layer) = layers.pop() {
-            close_group(canvas, &mut layers, st, layer);
+            close_group(canvas, &mut layers, st, layer, damage);
         }
     });
 }
 
-/// Composite a finished group into what's under it.
-fn close_group(base: &mut Canvas, layers: &mut [Layer], st: &mut State, mut layer: Layer) {
+/// Composite a finished group into what's under it, with its shadow (a
+/// transparency layer's) under it.
+fn close_group(base: &mut Canvas, layers: &mut [Layer], st: &mut State, mut layer: Layer, damage: &Rect) {
     if layer.width > 0 && layer.height > 0 && layer.alpha > 0.0 {
         let src = tiny_skia::PixmapRef::from_bytes(as_bytes(&mut layer.px), layer.width, layer.height);
         if let Some(src) = src {
@@ -169,21 +170,34 @@ fn close_group(base: &mut Canvas, layers: &mut [Layer], st: &mut State, mut laye
                 Some(parent) => parent.canvas(base),
                 None => base.reborrow(),
             };
-            let region = (
-                (layer.x0 - target.x0) as usize,
-                (layer.y0 - target.y0) as usize,
-                (layer.x0 - target.x0) as usize + layer.width as usize,
-                (layer.y0 - target.y0) as usize + layer.height as usize,
-            );
+            let (lx, ly) = ((layer.x0 - target.x0) as usize, (layer.y0 - target.y0) as usize);
+            let mut region = (lx, ly, lx + layer.width as usize, ly + layer.height as usize);
+            // A shadow reaches anywhere in the group's clip.
+            if layer.draw.shadow.is_some()
+                && let Some(c) = target.clip_pixels(&layer.draw, damage)
+            {
+                region = union_region(region, c);
+            }
+            let (at_x, at_y) = ((lx - region.0) as i32, (ly - region.1) as i32);
             let paint = PixmapPaint {
                 opacity: layer.alpha.clamp(0.0, 1.0),
                 blend_mode: blend_mode(layer.draw.blend),
                 quality: tiny_skia::FilterQuality::Nearest,
             };
+            let shadow = layer.draw.shadow.clone();
             with_region(&mut target, st, region, |pm, spare, masks, origin| {
                 let mask = masks.get(layer.draw.mask.as_ref(), pm.width(), pm.height(), origin);
+                if let Some(shadow) = &shadow {
+                    let faded = ShadowSpec {
+                        color: [shadow.color[0], shadow.color[1], shadow.color[2], shadow.color[3] * paint.opacity],
+                        ..(**shadow).clone()
+                    };
+                    super::effects::shadow(pm, &faded, origin.2, mask, |target, moved| {
+                        target.draw_pixmap(at_x, at_y, src, &PixmapPaint::default(), moved, None)
+                    });
+                }
                 masked(pm, spare, mask, layer.draw.blend, |pm, mask| {
-                    pm.draw_pixmap(0, 0, src, &paint, Transform::identity(), mask)
+                    pm.draw_pixmap(at_x, at_y, src, &paint, Transform::identity(), mask)
                 });
             });
         }
@@ -221,8 +235,8 @@ fn draw_op(canvas: &mut Canvas, glyphs: &mut Glyphs, st: &mut State, damage: &Re
         Op::StrokePath { path, stroke, paint, draw } => {
             shape(canvas, st, damage, draw, &Shape::Stroke(path, stroke), paint)
         }
-        Op::Image { image, src, dst, alpha, quality, tint, draw } => {
-            super::images::draw(canvas, st, damage, image, (src, dst), *alpha, *quality, *tint, draw)
+        Op::Image { image, src, dst, alpha, quality, tint, tiled, draw } => {
+            super::images::draw(canvas, st, damage, image, (src, dst), *alpha, *quality, *tint, *tiled, draw)
         }
         Op::BeginGroup { .. } | Op::EndGroup => {}
     }
@@ -232,14 +246,28 @@ fn rect_path(r: &Rect) -> Option<tiny_skia::Path> {
     tiny_skia::Rect::from_ltrb(r.x0, r.y0, r.x1, r.y1).map(tiny_skia::PathBuilder::from_rect)
 }
 
-/// The pixels (of `canvas`) the ops of a group, up to its end, can reach
-/// within `damage`: x0, y0, x1, y1; `None` for none.
-fn contents(canvas: &Canvas, damage: &Rect, ops: &[Op]) -> Option<(usize, usize, usize, usize)> {
+/// Two pixel regions' union (x0, y0, x1, y1).
+fn union_region(a: (usize, usize, usize, usize), b: (usize, usize, usize, usize)) -> (usize, usize, usize, usize) {
+    (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))
+}
+
+/// The pixels (of `canvas`) ops can reach within `damage`, up to the end
+/// of the group they're in (or all of them), groups and all: x0, y0, x1,
+/// y1; `None` for none.
+pub(crate) fn contents(canvas: &Canvas, damage: &Rect, ops: &[Op]) -> Option<(usize, usize, usize, usize)> {
     let mut depth = 0;
     let mut all: Option<(usize, usize, usize, usize)> = None;
+    // Groups casting shadows reach as far as their clips let the shadows.
+    let mut shadowed: Option<(usize, usize, usize, usize)> = None;
     for op in ops {
         let reach = match op {
-            Op::BeginGroup { .. } => {
+            Op::BeginGroup { draw, .. } => {
+                if depth == 0
+                    && draw.shadow.is_some()
+                    && let Some(r) = canvas.clip_pixels(draw, damage)
+                {
+                    shadowed = Some(shadowed.map_or(r, |a| union_region(a, r)));
+                }
                 depth += 1;
                 continue;
             }
@@ -254,15 +282,19 @@ fn contents(canvas: &Canvas, damage: &Rect, ops: &[Op]) -> Option<(usize, usize,
             Op::StrokePath { path, stroke, draw, .. } => {
                 region(canvas, damage, draw, path.bounds(), stroke_outset(canvas, draw, stroke))
             }
-            Op::Image { dst, draw, .. } => {
+            Op::Image { dst, draw, tiled: false, .. } => {
                 super::images::dst_bounds(dst).and_then(|b| region(canvas, damage, draw, b, 1.0))
             }
+            Op::Image { draw, tiled: true, .. } => canvas.clip_pixels(draw, damage),
         };
         if let Some(r) = reach {
-            all = Some(all.map_or(r, |a| (a.0.min(r.0), a.1.min(r.1), a.2.max(r.2), a.3.max(r.3))));
+            all = Some(all.map_or(r, |a| union_region(a, r)));
         }
     }
-    all
+    match (all, shadowed) {
+        (Some(a), Some(s)) => Some(union_region(a, s)),
+        (a, _) => a,
+    }
 }
 
 /// Where a run's glyphs may put ink (layer points): around their origins
@@ -300,7 +332,7 @@ pub(crate) fn region(
     bounds: tiny_skia::Rect,
     outset: f32,
 ) -> Option<(usize, usize, usize, usize)> {
-    let (cx0, cy0, cx1, cy1) = canvas.pixels(&draw.clip.intersect(damage))?;
+    let (cx0, cy0, cx1, cy1) = canvas.clip_pixels(draw, damage)?;
     let dev = bounds.transform(canvas.transform().pre_concat(draw.xf))?;
     let mut b = (dev.left() - outset, dev.top() - outset, dev.right() + outset, dev.bottom() + outset);
     if let Some(s) = &draw.shadow {
@@ -332,15 +364,17 @@ fn shape(canvas: &mut Canvas, st: &mut State, damage: &Rect, draw: &Draw, shape:
         let xf = base.post_translate(-(region.0 as f32), -(region.1 as f32));
         let mask = masks.get(draw.mask.as_ref(), pm.width(), pm.height(), origin);
         if let Some(shadow) = &draw.shadow {
-            let black = solid([0.0, 0.0, 0.0, 1.0]);
-            super::effects::shadow(pm, shadow, origin.2, mask, |target, moved| {
-                paint_shape(target, shape, &black, draw.aa, xf.post_concat(moved), None)
-            });
+            // The shadow is as opaque as the paint casting it.
+            if let Some(caster) = shadow_paint(paint) {
+                super::effects::shadow(pm, shadow, origin.2, mask, |target, moved| {
+                    paint_shape(target, shape, &caster, draw.aa, xf.post_concat(moved), None)
+                });
+            }
         }
         let Some(mut paint) = to_paint(paint) else { return };
         paint.anti_alias = draw.aa;
         match draw.blend {
-            Blend::PlusDarker => {
+            Blend::PlusDarker | Blend::ColorBurn | Blend::SoftLight => {
                 // Draw alone, then combine by hand.
                 let (w, h) = (pm.width(), pm.height());
                 source.clear();
@@ -348,7 +382,11 @@ fn shape(canvas: &mut Canvas, st: &mut State, damage: &Rect, draw: &Draw, shape:
                 if let Some(mut layer) = PixmapMut::from_bytes(as_bytes(source), w, h) {
                     paint_shape(&mut layer, shape, &paint, draw.aa, xf, mask);
                 }
-                plus_darker(pm, source);
+                match draw.blend {
+                    Blend::ColorBurn => separable(pm, source, color_burn),
+                    Blend::SoftLight => separable(pm, source, soft_light),
+                    _ => plus_darker(pm, source),
+                }
             }
             blend => {
                 paint.blend_mode = blend_mode(blend);
@@ -356,6 +394,19 @@ fn shape(canvas: &mut Canvas, st: &mut State, damage: &Rect, draw: &Draw, shape:
             }
         }
     });
+}
+
+/// What a shape painted with `paint` casts as a shadow: black, with the
+/// paint's alpha (a gradient's at each of its stops).
+fn shadow_paint(paint: &Paint) -> Option<tiny_skia::Paint<'static>> {
+    match paint {
+        Paint::Solid(c) => Some(solid([0.0, 0.0, 0.0, c[3]])),
+        Paint::Gradient(g) => {
+            let mut black = (**g).clone();
+            black.stops.iter_mut().for_each(|(_, c)| *c = [0.0, 0.0, 0.0, c[3]]);
+            to_paint(&Paint::Gradient(Arc::new(black)))
+        }
+    }
 }
 
 pub(crate) fn solid<'a>(c: crate::protocol::Color) -> tiny_skia::Paint<'a> {
@@ -506,6 +557,56 @@ fn plus_darker(pm: &mut PixmapMut, source: &[u32]) {
     }
 }
 
+/// Composite premultiplied `source` pixels onto `pm` with a separable blend
+/// function `b(backdrop, source)` of unpremultiplied colors:
+/// `Sa·Da·b(Dc, Sc) + Sca·(1 − Da) + Dca·(1 − Sa)`, clamped to the result's
+/// alpha.
+fn separable(pm: &mut PixmapMut, source: &[u32], b: fn(f32, f32) -> f32) {
+    for (d, &s) in pm.pixels_mut().iter_mut().zip(source) {
+        let s = s.to_ne_bytes().map(|v| f32::from(v) / 255.0);
+        if s[3] <= 0.0 {
+            continue;
+        }
+        let dv = [d.red(), d.green(), d.blue(), d.alpha()].map(|v| f32::from(v) / 255.0);
+        let (sa, da) = (s[3], dv[3]);
+        let ra = sa + da - sa * da;
+        let ch = |sc: f32, dc: f32| {
+            let both = sa * da;
+            let blended = if both > 0.0 { both * b(dc / da, sc / sa) } else { 0.0 };
+            let v = blended + sc * (1.0 - da) + dc * (1.0 - sa);
+            (if v.is_nan() { 0.0 } else { v.clamp(0.0, ra) } * 255.0).round() as u8
+        };
+        let a = (ra * 255.0).round() as u8;
+        if let Some(p) = tiny_skia::PremultipliedColorU8::from_rgba(
+            ch(s[0], dv[0]).min(a),
+            ch(s[1], dv[1]).min(a),
+            ch(s[2], dv[2]).min(a),
+            a,
+        ) {
+            *d = p;
+        }
+    }
+}
+
+/// Color burn as CoreGraphics works it out (measured on macOS): the
+/// backdrop's distance from white divided by the source, from white, not
+/// held at black, so it darkens past it (the result is clamped after).
+fn color_burn(backdrop: f32, source: f32) -> f32 {
+    if backdrop >= 1.0 {
+        1.0
+    } else if source <= 0.0 {
+        -1e6
+    } else {
+        1.0 - (1.0 - backdrop) / source
+    }
+}
+
+/// Soft light as CoreGraphics works it out (measured on macOS): the
+/// quadratic form, `(1 − 2S)·B² + 2S·B`.
+fn soft_light(backdrop: f32, source: f32) -> f32 {
+    (1.0 - 2.0 * source) * backdrop * backdrop + 2.0 * source * backdrop
+}
+
 /// Run `f` on a pixmap holding `region` (x0, y0, x1, y1 pixels) of
 /// `canvas`, then put the pixels back. `f` also gets a spare buffer, the
 /// thread's clip masks, and the region's origin on the canvas and the
@@ -556,6 +657,18 @@ fn fill_clip(mask: &mut Mask, paths: &[ClipPath], origin: (i32, i32, f32)) {
     let to_region =
         |xf: Transform| Transform::from_scale(scale, scale).pre_concat(xf).post_translate(-(ox as f32), -(oy as f32));
     for (i, clip) in paths.iter().enumerate() {
+        if let Some(image) = &clip.image {
+            let cover = image_coverage(image, mask.width(), mask.height(), to_region(clip.xf));
+            let data = mask.data_mut();
+            if i == 0 {
+                data.copy_from_slice(&cover);
+            } else {
+                for (m, c) in data.iter_mut().zip(cover) {
+                    *m = ((u32::from(*m) * u32::from(c) + 127) / 255) as u8;
+                }
+            }
+            continue;
+        }
         let rule = if clip.even_odd { FillRule::EvenOdd } else { FillRule::Winding };
         if i == 0 {
             mask.fill_path(&clip.path, rule, clip.aa, to_region(clip.xf));
@@ -563,6 +676,49 @@ fn fill_clip(mask: &mut Mask, paths: &[ClipPath], origin: (i32, i32, f32)) {
             mask.intersect_path(&clip.path, rule, clip.aa, to_region(clip.xf));
         }
     }
+}
+
+/// How much of each of a `w` × `h` region's pixels an image clip leaves:
+/// its image's alpha stretched over its rectangle (`xf` maps user space to
+/// the region's pixels), nothing outside it.
+fn image_coverage(clip: &ClipImage, w: u32, h: u32, xf: Transform) -> Vec<u8> {
+    let mut out = vec![0u8; w as usize * h as usize];
+    let data = &clip.image;
+    let super::images::Pixels::Rgba(bytes) = &data.pixels else { return out };
+    let (Some(src), Some(mut pm)) =
+        (tiny_skia::PixmapRef::from_bytes(bytes, data.width, data.height), tiny_skia::Pixmap::new(w, h))
+    else {
+        return out;
+    };
+    let d = clip.dst;
+    let placed = Transform::from_row(
+        (d.x1 - d.x0) / data.width as f32,
+        0.0,
+        0.0,
+        (d.y1 - d.y0) / data.height as f32,
+        d.x0,
+        d.y0,
+    );
+    let paint = tiny_skia::Paint {
+        shader: tiny_skia::Pattern::new(
+            src,
+            tiny_skia::SpreadMode::Pad,
+            match clip.quality {
+                crate::protocol::Quality::None => tiny_skia::FilterQuality::Nearest,
+                _ => tiny_skia::FilterQuality::Bilinear,
+            },
+            1.0,
+            placed,
+        ),
+        ..Default::default()
+    };
+    if let Some(r) = super::images::dst_bounds(&d) {
+        pm.fill_rect(r, &paint, xf, None);
+    }
+    for (o, p) in out.iter_mut().zip(pm.pixels()) {
+        *o = p.alpha();
+    }
+    out
 }
 
 #[cfg(test)]
@@ -630,8 +786,13 @@ mod tests {
         pb.line_to(0.0, 10.0);
         pb.line_to(10.0, 10.0);
         pb.close();
-        let clip =
-            ClipPath { path: Arc::new(pb.finish().unwrap()), even_odd: false, xf: Transform::identity(), aa: true };
+        let clip = ClipPath {
+            path: Arc::new(pb.finish().unwrap()),
+            even_odd: false,
+            xf: Transform::identity(),
+            aa: true,
+            image: None,
+        };
         let mut d = draw(Rect::new(0.0, 0.0, 10.0, 10.0));
         d.mask = Some(Arc::from([clip]));
         let op =
@@ -648,8 +809,13 @@ mod tests {
         let under = Op::Fill { rect: Rect::new(0.0, 0.0, 10.0, 10.0), color: BLUE };
         let mut pb = tiny_skia::PathBuilder::new();
         pb.push_circle(5.0, 5.0, 4.0);
-        let clip =
-            ClipPath { path: Arc::new(pb.finish().unwrap()), even_odd: false, xf: Transform::identity(), aa: true };
+        let clip = ClipPath {
+            path: Arc::new(pb.finish().unwrap()),
+            even_odd: false,
+            xf: Transform::identity(),
+            aa: true,
+            image: None,
+        };
         let mut d = draw(Rect::new(1.0, 1.0, 9.0, 9.0));
         d.mask = Some(Arc::from([clip]));
         d.blend = Blend::Copy;
@@ -785,6 +951,7 @@ mod tests {
                 alpha: 1.0,
                 quality: crate::protocol::Quality::Medium,
                 tint: None,
+                tiled: false,
                 draw: d.clone(),
             });
         }
@@ -865,7 +1032,7 @@ mod tests {
         let (w, h) = (1000.0f32, 800.0f32);
         let rounded = kurbo::RoundedRect::new(0.0, 0.0, f64::from(w), f64::from(h), 12.0).to_path(0.1);
         let path = crate::path::to_skia(&rounded).unwrap();
-        let clip = ClipPath { path, even_odd: false, xf: Transform::identity(), aa: true };
+        let clip = ClipPath { path, even_odd: false, xf: Transform::identity(), aa: true, image: None };
         let mut d = draw(Rect::new(0.0, 0.0, w, h));
         d.mask = Some(Arc::from([clip]));
         let mut ops = Vec::new();

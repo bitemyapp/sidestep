@@ -163,6 +163,10 @@ impl Rect {
         Rect { x0, y0, x1, y1 }
     }
 
+    /// A clip that doesn't meet anything: empty, and with no bounds
+    /// (unlike an empty rectangle somewhere).
+    pub const NOWHERE: Rect = Rect { x0: 0.0, y0: 0.0, x1: -1.0, y1: -1.0 };
+
     pub fn is_empty(&self) -> bool {
         self.x1 <= self.x0 || self.y1 <= self.y0
     }
@@ -217,7 +221,8 @@ pub(crate) enum Op {
     },
     /// `src` of the image's pixels (top-left origin) drawn into `dst`
     /// (user space, `y0` its edge nearer the origin), faded by `alpha`; a
-    /// template image is drawn in `tint` wherever it has alpha.
+    /// template image is drawn in `tint` wherever it has alpha. `tiled`
+    /// repeats it from `dst` over all of the clip.
     Image {
         image: Arc<ImageData>,
         src: Rect,
@@ -225,6 +230,7 @@ pub(crate) enum Op {
         alpha: f32,
         quality: Quality,
         tint: Option<Color>,
+        tiled: bool,
         draw: Draw,
     },
     /// What follows until the matching `EndGroup` is drawn into a
@@ -332,13 +338,25 @@ pub(crate) struct Draw {
     pub shadow: Option<Arc<ShadowSpec>>,
 }
 
-/// A path clipping ops: layer points are `xf` of its points.
+/// A path clipping ops: layer points are `xf` of its points. With an
+/// image, the path is the image's rectangle and the image's alpha says how
+/// much of each point inside it is left (`CGContextClipToMask`).
 #[derive(Clone, Debug)]
 pub(crate) struct ClipPath {
     pub path: Arc<tiny_skia::Path>,
     pub even_odd: bool,
     pub xf: tiny_skia::Transform,
     pub aa: bool,
+    pub image: Option<Arc<ClipImage>>,
+}
+
+/// An image a clip is shaped by: its alpha, stretched over `dst` (user
+/// space, `y0` the edge its top row is at), sampled with `quality`.
+#[derive(Debug)]
+pub(crate) struct ClipImage {
+    pub image: Arc<ImageData>,
+    pub dst: Rect,
+    pub quality: Quality,
 }
 
 /// What a shape is filled or stroked with.

@@ -18,6 +18,7 @@
 pub(crate) mod effects;
 pub(crate) mod images;
 pub(crate) mod ops;
+pub(crate) mod pixels;
 
 use crate::protocol::{Color, Op, Rect};
 pub(crate) use crate::text::Glyphs;
@@ -59,12 +60,30 @@ impl<'a> Canvas<'a> {
     /// The pixels whose centers lie in `r` (layer points), within the
     /// canvas: x0, y0, x1, y1.
     pub fn pixels(&self, r: &Rect) -> Option<(usize, usize, usize, usize)> {
-        let s = self.scale;
         let edge = |v: f32| (v - 0.5).ceil();
-        let x0 = edge(r.x0 * s - self.x0 as f32).max(0.0);
-        let x1 = edge(r.x1 * s - self.x0 as f32).min(self.width as f32);
-        let y0 = edge((r.y0 - self.origin_y) * s - self.y0 as f32).max(0.0);
-        let y1 = edge((r.y1 - self.origin_y) * s - self.y0 as f32).min(self.height as f32);
+        self.pixels_by(r, edge, edge)
+    }
+
+    /// The pixels a clip lets drawing reach: those whose centers its
+    /// rectangle takes in, or with clip paths (whose antialiased edges
+    /// reach into pixels their rectangle doesn't take the centers of),
+    /// every pixel it touches; the paths' mask says how much of each.
+    pub fn clip_pixels(&self, draw: &crate::protocol::Draw, damage: &Rect) -> Option<(usize, usize, usize, usize)> {
+        let r = draw.clip.intersect(damage);
+        if draw.mask.is_some() { self.pixels_by(&r, f32::floor, f32::ceil) } else { self.pixels(&r) }
+    }
+
+    fn pixels_by(
+        &self,
+        r: &Rect,
+        low: impl Fn(f32) -> f32,
+        high: impl Fn(f32) -> f32,
+    ) -> Option<(usize, usize, usize, usize)> {
+        let s = self.scale;
+        let x0 = low(r.x0 * s - self.x0 as f32).max(0.0);
+        let x1 = high(r.x1 * s - self.x0 as f32).min(self.width as f32);
+        let y0 = low((r.y0 - self.origin_y) * s - self.y0 as f32).max(0.0);
+        let y1 = high((r.y1 - self.origin_y) * s - self.y0 as f32).min(self.height as f32);
         (x0 < x1 && y0 < y1).then_some((x0 as usize, y0 as usize, x1 as usize, y1 as usize))
     }
 }

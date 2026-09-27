@@ -378,6 +378,8 @@ dependencies = [
  "image",
  "objc2",
  "objc2-app-kit",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation",
  "sidestep",
 ]
@@ -1086,6 +1088,7 @@ name = "objc2-core-graphics"
 version = "0.3.2"
 dependencies = [
  "bitflags 2.13.2",
+ "block2",
  "dispatch2",
  "libc",
  "objc2",
@@ -1523,6 +1526,7 @@ dependencies = [
  "objc2",
  "objc2-app-kit",
  "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation",
  "sidestep",
 ]
