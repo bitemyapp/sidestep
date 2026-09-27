@@ -115,8 +115,9 @@ fn is<T: objc2::DowncastTarget>(this: &AnyObject) -> bool {
 }
 
 /// The label until one is set: a control's is its cell's; a button
-/// cell's is its title, or nothing once its button has a label of its
-/// own; other objects have none.
+/// cell's is its title (its image's description when it shows its image
+/// alone), or nothing once its button has a label of its own; an image
+/// cell's is its image's description; other objects have none.
 fn default_label(this: &AnyObject) -> Option<Retained<NSString>> {
     if let Some(control) = this.downcast_ref::<NSControl>() {
         return match control.cell() {
@@ -132,11 +133,32 @@ fn default_label(this: &AnyObject) -> Option<Retained<NSString>> {
         if view.is_some_and(|v| read(&v, |p| p.label.as_ref().map(|_| ())).is_some()) {
             return Some(NSString::new());
         }
+        if cell.imagePosition() == ak::NSCellImagePosition::ImageOnly {
+            return Some(image_description(cell).unwrap_or_default());
+        }
+    }
+    if let Some(cell) = this.downcast_ref::<NSCell>()
+        && super::image_view::is_image_cell(cell)
+    {
+        return Some(image_description(cell).unwrap_or_default());
     }
     title_of(this)
 }
 
+/// The accessibility description of a cell's image.
+fn image_description(cell: &NSCell) -> Option<Retained<NSString>> {
+    // SAFETY: image takes nothing and returns an image or nil.
+    let image: Option<Retained<ak::NSImage>> = unsafe { msg_send![cell, image] };
+    image?.accessibilityDescription()
+}
+
 fn title_of(this: &AnyObject) -> Option<Retained<NSString>> {
+    // A button showing its image alone shows no title.
+    if let Some(cell) = this.downcast_ref::<NSButtonCell>()
+        && cell.imagePosition() == ak::NSCellImagePosition::ImageOnly
+    {
+        return Some(NSString::new());
+    }
     if is::<NSButton>(this) || is::<NSButtonCell>(this) {
         // SAFETY: buttons and their cells answer `title` with a string.
         Some(unsafe { msg_send![this, title] })
@@ -177,6 +199,9 @@ fn default_role(this: &AnyObject) -> &'static NSString {
             }
             if is::<NSSliderCell>(this) {
                 return ak::NSAccessibilitySliderRole;
+            }
+            if super::image_view::is_image_cell(cell) {
+                return ak::NSAccessibilityImageRole;
             }
             if cell.r#type() == NSCellType::TextCellType {
                 return ak::NSAccessibilityStaticTextRole;

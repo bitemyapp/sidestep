@@ -10,10 +10,14 @@
 //! - `value` holds what a cell holds, and how its value converts;
 //! - `cell` is `NSCell` and `NSActionCell`, `control` is `NSControl`;
 //! - `track` has the mouse-tracking loops and `performClick:`;
-//! - `button` is `NSButton` and `NSButtonCell`;
+//! - `button` is `NSButton` and `NSButtonCell`, and `button_layout`
+//!   places a button's image and title;
 //! - `focus` has key equivalents, the default button and focus rings;
 //! - `text_field` has the text fields, and the hooks the field editor
 //!   fills in; `search_field` is `NSSearchField` and its cell;
+//! - `image_view` is `NSImageView` and `NSImageCell`, and
+//!   `image_animation` steps an image view through an animated image's
+//!   frames;
 //! - `box_view` is `NSBox`;
 //! - `progress` is `NSProgressIndicator`, animated on the window's frames;
 //! - `segmented` is `NSSegmentedControl` and its cell;
@@ -30,9 +34,12 @@ pub(crate) mod a11y;
 mod bench;
 pub(crate) mod box_view;
 pub(crate) mod button;
+pub(crate) mod button_layout;
 pub(crate) mod cell;
 pub(crate) mod control;
 pub(crate) mod focus;
+pub(crate) mod image_animation;
+pub(crate) mod image_view;
 pub(crate) mod progress;
 pub(crate) mod search_field;
 pub(crate) mod segmented;
@@ -45,6 +52,8 @@ pub(crate) mod value;
 
 use objc2::ClassType;
 use objc2::runtime::{AnyClass, AnyObject};
+use objc2_app_kit::NSImageScaling;
+use objc2_foundation::NSSize;
 
 sidestep_runtime::static_class!(pub NSCELL, NSCELL_META = "NSCell", || {
     a11y::install(cell::NSCellImpl::class());
@@ -91,6 +100,14 @@ sidestep_runtime::static_class!(pub NSSEARCHFIELDCELL, NSSEARCHFIELDCELL_META = 
 
 sidestep_runtime::static_class!(pub NSSEARCHFIELD, NSSEARCHFIELD_META = "NSSearchField", || {
     control::register_cell_class(search_field::NSSearchFieldImpl::class(), objc2_app_kit::NSSearchFieldCell::class());
+});
+
+sidestep_runtime::static_class!(pub NSIMAGECELL, NSIMAGECELL_META = "NSImageCell", || {
+    let _ = image_view::NSImageCellImpl::class();
+});
+
+sidestep_runtime::static_class!(pub NSIMAGEVIEW, NSIMAGEVIEW_META = "NSImageView", || {
+    control::register_cell_class(image_view::NSImageViewImpl::class(), objc2_app_kit::NSImageCell::class());
 });
 
 sidestep_runtime::static_class!(pub NSBOX, NSBOX_META = "NSBox", || {
@@ -142,6 +159,35 @@ sidestep_foundation::constant_string!(
 /// A view without an intrinsic size along an axis says so with this.
 #[unsafe(no_mangle)]
 pub static NSViewNoIntrinsicMetric: f64 = control::NO_METRIC;
+
+/// Half-way values up, as AppKit rounds where controls place things.
+pub(crate) fn half_up(v: f64) -> f64 {
+    (v + 0.5).floor()
+}
+
+/// An image of `size` scaled into `area` as `scaling` says, as image
+/// views and buttons scale theirs: proportionally down only if it's too
+/// big, to fill, not at all, or proportionally up or down. Scaled
+/// proportionally, the limiting side takes the area's length exactly.
+pub(crate) fn scaled_image(size: NSSize, area: NSSize, scaling: NSImageScaling) -> NSSize {
+    let fit = || {
+        if area.width / size.width <= area.height / size.height {
+            NSSize::new(area.width, size.height * area.width / size.width)
+        } else {
+            NSSize::new(size.width * area.height / size.height, area.height)
+        }
+    };
+    if size.width <= 0.0 || size.height <= 0.0 {
+        return size;
+    }
+    match scaling {
+        NSImageScaling::ScaleAxesIndependently => area,
+        NSImageScaling::ScaleNone => size,
+        NSImageScaling::ScaleProportionallyUpOrDown => fit(),
+        _ if size.width <= area.width && size.height <= area.height => size,
+        _ => fit(),
+    }
+}
 
 /// Whether `object` is an instance of `class` or of a subclass, found by
 /// walking its class's superclasses: `isKindOfClass:` without a message.

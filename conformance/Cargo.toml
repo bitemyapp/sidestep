@@ -187,3 +187,17 @@ harness = false
 [[test]]
 name = "panels"
 harness = false
+
+# Image views and images in controls (image_views, control_images). A
+# table of its own, so the features merge.
+[target.'cfg(all(all()))'.dev-dependencies]
+objc2-app-kit = { workspace = true, features = ["NSImageView", "NSImageCell", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSAppearance", "NSControl", "NSCell", "NSButton", "NSButtonCell", "NSGraphics", "NSGraphicsContext", "NSColor", "NSColorSpace", "NSEvent", "NSLayoutConstraint", "NSUserInterfaceLayout", "NSDragging", "NSPasteboard", "NSApplication", "NSWindow", "NSText", "NSFont", "NSStringDrawing", "NSAttributedString", "NSAccessibility", "NSAccessibilityConstants", "NSAccessibilityProtocols"] }
+objc2-foundation = { workspace = true, features = ["NSValue", "NSGeometry", "NSString", "NSArray", "NSDictionary"] }
+
+[[test]]
+name = "image_views"
+harness = false
+
+[[test]]
+name = "control_images"
+harness = false

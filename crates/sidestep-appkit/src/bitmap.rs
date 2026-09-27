@@ -202,6 +202,25 @@ pub(crate) struct BitmapIvars {
     recorded: Cell<bool>,
     properties: RefCell<Vec<(Retained<NSString>, Retained<AnyObject>)>>,
     compression: Cell<(NSTIFFCompression, f32)>,
+    /// An animated GIF's frames and which one shows.
+    frames: RefCell<Option<Box<Frames>>>,
+}
+
+/// An animated file's frames (`NSImageFrameCount` and its kin): which
+/// one shows, and the decoder that brings the others, one at a time, as
+/// they're asked for (made when the first is).
+struct Frames {
+    file: Arc<[u8]>,
+    info: crate::codec::Frames,
+    current: usize,
+    decoder: Option<crate::codec::GifFrames>,
+}
+
+impl Clone for Frames {
+    /// A copy shows the same frame, and decodes its own when told another.
+    fn clone(&self) -> Self {
+        Frames { file: self.file.clone(), info: self.info.clone(), current: self.current, decoder: None }
+    }
 }
 
 impl BitmapIvars {
@@ -216,6 +235,7 @@ impl BitmapIvars {
             recorded: Cell::new(false),
             properties: RefCell::new(Vec::new()),
             compression: Cell::new((NSTIFFCompression::None, 0.0)),
+            frames: RefCell::new(None),
         }
     }
 }
@@ -467,16 +487,15 @@ define_class!(
         #[unsafe(method_id(valueForProperty:))]
         fn value_for_property(&self, key: &NSString) -> Option<Retained<AnyObject>> {
             let key = key.to_string();
-            self.ivars().properties.borrow().iter().find(|(k, _)| k.to_string() == key).map(|(_, v)| v.clone())
+            self.frame_property(&key).or_else(|| {
+                self.ivars().properties.borrow().iter().find(|(k, _)| k.to_string() == key).map(|(_, v)| v.clone())
+            })
         }
 
         #[unsafe(method(setProperty:withValue:))]
         fn set_property(&self, key: &NSString, value: Option<&AnyObject>) {
-            let mut props = self.ivars().properties.borrow_mut();
-            let name = key.to_string();
-            props.retain(|(k, _)| k.to_string() != name);
-            if let Some(v) = value {
-                props.push((NSString::from_str(&name), v.retain()));
+            if !self.set_frame_property(key, value) {
+                self.store_property(key, value);
             }
         }
 
@@ -715,6 +734,8 @@ impl NSBitmapImageRepImpl {
             return false;
         }
         *self.ivars().layout.borrow_mut() = layout;
+        *self.ivars().frames.borrow_mut() = crate::codec::gif_frames(&bytes)
+            .map(|info| Box::new(Frames { file: bytes.clone(), info, current: 0, decoder: None }));
         *self.ivars().storage.borrow_mut() = Storage::Encoded(bytes, orient);
         self.ivars().space.set(Space::Srgb);
         set_rep(self, w, h, 8, alpha, "NSCalibratedRGBColorSpace");
@@ -728,6 +749,84 @@ impl NSBitmapImageRepImpl {
 
     fn bump(&self) {
         self.ivars().generation.set(self.ivars().generation.get() + 1);
+    }
+
+    fn store_property(&self, key: &NSString, value: Option<&AnyObject>) {
+        let mut props = self.ivars().properties.borrow_mut();
+        let name = key.to_string();
+        props.retain(|(k, _)| k.to_string() != name);
+        if let Some(v) = value {
+            props.push((NSString::from_str(&name), v.retain()));
+        }
+    }
+
+    /// `setProperty:withValue:` for the current frame of an animated file:
+    /// true if it was that.
+    fn set_frame_property(&self, key: &NSString, value: Option<&AnyObject>) -> bool {
+        if key.to_string() != "NSImageCurrentFrame" || self.ivars().frames.borrow().is_none() {
+            return false;
+        }
+        // SAFETY: the frame is a number.
+        if let Some(frame) = value.map(|v| -> isize { unsafe { msg_send![v, integerValue] } }) {
+            self.show_frame(frame);
+        }
+        true
+    }
+
+    /// An animated file's `NSImageFrameCount`, `NSImageCurrentFrame`,
+    /// `NSImageCurrentFrameDuration` or `NSImageLoopCount`, as numbers.
+    fn frame_property(&self, key: &str) -> Option<Retained<AnyObject>> {
+        use objc2_foundation::NSNumber;
+        let frames = self.ivars().frames.borrow();
+        let f = frames.as_ref()?;
+        let number = match key {
+            "NSImageFrameCount" => NSNumber::new_isize(f.info.delays.len() as isize),
+            "NSImageCurrentFrame" => NSNumber::new_isize(f.current as isize),
+            // Single precision, as AppKit keeps it.
+            "NSImageCurrentFrameDuration" => NSNumber::new_f32(f.info.delays[f.current] as f32),
+            "NSImageLoopCount" => NSNumber::new_isize(f.info.loops as isize),
+            _ => return None,
+        };
+        Some(Retained::into_super(Retained::into_super(Retained::into_super(number))))
+    }
+
+    /// Show frame `i` of an animated file: its pixels, decoded now (the
+    /// next frame alone, as an animation asks), become the rep's, in the
+    /// rep's layout. A frame it doesn't have is ignored.
+    fn show_frame(&self, i: isize) {
+        let frame = {
+            let mut frames = self.ivars().frames.borrow_mut();
+            let Some(f) = frames.as_mut() else { return };
+            if i < 0 || i as usize >= f.info.delays.len() || i as usize == f.current {
+                return;
+            }
+            let file = f.file.clone();
+            let decoder = f.decoder.get_or_insert_with(|| crate::codec::GifFrames::new(file));
+            let Some(frame) = decoder.frame(i as usize) else { return };
+            f.current = i as usize;
+            frame
+        };
+        self.decode();
+        let layout = self.ivars().layout.borrow().clone();
+        let premultiply = layout.alpha && !layout.format.contains(NSBitmapFormat::AlphaNonpremultiplied);
+        if let Storage::Owned(buf) = &mut *self.ivars().storage.borrow_mut() {
+            let bytes = crate::raster::as_bytes(buf);
+            for y in 0..layout.height {
+                let src = frame.get(y * layout.width * 4..(y + 1) * layout.width * 4);
+                let dst = bytes.get_mut(y * layout.bpr..y * layout.bpr + layout.width * 4);
+                let (Some(src), Some(dst)) = (src, dst) else { break };
+                dst.copy_from_slice(src);
+                if premultiply {
+                    for p in dst.as_chunks_mut::<4>().0 {
+                        let a = u32::from(p[3]);
+                        for c in &mut p[..3] {
+                            *c = ((u32::from(*c) * a + 127) / 255) as u8;
+                        }
+                    }
+                }
+            }
+        }
+        self.bump();
     }
 
     /// The pixels may be written: decode them if they're still a file, and
@@ -989,6 +1088,7 @@ impl NSBitmapImageRepImpl {
         let ivars = BitmapIvars::new(l, self.ivars().space.get(), storage);
         *ivars.properties.borrow_mut() = self.ivars().properties.borrow().clone();
         ivars.compression.set(self.ivars().compression.get());
+        *ivars.frames.borrow_mut() = self.ivars().frames.borrow().clone();
         crate::load_shell::<NSBitmapImageRep>();
         let this = NSBitmapImageRepImpl::alloc().set_ivars(ivars);
         // SAFETY: NSImageRep's designated initializer.

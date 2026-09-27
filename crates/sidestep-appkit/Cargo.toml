@@ -91,6 +91,12 @@ harness = false
 name = "panels"
 harness = false
 
+# Image views and images in controls (src/controls/image_view.rs). A
+# table of its own; Cargo unifies these features with the ones above.
+[target.'cfg(all(any(not(target_vendor = "apple"))))'.dependencies]
+objc2-app-kit = { workspace = true, features = ["NSImageView", "NSImageCell", "NSDragging", "NSPasteboard", "NSPasteboardItem"] }
+objc2-foundation = { workspace = true, features = ["NSTimer", "NSRunLoop", "NSValue"] }
+
 # The theme's reference images (src/theme/golden).
 [target.'cfg(not(target_vendor = "apple"))'.dev-dependencies]
 png = "0.18"
@@ -108,4 +114,10 @@ harness = false
 # Field editor sessions, driven through testing hooks (Linux only).
 [[test]]
 name = "field_editor"
+harness = false
+
+# Image views taking drops and pastes, and animating, through testing hooks
+# (Linux only).
+[[test]]
+name = "image_views"
 harness = false

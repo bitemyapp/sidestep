@@ -273,6 +273,46 @@ pub(crate) fn plain_border(p: &Palette, r: NSRect, s: State) {
     paint::stroke_round_rect(r, radii(0.0), 1.0, state_color(p.outline, s));
 }
 
+/// The frames an image view draws round its image (`NSImageFrameStyle`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ImageFrame {
+    /// A print on paper: the view color, a hairline edge and a shadow
+    /// below and to the right, where AppKit's frame is two points thick.
+    Photo,
+    /// A rounded wash.
+    GrayBezel,
+    /// A line cut into the surface: a dark edge with a light one inside.
+    Groove,
+    /// A button's bezel.
+    Button,
+}
+
+/// An image view's frame filling `r`.
+pub(crate) fn image_frame(p: &Palette, r: NSRect, frame: ImageFrame, axis: Axis, s: State) {
+    match frame {
+        ImageFrame::Photo => {
+            // The shadow along the bottom and right edges, then the print,
+            // a point in from them.
+            paint::fill_rect(r, state_color(p.card_border, s));
+            let top = axis.top(r);
+            let print = NSRect::new(
+                NSPoint::new(r.origin.x, if axis.flipped { top } else { top - (r.size.height - 1.0) }),
+                NSSize::new(r.size.width - 1.0, r.size.height - 1.0),
+            );
+            paint::fill_rect(print, p.view);
+            paint::stroke_round_rect(print, radii(0.0), 1.0, state_color(p.card_border, s));
+        }
+        ImageFrame::GrayBezel => {
+            paint::fill_round_rect(inset(r, 1.0, 1.0), radii(RADIUS + 2.0), state_color(p.button, s));
+        }
+        ImageFrame::Groove => {
+            paint::stroke_round_rect(inset(r, 1.0, 1.0), radii(RADIUS / 2.0), 1.0, state_color(p.knob, s));
+            paint::stroke_round_rect(r, radii(RADIUS / 2.0), 1.0, state_color(p.separator, s));
+        }
+        ImageFrame::Button => button_bezel(p, r, radii(RADIUS), Emphasis::Normal, s),
+    }
+}
+
 /// A card: a filled rounded rectangle with a hairline edge.
 pub(crate) fn card(p: &Palette, r: NSRect) {
     paint::fill_round_rect(r, radii(RADIUS * 2.0), p.card);

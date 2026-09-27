@@ -272,6 +272,47 @@ fn system_colors(_: MainThreadMarker) {
     }
 }
 
+fn system_effects(_: MainThreadMarker) {
+    use NSColorSystemEffect as E;
+    let rgb = |r: f64, g: f64, b: f64, a: f64| NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, a);
+    // In 255ths, as macOS gives them. Pressed, deep-pressed and rollover
+    // darken in the light appearance and lighten in the dark one; disabled
+    // fades (to 35% of the alpha in light, half in dark).
+    let cases = [
+        (E::Pressed, [0.0, 0.0, 255.0, 255.0], [0.0, 0.0, 215.0, 255.0], [46.0, 46.0, 255.0, 255.0]),
+        (E::Pressed, [153.0, 102.0, 51.0, 255.0], [121.0, 74.0, 27.0, 255.0], [199.0, 148.0, 97.0, 255.0]),
+        (E::Pressed, [128.0, 128.0, 128.0, 255.0], [98.0, 98.0, 98.0, 255.0], [174.0, 174.0, 174.0, 255.0]),
+        (E::DeepPressed, [153.0, 102.0, 51.0, 255.0], [95.0, 52.0, 8.0, 255.0], [235.0, 184.0, 133.0, 255.0]),
+        (E::Rollover, [153.0, 102.0, 51.0, 255.0], [95.0, 52.0, 8.0, 255.0], [214.0, 163.0, 112.0, 255.0]),
+        (E::Disabled, [153.0, 102.0, 51.0, 255.0], [153.0, 102.0, 51.0, 89.25], [153.0, 102.0, 51.0, 127.5]),
+        (E::None, [153.0, 102.0, 51.0, 255.0], [153.0, 102.0, 51.0, 255.0], [153.0, 102.0, 51.0, 255.0]),
+        // A translucent color: the step goes to its premultiplied
+        // components and its alpha.
+        (E::Pressed, [0.0, 0.0, 0.0, 127.5], [0.0, 0.0, 0.0, 158.0], [46.0, 46.0, 46.0, 174.0]),
+        (E::Pressed, [255.0, 255.0, 255.0, 127.5], [118.0, 118.0, 118.0, 158.0], [174.0, 174.0, 174.0, 174.0]),
+        (E::Pressed, [51.0, 51.0, 51.0, 204.0], [38.0, 38.0, 38.0, 228.0], [87.0, 87.0, 87.0, 250.0]),
+        (E::DeepPressed, [0.0, 0.0, 0.0, 127.5], [0.0, 0.0, 0.0, 182.0], [82.0, 82.0, 82.0, 210.0]),
+        (E::DeepPressed, [51.0, 51.0, 51.0, 204.0], [35.0, 35.0, 35.0, 247.0], [123.0, 123.0, 123.0, 255.0]),
+        (E::Rollover, [0.0, 0.0, 0.0, 127.5], [0.0, 0.0, 0.0, 182.0], [61.0, 61.0, 61.0, 189.0]),
+        (E::Disabled, [51.0, 51.0, 51.0, 204.0], [51.0, 51.0, 51.0, 71.4], [51.0, 51.0, 51.0, 102.0]),
+    ];
+    for (effect, from, light, dark_want) in cases {
+        let c = rgb(from[0] / 255.0, from[1] / 255.0, from[2] / 255.0, from[3] / 255.0);
+        let e = c.colorWithSystemEffect(effect);
+        // Made once, it follows the appearance it's used in.
+        assert_eq!(e.r#type(), NSColorType::Catalog, "{effect:?}");
+        for (a, want) in [(aqua(), light), (dark(), dark_want)] {
+            let got = within(&a, || srgb(&e)).map(|v| v * 255.0);
+            let close = got.iter().zip(want).all(|(g, w)| (g - w).abs() < 0.51);
+            assert!(close, "{effect:?} of {from:?} in {}: {got:?}, not {want:?}", a.name());
+        }
+    }
+    // A system color's too.
+    let pressed = NSColor::labelColor().colorWithSystemEffect(E::Pressed);
+    let got = within(&dark(), || srgb(&pressed)).map(|v| (v * 255.0).round());
+    assert_eq!(got, [255.0; 4]);
+}
+
 fn dynamic_colors(mtm: MainThreadMarker) {
     let calls: Rc<RefCell<Vec<String>>> = Rc::default();
     let c2 = calls.clone();
@@ -474,6 +515,7 @@ fn main() {
         ("blending", blending),
         ("color_spaces", color_spaces),
         ("system_colors", system_colors),
+        ("system_effects", system_effects),
         ("dynamic_colors", dynamic_colors),
         ("named_appearances", named_appearances),
         ("drawing_appearance", drawing_appearance),

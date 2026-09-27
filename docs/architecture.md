@@ -1223,7 +1223,16 @@ compositor.
   destination, kept per size and appearance. Bitmaps whose bytes wouldn't
   fit in memory, asked for or claimed by a file, are refused, as AppKit
   refuses them. `NSImage` isn't shared between threads, so neither are
-  the names `setName:` registers: each thread has its own.
+  the names `setName:` registers: each thread has its own. An animated
+  GIF's bitmap lists its frames from the file's blocks without decoding
+  them (`NSImageFrameCount`, the durations, the loop count, which counts
+  the first play as macOS does) and decodes a frame, composited as it
+  shows, when it's set (`NSImageCurrentFrame`), which then becomes its
+  pixels: a decoder kept on the bitmap brings the frames one at a time,
+  and starts again from the first to go back, so only the frame showing
+  and the decoder's canvas are held. Images go on
+  pasteboards as TIFF and come off them from image data or an image
+  file's URL (`NSPasteboardReading`/`Writing`).
 - **Symbols.** `imageWithSystemSymbolName:` maps about a hundred common
   symbol names to Sidestep's own line drawings, template images drawn by
   a handler, sized and weighted by an `NSImageSymbolConfiguration`. No SF
@@ -1246,9 +1255,13 @@ from the desktop and the selection colors from the accent. There is no
 color management: device, calibrated and generic RGB are sRGB, Display P3
 converts through its matrix, and gray is RGB's luminance weighed in
 linear light. Components are kept as given, beyond 0 to 1 too, and
-clamped when drawn or converted into a space that isn't extended; a
-system effect (`colorWithSystemEffect:`) on a system or dynamic color
-goes on following the appearance.
+clamped when drawn or converted into a space that isn't extended. A
+system effect (`colorWithSystemEffect:`) on any color depends on the
+appearance, so it's worked out each time the color is used, as macOS
+works it out (measured): disabled fades the alpha (to 35% in a light
+appearance, half in a dark one); pressed, deep-pressed and rollover add
+a step to the color taken premultiplied, darkening in a light appearance
+and lightening in a dark one, in whole 255ths.
 
 A view's effective appearance is its own, its superview's, its window's
 or the application's, which follows the desktop's. Views cache it; a
@@ -1791,6 +1804,39 @@ swash.
   equivalents match Control, Option and Command exactly and ignore Shift,
   which the characters carry. Keys nothing takes go up the responder
   chain from the window.
+- **Images in buttons** (`controls/button_layout.rs`) are laid out by a
+  pure function of the bezel's family, the control size, the image's and
+  title's sizes, the position, `imageScaling` and `imageHugsTitle`,
+  measured on macOS for thousands of cases and checked against an oracle
+  in `conformance/tests/control_images.rs` (which runs against AppKit on
+  macOS). Rounded bezels round each edge to whole points; square bezels
+  and borderless buttons don't; a disclosure button lays the image out in
+  its 13-point square. A cell's alternate image shows with its
+  alternate contents (on and showing state by contents, or highlighted
+  and highlighting by them, not both). A template draws in the title's
+  color on a bordered bezel; on a textured or toolbar one in the accent,
+  shaded by state as measured (or the label's color when the button shows
+  it's on by its bezel), and on a badge in the secondary label color; on
+  a borderless one in the content tint (with the pressed system effect
+  while pressed) or the label colors. A symbol configuration is applied
+  to a symbol image once per image (`image_view::SymbolCache`, shared
+  with image views), and the result kept until the image changes.
+- **Image views** (`controls/image_view.rs`): `NSImageCell` places the
+  image in its frame's drawing rect as it draws (its `imageRectForBounds:`
+  is the bounds, as AppKit's is), rounding the origin to whole points;
+  frames are the theme's (`parts::image_frame`). Templates take the
+  view's `contentTintColor`, else the secondary label color from the
+  system colors, white on an emphasized background. The view keeps the
+  target and action (an image cell has none), registers the image drag
+  types (whether editable or not), and while editable (enabled or not)
+  takes drops of image files and image data from sources that allow a
+  copy (the image is taken when the drop concludes), and, when it
+  `allowsCutCopyPaste`, pastes, cuts and Delete, sending its action. An
+  animated image steps through its frames on one-shot timers in the
+  common modes while the view `animates`, in a window or not, as AppKit's
+  does (`controls/image_animation.rs`); nothing runs between frames.
+  `+imageViewWithImage:` is added by hand, as a category, so it can make
+  an instance of the subclass it's sent to.
 - **Text fields** display, size, truncate and draw placeholders; the
   editing entry points (`currentEditor`, `editWithFrame:…`,
   `selectWithFrame:…`, `selectText:`, `endEditing:`) are hooks in

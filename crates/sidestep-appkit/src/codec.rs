@@ -15,6 +15,7 @@
 //! decodes.
 
 use std::io::Cursor;
+use std::sync::Arc;
 
 use image::{ImageDecoder, ImageFormat, ImageReader, metadata::Orientation};
 use objc2_app_kit::NSBitmapImageFileType;
@@ -145,6 +146,104 @@ fn gif_transparent(bytes: &[u8]) -> Option<bool> {
             }
             // The first image, with no control extension before it.
             _ => return Some(false),
+        }
+    }
+}
+
+/// An animated GIF's frames: how long each shows, in seconds, and how
+/// many times the whole plays (0 for ever).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Frames {
+    pub delays: Vec<f64>,
+    pub loops: u32,
+}
+
+/// The frames of a GIF that has more than one, read from its blocks
+/// without decoding any: each frame's delay from its graphic control
+/// extension (shorter than a hundredth of a second counts as a tenth, as
+/// the system's decoders count it), and how many times it plays: once
+/// without a `NETSCAPE2.0` extension, for ever when that says 0, and
+/// otherwise once more than it says (it counts the times played again,
+/// and macOS reports and plays the total, `image_views.rs`).
+pub(crate) fn gif_frames(bytes: &[u8]) -> Option<Frames> {
+    if !bytes.starts_with(b"GIF8") {
+        return None;
+    }
+    let packed = *bytes.get(10)?;
+    let mut at = 13 + if packed & 0x80 != 0 { 3 << ((packed & 7) + 1) } else { 0 };
+    let (mut delays, mut loops, mut delay) = (Vec::new(), 1, 0u16);
+    // Skip sub-blocks from `at` up to and past the empty one.
+    let skip = |mut at: usize| -> Option<usize> {
+        loop {
+            let len = usize::from(*bytes.get(at)?);
+            at += 1 + len;
+            if len == 0 {
+                return Some(at);
+            }
+        }
+    };
+    loop {
+        match *bytes.get(at)? {
+            0x21 => {
+                match *bytes.get(at + 1)? {
+                    0xf9 => delay = u16::from_le_bytes([*bytes.get(at + 4)?, *bytes.get(at + 5)?]),
+                    0xff if bytes.get(at + 3..at + 14) == Some(b"NETSCAPE2.0".as_slice())
+                        && bytes.get(at + 14..at + 16) == Some([3, 1].as_slice()) =>
+                    {
+                        let again = u32::from(u16::from_le_bytes([*bytes.get(at + 16)?, *bytes.get(at + 17)?]));
+                        loops = if again == 0 { 0 } else { again + 1 };
+                    }
+                    _ => {}
+                }
+                at = skip(at + 2)?;
+            }
+            0x2c => {
+                let local = *bytes.get(at + 9)?;
+                let table = if local & 0x80 != 0 { 3 << ((local & 7) + 1) } else { 0 };
+                // The descriptor, its color table and the code size.
+                at = skip(at + 10 + table + 1)?;
+                let seconds = f64::from(delay) / 100.0;
+                delays.push(if seconds < 0.011 { 0.1 } else { seconds });
+                delay = 0;
+            }
+            _ => break,
+        }
+    }
+    (delays.len() > 1).then_some(Frames { delays, loops })
+}
+
+/// An animated GIF's frames as they show (each drawn over what the ones
+/// before left), decoded one at a time as they're asked for: a frame
+/// after the last one given decodes the ones between, and an earlier one
+/// starts again from the first. Only the decoder's own canvas is kept.
+pub(crate) struct GifFrames {
+    file: Arc<[u8]>,
+    frames: Option<image::Frames<'static>>,
+    /// The index of the frame `frames` gives next.
+    next: usize,
+}
+
+impl GifFrames {
+    pub(crate) fn new(file: Arc<[u8]>) -> Self {
+        GifFrames { file, frames: None, next: 0 }
+    }
+
+    /// Frame `i`, straight RGBA the size of the file, if the file has it.
+    pub(crate) fn frame(&mut self, i: usize) -> Option<Vec<u8>> {
+        use image::AnimationDecoder;
+        if self.frames.is_none() || i < self.next {
+            let decoder = image::codecs::gif::GifDecoder::new(Cursor::new(self.file.clone())).ok()?;
+            self.frames = Some(decoder.into_frames());
+            self.next = 0;
+        }
+        let frames = self.frames.as_mut()?;
+        loop {
+            let frame = frames.next();
+            self.next += 1;
+            let frame = frame?.ok()?;
+            if self.next > i {
+                return Some(frame.into_buffer().into_raw());
+            }
         }
     }
 }
@@ -280,6 +379,47 @@ mod tests {
         assert!(header(&[]).is_none());
         // A header claiming more pixels than can be decoded is no image.
         assert!(header(include_bytes!("../../../conformance/tests/fixtures/huge.tiff")).is_none());
+    }
+
+    #[test]
+    fn animated_gifs_list_their_frames() {
+        let gif = |delays: &[u32], repeat: Option<u16>| {
+            use image::codecs::gif::{GifEncoder, Repeat};
+            let mut out = Vec::new();
+            {
+                let mut encoder = GifEncoder::new(&mut out);
+                if let Some(n) = repeat {
+                    encoder.set_repeat(if n == 0 { Repeat::Infinite } else { Repeat::Finite(n) }).unwrap();
+                }
+                let frames = delays.iter().enumerate().map(|(i, &ms)| {
+                    let pixel = image::Rgba([if i % 2 == 0 { 255 } else { 0 }, 0, 0, 255]);
+                    image::Frame::from_parts(
+                        image::RgbaImage::from_pixel(2, 2, pixel),
+                        0,
+                        0,
+                        image::Delay::from_numer_denom_ms(ms, 1),
+                    )
+                });
+                encoder.encode_frames(frames).unwrap();
+            }
+            out
+        };
+        let frames = gif_frames(&gif(&[100, 200, 0], Some(0))).expect("frames");
+        assert_eq!(frames, Frames { delays: vec![0.1, 0.2, 0.1], loops: 0 });
+        // Played three times again: four in all.
+        assert_eq!(gif_frames(&gif(&[50, 50], Some(3))).expect("frames").loops, 4);
+        assert_eq!(gif_frames(&gif(&[50, 50], None)).expect("frames").loops, 1);
+        // One frame isn't an animation.
+        assert!(gif_frames(&gif(&[100], Some(0))).is_none());
+        // Frames decode in any order, one at a time.
+        let mut frames = GifFrames::new(gif(&[100, 200, 300], Some(0)).into());
+        let red = [255, 0, 0, 255];
+        assert_eq!(frames.frame(1).expect("frame 1")[..4], [0, 0, 0, 255]);
+        assert_eq!(frames.frame(2).expect("frame 2")[..4], red);
+        assert_eq!(frames.frame(0).expect("frame 0")[..4], red);
+        assert_eq!(frames.frame(1).expect("frame 1")[..4], [0, 0, 0, 255]);
+        assert!(frames.frame(3).is_none());
+        assert_eq!(frames.frame(2).expect("frame 2")[..4], red);
     }
 
     #[test]

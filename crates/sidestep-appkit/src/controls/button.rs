@@ -31,18 +31,22 @@
 use std::cell::{Cell, RefCell};
 
 use objc2::rc::{Allocated, Retained};
-use objc2::runtime::{AnyObject, NSObjectProtocol, Sel};
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
+use objc2::runtime::{AnyClass, AnyObject, NSObjectProtocol, Sel};
+use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSActionCell, NSBezelStyle, NSButton, NSButtonCell, NSButtonType, NSCell, NSCellHitResult, NSCellImagePosition,
-    NSCellStyleMask, NSColor, NSControl, NSControlBorderShape, NSEvent, NSEventModifierFlags, NSFont, NSGradientType,
-    NSImageScaling, NSLineBreakMode, NSResponder, NSTextAlignment, NSView,
+    NSActionCell, NSBackgroundStyle, NSBezelStyle, NSButton, NSButtonCell, NSButtonType, NSCell, NSCellHitResult,
+    NSCellImagePosition, NSCellStyleMask, NSColor, NSColorSystemEffect, NSControl, NSControlBorderShape, NSEvent,
+    NSEventModifierFlags, NSFont, NSGradientType, NSImage, NSImageScaling, NSImageSymbolConfiguration, NSLineBreakMode,
+    NSResponder, NSTextAlignment, NSUserInterfaceLayoutDirection, NSView,
 };
 use objc2_foundation::{NSAttributedString, NSCopying, NSPoint, NSRect, NSSize, NSString, NSZone};
 
+use super::button_layout::{self as layout, Place, Spec};
 use super::cell::{self, Flags, NSCellImpl, Styled, imp as cell_imp};
 use super::control;
+use super::half_up;
 use super::value::{self, Value};
+use crate::protocol::Color;
 use crate::theme::{self, metrics, parts};
 
 /// The look a bezel style and button type come to.
@@ -92,6 +96,10 @@ pub(crate) struct ButtonCellIvars {
     /// The title's measured size and the cell generation it was measured
     /// at (see `cell::generation`).
     title_size: Cell<Option<(u32, NSSize)>>,
+    /// The button's symbol configuration, and the image it last made of a
+    /// symbol image with it (with the image it was made of).
+    symbols: RefCell<Option<Retained<NSImageSymbolConfiguration>>>,
+    configured: super::image_view::SymbolCache,
 }
 
 impl ButtonCellIvars {
@@ -104,7 +112,9 @@ impl ButtonCellIvars {
             alternate_title: RefCell::new(None),
             alternate_image: RefCell::new(None),
             image_position: Cell::new(NSCellImagePosition::NoImage),
-            image_scaling: Cell::new(NSImageScaling::ScaleProportionallyDown),
+            // Button cells don't scale images; the button factories make
+            // buttons that scale them down to fit.
+            image_scaling: Cell::new(NSImageScaling::ScaleNone),
             image_hugs_title: Cell::new(false),
             image_dims_when_disabled: Cell::new(true),
             key_equivalent: RefCell::new(NSString::new()),
@@ -121,6 +131,8 @@ impl ButtonCellIvars {
             key_font: RefCell::new(None),
             alternate_mnemonic: Cell::new(usize::MAX),
             title_size: Cell::new(None),
+            symbols: RefCell::new(None),
+            configured: Default::default(),
         }
     }
 
@@ -149,6 +161,7 @@ impl ButtonCellIvars {
         self.gradient.set(other.gradient.get());
         self.key_font.replace(other.key_font.borrow().clone());
         self.alternate_mnemonic.set(other.alternate_mnemonic.get());
+        self.symbols.replace(other.symbols.borrow().clone());
     }
 }
 
@@ -182,7 +195,10 @@ define_class!(
             let this = this.set_ivars(ButtonCellIvars::new());
             // SAFETY: NSActionCell's initializer.
             let this: Retained<Self> = unsafe { msg_send![super(this), initTextCell: &*NSString::new()] };
-            cell::as_cell(this.base()).setAlignment(NSTextAlignment::Center);
+            let c = cell::as_cell(this.base());
+            c.setAlignment(NSTextAlignment::Center);
+            // An image cell: untitled, of no type (an image shows it alone).
+            c.setType(objc2_app_kit::NSCellType::NullCellType);
             this.base().set_flag(Flags::BORDERED, true);
             // SAFETY: setImage: takes an image or nil.
             let _: () = unsafe { msg_send![&*this, setImage: image] };
@@ -409,6 +425,7 @@ define_class!(
 
         #[unsafe(method(setAlternateImage:))]
         fn set_alternate_image(&self, image: Option<&AnyObject>) {
+            self.ivars().configured.clear();
             let old = self.ivars().alternate_image.replace(image.map(|i| i.retain()));
             let same = match (&old, image) {
                 (Some(a), Some(b)) => std::ptr::eq(&**a, b),
@@ -418,6 +435,26 @@ define_class!(
             drop(old);
             if !same {
                 cell::redraw(self.base());
+            }
+        }
+
+        #[unsafe(method(setImage:))]
+        fn set_image(&self, image: Option<&AnyObject>) {
+            // What was made of the old image goes with it.
+            self.ivars().configured.clear();
+            let kind = self.as_cell().r#type();
+            // SAFETY: NSCell's setImage: takes an image or nil.
+            let _: () = unsafe { msg_send![super(self), setImage: image] };
+            // A button cell keeps its type (NSCell's would become an image
+            // cell).
+            if self.as_cell().r#type() != kind {
+                self.as_cell().setType(kind);
+            }
+            // A button given an image with nowhere to show it shows the
+            // image alone.
+            if image.is_some() && self.ivars().image_position.get() == NSCellImagePosition::NoImage {
+                self.ivars().image_position.set(NSCellImagePosition::ImageOnly);
+                cell::changed(self.base());
             }
         }
 
@@ -603,7 +640,14 @@ define_class!(
 
         #[unsafe(method(drawInteriorWithFrame:inView:))]
         fn draw_interior_with_frame(&self, frame: NSRect, view: &NSView) {
-            if title_size(self).width == 0.0 {
+            if let Some(image) = shown_image(self) {
+                // SAFETY: imageRectForBounds: takes and returns a rect.
+                let r: NSRect = unsafe { msg_send![self, imageRectForBounds: frame] };
+                // SAFETY: drawImage:withFrame:inView: takes an image, a rect
+                // and a view.
+                let _: () = unsafe { msg_send![self, drawImage: &*image, withFrame: r, inView: view] };
+            }
+            if title_size(self).width == 0.0 || self.ivars().image_position.get() == NSCellImagePosition::ImageOnly {
                 return;
             }
             // SAFETY: titleRectForBounds: takes and returns a rect.
@@ -627,8 +671,8 @@ define_class!(
         }
 
         #[unsafe(method(drawImage:withFrame:inView:))]
-        fn draw_image(&self, _image: &AnyObject, _frame: NSRect, _view: &NSView) {
-            // Images draw once the image work lands.
+        fn draw_image(&self, image: &AnyObject, frame: NSRect, view: &NSView) {
+            draw_image(self, image, frame, view);
         }
 
         #[unsafe(method(performClick:))]
@@ -830,7 +874,8 @@ fn turn_off_group(cell: &NSButtonCellImpl) {
 fn title_font(cell: &NSButtonCellImpl) -> Retained<NSFont> {
     let base = cell.base();
     base.font_set().unwrap_or_else(|| {
-        let size = if cell.look() == Look::Badge { 11.0 } else { metrics::FONT_SIZE[base.control_size_index()] };
+        let badge = cell.look() == Look::Badge && base.has(Flags::BORDERED);
+        let size = if badge { 11.0 } else { metrics::FONT_SIZE[base.control_size_index()] };
         NSFont::systemFontOfSize(size)
     })
 }
@@ -865,14 +910,12 @@ fn line_height(cell: &NSButtonCellImpl) -> f64 {
     Styled::plain(String::new(), attrs).size(None).height
 }
 
-/// Half-way values round up, as AppKit rounds positions.
-fn half_up(v: f64) -> f64 {
-    (v + 0.5).floor()
-}
-
 /// The intrinsic size, by look and control size (`controls.rs`,
 /// `push_buttons`, `check_boxes`, `buttons_of_every_bezel`).
 fn intrinsic_size(cell: &NSButtonCellImpl) -> NSSize {
+    if let Some(spec) = image_spec(cell) {
+        return layout::sizes(&spec).0;
+    }
     let base = cell.base();
     let i = base.control_size_index();
     let t = title_size(cell);
@@ -940,6 +983,9 @@ fn intrinsic_size(cell: &NSButtonCellImpl) -> NSSize {
 /// `cellSize`: the intrinsic size, and for the bezels whose frames reach
 /// past their alignment rects, that much more.
 fn cell_size(cell: &NSButtonCellImpl) -> NSSize {
+    if let Some(spec) = image_spec(cell) {
+        return layout::sizes(&spec).1;
+    }
     let size = intrinsic_size(cell);
     let (dw, dh) = match cell.look() {
         _ if !cell.base().has(Flags::BORDERED) => (0.0, 0.0),
@@ -964,6 +1010,9 @@ fn cell_size_for_bounds(cell: &NSButtonCellImpl, bounds: NSRect) -> NSSize {
 
 /// `drawingRectForBounds:`: where the bezel goes, by look.
 fn drawing_rect(cell: &NSButtonCellImpl, b: NSRect) -> NSRect {
+    if let Some(spec) = image_spec(cell) {
+        return layout::rects(&spec, b).drawing;
+    }
     let base = cell.base();
     let i = base.control_size_index();
     let (x, y, w, h) = (b.origin.x, b.origin.y, b.size.width, b.size.height);
@@ -984,10 +1033,11 @@ fn drawing_rect(cell: &NSButtonCellImpl, b: NSRect) -> NSRect {
         Look::Push => {
             let height = metrics::PUSH_HEIGHT[i];
             let pad = push_pad();
-            // A titled mini button's bezel sits a point lower.
-            let lower = if i == 2 && title_size(cell).width > 0.0 { 1.0 } else { 0.0 };
+            // Centered, half-way values rounding down the screen; a titled
+            // mini button's bezel sits half a point lower before rounding.
+            let lower = if i == 2 && title_size(cell).width > 0.0 { 0.5 } else { 0.0 };
             NSRect::new(
-                NSPoint::new(x + pad, y + ((h - height) / 2.0).floor() + lower),
+                NSPoint::new(x + pad, y + half_up((h - height) / 2.0 + lower)),
                 NSSize::new(w - 2.0 * pad, height),
             )
         }
@@ -1013,6 +1063,9 @@ fn drawing_rect(cell: &NSButtonCellImpl, b: NSRect) -> NSRect {
 
 /// `titleRectForBounds:`: by look; nothing for an empty title.
 fn title_rect(cell: &NSButtonCellImpl, b: NSRect) -> NSRect {
+    if let Some(spec) = image_spec(cell) {
+        return layout::rects(&spec, b).title;
+    }
     let t = title_size(cell);
     if t.width == 0.0 {
         return NSRect::ZERO;
@@ -1033,7 +1086,7 @@ fn title_rect(cell: &NSButtonCellImpl, b: NSRect) -> NSRect {
             let side = metrics::DISCLOSURE;
             NSRect::new(NSPoint::new(x + (w - side) / 2.0, y + middle), NSSize::new(side, t.height))
         }
-        _ if !base.has(Flags::BORDERED) => band(0.0, half_up(middle)),
+        _ if !base.has(Flags::BORDERED) => band(0.0, middle),
         Look::SmallSquare => band(1.0, middle),
         Look::ShadowlessSquare => band(3.0, middle),
         Look::TexturedSquare => band(metrics::TEXTURED_PAD[i] / 2.0, middle),
@@ -1051,6 +1104,9 @@ fn title_rect(cell: &NSButtonCellImpl, b: NSRect) -> NSRect {
 /// `imageRectForBounds:`: a check box's or radio button's box, at the
 /// leading edge and centered across (a mini box a point lower).
 fn image_rect(cell: &NSButtonCellImpl, bounds: NSRect) -> NSRect {
+    if let Some(spec) = image_spec(cell) {
+        return layout::rects(&spec, bounds).image;
+    }
     match cell.look() {
         Look::Check | Look::Radio => {
             let i = cell.base().control_size_index();
@@ -1060,6 +1116,182 @@ fn image_rect(cell: &NSButtonCellImpl, bounds: NSRect) -> NSRect {
         }
         _ => NSRect::ZERO,
     }
+}
+
+/// What a button with an image lays out, if it shows one: an image, a
+/// position that shows it, and a look that does.
+fn image_spec(cell: &NSButtonCellImpl) -> Option<Spec> {
+    let position = cell.ivars().image_position.get();
+    let look = cell.look();
+    if position == NSCellImagePosition::NoImage || !layout::shows_image(look) {
+        return None;
+    }
+    // SAFETY: image takes nothing and returns an image or nil.
+    let image: Option<Retained<AnyObject>> = unsafe { msg_send![cell, image] };
+    let image = image?;
+    let size = match image.downcast_ref::<NSImage>() {
+        Some(image) => configured(cell, image).size(),
+        // SAFETY: images answer size.
+        None => unsafe { msg_send![&*image, size] },
+    };
+    let base = cell.base();
+    let rtl = cell::as_cell(base).userInterfaceLayoutDirection() == NSUserInterfaceLayoutDirection::RightToLeft;
+    let place = match position {
+        NSCellImagePosition::ImageLeft => Place::Left,
+        NSCellImagePosition::ImageRight => Place::Right,
+        NSCellImagePosition::ImageBelow => Place::Below,
+        NSCellImagePosition::ImageAbove => Place::Above,
+        NSCellImagePosition::ImageOverlaps => Place::Overlaps,
+        NSCellImagePosition::ImageLeading if rtl => Place::Right,
+        NSCellImagePosition::ImageLeading => Place::Left,
+        NSCellImagePosition::ImageTrailing if rtl => Place::Left,
+        NSCellImagePosition::ImageTrailing => Place::Right,
+        _ => Place::Only,
+    };
+    let t = title_size(cell);
+    let title = (place != Place::Only && t.width > 0.0).then_some(t);
+    Some(Spec {
+        look,
+        size: base.control_size_index(),
+        bordered: base.has(Flags::BORDERED),
+        title,
+        image: size,
+        place,
+        hugs: cell.ivars().image_hugs_title.get(),
+        scaling: cell.ivars().image_scaling.get(),
+    })
+}
+
+/// `image` as the button shows it: a symbol image made with the button's
+/// symbol configuration, once per image and configuration.
+fn configured(cell: &NSButtonCellImpl, image: &NSImage) -> Retained<NSImage> {
+    let config = cell.ivars().symbols.borrow().clone();
+    cell.ivars().configured.shown(image, config.as_deref())
+}
+
+/// Whether the cell shows its alternate contents: when it's on and shows
+/// its state by its contents, or highlighted and highlights by them, but
+/// not both.
+fn shows_alternate(cell: &NSButtonCellImpl) -> bool {
+    let contents = NSCellStyleMask::ContentsCellMask.0;
+    let base = cell.base();
+    let on = base.raw_state().get() == 1 && cell.ivars().shows_state_by.get().0 & contents != 0;
+    let lit = base.has(Flags::HIGHLIGHTED) && cell.ivars().highlights_by.get().0 & contents != 0;
+    on != lit
+}
+
+/// The image the cell draws: the alternate image while it shows its
+/// alternate contents (if it has one), else the image; none unless it
+/// lays one out.
+fn shown_image(cell: &NSButtonCellImpl) -> Option<Retained<AnyObject>> {
+    image_spec(cell)?;
+    let alternate = shows_alternate(cell).then(|| cell.ivars().alternate_image.borrow().clone()).flatten();
+    // SAFETY: image takes nothing and returns an image or nil.
+    alternate.or_else(|| unsafe { msg_send![cell, image] })
+}
+
+/// `drawImage:withFrame:inView:`: the image in `frame`, a template tinted
+/// as the button's state and look say, another image faded when the
+/// button is disabled (unless it's told not to be).
+fn draw_image(cell: &NSButtonCellImpl, image: &AnyObject, frame: NSRect, view: &NSView) {
+    let Some(image) = image.downcast_ref::<NSImage>() else { return };
+    if !theme::paint::recording() {
+        return;
+    }
+    let base = cell.base();
+    let image = configured(cell, image);
+    let tint = image_tint(cell, &image, view);
+    let dims = cell.ivars().image_dims_when_disabled.get();
+    let enabled = base.has(Flags::ENABLED) || !dims;
+    let faded = if base.has(Flags::BORDERED) { 0.5 } else { 0.4 };
+    super::image_view::draw_image(&image, frame, tint, enabled, faded);
+}
+
+/// The color a template image draws in (`control_images.rs`,
+/// `template_images_by_state`): white on an emphasized background; on a
+/// bordered bezel the title's color, but the accent on a textured or
+/// toolbar one (see `textured_tint`) and the secondary label color on a
+/// badge; on a borderless button the content tint (with the pressed
+/// system effect while pressed), else the label color while pressed and
+/// the secondary label color otherwise, faint when disabled.
+fn image_tint(cell: &NSButtonCellImpl, image: &NSImage, view: &NSView) -> Option<Color> {
+    use crate::palette::System;
+    if !image.isTemplate() {
+        return None;
+    }
+    let look = crate::appearance::current_look();
+    let base = cell.base();
+    if cell::as_cell(base).interiorBackgroundStyle() == NSBackgroundStyle::Emphasized {
+        return Some(crate::palette::get(System::AlternateSelectedControlText, look));
+    }
+    let p = theme::palette();
+    let s = part_state(cell);
+    if base.has(Flags::BORDERED) {
+        return Some(match cell.look() {
+            Look::TexturedSquare | Look::Toolbar => textured_tint(cell, s, look),
+            Look::Badge => crate::palette::get(System::SecondaryLabel, look),
+            _ => parts::button_text(p, emphasis(cell), s),
+        });
+    }
+    let tint = cell.ivars().content_tint.borrow().clone().or_else(|| {
+        // A view that isn't a button may still give a tint.
+        let other = !super::kind_of(view, <NSButton as objc2::ClassType>::class());
+        // SAFETY: contentTintColor takes nothing and returns a color or nil,
+        // where the view answers it.
+        (other && view.respondsToSelector(sel!(contentTintColor)))
+            .then(|| unsafe { msg_send![view, contentTintColor] })
+            .flatten()
+    });
+    Some(match tint {
+        Some(c) if s.disabled => theme::palette::faded(theme::color_of(&c), 0.5),
+        Some(c) if s.pressed => {
+            crate::color::with_effect(theme::color_of(&c), NSColorSystemEffect::Pressed, look.dark())
+        }
+        Some(c) => theme::color_of(&c),
+        None if s.disabled => crate::palette::get(System::DisabledControlText, look),
+        None if s.pressed => crate::palette::get(System::Label, look),
+        None => crate::palette::get(System::SecondaryLabel, look),
+    })
+}
+
+/// A template's color on a textured or toolbar button, as measured with
+/// the default accent: the accent a shade darker in a light appearance
+/// and lighter in a dark one (10 and 13 255ths), more so pressed (46 and
+/// 61), faded by the disabled system effect when disabled. A button that
+/// shows it's on by its bezel (a push-on-push-off or on-off button) draws
+/// it in the label's color, at 70% (full strength pressed in a light
+/// appearance, 90% in a dark one; 28% and 25% disabled).
+fn textured_tint(cell: &NSButtonCellImpl, s: parts::State, look: crate::palette::Look) -> Color {
+    use crate::palette::System;
+    let dark = look.dark();
+    let by_bezel = NSCellStyleMask::ChangeGrayCellMask.0 | NSCellStyleMask::ChangeBackgroundCellMask.0;
+    if cell.base().raw_state().get() == 1 && cell.ivars().shows_state_by.get().0 & by_bezel != 0 {
+        let alpha = match (s.disabled, s.pressed, dark) {
+            (true, _, false) => 0.28,
+            (true, _, true) => 0.25,
+            (false, true, false) => 1.0,
+            (false, true, true) => 0.9,
+            (false, false, _) => 0.7,
+        };
+        let label = crate::palette::get(System::Label, look);
+        return [label[0], label[1], label[2], alpha];
+    }
+    let accent = crate::palette::get(System::ControlAccent, look);
+    if s.disabled {
+        return crate::color::with_effect(accent, NSColorSystemEffect::Disabled, dark);
+    }
+    let step = match (s.pressed, dark) {
+        (false, false) => -10.0,
+        (true, false) => -46.0,
+        (false, true) => 13.0,
+        (true, true) => 61.0,
+    } / 255.0;
+    [
+        (accent[0] + step).clamp(0.0, 1.0),
+        (accent[1] + step).clamp(0.0, 1.0),
+        (accent[2] + step).clamp(0.0, 1.0),
+        accent[3],
+    ]
 }
 
 /// `hitTestForEvent:inRect:ofView:`: a push-like button takes the click
@@ -1191,44 +1423,6 @@ define_class!(
     pub(crate) struct NSButtonImpl;
 
     impl NSButtonImpl {
-        #[unsafe(method_id(buttonWithTitle:image:target:action:))]
-        fn button_with_title_image(
-            title: &NSString,
-            image: &AnyObject,
-            target: Option<&AnyObject>,
-            action: Option<Sel>,
-        ) -> Retained<NSButton> {
-            let b = push_button(title, target, action, main_thread());
-            set_image(&b, image);
-            b.setImagePosition(NSCellImagePosition::ImageLeading);
-            b.sizeToFit();
-            b
-        }
-
-        #[unsafe(method_id(buttonWithTitle:target:action:))]
-        fn button_with_title(title: &NSString, target: Option<&AnyObject>, action: Option<Sel>) -> Retained<NSButton> {
-            push_button(title, target, action, main_thread())
-        }
-
-        #[unsafe(method_id(buttonWithImage:target:action:))]
-        fn button_with_image(image: &AnyObject, target: Option<&AnyObject>, action: Option<Sel>) -> Retained<NSButton> {
-            let b = push_button(&NSString::new(), target, action, main_thread());
-            set_image(&b, image);
-            b.setImagePosition(NSCellImagePosition::ImageOnly);
-            b.sizeToFit();
-            b
-        }
-
-        #[unsafe(method_id(checkboxWithTitle:target:action:))]
-        fn checkbox_with_title(title: &NSString, target: Option<&AnyObject>, action: Option<Sel>) -> Retained<NSButton> {
-            titled_button(title, NSButtonType::Switch, target, action, main_thread())
-        }
-
-        #[unsafe(method_id(radioButtonWithTitle:target:action:))]
-        fn radio_button_with_title(title: &NSString, target: Option<&AnyObject>, action: Option<Sel>) -> Retained<NSButton> {
-            titled_button(title, NSButtonType::Radio, target, action, main_thread())
-        }
-
         #[unsafe(method(isFlipped))]
         fn is_flipped(&self) -> bool {
             true
@@ -1470,12 +1664,19 @@ define_class!(
         }
 
         #[unsafe(method_id(symbolConfiguration))]
-        fn symbol_configuration(&self) -> Option<Retained<AnyObject>> {
-            None
+        fn symbol_configuration(&self) -> Option<Retained<NSImageSymbolConfiguration>> {
+            self.button_cell().and_then(|c| imp(&c).ivars().symbols.borrow().clone())
         }
 
         #[unsafe(method(setSymbolConfiguration:))]
-        fn set_symbol_configuration(&self, _configuration: Option<&AnyObject>) {}
+        fn set_symbol_configuration(&self, configuration: Option<&NSImageSymbolConfiguration>) {
+            if let Some(c) = self.button_cell() {
+                let cell = imp(&c);
+                cell.ivars().symbols.replace(configuration.map(|c| c.retain()));
+                cell.ivars().configured.clear();
+                cell::changed(cell.base());
+            }
+        }
 
         #[unsafe(method(state))]
         fn state(&self) -> isize {
@@ -1612,22 +1813,129 @@ fn set_image(button: &NSButton, image: &AnyObject) {
     let _: () = unsafe { msg_send![button, setImage: image] };
 }
 
-/// Class methods run on the main thread, as AppKit's classes do.
-fn main_thread() -> MainThreadMarker {
-    MainThreadMarker::new().expect("sidestep: AppKit's controls belong to the main thread")
+// NSButton's factories. Each makes a button of the class it's sent to (a
+// subclass makes one of its own, as AppKit's do): a `define_class!` class
+// method doesn't see its receiver, so they go in by hand, as a category.
+
+sidestep_runtime::category!("NSButton"(SidestepButtonFactories), |category| {
+    // SAFETY: each function takes the class, the selector and the
+    // arguments its selector names, and returns an autoreleased button, as
+    // a class method.
+    unsafe {
+        category.add_class_method(
+            sel!(buttonWithTitle:image:target:action:),
+            button_with_title_image as unsafe extern "C-unwind" fn(_, _, _, _, _, _) -> _,
+        );
+        category.add_class_method(
+            sel!(buttonWithTitle:target:action:),
+            button_with_title as unsafe extern "C-unwind" fn(_, _, _, _, _) -> _,
+        );
+        category.add_class_method(
+            sel!(buttonWithImage:target:action:),
+            button_with_image as unsafe extern "C-unwind" fn(_, _, _, _, _) -> _,
+        );
+        category.add_class_method(
+            sel!(checkboxWithTitle:target:action:),
+            checkbox_with_title as unsafe extern "C-unwind" fn(_, _, _, _, _) -> _,
+        );
+        category.add_class_method(
+            sel!(radioButtonWithTitle:target:action:),
+            radio_button_with_title as unsafe extern "C-unwind" fn(_, _, _, _, _) -> _,
+        );
+    }
+});
+
+/// `+buttonWithTitle:image:target:action:`: a push button with the image
+/// leading the title.
+unsafe extern "C-unwind" fn button_with_title_image(
+    class: &AnyClass,
+    _cmd: Sel,
+    title: &NSString,
+    image: &AnyObject,
+    target: Option<&AnyObject>,
+    action: Option<Sel>,
+) -> *mut NSButton {
+    let b = push_button(class, Some(title), target, action);
+    set_image(&b, image);
+    b.setImagePosition(NSCellImagePosition::ImageLeading);
+    b.sizeToFit();
+    Retained::autorelease_return(b)
 }
 
-/// `buttonWithTitle:target:action:`: a push button sized to fit, its
-/// title truncated at the tail when squeezed.
-fn push_button(
+/// `+buttonWithTitle:target:action:`.
+unsafe extern "C-unwind" fn button_with_title(
+    class: &AnyClass,
+    _cmd: Sel,
     title: &NSString,
     target: Option<&AnyObject>,
     action: Option<Sel>,
-    mtm: MainThreadMarker,
+) -> *mut NSButton {
+    Retained::autorelease_return(push_button(class, Some(title), target, action))
+}
+
+/// `+buttonWithImage:target:action:`: a push button showing the image
+/// alone; its title stays the default one, not shown.
+unsafe extern "C-unwind" fn button_with_image(
+    class: &AnyClass,
+    _cmd: Sel,
+    image: &AnyObject,
+    target: Option<&AnyObject>,
+    action: Option<Sel>,
+) -> *mut NSButton {
+    let b = push_button(class, None, target, action);
+    set_image(&b, image);
+    b.setImagePosition(NSCellImagePosition::ImageOnly);
+    b.sizeToFit();
+    Retained::autorelease_return(b)
+}
+
+/// `+checkboxWithTitle:target:action:`.
+unsafe extern "C-unwind" fn checkbox_with_title(
+    class: &AnyClass,
+    _cmd: Sel,
+    title: &NSString,
+    target: Option<&AnyObject>,
+    action: Option<Sel>,
+) -> *mut NSButton {
+    Retained::autorelease_return(titled_button(class, title, NSButtonType::Switch, target, action))
+}
+
+/// `+radioButtonWithTitle:target:action:`.
+unsafe extern "C-unwind" fn radio_button_with_title(
+    class: &AnyClass,
+    _cmd: Sel,
+    title: &NSString,
+    target: Option<&AnyObject>,
+    action: Option<Sel>,
+) -> *mut NSButton {
+    Retained::autorelease_return(titled_button(class, title, NSButtonType::Radio, target, action))
+}
+
+/// A new button of `class` (NSButton or a subclass), with no frame.
+fn new_button(class: &AnyClass) -> Retained<NSButton> {
+    // SAFETY: the class is NSButton or a subclass: alloc and initWithFrame:
+    // make one of it.
+    unsafe {
+        let allocated: Allocated<NSButton> = msg_send![class, alloc];
+        msg_send![allocated, initWithFrame: NSRect::ZERO]
+    }
+}
+
+/// `buttonWithTitle:target:action:`: a push button sized to fit, its
+/// title truncated at the tail when squeezed, its images scaled down to
+/// fit.
+fn push_button(
+    class: &AnyClass,
+    title: Option<&NSString>,
+    target: Option<&AnyObject>,
+    action: Option<Sel>,
 ) -> Retained<NSButton> {
-    let b = NSButton::initWithFrame(NSButton::alloc(mtm), NSRect::ZERO);
-    b.setTitle(title);
+    let b = new_button(class);
+    if let Some(title) = title {
+        b.setTitle(title);
+    }
     b.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+    b.setImageScaling(NSImageScaling::ScaleProportionallyDown);
     // SAFETY: the button keeps the target weakly; any selector may be an
     // action.
     unsafe {
@@ -1640,17 +1948,18 @@ fn push_button(
 
 /// A check box or radio button with a title, sized to fit.
 fn titled_button(
+    class: &AnyClass,
     title: &NSString,
     kind: NSButtonType,
     target: Option<&AnyObject>,
     action: Option<Sel>,
-    mtm: MainThreadMarker,
 ) -> Retained<NSButton> {
-    let b = NSButton::initWithFrame(NSButton::alloc(mtm), NSRect::ZERO);
+    let b = new_button(class);
     b.setButtonType(kind);
     b.setBezelStyle(NSBezelStyle::FlexiblePush);
     b.setTitle(title);
     b.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+    b.setImageScaling(NSImageScaling::ScaleProportionallyDown);
     // SAFETY: as in `push_button`.
     unsafe {
         b.setTarget(target);

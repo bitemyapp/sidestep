@@ -24,6 +24,10 @@
 //! so each thread asking for a file by name gets its own image of it.
 //! `lockFocus` makes a bitmap the image's only representation and draws
 //! into it, keeping what the image showed.
+//!
+//! On pasteboards an image is written as a TIFF, and read from image data
+//! (TIFF, PNG, JPEG and the other types the codecs know) or from an image
+//! file's URL, as `NSPasteboardReading` and `initWithPasteboard:` have it.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -36,7 +40,7 @@ use objc2::runtime::{AnyObject, Bool, NSObject, NSObjectProtocol};
 use objc2::{AnyThread, ClassType, DefinedClass, Message, define_class, msg_send};
 use objc2_app_kit::{
     NSBitmapImageRep, NSColor, NSCompositingOperation, NSCustomImageRep, NSGraphicsContext, NSImage, NSImageCacheMode,
-    NSImageRep, NSImageResizingMode, NSImageSymbolConfiguration, NSTIFFCompression,
+    NSImageRep, NSImageResizingMode, NSImageSymbolConfiguration, NSPasteboard, NSTIFFCompression,
 };
 use objc2_foundation::{NSArray, NSCopying, NSDictionary, NSEdgeInsets, NSPoint, NSRect, NSSize, NSString, NSZone};
 
@@ -151,14 +155,42 @@ define_class!(
         }
 
         #[unsafe(method_id(initWithPasteboard:))]
-        fn init_with_pasteboard(_this: Allocated<Self>, _pasteboard: &AnyObject) -> Option<Retained<Self>> {
-            // The pasteboard carries strings only, so far.
-            None
+        fn init_with_pasteboard(this: Allocated<Self>, pasteboard: &NSPasteboard) -> Option<Retained<Self>> {
+            with_rep(this, board_rep(pasteboard))
         }
 
         #[unsafe(method(canInitWithPasteboard:))]
-        fn can_init_with_pasteboard(_pasteboard: &AnyObject) -> bool {
-            false
+        fn can_init_with_pasteboard(pasteboard: &NSPasteboard) -> bool {
+            pasteboard_has_image(pasteboard)
+        }
+
+        #[unsafe(method_id(imagePasteboardTypes))]
+        fn image_pasteboard_types() -> Retained<NSArray<NSString>> {
+            ns_types(&PASTEBOARD_TYPES)
+        }
+
+        #[unsafe(method_id(imageUnfilteredPasteboardTypes))]
+        fn image_unfiltered_pasteboard_types() -> Retained<NSArray<NSString>> {
+            ns_types(&PASTEBOARD_TYPES)
+        }
+
+        // NSPasteboardReading: image data, or an image file.
+
+        #[unsafe(method_id(readableTypesForPasteboard:))]
+        fn readable_types_for_pasteboard(_pasteboard: &NSPasteboard) -> Retained<NSArray<NSString>> {
+            ns_types(&PASTEBOARD_TYPES)
+        }
+
+        #[unsafe(method(readingOptionsForType:pasteboard:))]
+        fn reading_options_for_type(kind: &NSString, _pasteboard: &NSPasteboard) -> usize {
+            // A file's URL is read as its string (NSPasteboardReadingAsString),
+            // image data as data.
+            usize::from(kind.to_string() == crate::pasteboard_types::FILE_URL)
+        }
+
+        #[unsafe(method_id(initWithPasteboardPropertyList:ofType:))]
+        fn init_with_pasteboard_property_list(this: Allocated<Self>, list: &AnyObject, kind: &NSString) -> Option<Retained<Self>> {
+            with_rep(this, rep_of_property_list(list, kind))
         }
 
         #[unsafe(method_id(imageWithSize:flipped:drawingHandler:))]
@@ -319,6 +351,18 @@ define_class!(
 
         #[unsafe(method(recache))]
         fn recache(&self) {}
+
+        // NSPasteboardWriting: an image goes on a pasteboard as a TIFF.
+
+        #[unsafe(method_id(writableTypesForPasteboard:))]
+        fn writable_types_for_pasteboard(&self, _pasteboard: &NSPasteboard) -> Retained<NSArray<NSString>> {
+            ns_types(&["public.tiff"])
+        }
+
+        #[unsafe(method_id(pasteboardPropertyListForType:))]
+        fn pasteboard_property_list_for_type(&self, kind: &NSString) -> Option<Retained<AnyObject>> {
+            (kind.to_string() == "public.tiff").then(|| self.tiff()).flatten()
+        }
 
         #[unsafe(method_id(imageWithSymbolConfiguration:))]
         fn with_symbol_configuration(&self, config: &NSImageSymbolConfiguration) -> Option<Retained<NSImage>> {
@@ -520,6 +564,87 @@ fn referencing(this: Allocated<NSImageImpl>, rep: Option<Retained<NSBitmapImageR
 /// A bitmap of the image file at `path`, if it is one.
 fn rep_at(path: &str) -> Option<Retained<NSBitmapImageRep>> {
     crate::bitmap::from_file_bytes(crate::image_rep::read_file(path)?, true)
+}
+
+// Images on pasteboards.
+
+/// The image data types pasteboards carry, most wanted first.
+const DATA_TYPES: [&str; 7] = [
+    "public.tiff",
+    "public.png",
+    "public.jpeg",
+    "com.compuserve.gif",
+    "org.webmproject.webp",
+    "com.microsoft.bmp",
+    "com.microsoft.ico",
+];
+/// Those, and the file URLs of image files.
+const PASTEBOARD_TYPES: [&str; DATA_TYPES.len() + 1] = {
+    let mut all = [crate::pasteboard_types::FILE_URL; DATA_TYPES.len() + 1];
+    let mut i = 0;
+    while i < DATA_TYPES.len() {
+        all[i] = DATA_TYPES[i];
+        i += 1;
+    }
+    all
+};
+
+/// The extensions of the image files images read.
+const EXTENSIONS: [&str; 10] = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "ico", "icns"];
+
+fn ns_types(types: &[&str]) -> Retained<NSArray<NSString>> {
+    let types: Vec<Retained<NSString>> = types.iter().map(|t| NSString::from_str(t)).collect();
+    NSArray::from_retained_slice(&types)
+}
+
+/// The paths of the image files `board`'s items name.
+fn image_files(board: &NSPasteboard) -> Vec<String> {
+    let kind = NSString::from_str(crate::pasteboard_types::FILE_URL);
+    let items = board.pasteboardItems().map(|i| i.to_vec()).unwrap_or_default();
+    items
+        .iter()
+        .filter_map(|item| crate::pasteboard_types::file_path(&item.stringForType(&kind)?.to_string()))
+        .filter(|path| {
+            let ext = std::path::Path::new(path).extension().and_then(|e| e.to_str()).map(str::to_lowercase);
+            ext.is_some_and(|e| EXTENSIONS.contains(&e.as_str()))
+        })
+        .collect()
+}
+
+/// A bitmap of the image on `board`: its image data, or else the first
+/// image file it names.
+fn board_rep(board: &NSPasteboard) -> Option<Retained<NSBitmapImageRep>> {
+    if let Some(kind) = board.availableTypeFromArray(&ns_types(&DATA_TYPES))
+        && let Some(rep) = board.dataForType(&kind).and_then(|data| rep_of_data(&data, true))
+    {
+        return Some(rep);
+    }
+    image_files(board).iter().find_map(|path| rep_at(path))
+}
+
+/// A bitmap of what a pasteboard holds for `kind`: image data, or an
+/// image file's URL.
+fn rep_of_property_list(list: &AnyObject, kind: &NSString) -> Option<Retained<NSBitmapImageRep>> {
+    if kind.to_string() == crate::pasteboard_types::FILE_URL {
+        let url = list.downcast_ref::<NSString>()?.to_string();
+        rep_at(&crate::pasteboard_types::file_path(&url)?)
+    } else {
+        rep_of_data(list, true)
+    }
+}
+
+/// The image on `board`, as `initWithPasteboard:` reads it.
+pub(crate) fn from_pasteboard(board: &NSPasteboard) -> Option<Retained<NSImage>> {
+    let rep = board_rep(board)?;
+    let image = new_image(None);
+    imp(&image).add_rep(Retained::into_super(rep));
+    Some(image)
+}
+
+/// Whether `board` has an image: image data, or an image file's URL.
+/// Only the types and URLs are looked at; nothing is read.
+pub(crate) fn pasteboard_has_image(board: &NSPasteboard) -> bool {
+    board.availableTypeFromArray(&ns_types(&DATA_TYPES)).is_some() || !image_files(board).is_empty()
 }
 
 impl NSImageImpl {

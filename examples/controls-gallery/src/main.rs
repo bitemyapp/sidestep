@@ -3,17 +3,20 @@
 //! against objc2-app-kit: on macOS it shows AppKit's controls, on Linux
 //! Sidestep's.
 //!
-//! SCENARIO: buttons, text, indicators, segmented, or all (the default).
+//! SCENARIO: buttons, text, indicators, segmented, images, or all (the
+//! default).
 //! GALLERY_QUIT_AFTER: seconds until the app terminates itself.
 
 use std::cell::RefCell;
 
+use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::runtime::{Bool, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSBezelStyle, NSBox,
-    NSBoxType, NSButton, NSColor, NSControlSize, NSFont, NSLineBreakMode, NSProgressIndicator,
+    NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSBezelStyle,
+    NSBezierPath, NSBox, NSBoxType, NSButton, NSButtonType, NSCellImagePosition, NSColor, NSControlSize, NSFont,
+    NSImage, NSImageFrameStyle, NSImageScaling, NSImageView, NSLineBreakMode, NSProgressIndicator,
     NSProgressIndicatorStyle, NSResponder, NSSearchField, NSSecureTextField, NSSegmentStyle, NSSegmentSwitchTracking,
     NSSegmentedControl, NSSlider, NSStepper, NSSwitch, NSTextField, NSView, NSWindow, NSWindowStyleMask,
 };
@@ -312,6 +315,150 @@ fn segmented(l: &mut Layout, mtm: MainThreadMarker) {
     l.next_row();
 }
 
+/// A symbol image, or the landscape picture as a template where the
+/// system has no such symbol.
+fn symbol(name: &str) -> Retained<NSImage> {
+    NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(name), None).unwrap_or_else(|| {
+        let image = picture(16.0, 16.0);
+        image.setTemplate(true);
+        image
+    })
+}
+
+/// A picture in color, drawn by a handler: a sky, a sun and a hill.
+fn picture(w: f64, h: f64) -> Retained<NSImage> {
+    let draw = RcBlock::new(move |r: NSRect| -> Bool {
+        NSColor::colorWithSRGBRed_green_blue_alpha(0.55, 0.78, 0.96, 1.0).set();
+        NSBezierPath::fillRect(r);
+        NSColor::colorWithSRGBRed_green_blue_alpha(0.98, 0.8, 0.2, 1.0).set();
+        NSBezierPath::bezierPathWithOvalInRect(rect(w * 0.6, h * 0.55, w * 0.25, h * 0.25)).fill();
+        NSColor::colorWithSRGBRed_green_blue_alpha(0.3, 0.62, 0.3, 1.0).set();
+        NSBezierPath::bezierPathWithOvalInRect(rect(-w * 0.2, -h * 0.6, w * 1.1, h)).fill();
+        Bool::YES
+    });
+    NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(w, h), false, &draw)
+}
+
+fn image_view(image: &NSImage, frame: NSImageFrameStyle, size: f64, mtm: MainThreadMarker) -> Retained<NSImageView> {
+    let v = NSImageView::initWithFrame(NSImageView::alloc(mtm), rect(0.0, 0.0, size, size));
+    v.setImage(Some(image));
+    v.setImageFrameStyle(frame);
+    v.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
+    v
+}
+
+// The square bezel names are deprecated, and programs still use them.
+#[allow(deprecated)]
+fn images(l: &mut Layout, mtm: MainThreadMarker) {
+    // Image views: a picture in every frame style, a tinted symbol, a
+    // disabled one, and an editable well that takes dropped images.
+    let pic = picture(64.0, 48.0);
+    for frame in [
+        NSImageFrameStyle::None,
+        NSImageFrameStyle::Photo,
+        NSImageFrameStyle::GrayBezel,
+        NSImageFrameStyle::Groove,
+        NSImageFrameStyle::Button,
+    ] {
+        l.add(&image_view(&pic, frame, 64.0, mtm));
+    }
+    let tinted = image_view(&symbol("star.fill"), NSImageFrameStyle::None, 40.0, mtm);
+    tinted.setContentTintColor(Some(&NSColor::systemOrangeColor()));
+    l.add(&tinted);
+    let plain = image_view(&symbol("gearshape"), NSImageFrameStyle::None, 40.0, mtm);
+    l.add(&plain);
+    let off = image_view(&symbol("gearshape"), NSImageFrameStyle::None, 40.0, mtm);
+    off.setEnabled(false);
+    l.add(&off);
+    let well = NSImageView::initWithFrame(NSImageView::alloc(mtm), rect(0.0, 0.0, 64.0, 64.0));
+    well.setImageFrameStyle(NSImageFrameStyle::GrayBezel);
+    well.setEditable(true);
+    l.add(&well);
+    l.next_row();
+
+    // Image-only buttons at every bezel.
+    let star = symbol("star");
+    for bezel in [
+        NSBezelStyle::Push,
+        NSBezelStyle::FlexiblePush,
+        NSBezelStyle::Circular,
+        NSBezelStyle::SmallSquare,
+        NSBezelStyle::ShadowlessSquare,
+        NSBezelStyle::TexturedSquare,
+        NSBezelStyle::Toolbar,
+        NSBezelStyle::Badge,
+        NSBezelStyle::Disclosure,
+    ] {
+        // SAFETY: no target or action.
+        let b = unsafe { NSButton::buttonWithImage_target_action(&star, None, None, mtm) };
+        b.setBezelStyle(bezel);
+        b.sizeToFit();
+        l.add(&b);
+    }
+    // SAFETY: as above.
+    let borderless = unsafe { NSButton::buttonWithImage_target_action(&star, None, None, mtm) };
+    borderless.setBordered(false);
+    borderless.sizeToFit();
+    l.add(&borderless);
+    l.next_row();
+
+    // An image beside, above, below and under a title.
+    let trash = symbol("trash");
+    for (title, position, bezel) in [
+        ("Leading", NSCellImagePosition::ImageLeading, NSBezelStyle::Push),
+        ("Trailing", NSCellImagePosition::ImageTrailing, NSBezelStyle::Push),
+        ("Above", NSCellImagePosition::ImageAbove, NSBezelStyle::FlexiblePush),
+        ("Below", NSCellImagePosition::ImageBelow, NSBezelStyle::ShadowlessSquare),
+        ("Overlaps", NSCellImagePosition::ImageOverlaps, NSBezelStyle::FlexiblePush),
+    ] {
+        // SAFETY: no target or action.
+        let b = unsafe {
+            NSButton::buttonWithTitle_image_target_action(&NSString::from_str(title), &trash, None, None, mtm)
+        };
+        b.setBezelStyle(bezel);
+        b.setImagePosition(position);
+        b.sizeToFit();
+        l.add(&b);
+    }
+    // SAFETY: as above.
+    let hugging =
+        unsafe { NSButton::buttonWithTitle_image_target_action(ns_string!("Hugging"), &trash, None, None, mtm) };
+    hugging.setImageHugsTitle(true);
+    hugging.setFrameSize(NSSize::new(140.0, hugging.frame().size.height));
+    l.add(&hugging);
+    l.next_row();
+
+    // Template images by state: pressed, disabled, the default button, a
+    // toggle on (showing its alternate image), tinted borderless buttons.
+    let gear = symbol("gearshape");
+    type Setup<'a> = &'a dyn Fn(&NSButton);
+    let states: [(&str, Setup); 6] = [
+        ("Pressed", &|b| b.highlight(true)),
+        ("Disabled", &|b| b.setEnabled(false)),
+        ("Default", &|b| b.setKeyEquivalent(ns_string!("\r"))),
+        ("Toggle", &|b| {
+            b.setButtonType(NSButtonType::Toggle);
+            b.setAlternateImage(Some(&symbol("gearshape.fill")));
+            b.setState(1);
+        }),
+        ("Tinted", &|b| {
+            b.setBordered(false);
+            b.setContentTintColor(Some(&NSColor::systemPinkColor()));
+        }),
+        ("Plain", &|b| b.setBordered(false)),
+    ];
+    for (title, setup) in states {
+        // SAFETY: no target or action.
+        let b = unsafe {
+            NSButton::buttonWithTitle_image_target_action(&NSString::from_str(title), &gear, None, None, mtm)
+        };
+        setup(&b);
+        b.sizeToFit();
+        l.add(&b);
+    }
+    l.next_row();
+}
+
 #[derive(Default)]
 struct DelegateIvars {
     window: RefCell<Option<Retained<NSWindow>>>,
@@ -353,7 +500,8 @@ impl Delegate {
     fn open_window(&self) {
         let mtm = self.mtm();
         let scenario = std::env::var("SCENARIO").unwrap_or_else(|_| "all".into());
-        let size = NSSize::new(800.0, 620.0);
+        let height = if matches!(scenario.as_str(), "all") { 920.0 } else { 620.0 };
+        let size = NSSize::new(800.0, height);
         let style = NSWindowStyleMask::Titled | NSWindowStyleMask::Closable | NSWindowStyleMask::Resizable;
         let window = unsafe {
             NSWindow::initWithContentRect_styleMask_backing_defer(
@@ -382,6 +530,9 @@ impl Delegate {
         }
         if all || scenario == "segmented" {
             segmented(&mut l, mtm);
+        }
+        if all || scenario == "images" {
+            images(&mut l, mtm);
         }
         window.setContentView(Some(&page));
         if let Some(focus) = &l.focus {

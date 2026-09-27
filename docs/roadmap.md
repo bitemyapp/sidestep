@@ -205,7 +205,9 @@ pictures on macOS for comparison):
   thread, a texture cache with mipmaps, representation choice by device
   pixels, drawing handlers, `lockFocus`, view snapshots
   (`cacheDisplayInRect:toBitmapImageRep:`); symbol images drawn by
-  Sidestep.
+  Sidestep; animated GIFs' frames (`NSImageFrameCount`,
+  `NSImageCurrentFrame` and their durations); images read from and
+  written to pasteboards (TIFF, the other image types, image files).
 - `NSGradient`, `NSShadow`, `NSVisualEffectView` (an opaque material),
   `alphaValue`, and `NSAnimationContext` (changes apply at once).
 
@@ -267,8 +269,9 @@ Next:
   event queue.
 - Input methods: surrounding text (and so deleting around the caret),
   content types from the client.
-- Image cursors; dragging from our windows (drag sources), and `NSImage`
-  and `NSColor` on pasteboards.
+- Image cursors; dragging from our windows (drag sources, so an editable
+  image view's image can't be dragged out yet), and `NSColor` on
+  pasteboards.
 - Drawing: text under a rotated transform (glyph runs take a translation
   only), pattern colors (and `patternImage` on threads other than the
   image's), `-[NSView lockFocus]`, animations over time, blur behind
@@ -374,7 +377,12 @@ action, the mouse-tracking loops in AppKit's order of calls,
 `performClick:`, copying, hit testing, and the sizes and rectangles a
 program can read, as measured on macOS; `NSButton` (push buttons of every
 bezel style at every control size, check boxes, radio groups, the default
-button and key equivalents);
+button and key equivalents), with images in every position at every
+bezel (the layout measured on macOS for thousands of cases), template
+images tinted by state and look, and alternate images; `NSImageView` and
+`NSImageCell` (every scaling, alignment and frame style, as measured;
+templates tinted; editable views taking dropped, pasted and deleted
+images; animated GIFs);
 `NSTextField` as a label, a wrapping label and a field, with
 `NSSecureTextField` and `NSSearchField` (display and sizing; editing waits
 for the field editor); `NSBox`; `NSProgressIndicator`, animated by the
@@ -386,8 +394,21 @@ They are drawn in an Adwaita-like theme, light or dark. See
 
 Next:
 
-- Editing text fields (the field editor, with the text-editing work),
-  `NSImageView` and images in buttons.
+- Editing text fields (the field editor, with the text-editing work).
+- Images in buttons: AppKit's layout for a push button with its image
+  above or below the title (squeezed into its fixed height), for a
+  toolbar button's image above, below or over it, for badge buttons with
+  images, for scalings other than proportionally down on titled buttons,
+  and for bounds smaller than a button's own size, which it answers in
+  ways not yet pinned; check boxes' and radio buttons' own images
+  (`image` and `alternateImage` are AppKit's box images there);
+  alternate titles, which aren't drawn yet; textured and toolbar
+  templates follow AppKit's default blue accent's shades, not yet
+  checked with other accents.
+- `NSButton`'s factories (`buttonWithTitle:target:action:` and the rest)
+  make an `NSButton` even when sent to a subclass, where AppKit makes one
+  of the subclass (`+[NSImageView imageViewWithImage:]` does).
+- Animated images: GIFs only; other animated formats aren't animated.
 - Numbers in cells read as Foundation's `-[NSNumber descriptionWithLocale:]`
   gives them, which on Linux doesn't yet group digits or print "NaN" and
   "∞" as macOS does.

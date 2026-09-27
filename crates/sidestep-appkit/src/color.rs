@@ -8,8 +8,9 @@
 //!   the current drawing appearance each time it's used;
 //! - a **dynamic** color, whose provider block AppKit calls with the
 //!   current drawing appearance each time it's used (never when it's made);
-//! - a **system effect** (`colorWithSystemEffect:`) on a catalog or
-//!   dynamic color, worked out from it each time it's used;
+//! - a **system effect** (`colorWithSystemEffect:`) on any other color
+//!   but a pattern, worked out from it each time it's used, since it
+//!   depends on the appearance;
 //! - a **pattern**, an image tiled.
 //!
 //! [`resolve`] turns any of them into straight sRGB RGBA for drawing: at
@@ -414,8 +415,8 @@ pub(crate) enum Repr {
         provider: Provider,
         alpha: Option<f64>,
     },
-    /// A system effect on a catalog or dynamic color, applied each time
-    /// the color is used.
+    /// A system effect on another color, applied each time the color is
+    /// used.
     Effect {
         base: Retained<NSColor>,
         effect: NSColorSystemEffect,
@@ -1071,22 +1072,14 @@ define_class!(
             Some(blend_colors(self, level, &black_color()))
         }
 
+        // The effect depends on the appearance, so it's worked out each
+        // time the color is used, whatever the color (a catalog color, as
+        // AppKit makes it).
         #[unsafe(method_id(colorWithSystemEffect:))]
         fn with_system_effect(&self, effect: NSColorSystemEffect) -> Retained<NSColor> {
-            let changes = matches!(
-                effect,
-                NSColorSystemEffect::Pressed | NSColorSystemEffect::DeepPressed | NSColorSystemEffect::Disabled
-            );
             match &self.ivars().repr {
-                _ if !changes => self.as_color().retain(),
-                // A color that follows the appearance goes on following it.
-                Repr::Catalog { .. } | Repr::Dynamic { .. } | Repr::Effect { .. } => {
-                    make(Repr::Effect { base: self.as_color().retain(), effect })
-                }
-                _ => {
-                    let c = with_effect(resolve_impl(self), effect).map(f64::from);
-                    rgba(Space::Srgb, c[0], c[1], c[2], c[3])
-                }
+                Repr::Pattern(..) => self.as_color().retain(),
+                _ => make(Repr::Effect { base: self.as_color().retain(), effect }),
             }
         }
     }
@@ -1405,15 +1398,38 @@ fn srgb_for(rgb: [f64; 3]) -> Space {
     if rgb.iter().all(|v| (0.0..=1.0).contains(v)) { Space::Srgb } else { Space::ExtendedSrgb }
 }
 
-/// `c` with a system effect: pressed and deep-pressed darken, disabled
-/// fades.
-fn with_effect(c: Color, effect: NSColorSystemEffect) -> Color {
-    match effect {
-        NSColorSystemEffect::Pressed => [c[0] * 0.8, c[1] * 0.8, c[2] * 0.8, c[3]],
-        NSColorSystemEffect::DeepPressed => [c[0] * 0.65, c[1] * 0.65, c[2] * 0.65, c[3]],
-        NSColorSystemEffect::Disabled => [c[0], c[1], c[2], c[3] * 0.5],
-        _ => c,
-    }
+/// `c` with a system effect in a light or dark appearance, as macOS works
+/// it out (`color_appearance.rs`, `system_effects`). Disabled fades: to
+/// 35% of its alpha in a light appearance, half in a dark one. Pressed,
+/// deep-pressed and rollover (deep-pressed again in a light appearance)
+/// add a step to the color taken premultiplied, the results reported as
+/// its components, in whole 255ths: in a dark appearance they add to the
+/// color and the alpha; in a light one they darken the color by a
+/// fraction and add twice that to the alpha, and what the alpha would
+/// gain past 1 comes off the color.
+pub(crate) fn with_effect(c: Color, effect: NSColorSystemEffect, dark: bool) -> Color {
+    let step = match (effect, dark) {
+        (NSColorSystemEffect::Pressed, false) => 20.0,
+        (NSColorSystemEffect::DeepPressed | NSColorSystemEffect::Rollover, false) => 36.0,
+        (NSColorSystemEffect::Pressed, true) => 46.0,
+        (NSColorSystemEffect::DeepPressed, true) => 82.0,
+        (NSColorSystemEffect::Rollover, true) => 61.0,
+        (NSColorSystemEffect::Disabled, _) => {
+            return [c[0], c[1], c[2], c[3] * if dark { 0.5 } else { 0.35 }];
+        }
+        _ => return c,
+    } / 255.0;
+    let q = |v: f64| (v.clamp(0.0, 1.0) * 255.0).round() / 255.0;
+    let [r, g, b, a] = c.map(|v| q(f64::from(v)));
+    let out = if dark {
+        [r * a + step, g * a + step, b * a + step, a + step]
+    } else {
+        let alpha = a * (1.0 - step) + 2.0 * step;
+        let over = (alpha - 1.0).max(0.0);
+        let darker = |v: f64| v * a * (1.0 - step) - over;
+        [darker(r), darker(g), darker(b), alpha]
+    };
+    out.map(|v| q(v) as f32)
 }
 
 impl NSColorImpl {
@@ -1555,7 +1571,7 @@ fn resolve_impl(c: &NSColorImpl) -> Color {
             }
             v
         }
-        Repr::Effect { base, effect } => with_effect(resolve(base), *effect),
+        Repr::Effect { base, effect } => with_effect(resolve(base), *effect, crate::appearance::current_look().dark()),
         // Patterns fill with their image's average; tiling comes with
         // pattern paints.
         Repr::Pattern(..) => [0.5, 0.5, 0.5, 1.0],

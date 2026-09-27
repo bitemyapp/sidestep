@@ -95,6 +95,13 @@ fn sheet(p: &Palette) {
     // Pop-up buttons, at rest and pressed.
     parts::pop_up(p, rect(10.0, 184.0, 100.0, 24.0), axis, 22.0, rest);
     parts::pop_up(p, rect(120.0, 184.0, 100.0, 24.0), axis, 22.0, pressed);
+
+    // Image views' frames: a photo, a gray bezel, a groove, a button.
+    let frames =
+        [parts::ImageFrame::Photo, parts::ImageFrame::GrayBezel, parts::ImageFrame::Groove, parts::ImageFrame::Button];
+    for (i, frame) in frames.into_iter().enumerate() {
+        parts::image_frame(p, rect(230.0 + 27.0 * i as f64, 184.0, 24.0, 24.0), frame, axis, rest);
+    }
 }
 
 /// The sheet in `p` at `scale`, as RGB bytes.

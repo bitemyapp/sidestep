@@ -6,6 +6,7 @@
 use std::io::Cursor;
 use std::path::Path;
 
+use image::codecs::gif::Repeat;
 use image::{ImageFormat, Rgba, RgbaImage};
 
 const RED: Rgba<u8> = Rgba([255, 0, 0, 255]);
@@ -105,8 +106,36 @@ fn main() {
     write("small.gif", encode(&small, ImageFormat::Gif));
     write("small.webp", encode(&small, ImageFormat::WebP));
 
+    // An animated GIF, 4 × 4: a red, a green and a blue frame, shown for
+    // 0.1, 0.2 and 0.3 seconds, looping forever; the same played once (no
+    // loop count) and twice (played again once).
+    write("frames.gif", frames_gif(Some(Repeat::Infinite)));
+    write("once.gif", frames_gif(None));
+    write("twice.gif", frames_gif(Some(Repeat::Finite(1))));
+
     write("garbage.png", b"\x89PNG\r\n\x1a\nthis is not really a PNG file at all".to_vec());
     write("huge.tiff", huge_tiff());
+}
+
+/// Three whole frames, red, green and blue, shown for 10, 20 and 30
+/// hundredths of a second, played again as `repeat` says (a NETSCAPE2.0
+/// loop count), or once without one.
+fn frames_gif(repeat: Option<Repeat>) -> Vec<u8> {
+    use image::codecs::gif::GifEncoder;
+    use image::{Delay, Frame};
+    let mut out = Vec::new();
+    {
+        let mut encoder = GifEncoder::new(&mut out);
+        if let Some(repeat) = repeat {
+            encoder.set_repeat(repeat).expect("a loop count");
+        }
+        let ms = |n: u32| Delay::from_numer_denom_ms(n, 1);
+        let red = Frame::from_parts(RgbaImage::from_pixel(4, 4, RED), 0, 0, ms(100));
+        let green = Frame::from_parts(RgbaImage::from_pixel(4, 4, GREEN), 0, 0, ms(200));
+        let blue = Frame::from_parts(RgbaImage::from_pixel(4, 4, BLUE), 0, 0, ms(300));
+        encoder.encode_frames([red, green, blue]).expect("frames");
+    }
+    out
 }
 
 /// A gray TIFF whose header claims 2³¹ × 2³¹ pixels, over 16 bytes of
