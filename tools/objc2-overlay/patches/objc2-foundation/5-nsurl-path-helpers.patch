@@ -1,0 +1,237 @@
+--- a/src/url.rs
++++ b/src/url.rs
+@@ -1,17 +1,17 @@
+ #![cfg(feature = "std")]
+ #![cfg(unix)] // TODO: Use as_encoded_bytes/from_encoded_bytes_unchecked once in MSRV.
+-#![cfg(not(feature = "gnustep-1-7"))] // Doesn't seem to be available on GNUStep?
+-use core::ptr::NonNull;
+-use std::ffi::{CStr, CString, OsStr};
+-use std::os::unix::ffi::OsStrExt;
++use std::ffi::{CString, OsString};
++use std::os::unix::ffi::{OsStrExt, OsStringExt};
+ use std::path::{Path, PathBuf};
+
+ use objc2::rc::Retained;
+-use objc2::AnyThread;
+
+ use crate::NSURL;
+
+-const PATH_MAX: usize = 1024;
++#[cfg(not(feature = "gnustep-1-7"))]
++use self::file_system_representation::{file_system_representation, init_file_url};
++#[cfg(feature = "gnustep-1-7")]
++use self::via_string::{file_system_representation, init_file_url};
+
+ /// [`Path`] conversion.
+ impl NSURL {
+@@ -34,18 +34,7 @@
+
+         // TODO: Should we strip trailing \0 to fully match CoreFoundation?
+         let cstr = CString::new(bytes).ok()?;
+-        let ptr = NonNull::new(cstr.as_ptr().cast_mut()).unwrap();
+-
+-        // SAFETY: The pointer is a C string, and valid for the duration of
+-        // the call.
+-        Some(unsafe {
+-            Self::initFileURLWithFileSystemRepresentation_isDirectory_relativeToURL(
+-                Self::alloc(),
+-                ptr,
+-                is_directory,
+-                base_url,
+-            )
+-        })
++        init_file_url(&cstr, is_directory, base_url)
+     }
+
+     /// Create a file url from a [`Path`].
+@@ -75,6 +64,10 @@
+     /// (this function cannot do that for you, since it relies on a quirk of
+     /// HFS+ that b"\xf8" and b"%F8" refer to the same file).
+     ///
++    /// On GNUStep, whose `NSURL` lacks the `FileSystemRepresentation`
++    /// methods, the path is converted through an `NSString`, so it must be
++    /// valid in the file system's encoding there.
++    ///
+     ///
+     /// # Examples
+     ///
+@@ -172,6 +165,45 @@
+     #[doc(alias = "getFileSystemRepresentation:maxLength:")]
+     #[doc(alias = "fileSystemRepresentation")]
+     pub fn to_file_path(&self) -> Option<PathBuf> {
++        let bytes = file_system_representation(self)?;
++        Some(PathBuf::from(OsString::from_vec(bytes)))
++    }
++}
++
++/// Using `FileSystemRepresentation` methods on `NSURL`.
++#[cfg(not(feature = "gnustep-1-7"))]
++mod file_system_representation {
++    use core::ptr::NonNull;
++    use std::ffi::CStr;
++    use std::vec::Vec;
++
++    use objc2::rc::Retained;
++    use objc2::AnyThread;
++
++    use crate::NSURL;
++
++    const PATH_MAX: usize = 1024;
++
++    pub(super) fn init_file_url(
++        path: &CStr,
++        is_directory: bool,
++        base_url: Option<&NSURL>,
++    ) -> Option<Retained<NSURL>> {
++        let ptr = NonNull::new(path.as_ptr().cast_mut()).unwrap();
++
++        // SAFETY: The pointer is a C string, and valid for the duration of
++        // the call.
++        Some(unsafe {
++            NSURL::initFileURLWithFileSystemRepresentation_isDirectory_relativeToURL(
++                NSURL::alloc(),
++                ptr,
++                is_directory,
++                base_url,
++            )
++        })
++    }
++
++    pub(super) fn file_system_representation(url: &NSURL) -> Option<Vec<u8>> {
+         let mut buf = [0u8; PATH_MAX];
+         let ptr = NonNull::new(buf.as_mut_ptr()).unwrap().cast();
+         // SAFETY: The provided buffer is valid.
+@@ -179,7 +211,7 @@
+         // `fileSystemRepresentation`, since the former is guaranteed to
+         // handle internal NUL bytes (even if there probably won't be any,
+         // NSURL seems to avoid that by construction).
+-        let result = unsafe { self.getFileSystemRepresentation_maxLength(ptr, buf.len()) };
++        let result = unsafe { url.getFileSystemRepresentation_maxLength(ptr, buf.len()) };
+         if !result {
+             return None;
+         }
+@@ -188,8 +220,69 @@
+         // the function succeeded.
+         let cstr = unsafe { CStr::from_bytes_until_nul(&buf).unwrap_unchecked() };
+
+-        let path = OsStr::from_bytes(cstr.to_bytes());
+-        Some(PathBuf::from(path))
++        Some(cstr.to_bytes().to_vec())
++    }
++}
++
++/// GNUStep's `NSURL` has no `FileSystemRepresentation` methods, so there we
++/// convert through an `NSString` path instead, with methods that both GNUStep
++/// and Apple have (so this is tested on Apple too).
++#[cfg(any(feature = "gnustep-1-7", test))]
++mod via_string {
++    use core::ffi::c_char;
++    use std::ffi::CStr;
++    use std::vec::Vec;
++
++    use objc2::rc::{autoreleasepool, Retained};
++    use objc2::runtime::NSObject;
++    use objc2::{class, msg_send, AnyThread};
++
++    use crate::NSURL;
++
++    pub(super) fn init_file_url(
++        path: &CStr,
++        is_directory: bool,
++        base_url: Option<&NSURL>,
++    ) -> Option<Retained<NSURL>> {
++        let len = path.to_bytes().len();
++        // SAFETY: `+[NSFileManager defaultManager]` takes no arguments, and
++        // returns an `NSFileManager`.
++        let manager: Retained<NSObject> =
++            unsafe { msg_send![class!(NSFileManager), defaultManager] };
++        // SAFETY: The pointer is valid for `len` bytes, and the method
++        // returns an `NSString` (or `nil` if the bytes cannot be converted).
++        let string: Option<Retained<NSObject>> = unsafe {
++            msg_send![
++                &manager,
++                stringWithFileSystemRepresentation: path.as_ptr(),
++                length: len,
++            ]
++        };
++        let string = string?;
++        // SAFETY: `string` is an `NSString`, and `base_url` an `NSURL`.
++        unsafe {
++            msg_send![
++                NSURL::alloc(),
++                initFileURLWithPath: &*string,
++                isDirectory: is_directory,
++                relativeToURL: base_url,
++            ]
++        }
++    }
++
++    pub(super) fn file_system_representation(url: &NSURL) -> Option<Vec<u8>> {
++        autoreleasepool(|_| {
++            // SAFETY: `-[NSURL path]` returns an `NSString` or `nil`.
++            let path: Option<Retained<NSObject>> = unsafe { msg_send![url, path] };
++            let path = path?;
++            // SAFETY: `path` is an `NSString`. The returned C string lives
++            // until the autorelease pool is drained, and we copy it before.
++            let ptr: *const c_char = unsafe { msg_send![&path, fileSystemRepresentation] };
++            if ptr.is_null() {
++                return None;
++            }
++            Some(unsafe { CStr::from_ptr(ptr) }.to_bytes().to_vec())
++        })
+     }
+ }
+
+@@ -197,10 +290,52 @@
+ #[cfg(test)]
+ #[cfg(unix)]
+ mod tests {
++    use std::ffi::OsStr;
+     use std::os::unix::ffi::OsStrExt;
+
+     use super::*;
+
++    /// The GNUStep implementation gives the same results as Apple's, when
++    /// run on Apple's Foundation.
++    #[test]
++    #[cfg(not(feature = "gnustep-1-7"))]
++    fn via_string() {
++        let cases: &[(&[u8], bool)] = &[
++            (b"/tmp/file.txt", false),
++            (b"foo.txt", false),
++            (b"./foo.txt", false),
++            (b"/Library", true),
++            (b"/Library/", true),
++            (b"foo", true),
++            (b"/Library/././.", true),
++            (b"/Library/..", true),
++            (b"/a//b", false),
++            (b"/a/./b/", false),
++            (b"/a b/%20c", false),
++            (b"/\x08", false),
++            (b"/cafe\xcc\x81", false),
++            (b"/", false),
++            (b"/", true),
++        ];
++        for (bytes, is_directory) in cases {
++            let path = Path::new(OsStr::from_bytes(bytes));
++            let expected = NSURL::from_path(path, *is_directory, None).unwrap();
++            let expected = expected.to_file_path().unwrap();
++
++            let cstr = CString::new(*bytes).unwrap();
++            let url = via_string::init_file_url(&cstr, *is_directory, None).unwrap();
++            let actual = via_string::file_system_representation(&url).unwrap();
++            assert_eq!(OsStr::from_bytes(&actual), expected.as_os_str(), "{path:?}");
++        }
++
++        // Known differences: Apple's `-[NSString fileSystemRepresentation]`
++        // decomposes (`/café` becomes `/cafe\u{301}`), and
++        // `stringWithFileSystemRepresentation:length:` rejects bytes that
++        // aren't UTF-8.
++        let cstr = CString::new(&b"/\xf8"[..]).unwrap();
++        assert_eq!(via_string::init_file_url(&cstr, false, None), None);
++    }
++
+     #[test]
+     fn invalid_path() {
+         assert_eq!(NSURL::from_file_path(""), None);

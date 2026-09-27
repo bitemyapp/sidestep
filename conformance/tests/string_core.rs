@@ -10,45 +10,40 @@ use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::{NSObject, NSObjectProtocol};
 use objc2::{AnyThread, DefinedClass, define_class, msg_send};
 use objc2_foundation::{
-    NSCopying, NSIntersectionRange, NSMutableCopying, NSMutableString, NSRange, NSRangeFromString, NSString,
-    NSStringEncodingConversionOptions, NSUnionRange, ns_string,
+    NSASCIIStringEncoding, NSCopying, NSData, NSISOLatin1StringEncoding, NSIntersectionRange,
+    NSMacOSRomanStringEncoding, NSMutableCopying, NSMutableString, NSRange, NSRangeFromString, NSString,
+    NSStringEncoding, NSStringEncodingConversionOptions, NSUTF8StringEncoding, NSUTF16BigEndianStringEncoding,
+    NSUTF16LittleEndianStringEncoding, NSUTF16StringEncoding, NSUTF32BigEndianStringEncoding,
+    NSUTF32LittleEndianStringEncoding, NSUTF32StringEncoding, NSUnionRange, NSWindowsCP1252StringEncoding, ns_string,
 };
 
 use sidestep as _;
 
-const ASCII: usize = 1;
-const UTF8: usize = 4;
-const LATIN1: usize = 5;
-const WINDOWS_1252: usize = 12;
-const UTF16: usize = 10;
-const MAC_ROMAN: usize = 30;
-const UTF16_BE: usize = 0x9000_0100;
-const UTF16_LE: usize = 0x9400_0100;
-const UTF32: usize = 0x8c00_0100;
-const UTF32_BE: usize = 0x9800_0100;
-const UTF32_LE: usize = 0x9c00_0100;
+// `NSStringEncoding` is `NSUInteger` on Apple platforms and `int` on
+// GNUstep, as objc2's own helpers use it (see docs/abi.md).
+const ASCII: NSStringEncoding = NSASCIIStringEncoding;
+const UTF8: NSStringEncoding = NSUTF8StringEncoding;
+const LATIN1: NSStringEncoding = NSISOLatin1StringEncoding;
+const WINDOWS_1252: NSStringEncoding = NSWindowsCP1252StringEncoding;
+const UTF16: NSStringEncoding = NSUTF16StringEncoding;
+const MAC_ROMAN: NSStringEncoding = NSMacOSRomanStringEncoding;
+const UTF16_BE: NSStringEncoding = NSUTF16BigEndianStringEncoding;
+const UTF16_LE: NSStringEncoding = NSUTF16LittleEndianStringEncoding;
+const UTF32: NSStringEncoding = NSUTF32StringEncoding;
+const UTF32_BE: NSStringEncoding = NSUTF32BigEndianStringEncoding;
+const UTF32_LE: NSStringEncoding = NSUTF32LittleEndianStringEncoding;
 
-/// `-initWithBytes:length:encoding:`. objc2's own helpers send the encoding
-/// as `i32` on GNUstep, and Sidestep registers the method that way (see
-/// docs/abi.md), so the test does too.
-fn from_bytes(bytes: &[u8], encoding: usize) -> Option<Retained<NSString>> {
-    let ptr: *const c_void = bytes.as_ptr().cast();
-    unsafe { msg_send![NSString::alloc(), initWithBytes: ptr, length: bytes.len(), encoding: arg(encoding)] }
+/// `-initWithBytes:length:encoding:`, through the generated method (so a
+/// debug build verifies its signature).
+fn from_bytes(bytes: &[u8], encoding: NSStringEncoding) -> Option<Retained<NSString>> {
+    let ptr = NonNull::new(bytes.as_ptr().cast_mut().cast()).unwrap();
+    unsafe { NSString::initWithBytes_length_encoding(NSString::alloc(), ptr, bytes.len(), encoding) }
 }
 
-#[cfg(target_vendor = "apple")]
-fn arg(encoding: usize) -> usize {
-    encoding
-}
-
-#[cfg(not(target_vendor = "apple"))]
-fn arg(encoding: usize) -> i32 {
-    encoding as i32
-}
-
-/// `-lengthOfBytesUsingEncoding:`, with the encoding width as above.
-fn byte_len(s: &NSString, encoding: usize) -> usize {
-    unsafe { msg_send![s, lengthOfBytesUsingEncoding: arg(encoding)] }
+/// `-lengthOfBytesUsingEncoding:`, which objc2's own `NSString` helpers
+/// also send.
+fn byte_len(s: &NSString, encoding: NSStringEncoding) -> usize {
+    s.lengthOfBytesUsingEncoding(encoding)
 }
 
 fn units(s: &NSString) -> Vec<u16> {
@@ -338,8 +333,8 @@ fn byte_lengths_and_encodings() {
         len: [usize; 6],
         max: [usize; 5],
         can: [bool; 3],
-        fastest: usize,
-        smallest: usize,
+        fastest: NSStringEncoding,
+        smallest: NSStringEncoding,
     }
     // len: ASCII, UTF-8, UTF-16, Latin 1, UTF-32, Mac Roman.
     // max: ASCII, UTF-8, UTF-16, Latin 1, UTF-32.
@@ -431,7 +426,13 @@ fn c_strings() {
 }
 
 /// `-getBytes:maxLength:usedLength:encoding:options:range:remainingRange:`.
-fn get_bytes(s: &NSString, max: usize, encoding: usize, options: usize, range: NSRange) -> (bool, Vec<u8>, NSRange) {
+fn get_bytes(
+    s: &NSString,
+    max: usize,
+    encoding: NSStringEncoding,
+    options: usize,
+    range: NSRange,
+) -> (bool, Vec<u8>, NSRange) {
     let mut buf = [0u8; 32];
     let mut used = 999;
     let mut rest = NSRange::new(99, 99);
@@ -507,6 +508,102 @@ fn get_bytes_converts_until_it_must_stop() {
         )
     };
     assert_eq!((ok, used, rest), (true, 8, NSRange::new(5, 0)));
+}
+
+#[test]
+fn data_conversions() {
+    let data =
+        |s: &NSString, encoding, lossy| s.dataUsingEncoding_allowLossyConversion(encoding, lossy).map(|d| d.to_vec());
+    let s = NSString::from_str("aé€");
+    assert_eq!(data(&s, UTF8, false), Some("aé€".as_bytes().to_vec()));
+    assert_eq!(s.dataUsingEncoding(UTF8).map(|d| d.to_vec()), Some("aé€".as_bytes().to_vec()));
+    assert_eq!(data(&s, MAC_ROMAN, false), Some(vec![0x61, 0x8E, 0xDB]));
+    assert_eq!(data(&s, WINDOWS_1252, false), Some(vec![0x61, 0xE9, 0x80]));
+    // A character the encoding lacks: nil, or with lossy conversion its base
+    // letter or a question mark.
+    assert_eq!(data(&s, LATIN1, false), None);
+    assert_eq!(s.dataUsingEncoding(ASCII), None);
+    assert_eq!(data(&s, LATIN1, true), Some(vec![0x61, 0xE9, b'?']));
+    assert_eq!(data(&s, ASCII, true), Some(vec![0x61, b'e', b'?']));
+    // Unmarked UTF-16 and UTF-32 start with a byte order mark and are in
+    // host order; the explicit byte orders have no mark.
+    let ab = NSString::from_str("ab");
+    let host16 = |v: u16| if cfg!(target_endian = "little") { v.to_le_bytes() } else { v.to_be_bytes() };
+    let host32 = |v: u32| if cfg!(target_endian = "little") { v.to_le_bytes() } else { v.to_be_bytes() };
+    assert_eq!(data(&ab, UTF16, false), Some([0xFEFF, 0x61, 0x62].map(host16).concat()));
+    assert_eq!(data(&ab, UTF32, false), Some([0xFEFF, 0x61, 0x62].map(host32).concat()));
+    assert_eq!(data(&ab, UTF16_BE, false), Some(vec![0, 0x61, 0, 0x62]));
+    assert_eq!(data(&ab, UTF16_LE, false), Some(vec![0x61, 0, 0x62, 0]));
+    assert_eq!(data(&ab, UTF32_BE, false), Some(vec![0, 0, 0, 0x61, 0, 0, 0, 0x62]));
+    // The empty string is empty data, or just the mark.
+    assert_eq!(data(&NSString::new(), UTF8, false), Some(vec![]));
+    assert_eq!(data(&NSString::new(), UTF16, false), Some(host16(0xFEFF).to_vec()));
+    assert_eq!(data(&NSString::new(), UTF32, false), Some(host32(0xFEFF).to_vec()));
+    assert_eq!(data(&NSString::new(), UTF16_LE, false), Some(vec![]));
+    // A lone surrogate: UTF-16 keeps it, UTF-8 can't write it.
+    let lone = lone_high();
+    assert_eq!(data(&lone, UTF16_LE, false), Some(vec![0x3C, 0xD8]));
+    assert_eq!(data(&lone, UTF8, false), None);
+    // Mutable strings too.
+    let m = NSMutableString::from_str("mutable é");
+    assert_eq!(data(&m, LATIN1, false), Some(b"mutable \xe9".to_vec()));
+
+    // -initWithData:encoding:, which reads the bytes as
+    // -initWithBytes:length:encoding: does.
+    let read = |bytes: &[u8], encoding| {
+        let d = NSData::with_bytes(bytes);
+        NSString::initWithData_encoding(NSString::alloc(), &d, encoding).map(|s| s.to_string())
+    };
+    assert_eq!(read("héllo".as_bytes(), UTF8), Some("héllo".to_string()));
+    assert_eq!(read(b"caf\xe9", LATIN1), Some("café".to_string()));
+    assert_eq!(read(b"caf\xe9", UTF8), None);
+    assert_eq!(read(&[0xFF, 0xFE, 0x61, 0x00], UTF16), Some("a".to_string()));
+    assert_eq!(read(&[0x00, 0x61], UTF16_BE), Some("a".to_string()));
+    assert_eq!(read(b"", UTF8), Some(String::new()));
+    let d = NSData::with_bytes("grows".as_bytes());
+    let m = NSMutableString::initWithData_encoding(NSMutableString::alloc(), &d, UTF8).unwrap();
+    m.appendString(ns_string!(" and grows"));
+    assert_eq!(m.to_string(), "grows and grows");
+    let bad = NSData::with_bytes(b"\xff");
+    assert!(NSMutableString::initWithData_encoding(NSMutableString::alloc(), &bad, UTF8).is_none());
+    // Round trips.
+    for text in ["", "plain", "héllo wörld", "🎉 party", "漢字"] {
+        for encoding in [UTF8, UTF16, UTF16_LE, UTF32, UTF32_BE] {
+            let d = NSString::from_str(text).dataUsingEncoding(encoding).unwrap();
+            let back = NSString::initWithData_encoding(NSString::alloc(), &d, encoding).unwrap();
+            assert_eq!(back.to_string(), text, "{text:?} in {encoding:#x}");
+        }
+    }
+}
+
+/// `+availableStringEncodings` is a 0-terminated list of `NSStringEncoding`s,
+/// so walking it through the generated binding checks the type's width (8
+/// bytes on Apple platforms, 4 on GNUstep); `+defaultCStringEncoding`
+/// returns one.
+#[test]
+fn available_and_default_encodings() {
+    let list = NSString::availableStringEncodings();
+    let mut found = Vec::new();
+    for i in 0..10_000 {
+        // SAFETY: the list ends with 0, which the loop stops at.
+        let encoding = unsafe { *list.as_ptr().add(i) };
+        if encoding == 0 {
+            break;
+        }
+        found.push(encoding);
+    }
+    assert!(found.len() < 10_000, "no terminator");
+    for encoding in [ASCII, UTF8, LATIN1, UTF16, UTF16_BE, UTF16_LE, UTF32, UTF32_BE, UTF32_LE] {
+        assert!(found.contains(&encoding), "{encoding:#x} missing from {found:x?}");
+    }
+
+    // Which encoding C strings use differs (Mac Roman on macOS, UTF-8 on
+    // Linux), but it is one of the list's and it can write ASCII.
+    let default = NSString::defaultCStringEncoding();
+    assert!(found.contains(&default), "{default:#x} missing from {found:x?}");
+    assert!(ns_string!("plain").canBeConvertedToEncoding(default));
+    assert!(ns_string!("plain").canBeConvertedToEncoding(ASCII));
+    assert!(!NSString::from_str("é").canBeConvertedToEncoding(ASCII));
 }
 
 #[test]

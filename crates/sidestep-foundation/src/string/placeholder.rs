@@ -17,7 +17,7 @@ use std::ptr::NonNull;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, Sel};
 use objc2::{ClassType, msg_send, sel};
-use objc2_foundation::NSString;
+use objc2_foundation::{NSData, NSString, NSStringEncoding};
 use sidestep_runtime::StaticObject;
 
 use super::create;
@@ -52,10 +52,22 @@ extern "C-unwind" fn init_with_bytes(
     _: Sel,
     bytes: *const c_void,
     length: usize,
-    encoding: i32,
+    encoding: NSStringEncoding,
 ) -> *mut AnyObject {
     // SAFETY: the caller passes `length` readable bytes.
-    build(unsafe { create::bytes(bytes, length, encoding as u32) })
+    build(unsafe { create::bytes(bytes, length, encoding::arg(encoding)) })
+}
+
+extern "C-unwind" fn init_with_data(
+    _: *mut AnyObject,
+    _: Sel,
+    data: Option<&NSData>,
+    encoding: NSStringEncoding,
+) -> *mut AnyObject {
+    // SAFETY: the bytes stay alive and unchanged during the call.
+    let bytes = data.map_or(&[][..], |d| unsafe { d.as_bytes_unchecked() });
+    // SAFETY: `bytes` is readable for its length.
+    build(unsafe { create::bytes(bytes.as_ptr().cast(), bytes.len(), encoding::arg(encoding)) })
 }
 
 extern "C-unwind" fn init_with_bytes_no_copy(
@@ -63,7 +75,7 @@ extern "C-unwind" fn init_with_bytes_no_copy(
     _: Sel,
     bytes: NonNull<c_void>,
     length: usize,
-    encoding: usize,
+    encoding: NSStringEncoding,
     free_when_done: Bool,
 ) -> *mut AnyObject {
     // SAFETY: as above.
@@ -98,7 +110,7 @@ extern "C-unwind" fn init_with_c_string(
     _: *mut AnyObject,
     _: Sel,
     s: NonNull<c_char>,
-    encoding: usize,
+    encoding: NSStringEncoding,
 ) -> *mut AnyObject {
     // SAFETY: as above.
     build(unsafe { create::c_string(s.as_ptr(), encoding::arg(encoding)) })
@@ -137,6 +149,7 @@ fn load() {
     unsafe {
         b.add_method(sel!(init), init as extern "C-unwind" fn(_, _) -> _);
         b.add_method(sel!(initWithBytes:length:encoding:), init_with_bytes as extern "C-unwind" fn(_, _, _, _, _) -> _);
+        b.add_method(sel!(initWithData:encoding:), init_with_data as extern "C-unwind" fn(_, _, _, _) -> _);
         b.add_method(
             sel!(initWithBytesNoCopy:length:encoding:freeWhenDone:),
             init_with_bytes_no_copy as extern "C-unwind" fn(_, _, _, _, _, _) -> _,
@@ -229,7 +242,7 @@ extern "C-unwind" fn string_with_c_string(
     cls: &AnyClass,
     _: Sel,
     s: NonNull<c_char>,
-    encoding: usize,
+    encoding: NSStringEncoding,
 ) -> *mut AnyObject {
     // SAFETY: as above.
     made(unsafe {
@@ -238,25 +251,25 @@ extern "C-unwind" fn string_with_c_string(
     })
 }
 
-extern "C-unwind" fn default_c_string_encoding(_: &AnyClass, _: Sel) -> usize {
+extern "C-unwind" fn default_c_string_encoding(_: &AnyClass, _: Sel) -> NSStringEncoding {
     // C strings on Linux are UTF-8.
-    encoding::UTF8 as usize
+    encoding::raw(encoding::UTF8)
 }
 
-/// `+availableStringEncodings`: a 0-terminated list.
-extern "C-unwind" fn available_string_encodings(_: &AnyClass, _: Sel) -> NonNull<usize> {
-    static LIST: [usize; 12] = [
-        encoding::ASCII_ENC as usize,
-        encoding::UTF8 as usize,
-        encoding::LATIN1 as usize,
-        encoding::WINDOWS_1252 as usize,
-        encoding::MAC_ROMAN as usize,
-        encoding::UTF16 as usize,
-        encoding::UTF16_BE as usize,
-        encoding::UTF16_LE as usize,
-        encoding::UTF32 as usize,
-        encoding::UTF32_BE as usize,
-        encoding::UTF32_LE as usize,
+/// `+availableStringEncodings`: a 0-terminated list, of `int`s on GNUstep.
+extern "C-unwind" fn available_string_encodings(_: &AnyClass, _: Sel) -> NonNull<NSStringEncoding> {
+    static LIST: [NSStringEncoding; 12] = [
+        encoding::ASCII_ENC as NSStringEncoding,
+        encoding::UTF8 as NSStringEncoding,
+        encoding::LATIN1 as NSStringEncoding,
+        encoding::WINDOWS_1252 as NSStringEncoding,
+        encoding::MAC_ROMAN as NSStringEncoding,
+        encoding::UTF16 as NSStringEncoding,
+        encoding::UTF16_BE as NSStringEncoding,
+        encoding::UTF16_LE as NSStringEncoding,
+        encoding::UTF32 as NSStringEncoding,
+        encoding::UTF32_BE as NSStringEncoding,
+        encoding::UTF32_LE as NSStringEncoding,
         0,
     ];
     NonNull::from(&LIST).cast()

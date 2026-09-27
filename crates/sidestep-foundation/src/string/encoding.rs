@@ -9,6 +9,8 @@
 
 use std::borrow::Cow;
 
+use objc2_foundation::NSStringEncoding;
+
 use super::index::Text;
 use super::wtf8::{self, ASCII, HAS_SURROGATE};
 
@@ -29,12 +31,18 @@ pub(crate) const ALLOW_LOSSY: usize = 1;
 /// `NSStringEncodingConversionExternalRepresentation`: add a byte order mark.
 pub(crate) const EXTERNAL: usize = 2;
 
-/// objc2 passes `NSStringEncoding` as `i32` in its own helpers and as
-/// `usize` in the generated bindings (see docs/abi.md). Either way only the
-/// low 32 bits carry the value.
+/// An `NSStringEncoding` as Sidestep compares it. On GNUstep it is an `int`
+/// (objc2's fork, see docs/abi.md), and the encodings above 0x7fffffff
+/// arrive as negative numbers with the same bits.
 #[inline]
-pub(crate) fn arg(raw: usize) -> u32 {
+pub(crate) fn arg(raw: NSStringEncoding) -> u32 {
     raw as u32
+}
+
+/// The `NSStringEncoding` for one of the constants above.
+#[inline]
+pub(crate) fn raw(encoding: u32) -> NSStringEncoding {
+    encoding as NSStringEncoding
 }
 
 /// Text decoded from bytes: WTF-8, its UTF-16 length and its flags.
@@ -386,6 +394,28 @@ pub(crate) fn encode_units(
 /// base letter when it decomposes into one the encoding has, else `?`.
 fn lossy_byte(c: u32, encoding: u32) -> u8 {
     super::fold::base_letter(c).and_then(|base| single_byte_of(base, encoding)).unwrap_or(b'?')
+}
+
+/// `-dataUsingEncoding:allowLossyConversion:`: the whole text in
+/// `encoding`, after a byte order mark for unmarked UTF-16 and UTF-32 (even
+/// when the text is empty, as on macOS), or `None` if some character can't
+/// be written (and `lossy` is off) or the encoding isn't supported.
+pub(crate) fn external_representation(text: &Text, encoding: u32, lossy: bool) -> Option<Vec<u8>> {
+    if !supported(encoding) {
+        return None;
+    }
+    let body = encode_all(text, encoding, lossy)?;
+    let mut out = match encoding {
+        UTF16 => {
+            if cfg!(target_endian = "little") { 0xFEFFu16.to_le_bytes() } else { 0xFEFFu16.to_be_bytes() }.to_vec()
+        }
+        UTF32 => {
+            if cfg!(target_endian = "little") { 0xFEFFu32.to_le_bytes() } else { 0xFEFFu32.to_be_bytes() }.to_vec()
+        }
+        _ => Vec::new(),
+    };
+    out.extend(body);
+    Some(out)
 }
 
 /// The whole text in `encoding`, or `None` if some character can't be

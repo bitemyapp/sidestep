@@ -11,6 +11,22 @@ fi
 if ! docker image inspect "$image" >/dev/null 2>&1; then
   docker build -q -t "$image" -f "$repo/scripts/linux.Dockerfile" "$repo/scripts" >&2
 fi
+# objc2's crates with the fixes from Sidestep's objc2 fork, which the
+# workspace's [patch.crates-io] points at (tools/objc2-overlay). Built on the
+# host, or in the container if the host has no cargo; a no-op when they are
+# up to date. The container runs as root, so it then gives .objc2-overlay the
+# checkout's owner, as it appears in the container (the user with rootful
+# Docker on Linux; root, which maps back to the user, with rootless Docker).
+if command -v cargo >/dev/null 2>&1; then
+  cargo run --quiet --release --manifest-path "$repo/tools/objc2-overlay/Cargo.toml" -- --quiet >/dev/null
+else
+  docker run --rm -v "$repo":/work -w /work \
+    -v sidestep-cargo-registry:/usr/local/cargo/registry \
+    -v "$target":/target -e CARGO_TARGET_DIR=/target/objc2-overlay \
+    "$image" sh -c 'cargo run --quiet --release --manifest-path tools/objc2-overlay/Cargo.toml -- --quiet >/dev/null &&
+      { chown -R --reference=/work .objc2-overlay ||
+        echo "linux-env: could not give .objc2-overlay the checkout'\''s owner" >&2; }'
+fi
 
 in_container() {
   # shellcheck disable=SC2086

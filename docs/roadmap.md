@@ -73,16 +73,16 @@ single change deep inside a large mutable ordered set (1.7 times Apple's
 time at a random place among 20,000 members), which renumbers its index;
 changes at its ends and changes of many members at once are faster.
 
-Strings: `NSString` and `NSMutableString` with encodings, comparison,
-search, case mapping, normalization, lines and enumeration, paths and
-numbers; `NSAttributedString` and `NSMutableAttributedString`;
-`NSCharacterSet`, `NSScanner`, `NSRegularExpression` and
-`NSTextCheckingResult`; the `NSRange` and `NSGeometry` functions (see
-`examples/strbench`).
+Strings: `NSString` and `NSMutableString` with encodings (and to and
+from `NSData`), comparison, search, case mapping, normalization, lines and
+enumeration, paths and numbers; `NSAttributedString` and
+`NSMutableAttributedString`; `NSCharacterSet`, `NSScanner`,
+`NSRegularExpression` and `NSTextCheckingResult`; the `NSRange` and
+`NSGeometry` functions (see `examples/strbench`).
 
-- Strings, still to do: initializers and writers for files, URLs and
-  `NSData`; encodings beyond ASCII, Latin-1, Windows-1252, Mac Roman and
-  the UTF forms; locale tailoring for case mapping and collation, and
+- Strings, still to do: initializers and writers for files and URLs;
+  encodings beyond ASCII, Latin-1, Windows-1252, Mac Roman and the UTF
+  forms; locale tailoring for case mapping and collation, and
   `NSLocale` arguments generally; dictionary-based word breaks for CJK and
   Thai; in regular expressions, character names (`\N{…}`), `\G`, full case
   folding and exact hit-end flags; attributed string drawing (with the text
@@ -454,16 +454,20 @@ libobjc2 v2 ABI's `__objc_load` path) the runtime would then need to accept.
 
 ## Standing work
 
-- Raise the `NSStringEncoding` width mismatch with objc2 (see
-  [abi.md](abi.md)).
+- Send the objc2 fork's commits upstream from its `sidestep-main` branch
+  (see [abi.md](abi.md#fixed-in-the-objc2-fork-pending-upstream); commit 1
+  is already on objc2's `main`) once the maintainer agrees, and drop each
+  of the overlay's patches and rules as a release includes it.
 - Keep the fallback declarations crate from [legal.md](legal.md) ready:
   prototype the Cargo mechanics early.
 - CI on Linux x86_64 and aarch64 and on macOS.
-- Ask objc2 to link objc2-core-graphics, -quartz-core, -core-text,
-  -image-io, -core-services and -natural-language to their frameworks
-  only on Apple targets, and to offer the CG-typed AppKit methods
-  (`-[NSGraphicsContext CGContext]`, `-[NSColor CGColor]`,
-  `-[NSView layer]`) elsewhere, so Sidestep can supply CGContext (its
-  graphics state is shaped for a one-to-one mapping) and CALayer. Test the
-  patch with `[patch]` first; sending it upstream needs the maintainer's
-  go-ahead.
+- CoreGraphics, QuartzCore, CoreText and ImageIO: with the fork, their
+  crates and AppKit's methods with their types (`-[NSGraphicsContext
+  CGContext]`, `-[NSColor CGColor]`, `-[NSView layer]` and the rest) build
+  on Linux, and sidestep-appkit depends on them. Supply the classes and
+  functions behind them next: CGContext (its graphics state is shaped for a
+  one-to-one mapping), CGPath and CGImage, CALayer and CADisplayLink, CTLine
+  and CTFont, CGImageSource.
+- Ask objc2 to link objc2-core-services and -natural-language (and any
+  framework crate without GNUstep support) to their frameworks only on
+  Apple targets; needs the maintainer's go-ahead like the fork's commits.

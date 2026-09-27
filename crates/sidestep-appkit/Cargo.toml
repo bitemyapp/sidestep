@@ -13,7 +13,16 @@ sidestep-foundation.workspace = true
 objc2 = { workspace = true, features = ["gnustep-2-1"] }
 block2 = { workspace = true, features = ["gnustep-2-1"] }
 objc2-foundation = { workspace = true, features = ["gnustep-2-1", "NSObject", "NSString", "NSDictionary", "NSGeometry", "NSNotification", "NSTimer", "NSDate", "NSZone", "NSRange", "block2", "NSArray", "NSData", "NSValue", "NSAffineTransform", "NSURL", "objc2-core-foundation", "NSRunLoop", "NSUserDefaults", "NSBundle", "NSObjCRuntime", "NSIndexSet", "NSEnumerator"] }
-objc2-app-kit = { workspace = true, features = ["gnustep-2-1", "NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics", "NSColor", "NSFont", "NSFontDescriptor", "NSBezierPath", "NSStringDrawing", "NSAttributedString", "NSEvent", "NSScrollView", "NSClipView", "NSRunningApplication", "objc2-core-foundation", "NSPasteboard", "NSText", "NSCursor", "NSTrackingArea", "NSTextInputContext", "NSParagraphStyle", "NSCell", "NSPasteboardItem", "NSDragging", "NSDraggingItem", "NSScreen", "block2", "NSGraphicsContext", "NSImageRep", "NSBitmapImageRep", "NSCustomImageRep", "NSColorSpace", "NSAppearance", "NSAffineTransform", "NSColorList", "NSImage", "NSGradient", "NSShadow", "NSAnimation", "NSAnimationContext", "NSControl", "NSImageView", "NSVisualEffectView", "NSPanel", "NSViewController", "NSWindowController", "NSNib", "NSUserInterfaceItemIdentification", "NSUserInterfaceLayout", "NSLayoutConstraint", "NSLayoutAnchor", "NSLayoutGuide", "NSStackView", "NSSplitView", "NSTabView", "NSTabViewItem", "NSTableView", "NSTableColumn", "NSTableRowView", "NSTableCellView", "NSTableHeaderView", "NSTextStorage", "NSLayoutManager", "NSTextContainer", "NSTextView", "NSTextTable", "NSTextInputClient"] }
+objc2-app-kit = { workspace = true, features = ["gnustep-2-1", "NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics", "NSColor", "NSFont", "NSFontDescriptor", "NSBezierPath", "NSStringDrawing", "NSAttributedString", "NSEvent", "NSScrollView", "NSClipView", "NSRunningApplication", "objc2-core-foundation", "NSPasteboard", "NSText", "NSCursor", "NSTrackingArea", "NSTextInputContext", "NSParagraphStyle", "NSCell", "NSPasteboardItem", "NSDragging", "NSDraggingItem", "NSScreen", "block2", "NSGraphicsContext", "NSImageRep", "NSBitmapImageRep", "NSCustomImageRep", "NSColorSpace", "NSAppearance", "NSAffineTransform", "NSColorList", "NSImage", "NSGradient", "NSShadow", "NSAnimation", "NSAnimationContext", "NSControl", "NSImageView", "NSVisualEffectView", "NSPanel", "NSViewController", "NSWindowController", "NSNib", "NSUserInterfaceItemIdentification", "NSUserInterfaceLayout", "NSLayoutConstraint", "NSLayoutAnchor", "NSLayoutGuide", "NSStackView", "NSSplitView", "NSTabView", "NSTabViewItem", "NSTableView", "NSTableColumn", "NSTableRowView", "NSTableCellView", "NSTableHeaderView", "NSTextStorage", "NSLayoutManager", "NSTextContainer", "NSTextView", "NSTextTable", "NSTextInputClient", "objc2-core-graphics", "objc2-quartz-core", "objc2-core-text"] }
+# CoreGraphics, QuartzCore, CoreText and ImageIO, with the features apps use.
+# They build off Apple with objc2's fork (tools/objc2-overlay), and AppKit's
+# methods with their types (NSColor's CGColor, NSView's layer and so on) come
+# with them. Sidestep doesn't implement these frameworks yet: nothing calls
+# into them (tests/framework_types.rs only checks that they compile).
+objc2-core-graphics = { workspace = true, features = ["CGAffineTransform", "CGBitmapContext", "CGColor", "CGColorSpace", "CGContext", "CGDataConsumer", "CGDataProvider", "CGDirectDisplay", "CGEventTypes", "CGFont", "CGGeometry", "CGGradient", "CGImage", "CGPath", "bitflags", "objc2"] }
+objc2-quartz-core = { workspace = true, features = ["gnustep-2-1", "CAAnimation", "CABase", "CADisplayLink", "CALayer", "CAMediaTiming", "CAMediaTimingFunction", "CAOpenGLLayer", "CATransaction", "CATransform3D", "bitflags", "objc2-core-foundation", "objc2-core-graphics"] }
+objc2-core-text = { workspace = true, features = ["CTFont", "CTFontDescriptor", "CTFontManager", "CTLine", "CTRun", "CTStringAttributes", "SFNTLayoutTypes", "bitflags", "objc2-core-graphics"] }
+objc2-image-io = { workspace = true, features = ["CGImageProperties", "CGImageSource", "objc2-core-graphics"] }
 smithay-client-toolkit = { version = "0.19", default-features = false, features = ["calloop"] }
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
 # Path geometry for NSBezierPath: bounds, winding, flattening.
@@ -102,6 +111,13 @@ objc2-foundation = { workspace = true, features = ["NSTimer", "NSRunLoop", "NSVa
 # The theme's reference images (src/theme/golden).
 [target.'cfg(not(target_vendor = "apple"))'.dev-dependencies]
 png = "0.18"
+# The items of CoreFoundation, CoreGraphics and QuartzCore that use `libc`
+# types only Apple platforms have (Mach ports, cpu_type_t, boolean_t, malloc
+# zones), which objc2's fork makes Apple-only: with `libc` on, one that lost
+# its gate fails the Linux build (tests/framework_types.rs).
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "libc", "objc2", "CFBase", "CFBundle", "CFMachPort", "CFRunLoop"] }
+objc2-core-graphics = { workspace = true, features = ["libc", "CGDirectDisplay", "CGDisplayConfiguration", "CGDisplayFade", "CGError", "CGRemoteOperation"] }
+objc2-quartz-core = { workspace = true, features = ["libc", "CARemoteLayerClient", "CARemoteLayerServer"] }
 
 # Scroll views' layers and scrolling, through the null render thread.
 [[test]]
@@ -128,3 +144,8 @@ harness = false
 [[test]]
 name = "image_views"
 harness = false
+
+# AppKit's methods with CoreGraphics, QuartzCore and CoreText types, and
+# those crates, compile on Linux (default harness; Linux only).
+[[test]]
+name = "framework_types"

@@ -1,0 +1,15 @@
+[package]
+name = "objc2-overlay"
+description = "objc2's published crates with the fixes from Sidestep's objc2 fork, for [patch.crates-io]"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# No dependencies: it shells out to curl and tar, and checks SHA-256 itself.
+[dependencies]
+
+# A workspace of its own, so it builds before Sidestep's [patch.crates-io]
+# paths exist (Sidestep's Cargo.toml also excludes it).
+[workspace]

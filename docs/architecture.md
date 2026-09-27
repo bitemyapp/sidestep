@@ -6,13 +6,18 @@ On Linux, Sidestep supplies what objc2 expects to find there, written in Rust.
 
 ```
 your app                          unchanged source; one `use sidestep as _;`
-objc2-app-kit, objc2-foundation   unmodified, from crates.io
-objc2, block2                     unmodified; GNUstep ABI selected on Linux
+objc2-app-kit, objc2-foundation   from crates.io, with the objc2 fork's fixes
+objc2, block2                     from crates.io (objc2 with the fork's fixes);
+                                  GNUstep ABI selected on Linux
 ───────── C ABI: objc_msg_lookup, objc_allocateClassPair, objc_retain, …,
           class symbols ._OBJC_CLASS_<Name>, _Block_copy, _NSConcreteStackBlock
 sidestep-runtime                  the Objective-C runtime, in Rust
 sidestep-foundation, -appkit      framework classes, in Rust, via define_class!
 ```
+
+The objc2 fork's fixes are pending upstream; `tools/objc2-overlay` applies
+them to the published crates at build time (see
+[abi.md](abi.md#fixed-in-the-objc2-fork-pending-upstream)).
 
 [objc2]: https://github.com/madsmtm/objc2
 
@@ -33,10 +38,16 @@ sidestep-foundation, -appkit      framework classes, in Rust, via define_class!
 
 ## Classes are static shells
 
-In GNUstep 2.x mode objc2 names every framework class it uses by linker symbol,
-`._OBJC_CLASS_NSString`, rather than looking it up at run time. So each class
-an app can touch must exist at link time, and a class Sidestep has not written
-yet is a link error, not a crash.
+objc2 finds a framework class by name at run time, with `objc_getClass` the
+first time it is used (then cached), unless the app enables objc2's
+`unstable-static-class`, which in GNUstep 2.x mode names it by linker symbol,
+`._OBJC_CLASS_NSString`, instead. Either way the class must be in the program.
+Each Sidestep class is a static shell carrying that symbol, listed in the
+`sidestep_classes` linker section so the runtime knows it by name before it
+loads; the shells are also what makes the linker keep a framework's rlib. A
+class Sidestep has not written yet stops the program with objc2's "class …
+could not be found" panic on first use (a link error with
+`unstable-static-class`).
 
 `sidestep_runtime::static_class!` declares such a symbol: a class and a
 metaclass *shell* plus a loader function. The first time the runtime needs the

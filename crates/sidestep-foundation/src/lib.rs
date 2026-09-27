@@ -47,7 +47,7 @@ mod thread;
 mod time_zone;
 mod timer;
 mod undo;
-pub mod url;
+mod url;
 mod user_defaults;
 mod uuid;
 mod xdg;

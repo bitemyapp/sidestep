@@ -1,0 +1,33 @@
+Parts of this directory come from objc2 (https://github.com/madsmtm/objc2):
+the files in patches/ carry objc2's hand-written source, as context and as
+the changes from Sidestep's objc2 fork, and src/platform.rs ports
+header-translator's src/cfgs.rs with its unit tests.
+
+objc2's LICENSE.md licenses objc2, block2, objc2-foundation and objc2-encode
+under the MIT licence, and its other crates (header-translator,
+objc2-app-kit and the other framework crates) under Zlib OR Apache-2.0 OR
+MIT. All of them are used here under the MIT licence below. objc2 no longer
+carries a copyright line; the one below is from the MIT licence file it
+had until 2025 (LICENSE.txt), with the authors since added.
+
+MIT License
+
+Copyright (c) Steven Sheldon, Mads Marquart and the objc2 contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

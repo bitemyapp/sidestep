@@ -2,8 +2,8 @@
 
 What Sidestep provides so the published objc2 crates work on Linux, and where
 it knowingly differs. Taken from objc2 0.6.4, block2 0.6.2 and
-objc2-foundation 0.3.2 with their `gnustep-2-1` features; other versions are
-untested.
+objc2-foundation 0.3.2 with their `gnustep-2-1` features and the fixes listed
+at the end, which `tools/objc2-overlay` applies; other versions are untested.
 
 ## Symbols
 
@@ -27,10 +27,11 @@ untested.
 | CoreFoundation | Retain/release/equality (`CFRetain`, `CFRelease`, `CFAutorelease`, `CFEqual`, `CFHash`, `CFGetTypeID`, `CFCopyDescription`, `CFShow`); the run loop (`CFRunLoop*`, `CFRunLoopTimer*`, `CFRunLoopObserver*`, `kCFRunLoopDefaultMode`, `kCFRunLoopCommonModes`); and toll-free `CFString`, `CFData`, `CFDate`, `CFError`, `CFURL`, `CFDictionary` and `CFArray` (mutable ones too), `CFNumber`, `CFPreferences`; the `kCFAllocator*` constants and the `kCFType…CallBacks` |
 | Foundation functions | `NSUnionRange`, `NSIntersectionRange`, `NSStringFromRange`, `NSRangeFromString`; the `NSGeometry` functions (`NSEqualRects`, `NSInsetRect`, `NSIntegralRectWithOptions`, `NSDivideRect`, `NSPointInRect`, `NSStringFromRect`, `NSRectFromString` and the rest objc2-foundation declares); `NSHomeDirectory(ForUser)`, `NSTemporaryDirectory`, `NSUserName`, `NSFullUserName`, `NSOpenStepRootDirectory`, `NSSearchPathForDirectoriesInDomains`, `NSClassFromString`, `NSStringFromClass`, `NSSelectorFromString`, `NSStringFromSelector`, `NSProtocolFromString`, `NSStringFromProtocol`, and the string constants (`NSDefaultRunLoopMode`, error domains and keys, file attribute and URL resource keys, defaults domains, notification names) |
 
-objc2-foundation and dispatch2 link `-ldispatch` on Linux;
-sidestep-foundation's build script writes an empty `libdispatch.a` into
-its output directory so the link succeeds, and the symbols above come from
-Sidestep itself.
+dispatch2 links `-ldispatch` on Linux (objc2-foundation 0.3.2 doesn't
+depend on dispatch2; objc2-core-foundation and objc2-core-graphics do
+through their `dispatch2` features); sidestep-foundation's build script
+writes an empty `libdispatch.a` into its output directory so the link
+succeeds, and the symbols above come from Sidestep itself.
 
 The blocks runtime follows Clang's published Block Implementation
 Specification.
@@ -140,23 +141,78 @@ Specification.
 - Protocol objects have a null `isa`, so retaining one (which
   objc2-foundation's `NSProtocolFromString` wrapper does) crashes.
 
-## Upstream issues
+## Fixed in the objc2 fork, pending upstream
 
-- **`NSStringEncoding` width.** On GNUstep, objc2's internal `NSString`
-  helpers (`from_str`, `Display`, `to_str`) pass encodings as `i32`, while
-  objc2-foundation's generated bindings pass `NSStringEncoding` as `usize`.
-  objc2's debug-mode signature check only tolerates integer size differences on
-  Apple targets, so on Linux one of the two paths fails it whatever the method
-  is registered with. Sidestep registers `i32` to match the helpers (the path
-  every string conversion takes) for the two methods the helpers send,
-  `-initWithBytes:length:encoding:` and `-lengthOfBytesUsingEncoding:`, and
-  `NSUInteger` for every other method taking an encoding; all of them read
-  only the low 32 bits, which is correct for either caller. Direct calls such
-  as `s.lengthOfBytesUsingEncoding(NSUTF8StringEncoding)` work in release
-  builds but fail the debug check. To be raised with objc2.
+Sidestep builds against the published crates with the fixes below. Each is
+one commit in Sidestep's objc2 fork (github.com/bitemyapp/objc2), written
+to be sent upstream, on two branches: `sidestep`, based on the
+`objc2-0.6.4` tag, and `sidestep-main`, based on objc2's `main`, which
+already has commit 1 and is the branch the others go upstream from.
+`tools/objc2-overlay` builds the affected crates from crates.io's: it checks
+each against the checksum Cargo.lock had for it, applies the fork's
+hand-written changes as patches, and makes the changes regenerating the
+bindings with the fork's generator and configs would make, by rule (neither
+Sidestep nor the fork may contain generated code, see
+[legal.md](legal.md) §3.6). The workspace's `[patch.crates-io]` points at its
+output in `.objc2-overlay/`; `scripts/linux-env` and CI run it before cargo.
+The tool's README maps each patch and rule to its commit.
 
-- **`NSURL` path helpers.** objc2-foundation compiles `NSURL::from_file_path`,
-  `from_directory_path` and `to_file_path` out under `gnustep-1-7` (which
-  `gnustep-2-1` implies), though Sidestep's `NSURL` supports what they call.
-  Rust code on Linux can use `sidestep_foundation::url::file_url` and
-  `file_path` meanwhile. To be raised with objc2.
+- **`Retained::retain_autoreleased`** (commit 1, objc2's #862 cherry-picked
+  for issue #861). Release builds of objc2 0.6.4 can use an object after
+  releasing it on macOS 13 to 26. A patch to objc2.
+- **Swift-backed strings in message verification** (commit 2). On macOS 26
+  Foundation hands out Swift strings whose `-getCharacters:range:` encodes
+  its range as `{?=qq}`, so debug builds panicked comparing it with
+  `{_NSRange=QQ}`. On Apple platforms objc2 now lets an anonymous struct
+  match a named one with equivalent fields, relaxing the sign of
+  register-sized integers inside it as it already did at the top level. A
+  patch to objc2.
+- **CoreGraphics, QuartzCore, CoreText and ImageIO off Apple** (commit 3).
+  0.3.2 links these frameworks unconditionally, which rustc refuses off
+  Apple, and objc2-app-kit gates the 182 items that use their types to
+  Apple platforms (`-[NSColor CGColor]`, `-[NSView layer]`,
+  `-[NSGraphicsContext CGContext]` and the rest). The fork marks the four as
+  supporting GNUstep, makes the Darwin-only `libc` types (Mach ports,
+  `cpu_type_t`, `boolean_t`, malloc zones) Apple-only so the crates compile
+  with default features, and keeps the toll-free bridging between AppKit and
+  CoreText types Apple-only, since GNUstep's (and Sidestep's) `NSFont` isn't
+  a `CTFont`. Rules: the framework link lines become
+  `cfg_attr(target_vendor = "apple", ...)`, dependency tables follow the
+  generator's platform logic (AppKit takes CoreGraphics, CoreText and
+  QuartzCore everywhere; QuartzCore takes Metal and CoreVideo on Apple only),
+  every item's platform `cfg` is recomputed (AppKit loses 80, keeps 102,
+  among them the bridging, and gains 2), and QuartzCore's `gnustep-*`
+  features forward to objc2 again. The published 0.3.2 bindings came from
+  a newer generator than the tag's, so the bridging and malloc-zone parts
+  of these rules follow `sidestep-main`'s version of the commit; the tag's
+  generator emits no bridging and doesn't map malloc zones. Sidestep
+  builds the four crates and AppKit's methods with their types on Linux,
+  but implements none of the frameworks yet.
+- **`NSStringEncoding` on GNUstep** (commit 4). GNUstep declares it as a C
+  enum without a fixed type: an `int`, which Clang encodes as `i`.
+  objc2-foundation bound it as `NSUInteger` while objc2's own helpers used
+  `i32`, and objc2's debug check tolerates neither a size difference nor
+  (off Apple) a sign difference, so one of the two failed it on Linux. With
+  the fork it is `c_int` under `gnustep-1-7`, the five encodings above
+  0x7fffffff keep their bit patterns, and Sidestep registers every method
+  taking or returning an encoding with it, so objc2's helpers and the
+  generated methods (`s.lengthOfBytesUsingEncoding(NSUTF8StringEncoding)`)
+  both pass. Patches to objc2 and objc2-foundation; a rule drops the
+  generated typedef and the five constants.
+- **NSURL path helpers on GNUstep** (commit 5). objc2-foundation compiled
+  `NSURL::from_file_path`, `from_directory_path` and `to_file_path` out
+  under `gnustep-1-7`. They now go through methods GNUstep has
+  (`-[NSFileManager stringWithFileSystemRepresentation:length:]`,
+  `-initFileURLWithPath:isDirectory:relativeToURL:`, `-path`,
+  `-[NSString fileSystemRepresentation]`) there, so on Linux a path must be
+  UTF-8. A patch to objc2-foundation.
+- **`NSTextAlignment` on GNUstep** (commit 6). objc2-app-kit chose Center's
+  and Right's values by Apple's per-architecture rule, which gave x86_64
+  Linux macOS's; GNUstep uses Center = 1 and Right = 2 everywhere. A patch
+  to objc2-app-kit. Nothing in Sidestep depends on the raw values.
+
+To drop a fix once upstream releases it: move Sidestep to that release,
+delete the fix's patches, rules and pinned crates from `tools/objc2-overlay`,
+and update `[patch.crates-io]` from the tool's output. When nothing is left,
+delete the tool, the table and the steps that run it in `scripts/linux-env`
+and CI.

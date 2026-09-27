@@ -396,10 +396,15 @@ define_class!(
         }
 
         #[unsafe(method_id(stringWithFileSystemRepresentation:length:))]
-        fn string_with_file_system_representation(&self, text: NonNull<c_char>, length: NSUInteger) -> Retained<NSString> {
+        fn string_with_file_system_representation(
+            &self,
+            text: NonNull<c_char>,
+            length: NSUInteger,
+        ) -> Option<Retained<NSString>> {
             // SAFETY: the caller passes `length` readable bytes.
             let bytes = unsafe { std::slice::from_raw_parts(text.as_ptr().cast::<u8>(), length) };
-            NSString::from_str(&String::from_utf8_lossy(bytes))
+            // Bytes that aren't UTF-8 make no string, as on macOS.
+            std::str::from_utf8(bytes).ok().map(NSString::from_str)
         }
 
         #[unsafe(method_id(contentsOfDirectoryAtPath:error:))]

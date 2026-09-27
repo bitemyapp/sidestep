@@ -19,7 +19,9 @@ use std::ptr::NonNull;
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyClass, AnyObject, NSObjectProtocol};
 use objc2::{AnyThread, ClassType, DefinedClass, define_class, msg_send, sel};
-use objc2_foundation::{NSMutableString, NSRange, NSString, NSStringCompareOptions, NSUInteger, NSZone};
+use objc2_foundation::{
+    NSData, NSMutableString, NSRange, NSString, NSStringCompareOptions, NSStringEncoding, NSUInteger, NSZone,
+};
 
 use super::encoding::Decoded;
 use super::index::{IndexRef, LocalIndex, Text, indexable};
@@ -139,10 +141,23 @@ define_class!(
             this: Allocated<Self>,
             bytes: *const c_void,
             length: NSUInteger,
-            encoding: i32,
+            encoding: NSStringEncoding,
         ) -> Option<Retained<Self>> {
             // SAFETY: the caller passes `length` readable bytes.
-            let decoded = unsafe { create::bytes(bytes, length, encoding as u32) };
+            let decoded = unsafe { create::bytes(bytes, length, super::encoding::arg(encoding)) };
+            decoded.map(|d| finish(this, MutBuf::new(d, 0)))
+        }
+
+        #[unsafe(method_id(initWithData:encoding:))]
+        fn init_with_data(
+            this: Allocated<Self>,
+            data: Option<&NSData>,
+            encoding: NSStringEncoding,
+        ) -> Option<Retained<Self>> {
+            // SAFETY: the bytes stay alive and unchanged during the call.
+            let bytes = data.map_or(&[][..], |d| unsafe { d.as_bytes_unchecked() });
+            // SAFETY: `bytes` is readable for its length.
+            let decoded = unsafe { create::bytes(bytes.as_ptr().cast(), bytes.len(), super::encoding::arg(encoding)) };
             decoded.map(|d| finish(this, MutBuf::new(d, 0)))
         }
 
@@ -151,11 +166,11 @@ define_class!(
             this: Allocated<Self>,
             bytes: NonNull<c_void>,
             length: NSUInteger,
-            encoding: NSUInteger,
+            encoding: NSStringEncoding,
             free_when_done: bool,
         ) -> Option<Retained<Self>> {
             // SAFETY: as above; the buffer is the caller's to hand over.
-            let decoded = unsafe { create::bytes(bytes.as_ptr(), length, encoding as u32) };
+            let decoded = unsafe { create::bytes(bytes.as_ptr(), length, super::encoding::arg(encoding)) };
             let result = decoded.map(|d| finish(this, MutBuf::new(d, 0)));
             // As for NSString: a failed initializer leaves the buffer to the
             // caller.
@@ -178,10 +193,10 @@ define_class!(
         fn init_with_c_string(
             this: Allocated<Self>,
             s: NonNull<c_char>,
-            encoding: NSUInteger,
+            encoding: NSStringEncoding,
         ) -> Option<Retained<Self>> {
             // SAFETY: as above.
-            let decoded = unsafe { create::c_string(s.as_ptr(), encoding as u32) };
+            let decoded = unsafe { create::c_string(s.as_ptr(), super::encoding::arg(encoding)) };
             decoded.map(|d| finish(this, MutBuf::new(d, 0)))
         }
 

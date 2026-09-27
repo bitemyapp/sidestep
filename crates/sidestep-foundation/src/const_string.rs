@@ -8,7 +8,7 @@ use std::ffi::c_char;
 
 use objc2::runtime::{AnyObject, Bool, ClassBuilder, Sel};
 use objc2::{ClassType, sel};
-use objc2_foundation::{NSString, NSZone};
+use objc2_foundation::{NSString, NSStringEncoding, NSZone};
 use sidestep_runtime::StaticObject;
 
 use crate::string::index::Text;
@@ -98,8 +98,8 @@ extern "C-unwind" fn length(this: &AnyObject, _: Sel) -> usize {
     body(this).utf16_len
 }
 
-extern "C-unwind" fn length_of_bytes(this: &AnyObject, _: Sel, encoding: i32) -> usize {
-    crate::string::byte_length(body(this).as_str(), encoding as u32)
+extern "C-unwind" fn length_of_bytes(this: &AnyObject, _: Sel, encoding: NSStringEncoding) -> usize {
+    crate::string::byte_length(body(this).as_str(), crate::string::encoding::arg(encoding))
 }
 
 extern "C-unwind" fn utf8_string(this: &AnyObject, _: Sel) -> *const c_char {

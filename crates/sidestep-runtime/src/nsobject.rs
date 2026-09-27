@@ -3,7 +3,7 @@
 //!
 //! Methods that need Foundation (`-description`) are added by Foundation.
 
-use std::ffi::c_void;
+use std::ffi::{c_int, c_void};
 
 use objc2::runtime::{AnyClass, AnyObject, AnyProtocol, Bool, ClassBuilder, Imp, NSZone, Sel};
 use objc2::sel;
@@ -163,15 +163,16 @@ pub(crate) extern "C-unwind" fn zone(_: Id, _: Sel) -> *mut NSZone {
 /// `NSString`; before one is, there is none (nil).
 fn string(text: &str) -> Id {
     let Some(string_class) = crate::class::lookup_name(c"NSString") else { return std::ptr::null_mut() };
-    // SAFETY: +alloc and -initWithBytes:length:encoding: (UTF-8 is 4, an
-    // int in this ABI, see docs/abi.md) are NSString's.
+    // SAFETY: +alloc and -initWithBytes:length:encoding: are NSString's.
+    // Its encoding is an `NSStringEncoding`, a C `int` on GNUstep (objc2's
+    // fork, see docs/abi.md); UTF-8 is 4.
     unsafe {
         let string = send0((string_class as *const Class).cast_mut().cast(), sel!(alloc));
         let sel = sel!(initWithBytes:length:encoding:);
         // A message, not `method_for`: +alloc may return an object of a
         // class that hasn't loaded yet (Foundation's placeholder).
         let imp = crate::message::objc_msg_lookup(obj(string), raw(sel)).expect("lookup never fails");
-        let imp: unsafe extern "C-unwind" fn(Id, Sel, *const c_void, usize, i32) -> Id = std::mem::transmute(imp);
+        let imp: unsafe extern "C-unwind" fn(Id, Sel, *const c_void, usize, c_int) -> Id = std::mem::transmute(imp);
         crate::arc::objc_autorelease(imp(string, sel, text.as_ptr().cast(), text.len(), 4).cast()).cast()
     }
 }

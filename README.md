@@ -4,8 +4,10 @@ Write a Rust GUI app once against [objc2], and build it for macOS or Linux.
 
 On macOS, objc2 talks to Apple's runtime and frameworks as usual. On Linux,
 Sidestep provides them: an Objective-C runtime written in Rust, and Foundation
-and AppKit classes written in Rust with objc2's own `define_class!`. Your code,
-objc2 and its framework crates stay unmodified.
+and AppKit classes written in Rust with objc2's own `define_class!`. Your code
+stays unmodified, and so do objc2 and its framework crates, apart from a few
+fixes Sidestep applies to them at build time until upstream releases them
+(see [Using it](#using-it)).
 
 **Status:** early. The runtime is complete enough for objc2's core features
 (classes, subclassing, ivars, `super`, reference counting, autorelease pools,
@@ -42,13 +44,24 @@ fn main() {
 }
 ```
 
-That `use` line is the only change an app needs. For the fastest message
-sends on Linux, build releases with `lto = "fat"`: Sidestep's method lookup
-then inlines into every call site (see
+That `use` line is the only change to an app's code. Its build also needs
+the fixed objc2 crates Sidestep is written against: the published ones with
+the fixes from Sidestep's objc2 fork, pending upstream (listed in
+[docs/abi.md](docs/abi.md#fixed-in-the-objc2-fork-pending-upstream)).
+`tools/objc2-overlay` in a Sidestep checkout builds them from crates.io's
+and prints the `[patch.crates-io]` table for your workspace's Cargo.toml;
+run it again after updating Sidestep:
+
+```sh
+cargo run --release --manifest-path ../sidestep/tools/objc2-overlay/Cargo.toml -- --out .objc2-overlay
+```
+
+For the fastest message sends on Linux, build releases with `lto = "fat"`:
+Sidestep's method lookup then inlines into every call site (see
 [docs/architecture.md](docs/architecture.md#message-dispatch)). Sidestep needs
-Rust 1.95 or later. Sidestep switches objc2 to
-its GNUstep ABI on Linux by itself, and classes it hasn't implemented yet show
-up as link errors, not crashes.
+Rust 1.95 or later. Sidestep switches objc2 to its GNUstep ABI on Linux by
+itself, and a class it hasn't implemented yet stops the program with objc2's
+"class … could not be found" panic when first used.
 
 ## Test drive
 
@@ -72,6 +85,15 @@ text, baseline offsets, tab stops and wrapped mixed-direction paragraphs.
 `images`, `symbols`, `alpha` or `bench`); with `GALLERY_PNG=file.png` it
 opens no window and writes the picture to a file instead, on macOS too, for
 comparing the two.
+
+In a fresh checkout, first build the objc2 crates the workspace uses, the
+published ones with the fixes from Sidestep's objc2 fork (see
+[Developing](#developing)); until then cargo stops with "failed to read
+`.objc2-overlay/…/Cargo.toml`". `scripts/linux-cargo` does this itself.
+
+```sh
+cargo run --release --manifest-path tools/objc2-overlay/Cargo.toml
+```
 
 **macOS** runs it on Apple's AppKit:
 
@@ -183,17 +205,25 @@ see [docs/architecture.md](docs/architecture.md#appkit-a-main-thread-and-a-rende
 
 objc2 already supports GNUstep's runtime ABI. Sidestep implements that ABI in
 Rust instead of shipping libobjc2 and GNUstep, and provides each framework
-class as the linker symbol objc2 refers to. See
+class under the name and linker symbol objc2 looks for. See
 [docs/architecture.md](docs/architecture.md) and the exact contract in
 [docs/abi.md](docs/abi.md).
 
 ## Developing
 
 ```sh
+cargo run --release --manifest-path tools/objc2-overlay/Cargo.toml   # the fixed objc2 crates, once
 cargo test --workspace                  # conformance tests on macOS (Apple's runtime)
 scripts/linux-cargo test --workspace    # the same tests on Linux (Sidestep)
 scripts/linux-cargo run -p hello
 ```
+
+The workspace builds objc2's crates from `.objc2-overlay/`, which
+`tools/objc2-overlay` writes (see its README); `scripts/linux-cargo` and
+`scripts/linux-run` run it first, and it does nothing when it is up to
+date. Run it yourself before cargo on macOS, and after pulling changes to
+it. If cargo says it failed to read `.objc2-overlay/<crate>/Cargo.toml`,
+that step is missing.
 
 Please read [CONTRIBUTING.md](CONTRIBUTING.md) before contributing. It sets out
 where behavior may and may not be learned from.

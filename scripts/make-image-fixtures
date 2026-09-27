@@ -4,4 +4,6 @@
 # Never make fixtures with Apple's tools.
 set -eu
 repo=$(cd "$(dirname "$0")/.." && pwd)
+# objc2's crates with the fork's fixes, which the workspace builds against.
+cargo run --quiet --release --manifest-path "$repo/tools/objc2-overlay/Cargo.toml" -- --quiet >/dev/null
 cargo run -q --manifest-path "$repo/Cargo.toml" -p drawing-gallery --bin make-image-fixtures -- "$repo/conformance/tests/fixtures"

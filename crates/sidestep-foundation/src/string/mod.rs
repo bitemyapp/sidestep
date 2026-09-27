@@ -27,7 +27,9 @@ use std::ptr::NonNull;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, ClassBuilder, NSObject, NSObjectProtocol};
 use objc2::{ClassType, Message, define_class, msg_send};
-use objc2_foundation::{NSMutableString, NSRange, NSString, NSStringEncodingConversionOptions, NSUInteger, NSZone};
+use objc2_foundation::{
+    NSData, NSMutableString, NSRange, NSString, NSStringEncoding, NSStringEncodingConversionOptions, NSUInteger, NSZone,
+};
 
 use crate::const_string::{ConstStr, ConstantString};
 
@@ -312,24 +314,24 @@ define_class!(
         }
 
         #[unsafe(method(lengthOfBytesUsingEncoding:))]
-        fn length_of_bytes(&self, encoding: i32) -> NSUInteger {
-            encoding::byte_length(&view(self).text(), encoding as u32)
+        fn length_of_bytes(&self, encoding: NSStringEncoding) -> NSUInteger {
+            encoding::byte_length(&view(self).text(), encoding::arg(encoding))
         }
 
         #[unsafe(method(maximumLengthOfBytesUsingEncoding:))]
-        fn maximum_length_of_bytes(&self, encoding: NSUInteger) -> NSUInteger {
+        fn maximum_length_of_bytes(&self, encoding: NSStringEncoding) -> NSUInteger {
             // SAFETY: -length is a primitive.
             let len: usize = unsafe { msg_send![self, length] };
             encoding::max_byte_length(len, encoding::arg(encoding))
         }
 
         #[unsafe(method(cStringUsingEncoding:))]
-        fn c_string_using_encoding(&self, encoding: NSUInteger) -> *const c_char {
+        fn c_string_using_encoding(&self, encoding: NSStringEncoding) -> *const c_char {
             c_string(self, encoding::arg(encoding))
         }
 
         #[unsafe(method(getCString:maxLength:encoding:))]
-        fn get_c_string(&self, buffer: NonNull<c_char>, max: NSUInteger, encoding: NSUInteger) -> bool {
+        fn get_c_string(&self, buffer: NonNull<c_char>, max: NSUInteger, encoding: NSStringEncoding) -> bool {
             let encoding = encoding::arg(encoding);
             let encoded = encoding::encode_all(&view(self).text(), encoding, false);
             let nul = encoding::nul_width(encoding);
@@ -351,18 +353,30 @@ define_class!(
         }
 
         #[unsafe(method(canBeConvertedToEncoding:))]
-        fn can_be_converted(&self, encoding: NSUInteger) -> bool {
+        fn can_be_converted(&self, encoding: NSStringEncoding) -> bool {
             encoding::can_convert(&view(self).text(), encoding::arg(encoding))
         }
 
         #[unsafe(method(fastestEncoding))]
-        fn fastest_encoding(&self) -> NSUInteger {
-            encoding::fastest(&view(self).text()) as NSUInteger
+        fn fastest_encoding(&self) -> NSStringEncoding {
+            encoding::raw(encoding::fastest(&view(self).text()))
         }
 
         #[unsafe(method(smallestEncoding))]
-        fn smallest_encoding(&self) -> NSUInteger {
-            encoding::smallest(&view(self).text()) as NSUInteger
+        fn smallest_encoding(&self) -> NSStringEncoding {
+            encoding::raw(encoding::smallest(&view(self).text()))
+        }
+
+        #[unsafe(method_id(dataUsingEncoding:allowLossyConversion:))]
+        fn data_using_encoding_lossy(&self, encoding: NSStringEncoding, lossy: bool) -> Option<Retained<NSData>> {
+            encoding::external_representation(&view(self).text(), encoding::arg(encoding), lossy)
+                .map(|bytes| NSData::with_bytes(&bytes))
+        }
+
+        #[unsafe(method_id(dataUsingEncoding:))]
+        fn data_using_encoding(&self, encoding: NSStringEncoding) -> Option<Retained<NSData>> {
+            // SAFETY: the method above.
+            unsafe { msg_send![self, dataUsingEncoding: encoding, allowLossyConversion: false] }
         }
 
         #[unsafe(method(getBytes:maxLength:usedLength:encoding:options:range:remainingRange:))]
@@ -371,7 +385,7 @@ define_class!(
             buffer: *mut c_void,
             max: NSUInteger,
             used: *mut NSUInteger,
-            encoding: NSUInteger,
+            encoding: NSStringEncoding,
             options: NSStringEncodingConversionOptions,
             range: NSRange,
             leftover: *mut NSRange,

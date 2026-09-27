@@ -1,1 +1,4 @@
 /target
+# objc2 crates with the fork's fixes, written by tools/objc2-overlay.
+/.objc2-overlay/
+/tools/objc2-overlay/target

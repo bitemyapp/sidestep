@@ -1,0 +1,43 @@
+--- a/src/text.rs
++++ b/src/text.rs
+@@ -1,10 +1,38 @@
+ use crate::{NSTextAlignment, TARGET_ABI_USES_IOS_VALUES};
+
++/// GNUStep uses the same values as iOS on every architecture (see
++/// `NSText.h` in libs-gui).
++const USES_IOS_VALUES: bool = TARGET_ABI_USES_IOS_VALUES || cfg!(feature = "gnustep-1-7");
++
+ #[allow(non_upper_case_globals)]
+ #[allow(clippy::bool_to_int_with_if)]
+ impl NSTextAlignment {
+     #[doc(alias = "NSTextAlignmentRight")]
+-    pub const Right: Self = Self(if TARGET_ABI_USES_IOS_VALUES { 2 } else { 1 });
++    pub const Right: Self = Self(if USES_IOS_VALUES { 2 } else { 1 });
+     #[doc(alias = "NSTextAlignmentCenter")]
+-    pub const Center: Self = Self(if TARGET_ABI_USES_IOS_VALUES { 1 } else { 2 });
++    pub const Center: Self = Self(if USES_IOS_VALUES { 1 } else { 2 });
++}
++
++#[cfg(test)]
++#[cfg(any(
++    all(
++        target_os = "macos",
++        any(target_arch = "x86_64", target_arch = "aarch64")
++    ),
++    feature = "gnustep-1-7"
++))]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn center_and_right() {
++        // Only x86_64 macOS uses the old values.
++        let (center, right) = if cfg!(target_arch = "x86_64") && !cfg!(feature = "gnustep-1-7") {
++            (2, 1)
++        } else {
++            (1, 2)
++        };
++        assert_eq!(NSTextAlignment::Center, NSTextAlignment(center));
++        assert_eq!(NSTextAlignment::Right, NSTextAlignment(right));
++    }
+ }

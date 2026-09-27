@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, ClassBuilder, NSObject, Sel};
 use objc2::{ClassType, sel};
-use objc2_foundation::{NSRange, NSString, NSZone};
+use objc2_foundation::{NSRange, NSString, NSStringEncoding, NSZone};
 
 use super::index::{IndexRef, SharedIndex, Text, indexable};
 use super::wtf8::{self, HAS_SURROGATE};
@@ -214,12 +214,13 @@ extern "C-unwind" fn utf8_string(obj: &AnyObject, _: Sel) -> *const c_char {
     }
 }
 
-extern "C-unwind" fn length_of_bytes(obj: &AnyObject, _: Sel, encoding: i32) -> usize {
+extern "C-unwind" fn length_of_bytes(obj: &AnyObject, _: Sel, encoding: NSStringEncoding) -> usize {
     let s = this(obj);
-    if encoding as u32 == super::encoding::UTF8 && s.flags & HAS_SURROGATE == 0 {
+    let encoding = super::encoding::arg(encoding);
+    if encoding == super::encoding::UTF8 && s.flags & HAS_SURROGATE == 0 {
         return s.utf8_len;
     }
-    super::encoding::byte_length(&s.text(), encoding as u32)
+    super::encoding::byte_length(&s.text(), encoding)
 }
 
 extern "C-unwind" fn hash(obj: &AnyObject, _: Sel) -> usize {

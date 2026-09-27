@@ -1,0 +1,20 @@
+--- a/src/runtime/__nsstring.rs
++++ b/src/runtime/__nsstring.rs
+@@ -7,12 +7,15 @@
+ use crate::rc::AutoreleasePool;
+ use crate::runtime::NSObject;
+
++// Same type as `objc2_foundation::NSStringEncoding`: `NSUInteger` on Apple,
++// and `int` on GNUStep, where it is a C enum without a fixed type.
++//
+ // Note: While this is not public, it is still a breaking change to modify,
+ // since `objc2-foundation` relies on it.
+ #[cfg(not(feature = "gnustep-1-7"))]
+-pub const UTF8_ENCODING: usize = 4;
++pub const UTF8_ENCODING: NSUInteger = 4;
+ #[cfg(feature = "gnustep-1-7")]
+-pub const UTF8_ENCODING: i32 = 4;
++pub const UTF8_ENCODING: core::ffi::c_int = 4;
+
+ /// The number of UTF-8 code units in the given string.
+ ///

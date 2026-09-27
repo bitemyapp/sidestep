@@ -18,8 +18,10 @@
 //! trailing slash (a file-system check, as on macOS). Paths aren't
 //! normalized to Unicode NFD here: Linux file systems keep names as given.
 //!
-//! [`file_path`] and [`file_url`] let Rust code (AppKit's pasteboard, drag
-//! and drop, open panels) move between paths and file URLs.
+//! [`file_path`] and [`file_url`] move between paths and file URLs inside
+//! Sidestep without messages. Apps use objc2-foundation's
+//! `NSURL::from_file_path`, `from_directory_path` and `to_file_path`, which
+//! objc2's fork makes available on GNUstep (see docs/abi.md).
 
 pub(crate) mod components;
 pub(crate) mod parse;
@@ -853,7 +855,7 @@ fn load() {
 }
 
 /// The path of a file URL; `None` for other URLs.
-pub fn file_path(url: &NSURL) -> Option<PathBuf> {
+pub(crate) fn file_path(url: &NSURL) -> Option<PathBuf> {
     let url = url_impl(url);
     if !url.is_file() {
         return None;
@@ -864,7 +866,7 @@ pub fn file_path(url: &NSURL) -> Option<PathBuf> {
 /// A file URL for an absolute or relative (to the current directory)
 /// path; `None` for an empty one. Directories that exist get a trailing
 /// slash.
-pub fn file_url(path: &Path) -> Option<Retained<NSURL>> {
+pub(crate) fn file_url(path: &Path) -> Option<Retained<NSURL>> {
     new_file_url(&path.to_string_lossy(), None, None).map(as_url)
 }
 

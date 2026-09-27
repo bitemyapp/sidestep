@@ -692,6 +692,56 @@ fn file_urls() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+/// objc2-foundation's path helpers. On Apple they use NSURL's
+/// `FileSystemRepresentation` methods; on GNUstep (objc2's fork) they go
+/// through `-[NSFileManager stringWithFileSystemRepresentation:length:]`,
+/// `-initFileURLWithPath:isDirectory:relativeToURL:`, `-path` and
+/// `-[NSString fileSystemRepresentation]`, which must add up to the same.
+#[test]
+fn url_path_helpers() {
+    use std::path::Path;
+
+    let u = NSURL::from_file_path("/tmp/a file.txt").unwrap();
+    assert!(u.isFileURL());
+    assert_eq!(absolute(Some(u.clone())).as_deref(), Some("file:///tmp/a%20file.txt"));
+    assert_eq!(u.to_file_path().as_deref(), Some(Path::new("/tmp/a file.txt")));
+    let d = NSURL::from_directory_path("/tmp/a dir").unwrap();
+    assert!(d.hasDirectoryPath());
+    assert_eq!(absolute(Some(d.clone())).as_deref(), Some("file:///tmp/a%20dir/"));
+    assert_eq!(d.to_file_path().as_deref(), Some(Path::new("/tmp/a dir")));
+    // A file path isn't checked against the file system.
+    let tmp = NSURL::from_file_path("/tmp").unwrap();
+    assert!(!tmp.hasDirectoryPath());
+
+    // Relative paths are relative to the current directory.
+    let cwd = std::env::current_dir().unwrap();
+    let r = NSURL::from_file_path("rel/file.txt").unwrap();
+    assert_eq!(r.relativeString().to_string(), "rel/file.txt");
+    assert_eq!(r.to_file_path(), Some(cwd.join("rel/file.txt")));
+
+    // Characters URLs escape, and text beyond ASCII, come back as given.
+    for path in ["/a/b?c#d%e", "/a b/%20c", "/\u{fc}/\u{6f22}\u{5b57}/\u{1f389}", "/e\u{301}", "/a//b", "/"] {
+        let u = NSURL::from_file_path(path).unwrap();
+        assert_eq!(u.to_file_path().as_deref(), Some(Path::new(path)), "{path:?}");
+    }
+    assert!(NSURL::from_file_path("").is_none());
+    assert!(NSURL::from_file_path("/a\0b").is_none());
+
+    // Any URL's path; none without one.
+    assert_eq!(url("http://h/a%20b").to_file_path().as_deref(), Some(Path::new("/a b")));
+    assert_eq!(url("mailto:x").to_file_path(), None);
+
+    // Bytes that aren't UTF-8 make no string (the binding says otherwise).
+    let manager = NSFileManager::defaultManager();
+    let string = |bytes: &[u8]| -> Option<Retained<NSString>> {
+        let ptr: *const std::ffi::c_char = bytes.as_ptr().cast();
+        unsafe { msg_send![&manager, stringWithFileSystemRepresentation: ptr, length: bytes.len()] }
+    };
+    assert_eq!(text(string("/\u{fc}/x".as_bytes())).as_deref(), Some("/\u{fc}/x"));
+    assert_eq!(text(string(b"/a\0b")).as_deref(), Some("/a\0b"), "the length counts, not a NUL");
+    assert_eq!(text(string(b"/\xf8")), None);
+}
+
 #[test]
 fn url_derivations() {
     // (url, last, ext, deleting last, deleting ext, appending "c d", appending dir "e", appending ext "zip")

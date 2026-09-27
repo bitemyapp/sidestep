@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "examples/*", "conformance"]
+# The overlay tool builds on its own, before the [patch.crates-io] paths
+# below exist.
+exclude = ["tools/objc2-overlay"]
 
 [workspace.package]
 version = "0.0.1"
@@ -10,13 +13,17 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/bitemyapp/sidestep"
 
 [workspace.dependencies]
-# Sidestep implements the runtime and frameworks behind these crates; it does
-# not fork them. The versions below are the ones the ABI contract in
-# docs/abi.md was taken from.
+# Sidestep implements the runtime and frameworks behind these crates. It
+# depends on the published versions below (the ones the ABI contract in
+# docs/abi.md was taken from), plus the fixes in [patch.crates-io] at the end.
 objc2 = { version = "0.6.4", default-features = false, features = ["std"] }
 block2 = { version = "0.6.2", default-features = false, features = ["std"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std"] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std"] }
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std"] }
+objc2-core-text = { version = "0.3.2", default-features = false, features = ["std"] }
+objc2-image-io = { version = "0.3.2", default-features = false, features = ["std"] }
 
 sidestep = { path = "crates/sidestep" }
 sidestep-runtime = { path = "crates/sidestep-runtime" }
@@ -28,3 +35,25 @@ sidestep-appkit = { path = "crates/sidestep-appkit" }
 # in debug builds turn some blend modes into panics on x86_64.
 [profile.dev.package.tiny-skia]
 overflow-checks = false
+
+# The published objc2 crates with fixes Sidestep needs that upstream hasn't
+# released yet: GNUstep support in CoreGraphics, QuartzCore, CoreText and
+# ImageIO, NSStringEncoding's GNUstep type, the NSURL path helpers and
+# NSTextAlignment on GNUstep, anonymous structs in message verification and
+# objc2's #862 (see docs/abi.md). The fixes live upstream-ready in Sidestep's
+# objc2 fork (github.com/bitemyapp/objc2, branches `sidestep` and
+# `sidestep-main`); the crates here are built from crates.io's by
+# tools/objc2-overlay, which scripts/linux-env and CI run before cargo:
+#
+#     cargo run --release --manifest-path tools/objc2-overlay/Cargo.toml
+#
+# The table is the tool's output. It goes away as upstream releases the fixes.
+[patch.crates-io]
+objc2 = { path = ".objc2-overlay/objc2-0.6.4" }
+objc2-core-foundation = { path = ".objc2-overlay/objc2-core-foundation-0.3.2" }
+objc2-foundation = { path = ".objc2-overlay/objc2-foundation-0.3.2" }
+objc2-app-kit = { path = ".objc2-overlay/objc2-app-kit-0.3.2" }
+objc2-core-graphics = { path = ".objc2-overlay/objc2-core-graphics-0.3.2" }
+objc2-quartz-core = { path = ".objc2-overlay/objc2-quartz-core-0.3.2" }
+objc2-core-text = { path = ".objc2-overlay/objc2-core-text-0.3.2" }
+objc2-image-io = { path = ".objc2-overlay/objc2-image-io-0.3.2" }

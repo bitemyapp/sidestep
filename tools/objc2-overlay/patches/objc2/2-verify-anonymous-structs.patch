@@ -1,0 +1,283 @@
+--- a/src/test_utils.rs
++++ b/src/test_utils.rs
+@@ -42,6 +42,32 @@
+     );
+ }
+
++/// A struct with signed fields and no name, the way Swift encodes C structs
++/// such as `NSRange` (`{?=qq}` on 64-bit).
++#[derive(Debug, Eq, PartialEq)]
++#[repr(C)]
++pub(crate) struct AnonymousSignedRange {
++    pub(crate) location: isize,
++    pub(crate) length: isize,
++}
++
++unsafe impl Encode for AnonymousSignedRange {
++    const ENCODING: Encoding = Encoding::Struct("?", &[isize::ENCODING, isize::ENCODING]);
++}
++
++/// The same layout as [`AnonymousSignedRange`], but named and unsigned, the
++/// way Objective-C encodes `NSRange` (`{_NSRange=QQ}` on 64-bit).
++#[derive(Debug, Eq, PartialEq)]
++#[repr(C)]
++pub(crate) struct NamedUnsignedRange {
++    pub(crate) location: usize,
++    pub(crate) length: usize,
++}
++
++unsafe impl Encode for NamedUnsignedRange {
++    const ENCODING: Encoding = Encoding::Struct("_NSRange", &[usize::ENCODING, usize::ENCODING]);
++}
++
+ // TODO: Remove once c"" strings are in MSRV
+ fn c(s: &str) -> CString {
+     CString::new(s).unwrap()
+@@ -103,6 +129,17 @@
+             5
+         }
+
++        extern "C-unwind" fn get_anonymous_range(
++            _this: &AnyObject,
++            _cmd: Sel,
++            range: AnonymousSignedRange,
++        ) -> AnonymousSignedRange {
++            AnonymousSignedRange {
++                location: range.location + 1,
++                length: range.length + 1,
++            }
++        }
++
+         extern "C-unwind" fn custom_obj_set_bar(this: &AnyObject, _cmd: Sel, bar: u32) {
+             let ivar = this.class().instance_variable(&c("_bar")).unwrap();
+             unsafe { *ivar.load_ptr::<u32>(this) = bar }
+@@ -169,6 +206,8 @@
+
+             let get_nsinteger: extern "C-unwind" fn(_, _) -> _ = get_nsinteger;
+             builder.add_method(sel!(getNSInteger), get_nsinteger);
++            let get_anonymous_range: extern "C-unwind" fn(_, _, _) -> _ = get_anonymous_range;
++            builder.add_method(sel!(nextAnonymousRange:), get_anonymous_range);
+
+             let protocol_instance_method: extern "C-unwind" fn(_, _, _) = custom_obj_set_bar;
+             builder.add_method(sel!(setBar:), protocol_instance_method);
+--- a/src/verify.rs
++++ b/src/verify.rs
+@@ -72,12 +72,9 @@
+
+ impl Error for VerificationError {}
+
+-/// Relaxed version of `Encoding::equivalent_to_box` that allows interchanging
+-/// more types.
+-///
+-/// NOTE: This is a top-level comparison, e.g. `*mut *mut c_void` or structs
+-/// containing `*mut c_void` are not allowed differently than usual.
+-fn relaxed_equivalent_to_box(encoding: &Encoding, expected: &EncodingBox) -> bool {
++/// Whether the two encodings are integers of the same, register-sized width,
++/// which may differ in sign.
++fn is_register_sized_integer_of_either_sign(encoding: &Encoding, expected: &EncodingBox) -> bool {
+     // Register-sized integers are interoperable regardless of sign. The Rust
+     // [docs on ABI compatibility][abi] says:
+     // > Noteworthy cases of types _not_ being ABI-compatible in general are:
+@@ -114,9 +111,68 @@
+     // register size, though this is not strictly correct, we should perhaps
+     // use `size_of::<core::ffi::c_size_t>()` instead?
+     let register_size = size_of::<usize>();
+-    if size_of_matching_integer_encodings == register_size && cfg!(target_vendor = "apple") {
+-        // TODO: Swift is doing this, so it's definitely safe on Apple
+-        // platforms. But is it also on others?
++    // TODO: Swift is doing this, so it's definitely safe on Apple
++    // platforms. But is it also on others?
++    size_of_matching_integer_encodings == register_size && cfg!(target_vendor = "apple")
++}
++
++/// Relaxed comparison of structs, unions and arrays, which looks inside them.
++///
++/// Swift describes C structs in the type encodings of its methods without
++/// the struct's name, and with its own integer types. For example, on macOS
++/// 26 `-[Swift.__StringStorage getCharacters:range:]` encodes its `NSRange`
++/// argument as `{?=qq}`, where Objective-C uses `{_NSRange=QQ}`.
++///
++/// So on Apple platforms, where the sign rule above holds, we allow:
++/// - An anonymous (`?`) struct or union in place of a named one, as long as
++///   both list their fields, and those fields are equivalent.
++/// - Fields that differ only in the sign of register-sized integers, by the
++///   same rule as above. This applies recursively to nested structs, unions
++///   and arrays.
++///
++/// Fields behind pointers are compared as usual.
++fn relaxed_container_equivalent_to_box(encoding: &Encoding, expected: &EncodingBox) -> bool {
++    if !cfg!(target_vendor = "apple") {
++        return false;
++    }
++
++    match (encoding, expected) {
++        (Encoding::Struct(name, fields), EncodingBox::Struct(expected_name, expected_fields))
++        | (Encoding::Union(name, fields), EncodingBox::Union(expected_name, expected_fields)) => {
++            let names_match = *name == expected_name || *name == "?" || expected_name == "?";
++            // Without fields, there is nothing to verify an anonymous
++            // container against (and named, field-less containers are
++            // already handled by `equivalent_to_box`).
++            names_match
++                && !fields.is_empty()
++                && fields.len() == expected_fields.len()
++                && fields
++                    .iter()
++                    .zip(expected_fields)
++                    .all(|(field, expected)| relaxed_field_equivalent_to_box(field, expected))
++        }
++        (Encoding::Array(len, item), EncodingBox::Array(expected_len, expected_item)) => {
++            len == expected_len && relaxed_field_equivalent_to_box(item, expected_item)
++        }
++        _ => false,
++    }
++}
++
++fn relaxed_field_equivalent_to_box(encoding: &Encoding, expected: &EncodingBox) -> bool {
++    encoding.equivalent_to_box(expected)
++        || is_register_sized_integer_of_either_sign(encoding, expected)
++        || relaxed_container_equivalent_to_box(encoding, expected)
++}
++
++/// Relaxed version of `Encoding::equivalent_to_box` that allows interchanging
++/// more types.
++///
++/// NOTE: Apart from the struct and union fields that
++/// `relaxed_container_equivalent_to_box` looks at, this is a top-level
++/// comparison, e.g. `*mut *mut c_void` or structs containing `*mut c_void`
++/// are not allowed differently than usual.
++fn relaxed_equivalent_to_box(encoding: &Encoding, expected: &EncodingBox) -> bool {
++    if is_register_sized_integer_of_either_sign(encoding, expected) {
+         return true;
+     }
+
+@@ -152,7 +208,7 @@
+         }
+     }
+
+-    encoding.equivalent_to_box(expected)
++    encoding.equivalent_to_box(expected) || relaxed_container_equivalent_to_box(encoding, expected)
+ }
+
+ pub(crate) fn verify_method_signature(
+@@ -201,10 +257,12 @@
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    use crate::encode::Encode;
+     use crate::ffi;
+     use crate::runtime::Sel;
+-    use crate::test_utils;
++    use crate::test_utils::{self, AnonymousSignedRange, NamedUnsignedRange};
+     use crate::{msg_send, sel};
++    use alloc::format;
+     use alloc::string::ToString;
+     use core::ffi::c_void;
+     use core::panic::{RefUnwindSafe, UnwindSafe};
+@@ -266,6 +324,22 @@
+         };
+         assert_eq!(res.map_err(|e| e.to_string()), expected);
+
++        // Swift's anonymous structs with signed fields, e.g. `{?=qq}` for
++        // `NSRange` in `-[Swift.__StringStorage getCharacters:range:]`.
++        let res = cls.verify_sel::<(NamedUnsignedRange,), NamedUnsignedRange>(sel!(
++            nextAnonymousRange:
++        ));
++        let expected = if cfg!(target_vendor = "apple") {
++            Ok(())
++        } else {
++            Err(format!(
++                "expected return to have type code '{}', but found '{}'",
++                AnonymousSignedRange::ENCODING,
++                NamedUnsignedRange::ENCODING,
++            ))
++        };
++        assert_eq!(res.map_err(|e| e.to_string()), expected);
++
+         // Metaclass
+         let metaclass = cls.metaclass();
+         let err = metaclass
+@@ -291,6 +365,84 @@
+     }
+
+     #[test]
++    #[cfg(all(
++        target_vendor = "apple",
++        debug_assertions,
++        not(feature = "disable-encoding-assertions")
++    ))]
++    fn test_send_message_anonymous_struct() {
++        let obj = test_utils::custom_object();
++        let range = NamedUnsignedRange {
++            location: 1,
++            length: 2,
++        };
++        let res: NamedUnsignedRange = unsafe { msg_send![&obj, nextAnonymousRange: range] };
++        assert_eq!(
++            res,
++            NamedUnsignedRange {
++                location: 2,
++                length: 3
++            }
++        );
++    }
++
++    #[test]
++    fn test_relaxed_containers() {
++        fn relaxed(actual: &Encoding, expected: &str) -> bool {
++            let expected: EncodingBox = expected.parse().unwrap();
++            relaxed_equivalent_to_box(actual, &expected)
++        }
++        let apple = cfg!(target_vendor = "apple");
++        let u = usize::ENCODING;
++        let i = isize::ENCODING;
++        let range = NamedUnsignedRange::ENCODING;
++
++        // Unchanged.
++        assert!(relaxed(&range, &format!("{{_NSRange={u}{u}}}")));
++        assert!(relaxed(&range, "{_NSRange}"));
++        // Anonymous, signed, or both.
++        assert_eq!(relaxed(&range, &format!("{{?={u}{u}}}")), apple);
++        assert_eq!(relaxed(&range, &format!("{{_NSRange={i}{i}}}")), apple);
++        assert_eq!(relaxed(&range, &format!("{{?={i}{i}}}")), apple);
++        // Other names, fields, or no fields to compare.
++        assert!(!relaxed(&range, &format!("{{Other={u}{u}}}")));
++        assert!(!relaxed(&range, &format!("{{?={i}}}")));
++        assert!(!relaxed(&range, &format!("{{?={i}{i}{i}}}")));
++        assert!(!relaxed(&range, &format!("{{?={i}d}}")));
++        assert!(!relaxed(&range, "{?}"));
++        assert!(!relaxed(&range, &format!("(?={i}{i})")));
++
++        // Signs are only relaxed for register-sized integers.
++        let small = Encoding::Struct("Small", &[u32::ENCODING, u32::ENCODING]);
++        let register_sized = size_of::<u32>() == size_of::<usize>();
++        assert_eq!(relaxed(&small, "{?=II}"), apple);
++        assert_eq!(relaxed(&small, "{?=ii}"), apple && register_sized);
++
++        // Nested structs, unions and arrays.
++        let nested = Encoding::Struct(
++            "Outer",
++            &[
++                NamedUnsignedRange::ENCODING,
++                Encoding::Union("Inner", &[usize::ENCODING, f64::ENCODING]),
++                Encoding::Array(2, &usize::ENCODING),
++            ],
++        );
++        assert_eq!(
++            relaxed(&nested, &format!("{{?={{?={i}{i}}}(?={i}d)[2{i}]}}")),
++            apple
++        );
++        assert!(!relaxed(
++            &nested,
++            &format!("{{?={{?={i}{i}}}(?={i}d)[3{i}]}}")
++        ));
++
++        // Pointers are compared as usual.
++        let pointer = Encoding::Pointer(&NamedUnsignedRange::ENCODING);
++        assert!(relaxed(&pointer, &format!("^{{_NSRange={u}{u}}}")));
++        assert!(!relaxed(&pointer, &format!("^{{?={i}{i}}}")));
++    }
++
++    #[test]
+     fn test_marker_traits() {
+         fn assert_marker_traits<T: Send + Sync + UnwindSafe + RefUnwindSafe + Unpin>() {}
+         assert_marker_traits::<VerificationError>();
