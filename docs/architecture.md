@@ -147,8 +147,13 @@ locks only the shard of the object it read, checks the location still holds
 it, and retains through a CAS that fails once deallocation has begun;
 freeing an object zeroes its weak references under that same lock, so the
 object can't be freed under a load. An object with one weak reference, the
-usual case, needs no allocation for it. The atomic association policies
-retain the value under the lock and autorelease it after, as Apple's do.
+usual case, needs no allocation for it; up to 16 are kept in a list, and
+more in an open-addressed table in the same vector
+(`crates/sidestep-runtime/src/weak_locations.rs`), so storing or
+destroying a weak reference costs the same however many the object has (a
+delegate or an observed object can have thousands). The atomic
+association policies retain the value under the lock and autorelease it
+after, as Apple's do.
 Heap blocks are objects too: a block in a side table is marked in its
 `reserved` word, which the runtime owns in heap copies, and
 `_Block_release` takes it out of the tables when it frees it.
@@ -2156,7 +2161,8 @@ positions in points. `crates/sidestep-appkit/src/text/` holds the stack.
   through `textkit2::draw::with_context_state`, the one place CoreGraphics'
   context state plugs in. A layout manager's fragments and a content
   storage's elements share one weak reference to it
-  (`textkit2::SharedWeak`), so freeing many of them costs what they are.
+  (`textkit2::SharedWeak`), which saves each a weak location of its own:
+  memory, and half or more of the time freeing them takes (text.md).
 
 parley was chosen over cosmic-text, the other complete pure-Rust stack.
 parley takes styles as ranges over the text, which is what an attributed

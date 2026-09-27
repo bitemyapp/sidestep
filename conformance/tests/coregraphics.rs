@@ -330,6 +330,19 @@ fn color_spaces() {
         (CGColorSpaceModel::Indexed, 2)
     );
     assert!(CFEqual(Some(&srgb()), Some(&CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB })).unwrap())));
+    // Only indexed spaces and pattern spaces made with one have a base
+    // space; for the others CGColorSpaceCopyBaseColorSpace returns NULL
+    // (objc2-core-graphics 0.3.2 declared it non-null, and panicked, before
+    // the objc2 fork's fix).
+    assert!(srgb().copy_base_color_space().is_none());
+    assert!(d.copy_base_color_space().is_none());
+    assert!(pattern.copy_base_color_space().is_none());
+    let base = indexed.copy_base_color_space().expect("an indexed space's base");
+    assert!(CFEqual(Some(&*base), Some(&srgb())));
+    let colored = CGColorSpace::new_pattern(Some(&srgb())).unwrap();
+    assert!(colored.copy_base_color_space().is_some_and(|b| CFEqual(Some(&*b), Some(&srgb()))));
+    let copied = objc2_core_graphics::CGColorSpaceCopyBaseColorSpace(&indexed);
+    assert!(copied.is_some_and(|b| CFEqual(Some(&*b), Some(&srgb()))));
 }
 
 #[test]

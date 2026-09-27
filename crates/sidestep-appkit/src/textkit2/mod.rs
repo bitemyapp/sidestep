@@ -36,10 +36,12 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::AnyObject;
 
 /// A weak reference many objects share: a layout manager's fragments hold
-/// one to it, a content storage's elements one to it. The runtime keeps
-/// one weak location for it however many hold it, so freeing thousands of
-/// fragments or elements doesn't make it look through thousands of
-/// locations for each one's.
+/// one to it, a content storage's elements one to it. Holding a clone
+/// costs a reference count, where a weak reference of its own would cost
+/// each fragment or element a weak location (a boxed slot and the
+/// runtime's record of it, about 50 bytes) and the runtime's lock to make
+/// and free it: with 200 000 of each, 22 MB more at peak and twice the time
+/// to free them (docs/text.md).
 #[derive(Clone)]
 pub(crate) struct SharedWeak(Rc<Weak<AnyObject>>);
 

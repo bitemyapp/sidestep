@@ -213,6 +213,208 @@ fn weak_references_across_threads() {
     }
 }
 
+/// A fixed pseudo-random sequence (xorshift), so every run is the same.
+struct Rng(u64);
+
+impl Rng {
+    fn below(&mut self, n: usize) -> usize {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        (self.0 % n as u64) as usize
+    }
+}
+
+/// What a weak location holds: its object's address, or null.
+fn peek_weak(location: &mut *mut AnyObject) -> *mut AnyObject {
+    // SAFETY: a weak location; the object is released right away, and the
+    // result only compared.
+    unsafe {
+        let obj = objc2::ffi::objc_loadWeakRetained(location);
+        objc2::ffi::objc_release(obj);
+        obj
+    }
+}
+
+/// Many weak references to one object (a delegate, an observed object),
+/// destroyed in creation order, in reverse and shuffled: those left keep
+/// loading the object, and are cleared when it goes.
+#[test]
+fn many_weak_references_to_one_object() {
+    let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+    for order in ["creation", "reverse", "random"] {
+        let (c, drops) = counter();
+        let mut weaks: Vec<Weak<Counter>> = (0..3000).map(|_| Weak::from_retained(&c)).collect();
+        match order {
+            "reverse" => weaks.reverse(),
+            "random" => {
+                for i in (1..weaks.len()).rev() {
+                    weaks.swap(i, rng.below(i + 1));
+                }
+            }
+            _ => {}
+        }
+        let kept = weaks.split_off(2900);
+        for (i, weak) in weaks.into_iter().enumerate() {
+            if i % 250 == 0 {
+                assert!(weak.load().is_some_and(|l| std::ptr::eq(&*l, &*c)), "{order} order, reference {i}");
+                assert!(kept.iter().all(|k| k.load().is_some_and(|l| std::ptr::eq(&*l, &*c))));
+            }
+            drop(weak);
+        }
+        assert!(kept.iter().all(|k| k.load().is_some_and(|l| std::ptr::eq(&*l, &*c))), "{order} order");
+        drop(c);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(kept.iter().all(|k| k.load().is_none()), "{order} order: cleared");
+    }
+}
+
+/// An object's weak references rising into the thousands and falling back
+/// to a handful, again and again: each still loads the object while it
+/// lives, and none after.
+#[test]
+fn weak_reference_counts_rising_and_falling() {
+    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+    let (c, drops) = counter();
+    let mut weaks: Vec<Weak<Counter>> = Vec::new();
+    for (grow_to, shrink_to) in [(20, 3), (5, 1), (40, 2), (17, 16), (1000, 4), (18, 0), (300, 10)] {
+        while weaks.len() < grow_to {
+            weaks.push(Weak::from_retained(&c));
+        }
+        while weaks.len() > shrink_to {
+            drop(weaks.swap_remove(rng.below(weaks.len())));
+        }
+        assert!(weaks.iter().all(|w| w.load().is_some_and(|l| std::ptr::eq(&*l, &*c))));
+    }
+    drop(c);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    assert!(weaks.iter().all(|w| w.load().is_none()));
+}
+
+/// `objc_storeWeak` moving locations between two objects and nil, so that
+/// each object's weak references go from a handful to hundreds and back.
+#[test]
+fn weak_locations_moving_between_objects() {
+    use objc2::ffi::{objc_destroyWeak, objc_initWeak, objc_storeWeak};
+    let mut rng = Rng(0x0123_4567_89ab_cdef);
+    let (a, a_drops) = counter();
+    let (b, b_drops) = counter();
+    let (pa, pb) = (Retained::as_ptr(&a).cast_mut().cast::<AnyObject>(), Retained::as_ptr(&b).cast_mut().cast());
+    // What each location holds, as the test expects it: 0 nil, 1 a, 2 b.
+    let mut locations: Box<[*mut AnyObject]> = vec![std::ptr::null_mut(); 200].into_boxed_slice();
+    let mut expected = vec![1u8; locations.len()];
+    unsafe {
+        for location in locations.iter_mut() {
+            objc_initWeak(location, pa);
+        }
+        // Each phase moves nearly every location to one of the three, so
+        // each object's count sweeps between a few and nearly all.
+        for favored in [2u8, 0, 1, 2, 0, 1] {
+            for _ in 0..1500 {
+                let i = rng.below(locations.len());
+                let to = if rng.below(32) == 0 { rng.below(3) as u8 } else { favored };
+                objc_storeWeak(&mut locations[i], [std::ptr::null_mut(), pa, pb][to as usize]);
+                expected[i] = to;
+                let j = rng.below(locations.len());
+                assert_eq!(peek_weak(&mut locations[j]), [std::ptr::null_mut(), pa, pb][expected[j] as usize]);
+            }
+        }
+        drop(a);
+        assert_eq!(a_drops.load(Ordering::SeqCst), 1);
+        for (location, &e) in locations.iter_mut().zip(&expected) {
+            assert_eq!(peek_weak(location), if e == 2 { pb } else { std::ptr::null_mut() });
+        }
+        drop(b);
+        assert_eq!(b_drops.load(Ordering::SeqCst), 1);
+        for location in locations.iter_mut() {
+            assert!(peek_weak(location).is_null());
+            objc_destroyWeak(location);
+        }
+    }
+}
+
+/// Four threads storing, moving and loading many weak locations to two
+/// shared objects while one of them is freed: the locations holding it are
+/// cleared, those holding the other still load it.
+#[test]
+fn many_weak_locations_under_contention() {
+    use objc2::ffi::{objc_destroyWeak, objc_initWeak, objc_storeWeak};
+    /// A worker's arrival at the barrier, on its way or when it unwinds:
+    /// one whose check fails still lets the others through, so the test
+    /// fails rather than hangs.
+    struct Arrival(Option<Arc<std::sync::Barrier>>);
+    impl Arrival {
+        fn wait(&mut self) {
+            if let Some(barrier) = self.0.take() {
+                barrier.wait();
+            }
+        }
+    }
+    impl Drop for Arrival {
+        fn drop(&mut self) {
+            self.wait();
+        }
+    }
+    for round in 0..20u64 {
+        let (x, x_drops) = counter();
+        let y = NSObject::new();
+        let freed = Arc::new(std::sync::Barrier::new(5));
+        let threads: Vec<_> = (0..4u64)
+            .map(|t| {
+                let (x, y, freed) = (SendAnyway(x.clone()), SendAnyway(y.clone()), freed.clone());
+                std::thread::spawn(move || {
+                    // Declared first, so an unwinding worker lets go of x
+                    // before it arrives.
+                    let mut freed = Arrival(Some(freed));
+                    let (x, y) = (x, y);
+                    let px = Retained::as_ptr(&x.0).cast_mut().cast::<AnyObject>();
+                    let py = Retained::as_ptr(&y.0).cast_mut().cast::<AnyObject>();
+                    let mut rng = Rng(0x5851_f42d_4c95_7f2d ^ (round << 8 | t));
+                    let mut locations: Box<[*mut AnyObject]> = vec![std::ptr::null_mut(); 40].into_boxed_slice();
+                    unsafe {
+                        for location in locations.iter_mut() {
+                            objc_initWeak(location, px);
+                        }
+                    }
+                    for _ in 0..300 {
+                        let i = rng.below(locations.len());
+                        unsafe { objc_storeWeak(&mut locations[i], if rng.below(3) == 0 { py } else { px }) };
+                        let obj = peek_weak(&mut locations[rng.below(40)]);
+                        assert!(obj == px || obj == py);
+                    }
+                    // This thread's hold on x goes; the last one frees it,
+                    // while the others go on here.
+                    drop(x);
+                    for _ in 0..300 {
+                        let i = rng.below(locations.len());
+                        if rng.below(2) == 0 {
+                            unsafe { objc_storeWeak(&mut locations[i], py) };
+                        }
+                        let obj = peek_weak(&mut locations[rng.below(40)]);
+                        assert!(obj == px || obj == py || obj.is_null());
+                    }
+                    freed.wait();
+                    // x is gone: its locations are nil.
+                    let mut holding_y = 0;
+                    for location in locations.iter_mut() {
+                        let obj = peek_weak(location);
+                        assert!(obj == py || obj.is_null());
+                        holding_y += usize::from(obj == py);
+                        unsafe { objc_destroyWeak(location) };
+                    }
+                    holding_y
+                })
+            })
+            .collect();
+        drop(x);
+        freed.wait();
+        assert_eq!(x_drops.load(Ordering::SeqCst), 1, "round {round}");
+        let holding_y: usize = threads.into_iter().map(|t| t.join().unwrap()).sum();
+        assert!(holding_y > 0);
+        assert_eq!(retain_count(&y), 1);
+    }
+}
+
 #[test]
 fn retain_release_across_threads() {
     let obj = NSObject::new();

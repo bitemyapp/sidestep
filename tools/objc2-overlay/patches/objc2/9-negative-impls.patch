@@ -1,0 +1,25 @@
+--- a/src/rc/autorelease.rs
++++ b/src/rc/autorelease.rs
+@@ -308,10 +308,20 @@
+ #[cfg(not(feature = "unstable-autoreleasesafe"))]
+ unsafe impl<T: ?Sized> AutoreleaseSafe for T {}
+ 
++// Negative impls are unstable syntax, which the compiler rejects (as a
++// future-incompatibility warning for now) even under a disabled `cfg`, so
++// that every build of objc2 warned. The body of a macro is only parsed
++// where the macro is used, so they are written through one that is only
++// used when the feature is enabled.
+ #[cfg(feature = "unstable-autoreleasesafe")]
+-impl !AutoreleaseSafe for Pool {}
++macro_rules! not_autorelease_safe {
++    ($($ty:ty),* $(,)?) => {
++        $(impl !AutoreleaseSafe for $ty {})*
++    };
++}
++
+ #[cfg(feature = "unstable-autoreleasesafe")]
+-impl !AutoreleaseSafe for AutoreleasePool<'_> {}
++not_autorelease_safe!(Pool, AutoreleasePool<'_>);
+ 
+ /// Execute `f` in the context of a new autorelease pool. The pool is drained
+ /// after the execution of `f` completes.

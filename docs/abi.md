@@ -27,7 +27,7 @@ at the end, which `tools/objc2-overlay` applies; other versions are untested.
 | CoreFoundation | Retain/release/equality (`CFRetain`, `CFRelease`, `CFAutorelease`, `CFEqual`, `CFHash`, `CFGetTypeID`, `CFCopyDescription`, `CFShow`); the run loop (`CFRunLoop*`, `CFRunLoopTimer*`, `CFRunLoopObserver*`, `kCFRunLoopDefaultMode`, `kCFRunLoopCommonModes`); and toll-free `CFString`, `CFData`, `CFDate`, `CFError`, `CFURL`, `CFDictionary` and `CFArray` (mutable ones too), `CFNumber`, `CFPreferences`; the `kCFAllocator*` constants and the `kCFType…CallBacks` |
 | Foundation functions | `NSUnionRange`, `NSIntersectionRange`, `NSStringFromRange`, `NSRangeFromString`; the `NSGeometry` functions (`NSEqualRects`, `NSInsetRect`, `NSIntegralRectWithOptions`, `NSDivideRect`, `NSPointInRect`, `NSStringFromRect`, `NSRectFromString` and the rest objc2-foundation declares); `NSHomeDirectory(ForUser)`, `NSTemporaryDirectory`, `NSUserName`, `NSFullUserName`, `NSOpenStepRootDirectory`, `NSSearchPathForDirectoriesInDomains`, `NSClassFromString`, `NSStringFromClass`, `NSSelectorFromString`, `NSStringFromSelector`, `NSProtocolFromString`, `NSStringFromProtocol`; zones (`NSDefaultMallocZone`, `NSZoneMalloc` and the rest: one default zone over `malloc`), pages (`NSPageSize`, `NSAllocateMemoryPages`, …), `NSGetSizeAndAlignment`, `NSAllocateObject`, `NSCopyObject`, `NSDeallocateObject`, the extra reference count (`NSIncrementExtraRefCount`, `NSDecrementExtraRefCountWasZero`, `NSExtraRefCount`), `NSSetUncaughtExceptionHandler` and `NSGetUncaughtExceptionHandler` |
 | Foundation constants | Every string constant objc2-foundation declares under the features Sidestep's crates enable, with macOS's value (run-loop modes, error domains and keys, file attribute and URL resource keys, defaults domains, notification names, exception names, locale keys, …); `NSZeroPoint`, `NSZeroSize`, `NSZeroRect`, `NSEdgeInsetsZero`, `NSFoundationVersionNumber` (macOS 26's); `kCFBooleanTrue`, `kCFBooleanFalse` and `kCFNull`, `kCFAbsoluteTimeIntervalSince1970` and `…1904` |
-| AppKit | `NSApp`; every string constant objc2-app-kit declares under Sidestep's features, with macOS's value (accessibility attributes, roles, notifications and keys, image names, document types and attributes, workspace keys, pasteboard types, …), `NSAppKitVersionNumber` (macOS 26's) and the other numbers; `NSApplicationMain`, `NSApplicationLoad`, `NSAccessibilityPostNotification(WithUserInfo)`, the drawing functions (`NSRectFill…`, `NSFrameRect…`, `NSDrawTiledRects`, `NSDrawColorTiledRects`, `NSDrawThreePartImage`, `NSDrawNinePartImage`, …), window depths (`NSBestDepth` and the rest), the window list (`NSCountWindows`, `NSWindowList`), typed file pasteboard types (`NSCreateFilenamePboardType`, `NSGetFileType`, …; the two `Create` functions return autoreleased strings, as measured on macOS, though objc2-app-kit 0.3.2's wrappers take ownership of them), the services functions (no Services menu on Linux) and the rest objc2-app-kit declares under Sidestep's features, but for the known gaps below |
+| AppKit | `NSApp`; every string constant objc2-app-kit declares under Sidestep's features, with macOS's value (accessibility attributes, roles, notifications and keys, image names, document types and attributes, workspace keys, pasteboard types, …), `NSAppKitVersionNumber` (macOS 26's) and the other numbers; `NSApplicationMain`, `NSApplicationLoad`, `NSAccessibilityPostNotification(WithUserInfo)`, the drawing functions (`NSRectFill…`, `NSFrameRect…`, `NSDrawTiledRects`, `NSDrawColorTiledRects`, `NSDrawThreePartImage`, `NSDrawNinePartImage`, …), window depths (`NSBestDepth` and the rest), the window list (`NSCountWindows`, `NSWindowList`), typed file pasteboard types (`NSCreateFilenamePboardType`, `NSGetFileType`, …; the two `Create` functions return autoreleased strings, as measured on macOS, which objc2-app-kit 0.3.2's wrappers took ownership of until the objc2 fork's fix below), the services functions (no Services menu on Linux) and the rest objc2-app-kit declares under Sidestep's features, but for the known gaps below |
 
 `crates/sidestep/tests/link_closure.rs` references every extern static and
 function that objc2-foundation, objc2-app-kit and objc2-core-foundation
@@ -201,7 +201,8 @@ Sidestep builds against the published crates with the fixes below. Each is
 one commit in Sidestep's objc2 fork (github.com/bitemyapp/objc2), written
 to be sent upstream, on two branches: `sidestep`, based on the
 `objc2-0.6.4` tag, and `sidestep-main`, based on objc2's `main`, which
-already has commit 1 and is the branch the others go upstream from.
+already has commit 1 and is the branch the others go upstream from
+(commit 9 is `sidestep`'s alone: `main` no longer has what it fixes).
 `tools/objc2-overlay` builds the affected crates from crates.io's: it checks
 each against the checksum Cargo.lock had for it, applies the fork's
 hand-written changes as patches, and makes the changes regenerating the
@@ -264,6 +265,31 @@ The tool's README maps each patch and rule to its commit.
   and Right's values by Apple's per-architecture rule, which gave x86_64
   Linux macOS's; GNUstep uses Center = 1 and Right = 2 everywhere. A patch
   to objc2-app-kit. Nothing in Sidestep depends on the raw values.
+- **`NSCreateFilenamePboardType` and `NSCreateFileContentsPboardType`**
+  (commit 7). Named by the create rule, so objc2-app-kit's wrappers took
+  ownership of the string they return, but AppKit returns an autoreleased
+  string the caller doesn't own (measured on macOS), so each call
+  released it one time too many, on macOS as on Linux. The fork's
+  generator takes a `returns-retained` override for functions, and
+  AppKit's config sets it to false for the two. A rule: their wrappers
+  retain the result (`Retained::retain_autoreleased`) instead. Sidestep's
+  implementations autorelease theirs, as AppKit does.
+- **`CGColorSpaceCopyBaseColorSpace` may return NULL** (commit 8). Only
+  indexed spaces and pattern spaces made with a base have one; for every
+  other space it returns NULL (measured on macOS), but
+  objc2-core-graphics declared it non-null, so
+  `CGColorSpace::copy_base_color_space` panicked on macOS as on Linux. The
+  fork's CoreGraphics config marks the return nullable (on `sidestep` the
+  tag's generator also learns the function `return` override `main` has).
+  A rule: the method and the deprecated function return
+  `Option<CFRetained<CGColorSpace>>`.
+- **objc2's `AutoreleaseSafe` negative impls** (commit 9, `sidestep`
+  only). objc2 0.6.4 declares `impl !AutoreleaseSafe` behind its
+  `unstable-autoreleasesafe` feature, but the parser gates that syntax
+  before `cfg`, so since the overlay made objc2 a path dependency every
+  build printed "negative impls are experimental" twice (a
+  future-incompatibility warning). The impls are now written through a
+  macro that exists only with the feature. A patch to objc2.
 
 To drop a fix once upstream releases it: move Sidestep to that release,
 delete the fix's patches, rules and pinned crates from `tools/objc2-overlay`,

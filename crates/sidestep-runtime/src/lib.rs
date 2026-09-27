@@ -44,6 +44,7 @@ mod selector;
 mod sync;
 mod trampoline;
 mod util;
+mod weak_locations;
 
 pub use category::{Category, LinkedCategory};
 pub use class::{Class, LinkedClass};

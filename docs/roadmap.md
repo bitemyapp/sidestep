@@ -478,10 +478,8 @@ layout in 0.1 ms. See [text.md](text.md).
   storage's delegate filters out of enumeration are still laid out;
   `NSTextContentManager` subclasses whose locations aren't countable
   (elements are indexed by UTF-16 offsets); `textSelectionNavigation`'s
-  visual moves in mixed-direction text; the runtime finds a weak location to remove by looking
-  through the object's (TextKit 2 shares one weak reference among a
-  manager's fragments and elements so it never has many). The known
-  differences from macOS are listed in [text.md](text.md#textkit-2).
+  visual moves in mixed-direction text. The known differences from macOS
+  are listed in [text.md](text.md#textkit-2).
 
 ## 4. Controls and services
 
@@ -550,8 +548,9 @@ libobjc2 v2 ABI's `__objc_load` path) the runtime would then need to accept.
 
 - Send the objc2 fork's commits upstream from its `sidestep-main` branch
   (see [abi.md](abi.md#fixed-in-the-objc2-fork-pending-upstream); commit 1
-  is already on objc2's `main`) once the maintainer agrees, and drop each
-  of the overlay's patches and rules as a release includes it.
+  is already on objc2's `main`, and commit 9 only matters to the 0.6
+  releases) once the maintainer agrees, and drop each of the overlay's
+  patches and rules as a release includes it.
 - Keep the fallback declarations crate from [legal.md](legal.md) ready:
   prototype the Cargo mechanics early.
 - CI on Linux x86_64 and aarch64 and on macOS.

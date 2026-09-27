@@ -908,15 +908,6 @@ fn zones_and_pages(_mtm: MainThreadMarker) {
 }
 
 /// Window depths, typed file pasteboard types and the window list.
-mod raw {
-    use objc2_foundation::NSString;
-
-    unsafe extern "C-unwind" {
-        pub(crate) fn NSCreateFilenamePboardType(file_type: &NSString) -> *mut NSString;
-        pub(crate) fn NSCreateFileContentsPboardType(file_type: &NSString) -> *mut NSString;
-    }
-}
-
 fn appkit_functions(_mtm: MainThreadMarker) {
     unsafe {
         let mut exact = Bool::NO;
@@ -942,14 +933,11 @@ fn appkit_functions(_mtm: MainThreadMarker) {
         }
         assert_eq!(list, [0x108, 0x204, 0x208, 0x210, 0x220]);
         // Despite their names, the caller doesn't own the strings: they
-        // are autoreleased, as measured on macOS. (objc2-app-kit's
-        // wrappers take ownership, so the C functions are called here.)
+        // are autoreleased, as measured on macOS. (objc2-app-kit 0.3.2's
+        // wrappers took ownership; the objc2 fork's fix retains them.)
         let (names, contents) = objc2::rc::autoreleasepool(|_| {
             let t = s("txt");
-            (
-                Retained::retain_autoreleased(raw::NSCreateFilenamePboardType(&t)).expect("a type"),
-                Retained::retain_autoreleased(raw::NSCreateFileContentsPboardType(&t)).expect("a type"),
-            )
+            (NSCreateFilenamePboardType(&t).expect("a type"), NSCreateFileContentsPboardType(&t).expect("a type"))
         });
         assert_eq!(names.retainCount(), 1, "the pool released its reference");
         assert_eq!(contents.retainCount(), 1);

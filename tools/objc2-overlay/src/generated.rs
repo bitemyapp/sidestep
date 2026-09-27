@@ -45,14 +45,14 @@ enum AttrKind {
 }
 
 #[derive(Debug)]
-struct Item {
+pub struct Item {
     /// First attribute or doc comment line.
-    start: usize,
+    pub start: usize,
     /// The line the item itself starts on.
-    header: usize,
+    pub header: usize,
     /// Its last line.
-    end: usize,
-    indent: usize,
+    pub end: usize,
+    pub indent: usize,
     features: Vec<String>,
     /// Last line of the (last) feature `cfg`.
     feature_attr_end: Option<usize>,
@@ -168,7 +168,7 @@ fn item_end(lines: &[String], header: usize, indent: usize) -> usize {
     last
 }
 
-fn parse_items(lines: &[String]) -> Result<Vec<Item>, String> {
+pub fn parse_items(lines: &[String]) -> Result<Vec<Item>, String> {
     let mut items: Vec<Item> = Vec::new();
     let mut i = 0;
     while i < lines.len() {
@@ -296,7 +296,7 @@ fn uses_darwin_libc(text: &str) -> bool {
 
 /// The name a top-level item defines, if any (`pub struct Foo`,
 /// `pub unsafe extern "C-unwind" fn Foo(`, ...).
-fn defined_name(header: &str) -> Option<&str> {
+pub fn defined_name(header: &str) -> Option<&str> {
     let mut words = header.split_whitespace();
     while let Some(word) = words.next() {
         if matches!(word, "struct" | "type" | "fn" | "static" | "const" | "enum" | "union") {

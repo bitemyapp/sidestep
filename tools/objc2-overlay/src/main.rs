@@ -10,6 +10,7 @@ mod generated;
 mod manifest;
 mod patch;
 mod platform;
+mod returns;
 mod sha256;
 
 use std::env;
@@ -27,6 +28,7 @@ const SOURCES: &[&str] = &[
     include_str!("manifest.rs"),
     include_str!("patch.rs"),
     include_str!("platform.rs"),
+    include_str!("returns.rs"),
     include_str!("sha256.rs"),
 ];
 
@@ -69,6 +71,8 @@ struct Expect {
     bridging_apple_only: usize,
     items_removed: usize,
     dependencies_moved: usize,
+    returns_not_retained: usize,
+    returns_nullable: usize,
 }
 
 const EXPECT_NONE: Expect = Expect {
@@ -79,6 +83,8 @@ const EXPECT_NONE: Expect = Expect {
     bridging_apple_only: 0,
     items_removed: 0,
     dependencies_moved: 0,
+    returns_not_retained: 0,
+    returns_nullable: 0,
 };
 
 /// Every crate the fork changes, at the versions Sidestep's Cargo.lock
@@ -87,7 +93,10 @@ const EXPECT_NONE: Expect = Expect {
 /// (#862), 2 anonymous structs and signed fields in message verification,
 /// 3 GNUStep in CoreGraphics, QuartzCore, CoreText and ImageIO (rules), 4
 /// `NSStringEncoding` on GNUStep, 5 NSURL path helpers on GNUStep, 6
-/// `NSTextAlignment` on GNUStep.
+/// `NSTextAlignment` on GNUStep, 7 `NSCreate*PboardType` returns not
+/// retained (rule), 8 `CGColorSpaceCopyBaseColorSpace` nullable (rule), 9
+/// the `AutoreleaseSafe` negative impls hidden from stable (`sidestep`
+/// only).
 const CRATES: &[Pinned] = &[
     Pinned {
         name: "objc2",
@@ -97,6 +106,7 @@ const CRATES: &[Pinned] = &[
             patch!("objc2", "1-retain-autoreleased.patch"),
             patch!("objc2", "2-verify-anonymous-structs.patch"),
             patch!("objc2", "4-nsstringencoding.patch"),
+            patch!("objc2", "9-negative-impls.patch"),
         ],
         generated: Generated::No,
         expect: EXPECT_NONE,
@@ -132,6 +142,7 @@ const CRATES: &[Pinned] = &[
             gates_added: 2,
             bridging_apple_only: 10,
             dependencies_moved: 3,
+            returns_not_retained: 2,
             ..EXPECT_NONE
         },
     },
@@ -141,7 +152,14 @@ const CRATES: &[Pinned] = &[
         sha256: "e022c9d066895efa1345f8e33e584b9f958da2fd4cd116792e15e07e4720a807",
         patches: &[],
         generated: Generated::Yes,
-        expect: Expect { gates_added: 46, gates_changed: 12, darwin_items: 46, dependencies_moved: 2, ..EXPECT_NONE },
+        expect: Expect {
+            gates_added: 46,
+            gates_changed: 12,
+            darwin_items: 46,
+            dependencies_moved: 2,
+            returns_nullable: 2,
+            ..EXPECT_NONE
+        },
     },
     Pinned {
         name: "objc2-quartz-core",
@@ -318,6 +336,7 @@ fn build(krate: &Pinned, work: &Path, out: &Path) -> Result<(PathBuf, String), S
         let mut files = read_generated(&generated_dir)?;
         let before: Vec<Vec<String>> = files.iter().map(|f| f.lines.clone()).collect();
         let g = generated::apply(krate.name, &mut files)?;
+        let r = returns::apply(krate.name, &mut files)?;
         for (file, old) in files.iter().zip(before) {
             if file.lines != old {
                 let mut text = file.lines.join("\n");
@@ -340,12 +359,14 @@ fn build(krate: &Pinned, work: &Path, out: &Path) -> Result<(PathBuf, String), S
             bridging_apple_only: g.bridging_apple_only,
             items_removed: g.items_removed,
             dependencies_moved: m.dependencies_moved,
+            returns_not_retained: r.not_retained,
+            returns_nullable: r.nullable,
         };
         if actual != krate.expect {
             return Err(format!("{}: the rules changed {actual:?}, expected {:?}", krate.name, krate.expect));
         }
         report.push(format!(
-            "{} items and {} dependencies checked; gates {} removed, {} added, {} changed; {} Darwin-only; {} items removed; {} dependencies moved",
+            "{} items and {} dependencies checked; gates {} removed, {} added, {} changed; {} Darwin-only; {} items removed; {} dependencies moved; returns {} not retained, {} nullable",
             g.items_checked,
             m.dependencies_checked,
             g.gates_removed,
@@ -354,6 +375,8 @@ fn build(krate: &Pinned, work: &Path, out: &Path) -> Result<(PathBuf, String), S
             g.darwin_items,
             g.items_removed,
             m.dependencies_moved,
+            r.not_retained,
+            r.nullable,
         ));
     }
 

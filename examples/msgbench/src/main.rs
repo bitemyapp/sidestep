@@ -343,6 +343,23 @@ fn main() {
     bench("weak reference create + destroy", 10_000_000, || {
         drop(black_box(Weak::from_retained(&obj)));
     });
+    // What the runtime's weak table costs as an object gains more weak
+    // references: one more stored and destroyed, next to `others` kept.
+    for others in [0, 1, 3, 7, 15, 31, 63, 255] {
+        let referent = NSObject::new();
+        let kept: Vec<_> = (0..others).map(|_| Weak::from_retained(&referent)).collect();
+        let name = format!("weak init + destroy, object with {others} other weak refs");
+        bench(&name, 10_000_000, || {
+            let mut location: *mut AnyObject = std::ptr::null_mut();
+            // SAFETY: a live object, and a location that lives until destroyed.
+            unsafe {
+                ffi::objc_initWeak(&mut location, Retained::as_ptr(&referent).cast_mut().cast());
+                ffi::objc_destroyWeak(black_box(&mut location));
+            }
+        });
+        drop(kept);
+    }
+    weak_many();
     set_associated(&obj, &target);
     bench("associated object get", 10_000_000, || {
         black_box(get_associated(black_box(&obj)));
@@ -397,6 +414,63 @@ fn main() {
             unsafe { msg_send![black_box(&**proxy), performSelector: sel!(echo:), withObject: &*state.1] };
         black_box(r);
     });
+}
+
+/// Many weak references to one object (a delegate, an observed object):
+/// `MSGBENCH_WEAKS` of them (200 000 by default) created, then dropped in
+/// creation order, in reverse and in a shuffled order, each drop removing
+/// its location from the object's; and the object freed with them all.
+/// Median of three runs, in milliseconds for all of them and nanoseconds
+/// per reference.
+fn weak_many() {
+    let count = std::env::var("MSGBENCH_WEAKS").ok().and_then(|n| n.parse().ok()).unwrap_or(200_000usize);
+    type Arrange = fn(&mut Vec<Weak<NSObject>>);
+    let orders: [(&str, Arrange); 4] = [
+        ("dropped in creation order", |_| {}),
+        ("dropped in reverse order", |weaks| weaks.reverse()),
+        ("dropped in random order", |weaks| shuffle(weaks)),
+        ("kept while the object is freed", |_| {}),
+    ];
+    for (order, arrange) in orders {
+        let name = format!("{count} weak refs to one object, {order}");
+        if !wanted(&name) {
+            continue;
+        }
+        let mut runs: Vec<f64> = (0..3)
+            .map(|_| {
+                let obj = NSObject::new();
+                let mut weaks: Vec<_> = (0..count).map(|_| Weak::from_retained(&obj)).collect();
+                arrange(&mut weaks);
+                let start = Instant::now();
+                if order.starts_with("kept") {
+                    drop(obj);
+                    let elapsed = start.elapsed();
+                    assert!(weaks.iter().all(|w| w.load().is_none()));
+                    elapsed.as_secs_f64() * 1e3
+                } else {
+                    // In the vector's order.
+                    for weak in weaks.drain(..) {
+                        drop(weak);
+                    }
+                    start.elapsed().as_secs_f64() * 1e3
+                }
+            })
+            .collect();
+        runs.sort_by(f64::total_cmp);
+        println!("{name:<48} {:>8.2} ms  ({:.1} ns each)", runs[1], runs[1] * 1e6 / count as f64);
+    }
+}
+
+/// Fisher-Yates with a fixed xorshift sequence, so every run drops in the
+/// same order.
+fn shuffle<T>(items: &mut [T]) {
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    for i in (1..items.len()).rev() {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        items.swap(i, (state % (i as u64 + 1)) as usize);
+    }
 }
 
 /// A small number that differs between the benchmark's threads, so each

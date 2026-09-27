@@ -817,8 +817,10 @@ the machine busy with other work, so they are rough.
 Only the viewport is laid out: the rest of the 200 000 paragraphs stay
 estimates (the view is 3 000 015 points tall as estimated; 3 200 016 on
 macOS), and nothing runs in the background. A keystroke lays out again the
-edited paragraph and places the viewport's fragments. Freeing fragments and
-elements costs what they are: a layout manager's fragments share one weak
-reference to it, as a content storage's elements do (each holding its own
-made the runtime look through 200 000 weak locations to remove each, 5 s
-for 200 000 fragments).
+edited paragraph and places the viewport's fragments. A layout manager's
+fragments share one weak reference to it, as a content storage's elements
+do. The runtime stores and destroys a weak reference in amortized constant
+time however many an object has, but one each would still cost a weak
+location apiece: with every fragment made, 21 to 22 MB more at peak, 2 to
+2.7 times as long to free the view, and 10 to 30% more for the `setFont:`
+and `setString:` rows (measured on Linux, in two sessions).

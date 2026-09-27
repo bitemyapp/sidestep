@@ -184,8 +184,8 @@ pub extern "C-unwind" fn NSAvailableWindowDepths() -> NonNull<NSWindowDepth> {
 
 // Typed file pasteboard types. Despite their names, the two `Create`
 // functions return autoreleased strings the caller doesn't own, as
-// measured on macOS (objc2-app-kit 0.3.2's bindings take ownership, which
-// over-releases on macOS too).
+// measured on macOS (objc2-app-kit 0.3.2's bindings took ownership, which
+// over-released on macOS too, until the objc2 fork's fix; docs/abi.md).
 
 const FILENAMES: &str = "NSTypedFilenamesPboardType:";
 const FILE_CONTENTS: &str = "NXTypedFileContentsPboardType:";

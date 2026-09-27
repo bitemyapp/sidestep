@@ -2,7 +2,6 @@
 //! references.
 
 use std::cell::RefCell;
-use std::collections::hash_map::Entry as MapEntry;
 use std::ffi::c_void;
 use std::mem::transmute;
 use std::sync::MutexGuard;
@@ -14,6 +13,7 @@ use crate::message::objc_msg_lookup;
 use crate::object::{DEALLOCATING, IMMORTAL, Kind, Object, RC_ONE, WEAKLY_REFERENCED, header, isa, isa_relaxed, kind};
 use crate::selector::{Sel, known};
 use crate::util::{AddrMap, Sharded};
+use crate::weak_locations::{Locations, register, unregister};
 
 type Id = *mut Object;
 
@@ -600,13 +600,6 @@ pub unsafe extern "C-unwind" fn objc_retainAutoreleasedReturnValue(obj: Id) -> I
 // Holding that lock keeps the object's memory alive, because freeing it
 // first zeroes its weak references under the same lock.
 
-/// The locations weakly referring to one object: nearly always one, which
-/// needs no allocation.
-enum Locations {
-    One(usize),
-    Many(Vec<usize>),
-}
-
 static WEAK: Sharded<Locations> = Sharded::new();
 
 /// A weak location, which the runtime reads and writes atomically.
@@ -643,37 +636,6 @@ unsafe fn tracking(obj: Id) -> Tracking {
     }
 }
 
-fn register(table: &mut AddrMap<Locations>, obj: usize, location: usize) {
-    match table.entry(obj) {
-        MapEntry::Vacant(entry) => {
-            entry.insert(Locations::One(location));
-        }
-        MapEntry::Occupied(mut entry) => match entry.get_mut() {
-            Locations::One(first) => {
-                let first = *first;
-                entry.insert(Locations::Many(vec![first, location]));
-            }
-            Locations::Many(all) => all.push(location),
-        },
-    }
-}
-
-fn unregister(table: &mut AddrMap<Locations>, obj: usize, location: usize) {
-    let MapEntry::Occupied(mut entry) = table.entry(obj) else { return };
-    let emptied = match entry.get_mut() {
-        Locations::One(only) => *only == location,
-        Locations::Many(all) => {
-            if let Some(i) = all.iter().position(|&l| l == location) {
-                all.swap_remove(i);
-            }
-            all.is_empty()
-        }
-    };
-    if emptied {
-        entry.remove();
-    }
-}
-
 /// Zero every weak reference to `obj`, which is being freed.
 pub(crate) fn clear_weak(obj: Id) {
     let zero = |location: usize| {
@@ -684,10 +646,8 @@ pub(crate) fn clear_weak(obj: Id) {
     // Zeroed under the lock: a load that read `obj` from one of these
     // locations is waiting for it, and must find the location changed.
     let mut shard = WEAK.lock(obj as usize);
-    match shard.remove(&(obj as usize)) {
-        Some(Locations::One(location)) => zero(location),
-        Some(Locations::Many(all)) => all.into_iter().for_each(zero),
-        None => {}
+    if let Some(locations) = shard.remove(&(obj as usize)) {
+        locations.for_each(zero);
     }
 }
 
