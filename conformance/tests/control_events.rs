@@ -225,7 +225,13 @@ impl Setup {
         let mode = unsafe { NSDefaultRunLoopMode };
         while let Some(e) = self.app.nextEventMatchingMask_untilDate_inMode_dequeue(NSEventMask::Any, None, mode, true)
         {
-            left.push(e.r#type());
+            // AppKit and the system post events of their own whenever they
+            // like (CI's macOS runner posted an AppKit-defined one mid-test):
+            // only what a test posts counts.
+            let t = e.r#type();
+            if !matches!(t, NSEventType::AppKitDefined | NSEventType::SystemDefined) {
+                left.push(t);
+            }
         }
         left
     }
