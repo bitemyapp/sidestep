@@ -1,8 +1,8 @@
 //! NSAnimationContext and `animator`, checked on macOS and on Linux alike:
 //! the context's settings and how groups save and restore them, when
 //! completion handlers run, and changes made through `animator` in a group
-//! that lasts no time. (How AppKit animates over time isn't asserted:
-//! Sidestep applies changes at once.)
+//! that lasts no time. Render-thread interpolation for shown, layer-backed
+//! views is covered by `sidestep-appkit/tests/linux_layers.rs`.
 //!
 //! AppKit belongs to the main thread, so this file has its own `main`.
 

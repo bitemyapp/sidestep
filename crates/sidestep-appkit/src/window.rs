@@ -127,6 +127,8 @@ pub(crate) struct WindowIvars {
     /// A frame was presented and the render thread hasn't shown it yet.
     frame_pending: Cell<bool>,
     needs_display: Cell<bool>,
+    /// A scroll exposed a new viewport, even if all drawing is cached.
+    needs_view_preparation: Cell<bool>,
     damage: RefCell<HashMap<LayerId, Vec<Rect>>>,
     clips: RefCell<Vec<Retained<NSView>>>,
     /// The scroll layers (see `layers`).
@@ -284,6 +286,7 @@ define_class!(
                 deferred: Cell::new(defer),
                 frame_pending: Cell::new(false),
                 needs_display: Cell::new(false),
+                needs_view_preparation: Cell::new(false),
                 damage: RefCell::new(HashMap::new()),
                 clips: RefCell::new(Vec::new()),
                 layers: RefCell::default(),
@@ -1863,6 +1866,18 @@ impl NSWindowImpl {
     /// the next frame (see `view_layout`).
     pub(crate) fn needs_layout_pass(&self) {
         self.ivars().needs_display.set(true);
+    }
+
+    /// Prepare newly exposed content before presenting a scroll. Moving
+    /// cached layers need not damage pixels, but TextKit and subclasses
+    /// still need their viewWillDraw pass for the new visible rectangle.
+    pub(crate) fn needs_view_preparation(&self) {
+        self.ivars().needs_view_preparation.set(true);
+        self.ivars().needs_display.set(true);
+    }
+
+    pub(crate) fn take_view_preparation(&self) -> bool {
+        self.ivars().needs_view_preparation.replace(false)
     }
 
     /// Some layer has damage to draw in the next pass.

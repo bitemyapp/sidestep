@@ -540,8 +540,7 @@ define_class!(
 
         #[unsafe(method_id(animator))]
         fn animator(&self) -> Retained<NSView> {
-            // Changes apply at once (see `crate::animation`).
-            as_view(self).retain()
+            crate::animation::view_animator(as_view(self))
         }
 
         #[unsafe(method_id(inputContext))]

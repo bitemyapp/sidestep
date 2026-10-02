@@ -229,6 +229,9 @@ pub(crate) fn follow_clip_view(view: &NSViewImpl) {
 
 /// A clip view scrolled or resized: documents that follow it need layout.
 pub(crate) fn clip_moved(clip: &NSViewImpl) {
+    if let Some(window) = views::window_of(clip) {
+        window.needs_view_preparation();
+    }
     for sub in views::subviews(clip).iter() {
         let s = views::imp(sub);
         if has(s, FOLLOWS_CLIP) {
@@ -868,15 +871,19 @@ fn lay_out(view: &NSViewImpl, layout: bool) {
 }
 
 /// The window's pass before a frame: layout, then `viewWillDraw` if
-/// anything will be drawn, and layout again for anything that asked for it
-/// there.
+/// anything will be drawn or a scroll exposed content, and layout again
+/// for anything that asked for it there.
 pub(crate) fn run(window: &NSWindowImpl) {
     let Some(content) = window.content() else { return };
     let root = views::imp(&content);
     lay_out(root, true);
-    if window.has_damage() {
+    let prepare = window.take_view_preparation();
+    if prepare || window.has_damage() {
         content.viewWillDraw();
         lay_out(root, true);
+        if prepare {
+            crate::quartzcore::backing::prepare_viewports(root);
+        }
     }
 }
 

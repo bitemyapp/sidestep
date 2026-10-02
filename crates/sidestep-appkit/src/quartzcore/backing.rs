@@ -518,6 +518,32 @@ fn canvas_rect(view: &NSViewImpl, props: &Props, scale: f64) -> Option<([f64; 4]
     Some((r, (r[2] * scale).ceil() as u32, (r[3] * scale).ceil() as u32))
 }
 
+/// A viewport moved without changing its descendants' model geometry.
+/// Keep canvases that cover the new viewport, and commit a replacement
+/// for those that do not. The commit holds presentation until the new
+/// canvas is painted, as it does for any other canvas change.
+pub(crate) fn prepare_viewports(view: &NSViewImpl) {
+    if views::is_hidden(view) {
+        return;
+    }
+    if let Some(old) = state(view).canvas.get()
+        && composited(view)
+        && let Some(layer) = layer_of(view)
+    {
+        let li = imp(&layer);
+        let props = li.read(|m| m.props.clone());
+        let scale = views::window_of(view).map_or(1.0, |w| w.scale());
+        if let Some((rect, _, _)) = canvas_rect(view, &props, scale)
+            && old != rect
+        {
+            super::transaction::mark_dirty(li);
+        }
+    }
+    for sub in views::subviews(view) {
+        prepare_viewports(views::imp(&sub));
+    }
+}
+
 /// Whether a view updates its layer itself (`wantsUpdateLayer`).
 pub(crate) fn updates_layer(view: &NSView) -> bool {
     // SAFETY: wantsUpdateLayer takes nothing and returns BOOL.

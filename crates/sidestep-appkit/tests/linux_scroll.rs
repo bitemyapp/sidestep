@@ -26,8 +26,8 @@ mod linux {
     use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
     use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
     use objc2_app_kit::{
-        NSApplication, NSBackingStoreType, NSCursor, NSResponder, NSScrollView, NSScrollerPart, NSScrollerStyle,
-        NSView, NSViewLayerContentsRedrawPolicy, NSWindow, NSWindowStyleMask,
+        NSApplication, NSBackingStoreType, NSCursor, NSFont, NSResponder, NSScrollView, NSScrollerPart,
+        NSScrollerStyle, NSTextView, NSView, NSViewLayerContentsRedrawPolicy, NSWindow, NSWindowStyleMask,
     };
     use objc2_foundation::{NSNotification, NSNotificationCenter, NSPoint, NSRect, NSSize};
     use sidestep_appkit::testing::{self, LayerInfo, Seen};
@@ -272,6 +272,58 @@ mod linux {
         let layers = testing::scroll_layers(&w);
         let l = layer_of(&layers, &sv).expect("a layer");
         assert!(l.tiles.contains(&[0, 4]), "{:?}", l.tiles);
+        close(&w);
+    }
+
+    fn scrolling_prepares_text_without_unrelated_damage(mtm: MainThreadMarker) {
+        let sv = NSScrollView::initWithFrame(NSScrollView::alloc(mtm), rect(0.0, 0.0, 300.0, 150.0));
+        let text = NSTextView::initWithFrame(NSTextView::alloc(mtm), rect(0.0, 0.0, 300.0, 10000.0));
+        text.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+        text.setString(&objc2_foundation::NSString::from_str(&"Scrolling must prepare this line.\n".repeat(1000)));
+        sv.setDocumentView(Some(&text));
+        let (w, _, _) = shown(mtm, &[&sv]);
+        let controller = text.textLayoutManager().unwrap().textViewportLayoutController();
+        testing::note_painted_text(true);
+        for y in [2200.0, 4400.0, 6600.0, 3000.0, 1200.0] {
+            sv.contentView().scrollToPoint(pt(0.0, y));
+            // A real display pass, without manually preparing TextKit or
+            // invalidating unrelated views, must prepare the exposed text.
+            testing::settle();
+            assert!(
+                (controller.viewportBounds().origin.y - y).abs() < 1.0,
+                "viewport stayed at {:?} after scrolling to {y}",
+                controller.viewportBounds()
+            );
+            assert!(controller.viewportRange().is_some(), "the exposed viewport has text");
+            assert!(
+                testing::take_painted_text().iter().any(|run| run.y as f64 >= y && (run.y as f64) < y + 150.0),
+                "newly exposed text must be painted before scrolling stops"
+            );
+        }
+        testing::note_painted_text(false);
+        close(&w);
+    }
+
+    fn scrolling_refreshes_large_layer_canvases(mtm: MainThreadMarker) {
+        let sv = NSScrollView::initWithFrame(NSScrollView::alloc(mtm), rect(0.0, 0.0, 300.0, 150.0));
+        let doc = drawing(mtm, rect(0.0, 0.0, 300.0, 10000.0), "cached");
+        doc.setWantsLayer(true);
+        let container = view(mtm, doc.frame(), true);
+        container.addSubview(&doc);
+        sv.setDocumentView(Some(&container));
+        let (w, _, _) = shown(mtm, &[&sv]);
+        take_log();
+        sv.contentView().scrollToPoint(pt(0.0, 2200.0));
+        testing::settle();
+        assert!(take_log().is_empty(), "reuse a canvas that still covers the viewport");
+        for y in [4400.0, 8800.0, 1200.0] {
+            sv.contentView().scrollToPoint(pt(0.0, y));
+            testing::settle();
+            assert!(
+                take_log().iter().any(|s| s == "drew cached"),
+                "scrolling to {y} must draw content beyond the cached canvas"
+            );
+        }
         close(&w);
     }
 
@@ -793,6 +845,8 @@ mod linux {
         let tests: &[Test] = &[
             ("promotion", promotion),
             ("scrolling_moves_layers", scrolling_moves_layers),
+            ("scrolling_prepares_text_without_unrelated_damage", scrolling_prepares_text_without_unrelated_damage),
+            ("scrolling_refreshes_large_layer_canvases", scrolling_refreshes_large_layer_canvases),
             ("tiles_ahead_come_a_pass_late", tiles_ahead_come_a_pass_late),
             ("anchored_rows_and_columns", anchored_rows_and_columns),
             ("nested_layers_stack_in_paint_order", nested_layers_stack_in_paint_order),
