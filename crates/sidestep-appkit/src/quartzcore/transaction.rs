@@ -469,7 +469,11 @@ pub(crate) fn commit_now() {
     super::backing::committed();
     schedule_ending();
     if sent > 0 && crate::layers::tracing() {
-        eprintln!("sidestep ca commit: main: {:.3} ms, {sent} layers", (math::media_now() - now) * 1000.0);
+        eprintln!(
+            "sidestep @{:.1} ms ca commit: main: {:.3} ms, {sent} layers",
+            crate::layers::trace_ms(),
+            (math::media_now() - now) * 1000.0
+        );
     }
     // After the commit returns, from the run loop: the delegates of the
     // animations that started, then of those that stopped since the last

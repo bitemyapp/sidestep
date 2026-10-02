@@ -171,6 +171,11 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
     event_loop
         .handle()
         .insert_source(channel, |event, _, state: &mut State| match event {
+            ChannelEvent::Msg(msg) if crate::layers::tracing() => {
+                let started = std::time::Instant::now();
+                state.handle(msg);
+                tiles::note_busy(started.elapsed());
+            }
             ChannelEvent::Msg(msg) => state.handle(msg),
             ChannelEvent::Closed => state.exit = true,
         })
@@ -974,7 +979,8 @@ impl State {
         }
         if crate::layers::tracing() && count > 0 {
             eprintln!(
-                "sidestep ca frame: window {window} render: {:.3} ms, {count} redraws, {area:.0} points squared",
+                "sidestep @{:.1} ms ca frame: window {window} render: {:.3} ms, {count} redraws, {area:.0} points squared",
+                crate::layers::trace_ms(),
                 start.elapsed().as_secs_f64() * 1000.0
             );
         }

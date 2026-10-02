@@ -2213,9 +2213,16 @@ layer nested in no other, committed for it. So a fling uploads nothing
 until a tile comes into view, scrolling a scroll view of scroll views
 uploads nothing to their overlays, appending a line to a log pinned to its
 end uploads the line, and a caret blinking in a scroll view commits two
-surfaces. `SIDESTEP_TRACE_FRAMES=1` prints, for each pass, the main
-thread's time and the tiles it recorded, and for each present the bytes
-uploaded to tiles, overlays and the window and the surfaces committed.
+surfaces. `SIDESTEP_TRACE_FRAMES=1` prints, each line stamped with the
+milliseconds since the first so the two threads' lines line up, for each
+pass the main thread's time (with what layout and `viewWillDraw`, and
+layer-backed views' canvases, took of it) and the tiles it recorded, and
+for each present the render thread's time on the main thread's messages
+since the last present (and the longest of them), the bytes uploaded to
+tiles, overlays and the window, and the surfaces committed.
+`SIDESTEP_TRACE_FRAMES=tiles` adds a line for each tile paint: where it
+is, whether it was drawn ahead, and how many operations and glyph runs it
+holds, which shows a view leaving a tile blank.
 
 ### Core Animation
 

@@ -179,14 +179,34 @@ pub(crate) struct Stats {
     pub held: usize,
 }
 
+thread_local! {
+    /// Time the render thread spent on the main thread's messages since the
+    /// last present was traced, and the longest of them.
+    static BUSY: std::cell::Cell<(std::time::Duration, std::time::Duration)> = const {
+        std::cell::Cell::new((std::time::Duration::ZERO, std::time::Duration::ZERO))
+    };
+}
+
+/// Count a message's handling toward the next trace.
+pub(crate) fn note_busy(spent: std::time::Duration) {
+    BUSY.with(|busy| {
+        let (total, longest) = busy.get();
+        busy.set((total + spent, longest.max(spent)));
+    });
+}
+
 /// Print what a present of `window` did (`SIDESTEP_TRACE_FRAMES`): its
 /// layers' `stats`, and the window surface's `damage` (device pixels),
 /// which it commits too.
 pub(crate) fn trace(window: WindowId, stats: &Stats, damage: &[Rect]) {
     let window_bytes: f32 = damage.iter().map(|r| (r.x1 - r.x0) * (r.y1 - r.y0) * 4.0).sum();
+    let (busy, longest) = BUSY.with(|busy| busy.replace(Default::default()));
     eprintln!(
-        "sidestep frame: window {window} render: {} bytes uploaded to tiles, {} to overlays, {} to the window; \
-         {} surfaces committed, {} tiles on screen, {} kept",
+        "sidestep @{:.1} ms frame: window {window} render: {:.2} ms busy (longest message {:.2} ms), {} bytes \
+         uploaded to tiles, {} to overlays, {} to the window; {} surfaces committed, {} tiles on screen, {} kept",
+        crate::layers::trace_ms(),
+        busy.as_secs_f64() * 1000.0,
+        longest.as_secs_f64() * 1000.0,
         stats.bytes,
         stats.overlay_bytes,
         window_bytes as usize,

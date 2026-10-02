@@ -2772,8 +2772,10 @@ pub(crate) fn display_if_needed(window: &NSWindowImpl) {
     if !crate::settings::ready() || crate::layers::in_pass(window) {
         return;
     }
+    let started = crate::layers::tracing().then(std::time::Instant::now);
     // Constraints, layout and viewWillDraw, before anything is drawn.
     crate::view_layout::run(window);
+    let laid_out = started.map(|t| t.elapsed());
     // Layers changed by layout go to the render thread before the paints
     // that composite them; it holds the window's layer trees until this
     // pass presents.
@@ -2791,18 +2793,33 @@ pub(crate) fn display_if_needed(window: &NSWindowImpl) {
     // the next pass. A pass that changed nothing the render thread shows
     // commits nothing.
     let canvases = crate::quartzcore::backing::display_canvases(window);
+    let canvased = started.map(|t| t.elapsed());
     // A commit sent in the pass made the render thread wait for its Present.
     let committed = crate::quartzcore::backing::end_pass();
-    let put_off = crate::layers::display(window, |changed| {
+    let shown = crate::layers::display(window, |changed| {
         let changed = changed || canvases || committed;
         if (changed || titled) && ivars.visible.get() {
             app::send(ToRender::Present { window: id });
             ivars.frame_pending.set(true);
         }
     });
+    if let (Some(started), Some(laid_out), Some(canvased)) = (started, laid_out, canvased) {
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+        eprintln!(
+            "sidestep @{:.1} ms frame: window {id} main: {:.2} ms (layout and viewWillDraw {:.2} ms, layers' canvases \
+             {:.2} ms), {} tiles recorded, {} paints, {} layers",
+            crate::layers::trace_ms(),
+            ms(started.elapsed()),
+            ms(laid_out),
+            ms(canvased - laid_out),
+            shown.tiles,
+            shown.paints,
+            shown.layers
+        );
+    }
     // Tiles ahead put off for want of time: the next pass draws them. The
     // frame's callback wakes the loop for it; without a frame, nothing would.
-    if put_off {
+    if shown.put_off {
         ivars.needs_display.set(true);
         if !ivars.frame_pending.get() {
             sidestep_foundation::runloop::main().wake();
