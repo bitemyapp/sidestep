@@ -26,8 +26,8 @@ mod linux {
     use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
     use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
     use objc2_app_kit::{
-        NSApplication, NSBackingStoreType, NSCursor, NSResponder, NSScrollView, NSScrollerPart, NSScrollerStyle,
-        NSView, NSViewLayerContentsRedrawPolicy, NSWindow, NSWindowStyleMask,
+        NSApplication, NSBackingStoreType, NSCursor, NSFont, NSResponder, NSScrollView, NSScrollerPart,
+        NSScrollerStyle, NSTextView, NSView, NSViewLayerContentsRedrawPolicy, NSWindow, NSWindowStyleMask,
     };
     use objc2_foundation::{NSNotification, NSNotificationCenter, NSPoint, NSRect, NSSize};
     use sidestep_appkit::testing::{self, LayerInfo, Seen};
@@ -272,6 +272,125 @@ mod linux {
         let layers = testing::scroll_layers(&w);
         let l = layer_of(&layers, &sv).expect("a layer");
         assert!(l.tiles.contains(&[0, 4]), "{:?}", l.tiles);
+        close(&w);
+    }
+
+    fn scrolling_prepares_text_without_unrelated_damage(mtm: MainThreadMarker) {
+        let sv = NSScrollView::initWithFrame(NSScrollView::alloc(mtm), rect(0.0, 0.0, 300.0, 150.0));
+        let text = NSTextView::initWithFrame(NSTextView::alloc(mtm), rect(0.0, 0.0, 300.0, 10000.0));
+        text.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+        text.setString(&objc2_foundation::NSString::from_str(&"Scrolling must prepare this line.\n".repeat(1000)));
+        sv.setDocumentView(Some(&text));
+        let (w, _, _) = shown(mtm, &[&sv]);
+        let controller = text.textLayoutManager().unwrap().textViewportLayoutController();
+        testing::note_painted_text(true);
+        for y in [2200.0, 4400.0, 6600.0, 3000.0, 1200.0] {
+            sv.contentView().scrollToPoint(pt(0.0, y));
+            // A real display pass, without manually preparing TextKit or
+            // invalidating unrelated views, must prepare the exposed text.
+            testing::settle();
+            // The viewport covers what shows, with what was drawn ahead.
+            let b = controller.viewportBounds();
+            assert!(
+                b.origin.y <= y + 1.0 && b.origin.y + b.size.height >= y + 149.0 && b.origin.y >= y - 2048.0,
+                "viewport stayed at {b:?} after scrolling to {y}"
+            );
+            assert!(controller.viewportRange().is_some(), "the exposed viewport has text");
+            assert!(
+                testing::take_painted_text().iter().any(|run| run.y as f64 >= y && (run.y as f64) < y + 150.0),
+                "newly exposed text must be painted before scrolling stops"
+            );
+        }
+        testing::note_painted_text(false);
+        close(&w);
+    }
+
+    /// Text is painted wherever a tile is drawn, in sight or ahead of a
+    /// scroll: a TextKit 2 view's text outside its viewport would leave
+    /// blanks in tiles that are kept and shown as they come into view. The
+    /// text view sits in a container, as a row of a list does. Scrolling
+    /// back up goes over text laid out already, which changes no layout
+    /// that would have it drawn again.
+    fn scrolling_paints_text_ahead(mtm: MainThreadMarker) {
+        let sv = NSScrollView::initWithFrame(NSScrollView::alloc(mtm), rect(0.0, 0.0, 300.0, 150.0));
+        let container = view(mtm, rect(0.0, 0.0, 300.0, 6000.0), true);
+        // More text than the view holds, so text fills it to its bottom.
+        let text = NSTextView::initWithFrame(NSTextView::alloc(mtm), rect(0.0, 40.0, 300.0, 4500.0));
+        text.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+        text.setString(&objc2_foundation::NSString::from_str(&"Every line of this is text.\n".repeat(400)));
+        container.addSubview(&text);
+        sv.setDocumentView(Some(&container));
+        // Noted from the first frame: tiles drawn then are kept.
+        testing::note_painted_text(true);
+        let (w, _, _) = shown(mtm, &[&sv]);
+        let clip = sv.contentView();
+        let scroll = |y: f64| {
+            clip.scrollToPoint(pt(0.0, y));
+            sv.reflectScrolledClipView(&clip);
+            testing::settle();
+        };
+        // Where text was painted (baselines), and whether what shows of the
+        // text has any gap in it more than a couple of lines tall.
+        let mut painted: Vec<f64> = Vec::new();
+        let check = |y: f64, painted: &mut Vec<f64>| {
+            painted.extend(testing::take_painted_text().iter().map(|run| f64::from(run.y)));
+            let t = text.frame();
+            let (top, bottom) = (y.max(t.origin.y), (y + 150.0).min(t.origin.y + t.size.height - 20.0));
+            let mut seen: Vec<f64> = painted.iter().copied().filter(|p| *p >= top && *p <= bottom + 20.0).collect();
+            seen.sort_by(f64::total_cmp);
+            let mut last = top;
+            for p in seen.iter().copied().chain([bottom + 20.0]) {
+                assert!(
+                    p - last < 40.0,
+                    "a blank from {last} to {p} shows at scroll {y}: text there was never painted"
+                );
+                last = p;
+            }
+        };
+        // Down a little at a time, as a touchpad scrolls: the tiles coming
+        // into view were drawn ahead.
+        let end = text.frame().origin.y + text.frame().size.height - 150.0;
+        let mut y = 0.0;
+        while y < end {
+            y = (y + 40.0).min(end);
+            scroll(y);
+            check(y, &mut painted);
+        }
+        // Back up, once the tiles kept from the way down are behind.
+        painted.clear();
+        let kept = y - 3.0 * 512.0;
+        while y > 0.0 {
+            y = (y - 40.0).max(0.0);
+            scroll(y);
+            if y < kept {
+                check(y, &mut painted);
+            }
+        }
+        assert!(kept > 1000.0, "the text must be several tiles tall");
+        testing::note_painted_text(false);
+        close(&w);
+    }
+
+    fn scrolling_refreshes_large_layer_canvases(mtm: MainThreadMarker) {
+        let sv = NSScrollView::initWithFrame(NSScrollView::alloc(mtm), rect(0.0, 0.0, 300.0, 150.0));
+        let doc = drawing(mtm, rect(0.0, 0.0, 300.0, 10000.0), "cached");
+        doc.setWantsLayer(true);
+        let container = view(mtm, doc.frame(), true);
+        container.addSubview(&doc);
+        sv.setDocumentView(Some(&container));
+        let (w, _, _) = shown(mtm, &[&sv]);
+        take_log();
+        sv.contentView().scrollToPoint(pt(0.0, 2200.0));
+        testing::settle();
+        assert!(take_log().is_empty(), "reuse a canvas that still covers the viewport");
+        for y in [4400.0, 8800.0, 1200.0] {
+            sv.contentView().scrollToPoint(pt(0.0, y));
+            testing::settle();
+            assert!(
+                take_log().iter().any(|s| s == "drew cached"),
+                "scrolling to {y} must draw content beyond the cached canvas"
+            );
+        }
         close(&w);
     }
 
@@ -793,6 +912,9 @@ mod linux {
         let tests: &[Test] = &[
             ("promotion", promotion),
             ("scrolling_moves_layers", scrolling_moves_layers),
+            ("scrolling_prepares_text_without_unrelated_damage", scrolling_prepares_text_without_unrelated_damage),
+            ("scrolling_paints_text_ahead", scrolling_paints_text_ahead),
+            ("scrolling_refreshes_large_layer_canvases", scrolling_refreshes_large_layer_canvases),
             ("tiles_ahead_come_a_pass_late", tiles_ahead_come_a_pass_late),
             ("anchored_rows_and_columns", anchored_rows_and_columns),
             ("nested_layers_stack_in_paint_order", nested_layers_stack_in_paint_order),

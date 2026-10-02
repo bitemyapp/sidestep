@@ -109,6 +109,12 @@ const HUGE: f64 = 10_000_000.0;
 /// resize draws the whole view again).
 const IDLE_RESIZE: Duration = Duration::from_millis(250);
 
+/// The overdraw (TextKit 2) is kept within this many heights of what shows,
+/// and at least [`OVERDRAW_MIN`] points: as far as scroll tiles are kept
+/// and drawn ahead of a scroll.
+const OVERDRAW_REACH: f64 = 2.0;
+const OVERDRAW_MIN: f64 = 1024.0;
+
 /// The caret's blink: on and off this long each, stopping (on) after this
 /// long without an edit or a move.
 const BLINK: Duration = Duration::from_millis(600);
@@ -2586,16 +2592,58 @@ impl NSTextViewImpl {
         self.lm_impl().map(Geo::One)
     }
 
-    /// The viewport's bounds, as AppKit's text view works them out.
+    /// The viewport's bounds, as AppKit's text view works them out, with
+    /// the overdraw.
     fn viewport_bounds(&self) -> NSRect {
         let view = self.as_view();
-        // What the clip view shows, not cut to the view (the viewport runs on
-        // below a view that hasn't grown yet, as on macOS).
-        let visible = match enclosing_clip(view) {
+        let visible = self.shown_rect();
+        let overdraw = visible.and(self.ivars().tk2.overdraw.get());
+        crate::textkit2::view::viewport_bounds(view.bounds(), visible, overdraw, self.origin())
+    }
+
+    /// What the clip view shows of the view, not cut to the view (the
+    /// viewport runs on below a view that hasn't grown yet, as on macOS);
+    /// all of it in a window without a clip view; nothing out of a window.
+    fn shown_rect(&self) -> Option<NSRect> {
+        let view = self.as_view();
+        match enclosing_clip(view) {
             Some(clip) => Some(view.convertRect_fromView(clip.bounds(), Some(&clip))),
             None => view.window().is_some().then(|| view.visibleRect()),
+        }
+    }
+
+    /// Keep the overdraw near what shows: past [`OVERDRAW_REACH`] of it, a
+    /// scroll has left it behind.
+    fn trim_overdraw(&self) {
+        let tk2 = &self.ivars().tk2;
+        let (Some((y0, y1)), Some(shown)) = (tk2.overdraw.get(), self.shown_rect()) else { return };
+        let reach = (shown.size.height * OVERDRAW_REACH).max(OVERDRAW_MIN);
+        let (top, bottom) = (y0.max(shown.origin.y - reach), y1.min(shown.origin.y + shown.size.height + reach));
+        tk2.overdraw.set((bottom > top).then_some((top, bottom)));
+    }
+
+    /// Have the viewport take in `dirty` (the view's coordinates) before
+    /// drawing it. Sidestep keeps what views draw in scroll tiles, and draws
+    /// tiles ahead of a scroll and the damage to tiles out of sight: text
+    /// drawn only where it shows would leave blanks those tiles keep. So the
+    /// drawn part joins the viewport as overdraw, whose fragments are laid
+    /// out, configured and drawn as AppKit's are in its overdraw.
+    fn cover(&self, dirty: NSRect) {
+        let tk2 = &self.ivars().tk2;
+        let b = self.as_view().bounds();
+        let (y0, y1) =
+            (dirty.origin.y.max(b.origin.y), (dirty.origin.y + dirty.size.height).min(b.origin.y + b.size.height));
+        let covered = |laid: Option<NSRect>| {
+            let o = self.origin();
+            laid.is_some_and(|l| l.origin.y + o.y <= y0 && y1 <= l.origin.y + l.size.height + o.y)
         };
-        crate::textkit2::view::viewport_bounds(view.bounds(), visible, self.origin())
+        if y1 > y0 && !covered(tk2.clean.get()) && self.shown_rect().is_some() {
+            let (top, bottom) = tk2.overdraw.get().map_or((y0, y1), |(t, b)| (t.min(y0), b.max(y1)));
+            tk2.overdraw.set(Some((top, bottom)));
+        }
+        // Drawing is no time to scroll: what shows was put in place before
+        // the pass drew (`viewWillDraw`).
+        self.lay_out_viewport(false);
     }
 
     /// Take over a TextKit 2 container's viewport: the view is its
@@ -2627,6 +2675,13 @@ impl NSTextViewImpl {
     /// is on screen when laying out what is above it changes its place
     /// (estimates replaced by layout): the view scrolls by as much.
     fn lay_out_viewport_if_needed(&self) {
+        self.trim_overdraw();
+        self.lay_out_viewport(true);
+    }
+
+    /// Lay the viewport out if its bounds or the layout changed; with
+    /// `keep_place`, scroll to keep what showed in place.
+    fn lay_out_viewport(&self, keep_place: bool) {
         let Some(tlm) = self.tlm() else { return };
         // SAFETY: the layout manager's accessor.
         let vp: Option<Retained<AnyObject>> = unsafe { msg_send![&*tlm, textViewportLayoutController] };
@@ -2647,7 +2702,8 @@ impl NSTextViewImpl {
                 return;
             }
             let (y0, y1) = (bounds.origin.y, bounds.origin.y + bounds.size.height);
-            let anchor = if touched { None } else { manager.as_ref().and_then(|m| m.first_laid_in(y0, y1)) };
+            let anchor =
+                if touched || !keep_place { None } else { manager.as_ref().and_then(|m| m.first_laid_in(y0, y1)) };
             // SAFETY: layoutViewport takes nothing.
             let _: () = unsafe { msg_send![&*vp, layoutViewport] };
             let (Some(m), Some((o, top))) = (&manager, anchor) else { return };
@@ -2685,9 +2741,7 @@ impl NSTextViewImpl {
         if !matches!(geo, Geo::Two(_)) {
             return;
         }
-        if self.ivars().tk2.clean.get().is_none() {
-            self.lay_out_viewport_if_needed();
-        }
+        self.cover(dirty);
         // SAFETY: the layout manager's own accessor.
         let vp: Option<Retained<AnyObject>> =
             self.tlm().and_then(|tlm| unsafe { msg_send![&*tlm, textViewportLayoutController] });

@@ -2148,7 +2148,16 @@ damaged rectangle reaches, margins included) and presents; then, while it
 has spent less than 4 ms, it draws one tile ahead in the direction the
 layer moved (downward when it hasn't), after `prepareContentInRect:` to
 the document, which the render thread rasterizes while the compositor
-shows the frame. Tiles more
+shows the frame. What a pass draws, it keeps until it is damaged, so
+views must draw all of what they are asked to, shown or not (a TextKit 2
+text view takes what it is asked for into its viewport as overdraw, see
+[Text](#text)). Before a pass draws, the clip views that scrolled or
+resized since the last get `viewWillDraw` down their documents (the whole
+window does when anything is damaged): what shows changed even when every
+pixel is in tiles, so a text view lays out its viewport and keeps what
+showed in place, and layer-backed views whose canvases are cut to what
+shows (see [Core Animation](#core-animation)) draw a new one once what
+shows leaves theirs. Tiles more
 than two tiles from the viewport go, and the farthest from their viewports
 while a window's tiles hold more than 96 MB. An opaque clip view
 background makes the layer opaque: its tiles are cleared to that color and
@@ -2680,7 +2689,8 @@ positions in points. `crates/sidestep-appkit/src/text/` holds the stack.
   clicks, and whose `drawAtPoint:inContext:` is called) take part as on
   macOS. A text view in TextKit 2 mode (the default, as on macOS) reaches
   its layout through one adapter (`textkit2::view::Geo`) for selection,
-  carets, clicks and commands, lays out its viewport in `viewWillDraw`, and
+  carets, clicks and commands, lays out its viewport in `viewWillDraw` (and
+  again, as overdraw, when a pass draws a tile beyond it), and
   draws the fragments its viewport controller configured after its
   `drawRect:` (the display pass's `layers::record` calls it), as macOS
   draws them in views above it: each at the point zero, the drawing state's

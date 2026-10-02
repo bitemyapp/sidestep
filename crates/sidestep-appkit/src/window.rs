@@ -127,6 +127,9 @@ pub(crate) struct WindowIvars {
     /// A frame was presented and the render thread hasn't shown it yet.
     frame_pending: Cell<bool>,
     needs_display: Cell<bool>,
+    /// Clip views that scrolled or resized since the last pass: what they
+    /// show of their documents changed, even if every pixel is in tiles.
+    exposed: RefCell<Vec<Retained<NSView>>>,
     damage: RefCell<HashMap<LayerId, Vec<Rect>>>,
     clips: RefCell<Vec<Retained<NSView>>>,
     /// The scroll layers (see `layers`).
@@ -284,6 +287,7 @@ define_class!(
                 deferred: Cell::new(defer),
                 frame_pending: Cell::new(false),
                 needs_display: Cell::new(false),
+                exposed: RefCell::new(Vec::new()),
                 damage: RefCell::new(HashMap::new()),
                 clips: RefCell::new(Vec::new()),
                 layers: RefCell::default(),
@@ -1863,6 +1867,28 @@ impl NSWindowImpl {
     /// the next frame (see `view_layout`).
     pub(crate) fn needs_layout_pass(&self) {
         self.ivars().needs_display.set(true);
+    }
+
+    /// `clip` scrolled or resized: before the next frame, what it shows of
+    /// its document gets `viewWillDraw` (see `view_layout::run`), though
+    /// moving tiles may draw nothing.
+    pub(crate) fn clip_exposed(&self, clip: &NSView) {
+        let mut exposed = self.ivars().exposed.borrow_mut();
+        if !exposed.iter().any(|c| std::ptr::eq(&**c, clip)) {
+            exposed.push(clip.retain());
+        }
+        drop(exposed);
+        self.ivars().needs_display.set(true);
+    }
+
+    /// The clip views that scrolled or resized since the last pass, and
+    /// are still in this window.
+    pub(crate) fn take_exposed(&self) -> Vec<Retained<NSView>> {
+        let exposed = std::mem::take(&mut *self.ivars().exposed.borrow_mut());
+        exposed
+            .into_iter()
+            .filter(|c| crate::views::window_of(crate::views::imp(c)).is_some_and(|w| std::ptr::eq(w, self)))
+            .collect()
     }
 
     /// Some layer has damage to draw in the next pass.
