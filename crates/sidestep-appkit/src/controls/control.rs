@@ -343,6 +343,8 @@ define_class!(
 
         #[unsafe(method_id(stringValue))]
         fn string_value(&self) -> Retained<NSString> {
+            // AppKit validates the field editor before reading the cell.
+            self.as_control().validateEditing();
             match self.the_cell() {
                 Some(c) => c.stringValue(),
                 None => self.loose_value().string(),
@@ -351,6 +353,9 @@ define_class!(
 
         #[unsafe(method(setStringValue:))]
         fn set_string_value(&self, string: &NSString) {
+            // A programmatic replacement ends editing, discarding the
+            // unvalidated editor text before changing the cell's value.
+            self.as_control().abortEditing();
             match self.the_cell() {
                 Some(c) => c.setStringValue(string),
                 None => self.set_loose(Value::String(string.copy())),

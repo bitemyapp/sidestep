@@ -489,8 +489,10 @@ fn draw_field_frame(cell: &NSTextFieldCellImpl, frame: NSRect, _view: &NSView) {
 /// runs turn light, and so does a text color with the label color's value,
 /// while other colors and the placeholder stay, as on macOS
 /// (`conformance/tests/cell_backgrounds.rs`, `emphasized_text`).
-fn draw_field_text(cell: &NSTextFieldCellImpl, title: NSRect, _view: &NSView) {
-    if !theme::paint::recording() {
+fn draw_field_text(cell: &NSTextFieldCellImpl, title: NSRect, view: &NSView) {
+    // The field editor draws the live text over this view. The cell still
+    // draws its frame, but neither its old value nor its placeholder.
+    if !theme::paint::recording() || crate::textkit::field_editor::current_editor(view).is_some() {
         return;
     }
     let p = theme::palette();
