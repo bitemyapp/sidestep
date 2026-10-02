@@ -1333,11 +1333,15 @@ pub(super) fn build(
             features
         })
         .collect();
-    let families: Vec<[FontFamilyName<'_>; 2]> = used
+    let families: Vec<[FontFamilyName<'_>; 3]> = used
         .iter()
         .map(|&(i, _, _)| {
             let family = FontFamilyName::Named(Cow::Borrowed(&*attrs[i as usize].font.face.family));
-            [FontFamilyName::Generic(GenericFamily::Emoji), family]
+            [
+                FontFamilyName::Generic(GenericFamily::Emoji),
+                family,
+                FontFamilyName::Generic(GenericFamily::SansSerif),
+            ]
         })
         .collect();
     let own_emoji = settings.own_emoji;
@@ -1350,7 +1354,13 @@ pub(super) fn build(
             let a = &attrs[i as usize];
             let settings = (features.as_slice(), variations.as_slice(), settings);
             match kind {
-                Piece::Text => builder.push_style(text_style(a, i, FontFamily::Single(families[1].clone()), settings)),
+                // The script fallback alone is often the same font as the
+                // requested one (Latin UI text in Noto Sans, for example).
+                // Fontconfig's generic stack also covers symbols that neither
+                // font has, such as the disclosure triangles ▸ and ▾.
+                Piece::Text => {
+                    builder.push_style(text_style(a, i, FontFamily::List(Cow::Borrowed(&families[1..])), settings))
+                }
                 // Emoji look for a color emoji face first, as on macOS,
                 // where they'd otherwise take the text's face's plain
                 // glyphs.
@@ -1358,7 +1368,7 @@ pub(super) fn build(
                     let list = if own_emoji {
                         Cow::Owned(vec![families[1].clone(), families[0].clone()])
                     } else {
-                        Cow::Borrowed(&families[..])
+                        Cow::Borrowed(&families[..2])
                     };
                     builder.push_style(text_style(a, i, FontFamily::List(list), settings))
                 }
