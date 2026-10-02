@@ -860,7 +860,7 @@ fn title_rect(cell: &NSPopUpButtonCellImpl, bounds: NSRect) -> NSRect {
 }
 
 fn draw(cell: &NSPopUpButtonCellImpl, frame: NSRect, view: &NSView) {
-    if !theme::paint::recording() {
+    if cell.isTransparent() || !theme::paint::recording() {
         return;
     }
     let base = cell::imp(as_cell(cell));

@@ -289,6 +289,7 @@ pub(crate) fn begin(
         }
     });
     editor.scrollRangeToVisible(sel);
+    control.setNeedsDisplay(true);
 }
 
 /// Take `editor` out of the control it edits in, if it is in one.
@@ -315,8 +316,9 @@ fn end_session(editor: &NSTextView, session: Session) {
         // nothing that may have gone.
         editor.removeFromSuperview();
     }
-    if session.control.load().is_some() {
+    if let Some(control) = session.control.load() {
         session.clip.removeFromSuperview();
+        control.setNeedsDisplay(true);
     }
     if let Some(v) = as_impl(editor) {
         v.reset_editing();

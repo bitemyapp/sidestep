@@ -124,6 +124,11 @@ harness = false
 name = "field_editor"
 harness = false
 
+# Live control values and rendering while a field editor owns the text.
+[[test]]
+name = "control_editing"
+harness = false
+
 # Image views taking drops and pastes, and animating, through testing hooks
 # (Linux only).
 [[test]]
