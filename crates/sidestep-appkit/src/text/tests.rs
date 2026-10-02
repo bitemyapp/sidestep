@@ -93,6 +93,21 @@ fn fallback_finds_cjk_and_emoji() {
 }
 
 #[test]
+fn fallback_finds_ui_symbols() {
+    let (Some(primary), Some(_symbols)) = (font("Noto Sans", 13.0), font("DejaVu Sans", 13.0)) else { return };
+    let attrs = Attrs::new(primary);
+    let plain = lay("Mock backend", attrs.clone(), Options::UNBOUNDED);
+    for text in ["Mock backend  ▾", "Reasoning: off  ▾", "▸ ▾ ← → ✓"] {
+        let laid = lay(text, attrs.clone(), Options::UNBOUNDED);
+        assert!(glyphs(&laid).iter().all(|&g| g != 0), "missing UI symbol in {text:?}");
+        if text.starts_with("Mock backend") {
+            assert_eq!(laid.runs[0].font, plain.runs[0].font, "keep the requested font for ordinary text");
+            assert!(laid.runs.iter().any(|r| r.font != plain.runs[0].font), "another font draws the triangle");
+        }
+    }
+}
+
+#[test]
 fn right_to_left_runs_are_reversed() {
     let a = Attrs::new(sans(20.0));
     // Hebrew letters shaped alone, to recognize them in a line.
@@ -281,7 +296,15 @@ fn weights_map_through_the_named_ones() {
         assert!((fonts::css_weight(ns) - css).abs() < 0.01, "{ns}");
     }
     let bold = fonts::resolve(&FontSpec { weight: 700.0, ..FontSpec::system(Design::Default, 13.0) });
-    assert!(bold.postscript_name.contains("Bold"), "{}", bold.postscript_name);
+    // A variable font keeps its base PostScript name at every weight.
+    let bold_instance = bold.variations.iter().find(|(tag, _)| *tag == skrifa::Tag::new(b"wght"));
+    assert!(
+        bold_instance
+            .map_or_else(|| bold.postscript_name.contains("Bold"), |(_, weight)| (weight - 700.0).abs() < 0.01),
+        "{} at {:?}",
+        bold.postscript_name,
+        bold.variations,
+    );
 }
 
 #[test]
