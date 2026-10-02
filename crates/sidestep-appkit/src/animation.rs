@@ -1,8 +1,8 @@
 //! `NSAnimationContext` and `animator`.
 //!
-//! A change made through a view's or a window's `animator` (which is the
-//! view or window itself, as objc2 types it) applies at once, as AppKit's
-//! do with a duration of 0. A group is also a Core Animation transaction
+//! A view's `animator` forwards changes in an animation scope, without
+//! enabling implicit animation for other changes in the group. A group
+//! is also a Core Animation transaction
 //! with its duration and timing function, so layers the program changes
 //! in it animate over them, and so do layer-backed views' changes while
 //! `allowsImplicitAnimation` is set (`quartzcore::backing`). What programs
@@ -14,15 +14,18 @@
 //! on the thread's run loop, so a program that waits for one (to remove a
 //! view it faded out, or to chain animations) keeps its order and timing.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ptr::NonNull;
 
 use block2::{DynBlock, RcBlock};
-use objc2::rc::Retained;
-use objc2::runtime::{NSObject, NSObjectProtocol};
-use objc2::{AnyThread, ClassType, define_class, msg_send};
-use objc2_app_kit::NSAnimationContext;
-use objc2_foundation::{NSTimeInterval, NSTimer};
+use objc2::rc::{PartialInit, Retained};
+use objc2::runtime::{NSObject, NSObjectProtocol, Sel};
+use objc2::{AnyThread, ClassType, DefinedClass, define_class, msg_send};
+use objc2_app_kit::{NSAnimationContext, NSView};
+use objc2_foundation::{
+    NSInvocation, NSMethodSignature, NSPoint, NSProxy, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSTimeInterval,
+    NSTimer,
+};
 
 sidestep_runtime::static_class!(pub NSANIMATIONCONTEXT, NSANIMATIONCONTEXT_META = "NSAnimationContext", || {
     let _ = NSAnimationContextImpl::class();
@@ -49,14 +52,119 @@ impl Default for Group {
 /// Whether the current group allows implicit animation (of views'
 /// layers: `quartzcore::backing`).
 pub(crate) fn allows_implicit() -> bool {
-    STATE.with(|s| s.try_borrow().map(|s| s.1.last().is_some_and(|g| g.implicit) && s.1.len() > 1).unwrap_or(false))
+    ANIMATOR_DEPTH.with(|d| d.get() > 0)
+        || STATE
+            .with(|s| s.try_borrow().map(|s| s.1.last().is_some_and(|g| g.implicit) && s.1.len() > 1).unwrap_or(false))
 }
 
 thread_local! {
+    static ANIMATOR_DEPTH: Cell<usize> = const { Cell::new(0) };
     /// The thread's context and the groups open on it, innermost last
     /// (the first is outside any group).
     static STATE: RefCell<(Option<Retained<NSAnimationContext>>, Vec<Group>)> =
         RefCell::new((None, vec![Group::default()]));
+}
+
+struct AnimatorIvars {
+    target: Retained<NSView>,
+}
+
+define_class!(
+    #[unsafe(super(NSProxy))]
+    #[name = "_SidestepViewAnimator"]
+    #[ivars = AnimatorIvars]
+    struct ViewAnimator;
+
+    impl ViewAnimator {
+        // Real method entries also let objc2 validate these signatures in
+        // debug builds, before Objective-C's forwarding is entered.
+        #[unsafe(method(setFrame:))]
+        fn set_frame(&self, frame: NSRect) {
+            with_animator(|| self.ivars().target.setFrame(frame));
+        }
+
+        #[unsafe(method(setFrameOrigin:))]
+        fn set_frame_origin(&self, origin: NSPoint) {
+            with_animator(|| self.ivars().target.setFrameOrigin(origin));
+        }
+
+        #[unsafe(method(setFrameSize:))]
+        fn set_frame_size(&self, size: NSSize) {
+            with_animator(|| self.ivars().target.setFrameSize(size));
+        }
+
+        #[unsafe(method(setBounds:))]
+        fn set_bounds(&self, bounds: NSRect) {
+            with_animator(|| self.ivars().target.setBounds(bounds));
+        }
+
+        #[unsafe(method(setBoundsOrigin:))]
+        fn set_bounds_origin(&self, origin: NSPoint) {
+            with_animator(|| self.ivars().target.setBoundsOrigin(origin));
+        }
+
+        #[unsafe(method(setBoundsSize:))]
+        fn set_bounds_size(&self, size: NSSize) {
+            with_animator(|| self.ivars().target.setBoundsSize(size));
+        }
+
+        #[unsafe(method(setAlphaValue:))]
+        fn set_alpha_value(&self, alpha: f64) {
+            with_animator(|| self.ivars().target.setAlphaValue(alpha));
+        }
+
+        #[unsafe(method(setHidden:))]
+        fn set_hidden(&self, hidden: bool) {
+            with_animator(|| self.ivars().target.setHidden(hidden));
+        }
+
+        #[unsafe(method_id(methodSignatureForSelector:))]
+        fn method_signature(&self, sel: Sel) -> Option<Retained<NSMethodSignature>> {
+            // SAFETY: NSView implements NSObject's method signatures.
+            unsafe { msg_send![&*self.ivars().target, methodSignatureForSelector: sel] }
+        }
+
+        #[unsafe(method(forwardInvocation:))]
+        fn forward_invocation(&self, invocation: &NSInvocation) {
+            // SAFETY: the invocation's signature comes from this target,
+            // which is retained for the proxy's lifetime.
+            with_animator(|| unsafe { invocation.invokeWithTarget(&self.ivars().target) });
+        }
+    }
+);
+
+fn with_animator(f: impl FnOnce()) {
+    // Outside an explicit group, AppKit's animator uses the current
+    // context's default duration and timing function.
+    let own_group = !in_group();
+    if own_group {
+        begin();
+    }
+    struct Scope(bool);
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            ANIMATOR_DEPTH.with(|d| d.set(d.get() - 1));
+            if self.0 {
+                end(None);
+            }
+        }
+    }
+    ANIMATOR_DEPTH.with(|d| d.set(d.get() + 1));
+    let _scope = Scope(own_group);
+    f();
+}
+
+/// An animator has the target's static type in AppKit's protocol, while
+/// its dynamic type is a forwarding proxy. NSProxy has no initializer.
+pub(crate) fn view_animator(view: &NSView) -> Retained<NSView> {
+    use objc2::Message;
+    let mut this: PartialInit<ViewAnimator> = ViewAnimator::alloc().set_ivars(AnimatorIvars { target: view.retain() });
+    let ptr = PartialInit::as_mut_ptr(&mut this);
+    std::mem::forget(this);
+    // SAFETY: an allocated proxy with initialized ivars, transferring
+    // its owned reference; forwarded methods have NSView's signatures.
+    let proxy = unsafe { Retained::from_raw(ptr) }.expect("an allocated animator");
+    unsafe { Retained::cast_unchecked(proxy) }
 }
 
 /// Run `f` on the innermost group's settings.
@@ -224,8 +332,13 @@ fn run_group(changes: &DynBlock<dyn Fn(NonNull<NSAnimationContext>) + '_>, compl
 /// for none).
 fn schedule(delay: NSTimeInterval, handler: Completion) {
     let block = RcBlock::new(move |_timer: NonNull<NSTimer>| handler.call(()));
-    // SAFETY: the block owns what it calls, and the timer copies it.
-    let _ = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(delay, false, &block) };
+    // SAFETY: the block owns what it calls, and the timer copies it. A
+    // completion still runs while a control tracks the mouse, or a modal
+    // loop is open, just as the animation itself keeps being displayed.
+    unsafe {
+        let timer = NSTimer::timerWithTimeInterval_repeats_block(delay, false, &block);
+        NSRunLoop::currentRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes);
+    }
 }
 
 #[cfg(test)]

@@ -1346,14 +1346,19 @@ compositor.
   symbol names to Sidestep's own line drawings, template images drawn by
   a handler, sized and weighted by an `NSImageSymbolConfiguration`. No SF
   Symbols artwork is used; other names give nil.
-- **Animation.** `animator` is the view or window itself (as objc2 types
-  it), so changes made through it apply at once. An `NSAnimationContext`
-  group is a Core Animation transaction with the group's duration and
-  timing function: layers changed in it animate over them, and so do
-  layer-backed views' frame and alpha changes while the group allows
-  implicit animation (see [Core Animation](#core-animation)). The context
-  keeps its settings per group and runs completion handlers from the run
-  loop once a group's duration has passed.
+- **Animation.** A view's `animator` is a proxy (typed as the view, as
+  objc2 types it) that makes each change in an animation group, its own
+  unless one is open, with implicit animation allowed for that change
+  alone: a layer-backed view's frame, bounds and alpha animate over the
+  group's duration on the render thread, and other messages are passed on.
+  A window's `animator` is the window, so its changes apply at once. An
+  `NSAnimationContext` group is a Core Animation transaction with the
+  group's duration and timing function: layers changed in it animate over
+  them, and so do layer-backed views' frame and alpha changes while the
+  group allows implicit animation (see [Core Animation](#core-animation)).
+  The context keeps its settings per group and runs completion handlers
+  from the run loop once a group's duration has passed, in the common
+  modes, so while a control tracks the mouse too.
 
 ### CoreGraphics
 
@@ -2383,7 +2388,7 @@ count and autoreversing don't limit its sublayers' time; the `frame` key
 path doesn't animate, and gradient `colors` and `locations` don't when
 the model has none; a value function given a value macOS raises for (a
 lone number for a scale or translation, a missing `from` or `to`) does
-nothing; changes made through `animator` apply at once; the continuous
+nothing; changes made through a window's `animator` apply at once; the continuous
 corner curve (`render::rounded_rect`'s table, of which only the reach is
 measured) is tighter near the edge than macOS's; `renderInContext:` follows the screen where macOS's
 `renderInContext:` doesn't (it draws sublayers by `zPosition`, and honors

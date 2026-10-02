@@ -32,8 +32,8 @@ mod linux {
     use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
     use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
     use objc2_app_kit::{
-        NSAppearance, NSAppearanceNameAqua, NSApplication, NSBackingStoreType, NSColor, NSRectFill, NSView, NSWindow,
-        NSWindowStyleMask,
+        NSAnimatablePropertyContainer, NSAnimationContext, NSAppearance, NSAppearanceNameAqua, NSApplication,
+        NSBackingStoreType, NSColor, NSRectFill, NSView, NSWindow, NSWindowStyleMask,
     };
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
     use objc2_core_graphics::CGColor;
@@ -265,6 +265,85 @@ mod linux {
         near(px(&w, 20, 80), [0, 0, 255, 255], 0);
         near(px(&w, 70, 80), [255, 0, 0, 255], 0);
         blue.removeFromSuperlayer();
+        w.close();
+        testing::settle();
+    }
+
+    fn animator_interpolates_without_enabling_implicit_changes(mtm: MainThreadMarker) {
+        let (w, painter) = shown(mtm);
+        let child = Painter::new(mtm, rect(10.0, 10.0, 20.0, 20.0), [0.0, 0.0, 1.0]);
+        painter.addSubview(&child);
+        show(&w);
+        let layer = child.layer().unwrap();
+        let moving = child.clone();
+        let changes = block2::RcBlock::new(move |context: std::ptr::NonNull<NSAnimationContext>| {
+            let context = unsafe { context.as_ref() };
+            context.setDuration(LONG);
+            context.setTimingFunction(Some(&linear()));
+            assert!(!context.allowsImplicitAnimation());
+            moving.animator().setFrame(rect(110.0, 10.0, 20.0, 20.0));
+            moving.animator().setAlphaValue(0.5);
+            // An ordinary setter in this same group still applies at once.
+            moving.setBoundsOrigin(NSPoint::new(1.0, 0.0));
+        });
+        NSAnimationContext::runAnimationGroup(&changes);
+        show(&w);
+        let animation = unsafe { layer.animationForKey(&NSString::from_str("position")) }
+            .expect("animator creates an animation even when allowsImplicitAnimation is false");
+        let begin = animation.beginTime();
+        let draws = child.ivars().draws.get();
+        for step in 0..=20 {
+            let progress = step as f64 / 20.0;
+            let p = testing::presented_layer(&layer, begin + LONG * progress).unwrap();
+            assert!((p.position[0] - (10.0 + 100.0 * progress)).abs() < 0.01, "{:?}", p.position);
+            assert!((p.opacity - (1.0 - 0.5 * progress)).abs() < 0.01, "{}", p.opacity);
+            assert_eq!(p.bounds[0], 1.0, "direct setters remain immediate");
+            testing::composite_at(&w, begin + LONG * progress);
+        }
+        assert_eq!(child.ivars().draws.get(), draws, "animation reuses cached view drawing");
+        w.close();
+        testing::settle();
+    }
+
+    fn animator_resizes_and_completes_while_tracking(mtm: MainThreadMarker) {
+        let (w, painter) = shown(mtm);
+        let target = painter.clone();
+        let changes = block2::RcBlock::new(move |context: std::ptr::NonNull<NSAnimationContext>| {
+            // SAFETY: the animation group supplies its context.
+            let context = unsafe { context.as_ref() };
+            context.setDuration(LONG);
+            context.setTimingFunction(Some(&linear()));
+            target.animator().setFrameSize(NSSize::new(100.0, 100.0));
+        });
+        NSAnimationContext::runAnimationGroup(&changes);
+        show(&w);
+        let layer = painter.layer().unwrap();
+        let bounds = unsafe { layer.animationForKey(&NSString::from_str("bounds")) }.expect("animated resize");
+        let begin = bounds.beginTime();
+        let draws = painter.ivars().draws.get();
+        for step in 0..=20 {
+            let progress = step as f64 / 20.0;
+            let p = testing::presented_layer(&layer, begin + LONG * progress).unwrap();
+            assert!((p.bounds[2] - (200.0 - 100.0 * progress)).abs() < 0.01);
+            testing::composite_at(&w, begin + LONG * progress);
+        }
+        assert_eq!(painter.ivars().draws.get(), draws);
+
+        let done = std::rc::Rc::new(Cell::new(false));
+        let completed = done.clone();
+        let changes = block2::RcBlock::new(|context: std::ptr::NonNull<NSAnimationContext>| {
+            unsafe { context.as_ref() }.setDuration(0.0);
+        });
+        let completion = block2::RcBlock::new(move || completed.set(true));
+        NSAnimationContext::runAnimationGroup_completionHandler(&changes, Some(&completion));
+        // Keep the run loop in mouse tracking, as a held control does.
+        unsafe {
+            NSRunLoop::currentRunLoop().runMode_beforeDate(
+                objc2_app_kit::NSEventTrackingRunLoopMode,
+                &objc2_foundation::NSDate::dateWithTimeIntervalSinceNow(0.02),
+            );
+        }
+        assert!(done.get(), "animation completion must not wait for mouse tracking to end");
         w.close();
         testing::settle();
     }
@@ -526,6 +605,11 @@ mod linux {
         let tests: &[Test] = &[
             ("views_and_layers_composite", views_and_layers_composite),
             ("animations_draw_on_the_render_thread", animations_draw_on_the_render_thread),
+            (
+                "animator_interpolates_without_enabling_implicit_changes",
+                animator_interpolates_without_enabling_implicit_changes,
+            ),
+            ("animator_resizes_and_completes_while_tracking", animator_resizes_and_completes_while_tracking),
             ("opacity_and_transitions", opacity_and_transitions),
             ("masks_hide_what_they_leave_out", masks_hide_what_they_leave_out),
             ("views_update_their_layers", views_update_their_layers),

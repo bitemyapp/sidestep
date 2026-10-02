@@ -224,7 +224,8 @@ pictures on macOS for comparison):
 - `NSGradient`, `NSShadow`, `NSVisualEffectView` (an opaque material),
   `alphaValue`, and `NSAnimationContext` (a Core Animation transaction, in
   which layer-backed views' frame and alpha changes animate while it
-  allows implicit animation; changes through `animator` apply at once).
+  allows implicit animation, as do changes through a view's `animator`;
+  a window's apply at once).
 - CoreGraphics (`coregraphics/`, the gallery's `SCENARIO=cg` page):
   `CGContext` sharing `NSGraphicsContext`'s graphics state (paths, fills,
   strokes, dashes, clips and clips to masks, blend modes, alpha, shadows,
@@ -366,7 +367,7 @@ Next:
   pasteboards.
 - Drawing: text under a rotated transform (glyph runs take a translation
   only), pattern colors (and `patternImage` on threads other than the
-  image's), `-[NSView lockFocus]`, `animator` animating over time, blur behind
+  image's), `-[NSView lockFocus]`, a window's `animator` animating, blur behind
   visual effect views (no Wayland protocol yet), and batching a bitmap
   context's operations instead of rasterizing each at once (layouts other
   than RGBA are unpacked and packed for each).
@@ -387,7 +388,7 @@ Next:
   between layers), `rotationMode`, `contentsCenter`, filters, conic
   gradients, the continuous corner's exact curve, keyframes' tension,
   continuity and bias, overdamped springs as macOS moves them, a layer's
-  own duration and repeats, `animator` animating, `CATextLayer`,
+  own duration and repeats, a window's `animator` animating, `CATextLayer`,
   `CAReplicatorLayer`, `CAScrollLayer`, `CATransformLayer`, `CATiledLayer`
   and `CAEmitterLayer` (`CAMetalLayer` and `CAOpenGLLayer` wait for a GPU
   renderer), and drawing layer trees with a GPU (see architecture.md's
