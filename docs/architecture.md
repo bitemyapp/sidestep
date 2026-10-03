@@ -639,7 +639,9 @@ everything that touches pixels or the display server to a render thread.
 - **Rendering.** The render thread owns the Wayland connection through
   smithay-client-toolkit. It rasterizes operations on the CPU into a cache
   per layer (tiny-skia for paths and images, swash for glyphs), only inside damaged
-  rectangles. The window surface is presented from a few shared-memory
+  rectangles; a scroll layer's tiles keep their paints and rasterize them
+  between frames, in slices, so a tile drawn ahead of a scroll never holds
+  up the next frame. The window surface is presented from a few shared-memory
   buffers, each remembering what changed since it was last written, so a
   frame copies and damages only changed pixels. A Wayland protocol error
   ends the connection; the render thread then stops, and the main thread,
@@ -2200,7 +2202,16 @@ which is how the main thread draws a tile it starts keeping, and a paint
 reaching into the margin of a tile nobody keeps leaves it out. So a tile
 keeps its canvas exactly as long as the main thread keeps the tile (a
 dropped tile's canvas serves the next new one), and the memory cap counts
-every canvas. A tile has buffers only while it is on screen: two, each
+every canvas. A paint costs its message nothing: each tile it reaches
+keeps it, pending, and the render thread rasterizes pending paints oldest
+first while nothing else waits, in slices of 2 ms (it looks for events
+without sleeping while any are left, and rasterizes a slice after handling
+them), so frame callbacks and presents come first; a present finishes the
+pending paints of the tiles it shows before showing them, so no frame
+shows a tile half drawn. A slice ends between operations, never inside a
+group (whose layer lives only while one run draws it), so a tile holds
+what rasterizing it at once would have left (`backend::tiles`'s
+`slices_rasterize_what_painting_at_once_would`). A tile has buffers only while it is on screen: two, each
 remembering the rectangles it misses (as the window's own buffers do), so
 a change uploads only its pixels. An overlay is placed and cropped from
 the origin and viewport of the layer it sits in, with a point's margin of
@@ -2218,11 +2229,16 @@ milliseconds since the first so the two threads' lines line up, for each
 pass the main thread's time (with what layout and `viewWillDraw`, and
 layer-backed views' canvases, took of it) and the tiles it recorded, and
 for each present the render thread's time on the main thread's messages
-since the last present (and the longest of them), the bytes uploaded to
-tiles, overlays and the window, and the surfaces committed.
-`SIDESTEP_TRACE_FRAMES=tiles` adds a line for each tile paint: where it
-is, whether it was drawn ahead, and how many operations and glyph runs it
-holds, which shows a view leaving a tile blank.
+since the last present (and the longest of them, and what it was), what
+the present spent on its layers and on finishing the tiles it showed, the
+time spent rasterizing tiles between frames (and in how many slices), the
+bytes uploaded to tiles, overlays and the window, and the surfaces
+committed. `SIDESTEP_TRACE_FRAMES=tiles` adds a line for each tile paint
+(where it is, whether it was drawn ahead, and how many operations and
+glyph runs it holds, which shows a view leaving a tile blank), for each
+tile a present had to finish (how many paints and operations, over what),
+and for each text view that damages itself after laying out (where), which
+show what a slow present was redrawing.
 
 ### Core Animation
 

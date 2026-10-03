@@ -105,9 +105,10 @@ pub(crate) fn tracing() -> bool {
     trace_level() > 0
 }
 
-/// Whether `SIDESTEP_TRACE_FRAMES=tiles` asks for each tile paint too:
-/// where, why, and how much it drew.
-fn tracing_tiles() -> bool {
+/// Whether `SIDESTEP_TRACE_FRAMES=tiles` asks for more: each tile paint
+/// (where, why, how much it drew), each tile a present finishes, and each
+/// text view damaging itself after laying out.
+pub(crate) fn tracing_tiles() -> bool {
     trace_level() > 1
 }
 

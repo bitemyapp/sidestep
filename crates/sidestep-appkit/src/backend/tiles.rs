@@ -23,6 +23,17 @@
 //! without alpha; transparent layers' tiles are cleared to nothing and
 //! shown with it, over what the window's surface drew below them.
 //!
+//! **Rasterizing.** A paint of tiles costs the message nothing: each tile
+//! it reaches keeps it, pending, and the render thread rasterizes pending
+//! paints oldest first between frames, a slice of
+//! [`super::RASTER_SLICE`] at a time, looking for events between slices
+//! (`rasterize_pending`). So a tile drawn ahead of a scroll is rasterized
+//! while the compositor shows the frame before it, and never holds up a
+//! frame callback or the next present behind it. A present first finishes
+//! the pending paints of the tiles it shows, so no frame shows a tile half
+//! drawn. Slices end between ops, and a group is drawn in one go, so what
+//! a tile holds is what painting it at once would have left.
+//!
 //! **Overlays** hold the views painted over a layer (its overlay
 //! scrollers). They live in the points of the layer the views are drawn
 //! in, the one this layer is nested in (or the window's surface), with a
@@ -49,7 +60,9 @@
 //! surface and so below sheets.
 
 use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use smithay_client_toolkit::compositor::Region;
 use smithay_client_toolkit::reexports::client::Proxy;
@@ -61,7 +74,7 @@ use smithay_client_toolkit::reexports::protocols::wp::viewporter::client::wp_vie
 use smithay_client_toolkit::shm::slot::{Buffer, SlotPool};
 
 use super::{FrameTag, State, as_pixels, copy_rows};
-use crate::protocol::{LayerId, LayerPlace, Op, ROOT_LAYER, Rect, TileKey, WindowId};
+use crate::protocol::{LayerId, LayerPlace, Op, ROOT_LAYER, Rect, TileGrid, TileKey, WindowId};
 use crate::raster::{self, Canvas, Glyphs};
 
 /// A window's scroll layers, and the surfaces they're shown on.
@@ -80,6 +93,9 @@ pub(crate) struct Layers {
     /// Canvases of tiles dropped, for the next tiles (a layer's tiles are
     /// all one size), a few at most.
     spare: Vec<Vec<u32>>,
+    /// Tiles with paints to rasterize, in the order they were painted (a
+    /// tile may be listed again, or no longer have any).
+    queue: VecDeque<(LayerId, TileKey)>,
 }
 
 /// How many dropped tiles' canvases a window keeps for new ones.
@@ -91,12 +107,72 @@ struct Layer {
     overlay: Option<Overlay>,
 }
 
-/// A tile: its pixels, what changed since they were last uploaded, and
-/// its surfaces while it is on screen.
+/// A tile: its pixels, what changed since they were last uploaded (or
+/// will have once its pending paints are rasterized), its surfaces while
+/// it is on screen, and the paints it hasn't rasterized yet, oldest first.
 struct Tile {
     canvas: Vec<u32>,
     dirty: Vec<Rect>,
     shown: Option<Shown>,
+    pending: VecDeque<Pending>,
+}
+
+/// A paint of a tile waiting to be rasterized: its rectangle (layer
+/// points), its ops (shared by the tiles the paint reaches), and how many
+/// of them are drawn.
+struct Pending {
+    rect: Rect,
+    ops: Rc<Vec<Op>>,
+    done: usize,
+}
+
+impl Tile {
+    /// Rasterize the pending paints, until `until` if given (at least one
+    /// op or group, so every call gets on). Returns whether none are left.
+    fn rasterize(
+        &mut self,
+        key: TileKey,
+        grid: TileGrid,
+        scale: f64,
+        glyphs: &mut Glyphs,
+        until: Option<Instant>,
+    ) -> bool {
+        let Tile { canvas, pending, .. } = self;
+        let (x0, y0, w, h) = grid.pixels(key);
+        let mut canvas = Canvas { x0, y0, ..Canvas::new(canvas, w, h, 0.0, scale as f32) };
+        while let Some(p) = pending.front_mut() {
+            if p.done < p.ops.len() {
+                let end = unit_end(&p.ops, p.done);
+                raster::paint(&mut canvas, glyphs, std::slice::from_ref(&p.rect), &p.ops[p.done..end]);
+                p.done = end;
+            }
+            if p.done == p.ops.len() {
+                pending.pop_front();
+            }
+            if !pending.is_empty() && until.is_some_and(|t| Instant::now() >= t) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// Where the drawing that starts with `ops[start]` ends: after that op, or
+/// after the group it begins, which is drawn whole (its layer lives only
+/// while one run of the rasterizer draws it).
+fn unit_end(ops: &[Op], start: usize) -> usize {
+    let mut depth = 0usize;
+    for (i, op) in ops[start..].iter().enumerate() {
+        match op {
+            Op::BeginGroup { .. } => depth += 1,
+            Op::EndGroup => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        if depth == 0 {
+            return start + i + 1;
+        }
+    }
+    ops.len()
 }
 
 /// The views drawn above a layer, on a surface of their own.
@@ -181,17 +257,27 @@ pub(crate) struct Stats {
 
 thread_local! {
     /// Time the render thread spent on the main thread's messages since the
-    /// last present was traced, and the longest of them.
-    static BUSY: std::cell::Cell<(std::time::Duration, std::time::Duration)> = const {
-        std::cell::Cell::new((std::time::Duration::ZERO, std::time::Duration::ZERO))
+    /// last present was traced, and the longest of them and what it was.
+    static BUSY: std::cell::Cell<(Duration, Duration, &'static str)> = const {
+        std::cell::Cell::new((Duration::ZERO, Duration::ZERO, "none"))
     };
+    /// Time spent since then rasterizing tiles between frames, the longest
+    /// slice, and how many there were.
+    static SLICES: std::cell::Cell<(Duration, Duration, u32)> = const {
+        std::cell::Cell::new((Duration::ZERO, Duration::ZERO, 0))
+    };
+    /// Time the last present spent finishing tiles it showed, and on its
+    /// layers in all (finishing, uploading, placing).
+    static FINISHING: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
+    static PRESENTING: std::cell::Cell<Duration> = const { std::cell::Cell::new(Duration::ZERO) };
 }
 
 /// Count a message's handling toward the next trace.
-pub(crate) fn note_busy(spent: std::time::Duration) {
+pub(crate) fn note_busy(spent: Duration, kind: &'static str) {
     BUSY.with(|busy| {
-        let (total, longest) = busy.get();
-        busy.set((total + spent, longest.max(spent)));
+        let (total, longest, what) = busy.get();
+        let (longest, what) = if spent > longest { (spent, kind) } else { (longest, what) };
+        busy.set((total + spent, longest, what));
     });
 }
 
@@ -200,13 +286,23 @@ pub(crate) fn note_busy(spent: std::time::Duration) {
 /// which it commits too.
 pub(crate) fn trace(window: WindowId, stats: &Stats, damage: &[Rect]) {
     let window_bytes: f32 = damage.iter().map(|r| (r.x1 - r.x0) * (r.y1 - r.y0) * 4.0).sum();
-    let (busy, longest) = BUSY.with(|busy| busy.replace(Default::default()));
+    let (busy, longest, what) = BUSY.with(|busy| busy.replace((Duration::ZERO, Duration::ZERO, "none")));
+    let (sliced, longest_slice, slices) = SLICES.with(|s| s.replace(Default::default()));
+    let finishing = FINISHING.with(|f| f.replace(Duration::ZERO));
+    let presenting = PRESENTING.with(|f| f.replace(Duration::ZERO));
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
     eprintln!(
-        "sidestep @{:.1} ms frame: window {window} render: {:.2} ms busy (longest message {:.2} ms), {} bytes \
-         uploaded to tiles, {} to overlays, {} to the window; {} surfaces committed, {} tiles on screen, {} kept",
+        "sidestep @{:.1} ms frame: window {window} render: {:.2} ms busy (longest {:.2} ms, {what}; layers \
+         {:.2} ms, {:.2} ms of it finishing tiles shown), {:.2} ms rasterizing tiles between frames ({slices} \
+         slices, longest {:.2} ms), {} bytes uploaded to tiles, {} to overlays, {} to the window; {} surfaces \
+         committed, {} tiles on screen, {} kept",
         crate::layers::trace_ms(),
-        busy.as_secs_f64() * 1000.0,
-        longest.as_secs_f64() * 1000.0,
+        ms(busy),
+        ms(longest),
+        ms(presenting),
+        ms(finishing),
+        ms(sliced),
+        ms(longest_slice),
         stats.bytes,
         stats.overlay_bytes,
         window_bytes as usize,
@@ -282,27 +378,75 @@ pub(crate) fn rescaled(layers: &mut Layers) {
     }
 }
 
-/// Paint `rects` of a layer's tiles (layer points) or of its overlay (the
-/// points of the layer it sits in).
-pub(crate) fn paint(state: &mut State, window: WindowId, id: LayerId, overlay: bool, rects: &[Rect], ops: &[Op]) {
+/// Paint `rects` (layer points) of a layer's tiles: they keep the paint,
+/// to rasterize between frames or when a present shows them.
+pub(crate) fn paint_tiles(state: &mut State, window: WindowId, id: LayerId, rects: &[Rect], ops: Vec<Op>) {
+    let Some(win) = state.windows.get_mut(&window) else { return };
+    let scale = win.scale;
+    let Layers { layers, spare, queue, .. } = &mut win.layers;
+    let Some(layer) = layers.get_mut(&id) else { return };
+    let ops = Rc::new(ops);
+    queue.extend(layer.paint_tiles(spare, scale, rects, &ops).into_iter().map(|key| (id, key)));
+}
+
+/// Paint `rects` of a layer's overlay (the points of the layer it sits
+/// in), now: an overlay shows wherever its layer does.
+pub(crate) fn paint_overlay(state: &mut State, window: WindowId, id: LayerId, rects: &[Rect], ops: &[Op]) {
     let State { windows, glyphs, .. } = state;
     let Some(win) = windows.get_mut(&window) else { return };
     let scale = win.scale;
-    let Layers { layers, spare, .. } = &mut win.layers;
-    let Some(layer) = layers.get_mut(&id) else { return };
-    if overlay {
-        layer.paint_overlay(glyphs, scale, rects, ops);
-    } else {
-        layer.paint_tiles(spare, glyphs, scale, rects, ops);
+    let Some(layer) = win.layers.layers.get_mut(&id) else { return };
+    layer.paint_overlay(glyphs, scale, rects, ops);
+}
+
+/// Whether tiles of these layers have paints to rasterize.
+pub(crate) fn owed(layers: &Layers) -> bool {
+    !layers.queue.is_empty()
+}
+
+/// Rasterize the tiles' pending paints, oldest first, until `until`.
+/// Returns whether any are left.
+pub(crate) fn rasterize_pending(layers: &mut Layers, glyphs: &mut Glyphs, scale: f64, until: Instant) -> bool {
+    let started = Instant::now();
+    let mut left = false;
+    while let Some(&(id, key)) = layers.queue.front() {
+        if let Some(layer) = layers.layers.get_mut(&id)
+            && let Some(tile) = layer.tiles.get_mut(&key)
+            && !tile.rasterize(key, layer.place.grid, scale, glyphs, Some(until))
+        {
+            left = true;
+            break;
+        }
+        layers.queue.pop_front();
+        if Instant::now() >= until {
+            left = !layers.queue.is_empty();
+            break;
+        }
     }
+    if crate::layers::tracing() {
+        let spent = started.elapsed();
+        SLICES.with(|s| {
+            let (total, longest, count) = s.get();
+            s.set((total + spent, longest.max(spent), count + 1));
+        });
+    }
+    left
 }
 
 impl Layer {
-    /// Paint `rects` into the tiles they reach: the tiles kept, and a tile
-    /// a rectangle covers whole (the main thread drawing a new one).
-    fn paint_tiles(&mut self, spare: &mut Vec<Vec<u32>>, glyphs: &mut Glyphs, scale: f64, rects: &[Rect], ops: &[Op]) {
+    /// Have the tiles `rects` reach keep `ops` to rasterize: the tiles kept,
+    /// and a tile a rectangle covers whole (the main thread drawing a new
+    /// one). Returns the tiles that had nothing pending before.
+    fn paint_tiles(
+        &mut self,
+        spare: &mut Vec<Vec<u32>>,
+        scale: f64,
+        rects: &[Rect],
+        ops: &Rc<Vec<Op>>,
+    ) -> Vec<TileKey> {
         let grid = self.place.grid;
         let clear = self.place.opaque.map_or(0, raster::premultiplied);
+        let mut queued = Vec::new();
         for rect in rects {
             let Some((columns, rows)) = grid.padded_keys(rect, scale) else { continue };
             for row in rows {
@@ -322,17 +466,21 @@ impl Layer {
                             let mut canvas = spare.pop().unwrap_or_default();
                             canvas.clear();
                             canvas.resize((w * h) as usize, clear);
-                            new.insert(Tile { canvas, dirty: Vec::new(), shown: None })
+                            new.insert(Tile { canvas, dirty: Vec::new(), shown: None, pending: VecDeque::new() })
                         }
                     };
-                    let mut canvas = Canvas { x0, y0, ..Canvas::new(&mut tile.canvas, w, h, 0.0, scale as f32) };
-                    raster::paint(&mut canvas, glyphs, std::slice::from_ref(rect), ops);
+                    if tile.pending.is_empty() {
+                        queued.push(key);
+                    }
+                    tile.pending.push_back(Pending { rect: *rect, ops: ops.clone(), done: 0 });
+                    let canvas = Canvas { x0, y0, ..Canvas::new(&mut tile.canvas, w, h, 0.0, scale as f32) };
                     if let Some(r) = canvas.pixels(rect) {
                         add_dirty(&mut tile.dirty, px_rect(r));
                     }
                 }
             }
         }
+        queued
     }
 
     fn paint_overlay(&mut self, glyphs: &mut Glyphs, scale: f64, rects: &[Rect], ops: &[Op]) {
@@ -389,6 +537,15 @@ struct Ctx<'a> {
 /// Show the window's layers as they now are, before its surface commits:
 /// place, crop, upload and stack the surfaces on screen.
 pub(crate) fn present(state: &mut State, window: WindowId, seq: u64) -> Stats {
+    let started = Instant::now();
+    let stats = present_layers(state, window, seq);
+    if crate::layers::tracing() {
+        PRESENTING.with(|p| p.set(started.elapsed()));
+    }
+    stats
+}
+
+fn present_layers(state: &mut State, window: WindowId, seq: u64) -> Stats {
     if state.windows.get(&window).is_none_or(|w| w.layers.layers.is_empty() && w.layers.stack.is_empty()) {
         return Stats::default();
     }
@@ -403,7 +560,7 @@ pub(crate) fn present(state: &mut State, window: WindowId, seq: u64) -> Stats {
             r
         }
     };
-    let State { windows, pool, subcompositor, viewporter, qh, .. } = state;
+    let State { windows, pool, subcompositor, viewporter, qh, glyphs, .. } = state;
     let Some(win) = windows.get_mut(&window) else { return Stats::default() };
     let parent = win.surface().clone();
     let (scale, bounds) = (win.scale, Rect::new(0.0, 0.0, win.width as f32, win.height as f32));
@@ -476,6 +633,23 @@ pub(crate) fn present(state: &mut State, window: WindowId, seq: u64) -> Stats {
                 }
                 continue;
             };
+            // What it shows is drawn whole.
+            if !tile.pending.is_empty() {
+                let started = Instant::now();
+                let (paints, ops) =
+                    (tile.pending.len(), tile.pending.iter().map(|p| p.ops.len() - p.done).sum::<usize>());
+                let area = tile.pending.iter().map(|p| p.rect).reduce(|a, r| a.union(&r));
+                tile.rasterize(key, place.grid, scale, glyphs, None);
+                FINISHING.with(|f| f.set(f.get() + started.elapsed()));
+                if crate::layers::tracing_tiles() {
+                    eprintln!(
+                        "sidestep @{:.1} ms tile: window {window} layer {id:#x} {key:?} finished to show: {paints} \
+                         paints, {ops} ops, over {area:?}, in {:.2} ms",
+                        crate::layers::trace_ms(),
+                        started.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+            }
             let (.., w, h) = place.grid.pixels(key);
             let at = (shown.x0 as i32, shown.y0 as i32);
             let canvas = Pixels { px: &tile.canvas, size: (w, h), alpha: place.opaque.is_none() };
@@ -786,23 +960,23 @@ mod tests {
         let extent = Rect::new(0.0, 0.0, 900.0, 5000.0);
         let mut layer = Layer { place: place([0.0, 0.0], extent, scale), tiles: BTreeMap::new(), overlay: None };
         let grid = layer.place.grid;
-        let (mut spare, mut glyphs) = (Vec::new(), Glyphs::default());
-        let fill = |r: Rect| vec![Op::Fill { rect: r, color: [1.0, 0.0, 0.0, 1.0] }];
+        let mut spare = Vec::new();
+        let fill = |r: Rect| Rc::new(vec![Op::Fill { rect: r, color: [1.0, 0.0, 0.0, 1.0] }]);
         let keys = |l: &Layer| l.tiles.keys().copied().collect::<Vec<_>>();
         let padded = grid.padded([0, 5], scale);
-        layer.paint_tiles(&mut spare, &mut glyphs, scale, &[padded], &fill(padded));
+        layer.paint_tiles(&mut spare, scale, &[padded], &fill(padded));
         assert_eq!(keys(&layer), [[0, 5]]);
         // Damage across the edge between rows 5 and 6: row 5 only.
         let edge = Rect::new(10.0, 3071.0, 50.0, 3073.0);
         layer.tiles.values_mut().for_each(|t| t.dirty.clear());
-        layer.paint_tiles(&mut spare, &mut glyphs, scale, &[edge], &fill(edge));
+        layer.paint_tiles(&mut spare, scale, &[edge], &fill(edge));
         assert_eq!(keys(&layer), [[0, 5]]);
         assert!(!layer.tiles[&[0, 5]].dirty.is_empty());
         // Row 6 recorded: both hold what's painted across the edge.
         let next = grid.padded([0, 6], scale);
-        layer.paint_tiles(&mut spare, &mut glyphs, scale, &[next], &fill(next));
+        layer.paint_tiles(&mut spare, scale, &[next], &fill(next));
         layer.tiles.values_mut().for_each(|t| t.dirty.clear());
-        layer.paint_tiles(&mut spare, &mut glyphs, scale, &[edge], &fill(edge));
+        layer.paint_tiles(&mut spare, scale, &[edge], &fill(edge));
         assert_eq!(keys(&layer), [[0, 5], [0, 6]]);
         assert!(layer.tiles.values().all(|t| !t.dirty.is_empty()));
         // At a fractional scale too.
@@ -811,13 +985,138 @@ mod tests {
         let grid = layer.place.grid;
         for key in [[0, 3], [0, 4]] {
             let r = grid.padded(key, scale);
-            layer.paint_tiles(&mut spare, &mut glyphs, scale, &[r], &fill(r));
+            layer.paint_tiles(&mut spare, scale, &[r], &fill(r));
         }
         assert_eq!(keys(&layer), [[0, 3], [0, 4]]);
         for key in [[0, 3], [0, 4]] {
             layer.tiles.remove(&key);
         }
         assert!(layer.tiles.is_empty());
+    }
+
+    /// Ops for a tile: plain fills, a path, a group inside a group fading
+    /// them, and a shadow, over `r`.
+    fn mixed_ops(r: Rect) -> Vec<Op> {
+        use crate::protocol::{Blend, Draw, Paint, ShadowSpec};
+        let path = |x0: f32, y0: f32, x1: f32, y1: f32| {
+            std::sync::Arc::new(tiny_skia::PathBuilder::from_rect(tiny_skia::Rect::from_ltrb(x0, y0, x1, y1).unwrap()))
+        };
+        let draw = Draw {
+            xf: tiny_skia::Transform::identity(),
+            blend: Blend::SourceOver,
+            aa: true,
+            clip: r,
+            mask: None,
+            shadow: None,
+        };
+        let shadowed = Draw {
+            shadow: Some(std::sync::Arc::new(ShadowSpec {
+                dx: 2.0,
+                dy: 3.0,
+                blur: 6.0,
+                color: [0.0, 0.0, 0.0, 0.5],
+                only: false,
+            })),
+            ..draw.clone()
+        };
+        let (x, y) = (r.x0, r.y0);
+        vec![
+            Op::FillWith { rect: r, color: [1.0, 1.0, 1.0, 1.0], blend: crate::protocol::Blend::Copy },
+            Op::Fill { rect: Rect::new(x + 10.0, y + 10.0, x + 200.0, y + 60.0), color: [1.0, 0.0, 0.0, 1.0] },
+            Op::BeginGroup { alpha: 0.5, draw: draw.clone() },
+            Op::Fill { rect: Rect::new(x + 20.0, y + 30.0, x + 120.0, y + 160.0), color: [0.0, 0.0, 1.0, 1.0] },
+            Op::BeginGroup { alpha: 0.8, draw: draw.clone() },
+            Op::FillPath {
+                path: path(x + 60.0, y + 40.0, x + 300.0, y + 90.0),
+                even_odd: false,
+                paint: Paint::Solid([0.0, 1.0, 0.0, 1.0]),
+                draw: draw.clone(),
+            },
+            Op::EndGroup,
+            Op::Fill { rect: Rect::new(x + 100.0, y + 100.0, x + 250.0, y + 200.0), color: [1.0, 1.0, 0.0, 1.0] },
+            Op::EndGroup,
+            Op::FillPath {
+                path: path(x + 150.0, y + 220.0, x + 400.0, y + 300.0),
+                even_odd: false,
+                paint: Paint::Solid([0.5, 0.0, 0.5, 1.0]),
+                draw: shadowed,
+            },
+            Op::Fill { rect: Rect::new(x + 5.0, y + 400.0, x + 80.0, y + 450.0), color: [0.0, 0.5, 0.5, 0.5] },
+        ]
+    }
+
+    /// Rasterized between frames a group or an op at a time, oldest paint
+    /// first, a tile holds what painting it at once would have left; the
+    /// queue skips tiles dropped meanwhile and runs dry.
+    #[test]
+    fn slices_rasterize_what_painting_at_once_would() {
+        for scale in [1.0, 2.0] {
+            let extent = Rect::new(0.0, 0.0, 900.0, 3000.0);
+            let mut layers = Layers::default();
+            let id: LayerId = 8;
+            layers
+                .layers
+                .insert(id, Layer { place: place([0.0, 0.0], extent, scale), tiles: BTreeMap::new(), overlay: None });
+            let grid = layers.layers[&id].place.grid;
+            let keys = [[0, 0], [0, 1], [0, 2]];
+            let mut paints = Vec::new();
+            for key in keys {
+                let whole = grid.padded(key, scale);
+                paints.push((whole, mixed_ops(whole)));
+            }
+            // A second paint of the first tile, damage over part of it.
+            let part = {
+                let w = grid.padded([0, 0], scale);
+                Rect::new(w.x0 + 30.0, w.y0 + 50.0, w.x0 + 330.0, w.y0 + 250.0)
+            };
+            paints.push((part, mixed_ops(part)));
+            let Layers { layers: all, spare, queue, .. } = &mut layers;
+            for (rect, ops) in &paints {
+                let layer = all.get_mut(&id).unwrap();
+                queue.extend(
+                    layer
+                        .paint_tiles(spare, scale, std::slice::from_ref(rect), &Rc::new(ops.clone()))
+                        .into_iter()
+                        .map(|k| (id, k)),
+                );
+            }
+            assert_eq!(layers.queue.len(), 3, "a tile is queued once while it has paints pending");
+            // The last tile goes before it is rasterized.
+            layers.layers.get_mut(&id).unwrap().tiles.remove(&keys[2]);
+            // A slice ending at once still draws an op or a group.
+            let mut glyphs = Glyphs::default();
+            let mut slices = 0;
+            while rasterize_pending(&mut layers, &mut glyphs, scale, Instant::now()) {
+                slices += 1;
+                assert!(slices < 1000, "rasterizing gets on");
+            }
+            assert!(slices > 8, "{slices} slices: each did a little");
+            assert!(!owed(&layers));
+            // Painted at once, as each paint came, into the tiles kept then
+            // and the tiles it covers whole.
+            let mut reference: BTreeMap<TileKey, Vec<u32>> = BTreeMap::new();
+            for (rect, ops) in &paints {
+                let (columns, rows) = grid.padded_keys(rect, scale).unwrap();
+                for row in rows {
+                    for column in columns.clone() {
+                        let key = [column, row];
+                        let (x0, y0, w, h) = grid.pixels(key);
+                        let whole = grid.padded(key, scale);
+                        if !reference.contains_key(&key) && rect.intersect(&whole) != whole {
+                            continue;
+                        }
+                        let px = reference.entry(key).or_insert_with(|| vec![0; (w * h) as usize]);
+                        let mut canvas = Canvas { x0, y0, ..Canvas::new(px, w, h, 0.0, scale as f32) };
+                        raster::paint(&mut canvas, &mut glyphs, std::slice::from_ref(rect), ops);
+                    }
+                }
+            }
+            for key in &keys[..2] {
+                let tile = &layers.layers[&id].tiles[key];
+                assert!(tile.pending.is_empty());
+                assert!(tile.canvas == reference[key], "scale {scale}, tile {key:?}: sliced pixels differ");
+            }
+        }
     }
 
     /// A buffer written misses nothing; the other learns what it now

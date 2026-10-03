@@ -2378,6 +2378,15 @@ impl NSTextViewImpl {
         let bottom =
             if y1.is_finite() { (y1 + o.y).min(b.origin.y + b.size.height) } else { b.origin.y + b.size.height };
         if bottom > top {
+            if crate::layers::tracing_tiles() {
+                eprintln!(
+                    "sidestep @{:.1} ms text layout damage: view {:p} y {top:.0}..{bottom:.0} (laid out \
+                     {y0:.0}..{y1:.0}{})",
+                    crate::layers::trace_ms(),
+                    view,
+                    if idle { ", in the background" } else { "" }
+                );
+            }
             view.setNeedsDisplayInRect(NSRect::new(
                 NSPoint::new(b.origin.x, top),
                 NSSize::new(b.size.width, bottom - top),

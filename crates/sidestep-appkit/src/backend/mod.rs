@@ -172,9 +172,18 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
         .handle()
         .insert_source(channel, |event, _, state: &mut State| match event {
             ChannelEvent::Msg(msg) if crate::layers::tracing() => {
+                let kind = match &msg {
+                    ToRender::Paint { target: Target::Tiles(_), .. } => "a tiles paint",
+                    ToRender::Paint { target: Target::Overlay(_), .. } => "an overlay paint",
+                    ToRender::Paint { target: Target::Root, .. } => "a window paint",
+                    ToRender::Paint { target: Target::Content(_), .. } => "a layer canvas paint",
+                    ToRender::Present { .. } => "a present",
+                    ToRender::Commit(_) => "a layer commit",
+                    _ => "another message",
+                };
                 let started = std::time::Instant::now();
                 state.handle(msg);
-                tiles::note_busy(started.elapsed());
+                tiles::note_busy(started.elapsed(), kind);
             }
             ChannelEvent::Msg(msg) => state.handle(msg),
             ChannelEvent::Closed => state.exit = true,
@@ -226,7 +235,11 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
     seat::bind_existing(&mut state, &globals);
     outputs::started(&state, &globals);
     while !state.exit {
-        if event_loop.dispatch(None, &mut state).is_err() {
+        // While tiles have paints to rasterize, look for events without
+        // waiting, and rasterize a slice after handling them: frame
+        // callbacks and the main thread's presents come first.
+        let owed = state.windows.values().any(|w| tiles::owed(&w.layers));
+        if event_loop.dispatch(owed.then_some(std::time::Duration::ZERO), &mut state).is_err() {
             break;
         }
         // The Wayland source reports only I/O errors. After a protocol error
@@ -236,8 +249,14 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
             eprintln!("sidestep: Wayland protocol error: {error}");
             break;
         }
+        state.rasterize_tiles();
     }
 }
+
+/// How long the render thread rasterizes tiles between looks for events:
+/// well inside a frame at 120 Hz, so a frame callback or a present waits
+/// on it little.
+pub(crate) const RASTER_SLICE: std::time::Duration = std::time::Duration::from_micros(2_000);
 
 pub(crate) struct State {
     registry: RegistryState,
@@ -950,9 +969,21 @@ impl State {
     fn paint_target(&mut self, window: WindowId, target: Target, rects: Vec<Rect>, ops: Vec<Op>) {
         match target {
             Target::Root => self.paint(window, rects, ops),
-            Target::Tiles(layer) => tiles::paint(self, window, layer, false, &rects, &ops),
-            Target::Overlay(layer) => tiles::paint(self, window, layer, true, &rects, &ops),
+            Target::Tiles(layer) => tiles::paint_tiles(self, window, layer, &rects, ops),
+            Target::Overlay(layer) => tiles::paint_overlay(self, window, layer, &rects, &ops),
             Target::Content(_) => {}
+        }
+    }
+
+    /// Rasterize tiles' pending paints for a slice of time (see `tiles`).
+    fn rasterize_tiles(&mut self) {
+        let until = std::time::Instant::now() + RASTER_SLICE;
+        let State { windows, glyphs, .. } = self;
+        for win in windows.values_mut() {
+            if tiles::owed(&win.layers) && tiles::rasterize_pending(&mut win.layers, glyphs, win.scale, until) {
+                // The slice is over.
+                return;
+            }
         }
     }
 
