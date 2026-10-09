@@ -100,34 +100,7 @@ const MEMORY_CAP: usize = 96 << 20;
 /// How long a pass may have spent before it puts tiles ahead off.
 const PREFETCH_BUDGET: Duration = Duration::from_millis(4);
 
-/// Whether `SIDESTEP_TRACE_FRAMES` asks for counters (read once).
-pub(crate) fn tracing() -> bool {
-    trace_level() > 0
-}
-
-/// Whether `SIDESTEP_TRACE_FRAMES=tiles` asks for more: each tile paint
-/// (where, why, how much it drew), each tile a present finishes, and each
-/// text view damaging itself after laying out.
-pub(crate) fn tracing_tiles() -> bool {
-    trace_level() > 1
-}
-
-fn trace_level() -> u8 {
-    static LEVEL: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
-    *LEVEL.get_or_init(|| match std::env::var("SIDESTEP_TRACE_FRAMES").as_deref() {
-        Err(_) | Ok("0") => 0,
-        Ok("tiles") => 2,
-        Ok(_) => 1,
-    })
-}
-
-/// Milliseconds since the first traced line, which every
-/// `SIDESTEP_TRACE_FRAMES` line starts with, so the main thread's passes
-/// and the render thread's presents line up.
-pub(crate) fn trace_ms() -> f64 {
-    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    START.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0
-}
+pub(crate) use sidestep_engine::trace::{trace_ms, tracing, tracing_tiles};
 
 /// Where damage goes: the layer's own, or, for a view drawn in an overlay,
 /// only the overlays over that layer (keyed by the layer's id with its low

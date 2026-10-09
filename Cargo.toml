@@ -29,6 +29,7 @@ sidestep = { path = "crates/sidestep" }
 sidestep-runtime = { path = "crates/sidestep-runtime" }
 sidestep-foundation = { path = "crates/sidestep-foundation" }
 sidestep-appkit = { path = "crates/sidestep-appkit" }
+sidestep-engine = { path = "crates/sidestep-engine" }
 
 # tiny-skia's portable SIMD (every target but aarch64 with NEON) multiplies
 # 16-bit lanes expecting them to wrap, as the NEON path does; overflow checks

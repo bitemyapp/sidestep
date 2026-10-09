@@ -166,16 +166,11 @@ pub(crate) fn url_kind(uri: &str) -> &'static str {
     if is_file_uri(uri) { FILE_URL } else { URL }
 }
 
-/// The MIME types that mark this process's own selections and drags.
-pub(crate) const OWNER_PREFIX: &str = "application/x-sidestep-owner";
+use sidestep_engine::clipboard::{GNOME_FILES, MOZ_URL};
+pub(crate) use sidestep_engine::clipboard::{OWNER_PREFIX, TEXT_MIMES, URI_LIST, url_mime};
+
 /// Types with no MIME type of their own travel under this prefix.
 const UTI_PREFIX: &str = "application/x-sidestep-uti.";
-pub(crate) const URI_LIST: &str = "text/uri-list";
-const GNOME_FILES: &str = "x-special/gnome-copied-files";
-const MOZ_URL: &str = "text/x-moz-url";
-
-/// The MIME types text is offered and read as, best first.
-pub(crate) const TEXT_MIMES: &[&str] = &["text/plain;charset=utf-8", "UTF8_STRING", "text/plain", "STRING", "TEXT"];
 
 /// The MIME types a type is offered as, best first. URLs aren't here:
 /// every item's URL goes into one `text/uri-list` (see `uri_list`).
@@ -217,12 +212,6 @@ pub(crate) fn type_for_mime(mime: &str) -> Option<Cow<'static, str>> {
         }
     };
     Some(Cow::Borrowed(kind))
-}
-
-/// Where another program's URLs are, among the MIME types it offers: the
-/// best of them, if any.
-pub(crate) fn url_mime(mimes: &[String]) -> Option<&'static str> {
-    [URI_LIST, GNOME_FILES, MOZ_URL].into_iter().find(|m| mimes.iter().any(|o| o == m))
 }
 
 /// The URLs in data of `mime` (see `url_mime`).

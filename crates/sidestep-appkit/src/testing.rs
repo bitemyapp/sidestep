@@ -20,61 +20,9 @@ use objc2_app_kit::NSWindow;
 use sidestep_foundation::runloop::Mode;
 
 use crate::backend::null;
+pub use crate::backend::null::{PaintedText, Seen};
 use crate::event_loop;
 use crate::protocol::{Button, FromRender, Key, ScrollPhase, WindowState};
-
-/// What the main thread asked the null render thread for, besides drawing.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Seen {
-    /// A window was shown; a popup or a sheet names its parent.
-    Created {
-        window: u32,
-        width: u32,
-        height: u32,
-        popup_of: Option<u32>,
-        sheet_of: Option<u32>,
-    },
-    Closed {
-        window: u32,
-    },
-    /// The pointer's shape over a window's content, by its cursor-theme name.
-    Cursor {
-        window: u32,
-        name: String,
-    },
-    CursorHidden {
-        hidden: bool,
-        until_moved: bool,
-    },
-    /// A request (activation, resizing, moving, …), as its debug form.
-    Request {
-        window: u32,
-        request: String,
-    },
-    /// The window a window belongs over.
-    Parent {
-        window: u32,
-        parent: Option<u32>,
-    },
-    /// Display links asked for each frame of the window, or stopped.
-    FrameTicks {
-        window: u32,
-        on: bool,
-    },
-}
-
-/// A run of text the main thread asked the null render thread to paint.
-#[derive(Clone, Debug, PartialEq)]
-pub struct PaintedText {
-    pub window: u32,
-    /// Straight sRGB red, green, blue and alpha, 0 to 1.
-    pub color: [f32; 4],
-    /// Where the run starts on its baseline, in the points of what it was
-    /// painted into: the window's content, or the document of a scroll
-    /// view (whose content is painted into tiles of its own).
-    pub x: f32,
-    pub y: f32,
-}
 
 /// Start (or stop) writing down the text painted, for
 /// [`take_painted_text`].
@@ -437,7 +385,7 @@ pub fn request_window_pixels(
     window: &NSWindow,
     t: f64,
     crop: [u32; 4],
-) -> std::sync::mpsc::Receiver<Option<(u32, u32, Vec<[u8; 4]>)>> {
+) -> std::sync::mpsc::Receiver<Option<crate::protocol::Capture>> {
     let (reply, receiver) = std::sync::mpsc::channel();
     crate::app::send(crate::protocol::ToRender::CaptureWindow { window: showing_id(window), at: t, crop, reply });
     receiver

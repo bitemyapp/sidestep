@@ -31,8 +31,6 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::sync::{Condvar, Mutex};
-use std::time::{Duration, Instant};
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
@@ -41,85 +39,10 @@ use objc2_app_kit::{NSApplication, NSScreen, NSWindow};
 use objc2_foundation::{NSArray, NSDictionary, NSEdgeInsets, NSNumber, NSPoint, NSRect, NSSize, NSString, NSValue};
 use sidestep_foundation::notification_center::post;
 
+use sidestep_engine::outputs::{self, Output};
+
 use crate::protocol::{ToRender, WindowId};
 use crate::window::{self, NSWindowImpl};
-
-/// How long the first question about screens waits for the compositor to
-/// describe its outputs.
-const FIRST_SNAPSHOT: Duration = Duration::from_secs(1);
-
-/// An output, as the render thread publishes it.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Output {
-    /// The wl_output global's name, which stays the same while it's there.
-    pub id: u32,
-    pub name: String,
-    /// Where it is in the compositor's space, in logical points (y down).
-    pub rect: (i32, i32, i32, i32),
-    pub scale: f64,
-    pub refresh_mhz: i32,
-    /// The largest window size there that leaves the desktop's panels
-    /// uncovered, once a window was told it.
-    pub work_area: Option<(u32, u32)>,
-}
-
-#[derive(Default)]
-struct Published {
-    /// The render thread has described every output it knew of at start.
-    settled: bool,
-    /// Counts snapshots, so the main thread knows when to update.
-    generation: u64,
-    /// Some snapshot since the first was a change (the program is told of
-    /// changes even if it never asked about the screens before them).
-    changed: bool,
-    outputs: Vec<Output>,
-    /// The main thread asked the render thread to start for them.
-    asked: Option<Instant>,
-}
-
-static PUBLISHED: Mutex<Published> =
-    Mutex::new(Published { settled: false, generation: 0, changed: false, outputs: Vec::new(), asked: None });
-static ARRIVED: Condvar = Condvar::new();
-
-fn published() -> std::sync::MutexGuard<'static, Published> {
-    PUBLISHED.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// The render thread's side: the outputs are now these; `news` unless
-/// they're the first, or the same again.
-pub(crate) fn publish(outputs: Vec<Output>, news: bool) {
-    let mut p = published();
-    p.settled = true;
-    p.generation += 1;
-    p.changed |= news;
-    p.outputs = outputs;
-    drop(p);
-    ARRIVED.notify_all();
-}
-
-/// The latest snapshot if it's newer than snapshot `seen`, starting the
-/// render thread and waiting for its first one if need be.
-fn snapshot(seen: u64) -> Option<(u64, Vec<Output>)> {
-    let mut p = published();
-    if !p.settled {
-        let display = ["WAYLAND_DISPLAY", "WAYLAND_SOCKET"].iter().any(|v| std::env::var_os(v).is_some());
-        if !display {
-            return None;
-        }
-        let asked = *p.asked.get_or_insert_with(Instant::now);
-        drop(p);
-        crate::app::send(ToRender::PublishOutputs);
-        p = published();
-        while !p.settled {
-            let left = (asked + FIRST_SNAPSHOT).saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                break;
-            }
-            p = ARRIVED.wait_timeout(p, left).unwrap_or_else(|e| e.into_inner()).0;
-        }
-    }
-    (p.generation != seen).then(|| (p.generation, p.outputs.clone()))
-}
 
 /// A screen's state, from its output.
 #[derive(Clone, Copy, Default)]
@@ -348,7 +271,9 @@ fn frames(output: &Output, first: &Output) -> (NSRect, NSRect) {
 fn screens() -> Vec<Retained<NSScreen>> {
     let Some(mtm) = MainThreadMarker::new() else { return Vec::new() };
     let (seen, old) = SCREENS.with(|s| s.borrow().clone());
-    let Some((generation, outputs)) = snapshot(seen) else { return old };
+    let Some((generation, outputs)) = outputs::snapshot(seen, || crate::app::send(ToRender::PublishOutputs)) else {
+        return old;
+    };
     let mut ordered: Vec<&Output> = outputs.iter().collect();
     if let Some(first) = first(&outputs) {
         ordered.sort_by_key(|o| o.id != first.id);
@@ -434,7 +359,7 @@ pub(crate) fn changed(mtm: MainThreadMarker) {
     let same = if seen == 0 {
         // The program hasn't asked about screens before: the first snapshot
         // is where they start, and a change is news only if one came since.
-        !published().changed
+        !outputs::changed_since_first()
     } else {
         before.len() == after.len()
             && before

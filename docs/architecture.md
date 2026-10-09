@@ -13,11 +13,17 @@ objc2, block2                     from crates.io (objc2 with the fork's fixes);
           class symbols ._OBJC_CLASS_<Name>, _Block_copy, _NSConcreteStackBlock
 sidestep-runtime                  the Objective-C runtime, in Rust
 sidestep-foundation, -appkit      framework classes, in Rust, via define_class!
+sidestep-engine                   the render thread, rasterizer and text
+                                  engine under AppKit; no Objective-C
 ```
 
 The objc2 fork's fixes are pending upstream; `tools/objc2-overlay` applies
 them to the published crates at build time (see
 [abi.md](abi.md#fixed-in-the-objc2-fork-pending-upstream)).
+
+AppKit's half that never touches the Objective-C runtime is a crate of its
+own, `sidestep-engine` (see [The engine](#the-engine)), so other toolkits
+can draw and take input through it too.
 
 [objc2]: https://github.com/madsmtm/objc2
 
@@ -664,6 +670,42 @@ everything that touches pixels or the display server to a render thread.
 This design keeps GPU wake-ups and uploads proportional to what changed,
 which is what dominates power on a mostly idle desktop. A GPU rasterizer can
 replace the CPU one behind the same operations later.
+
+### The engine
+
+Everything below the line the two threads talk across lives in
+`crates/sidestep-engine`, which links no Objective-C: the messages
+(`protocol`), the render thread and its Wayland backends, the real one
+and the null one tests use (`backend`), the rasterizer (`raster`), Core
+Animation's layer trees as plain data and their compositing (`ca`), the
+text engine (`text`), the clipboard's shared state (`clipboard`), the
+compositor's outputs (`outputs`), the desktop's settings and the system
+colors they choose (`settings`, `desktop`, `palette`), image files
+(`codec`), CoreGraphics-style paths (`path`) and `SIDESTEP_TRACE_FRAMES`
+(`trace`). `sidestep-appkit` re-exports those modules at its crate root,
+so its code names them as it always has (`crate::protocol`,
+`crate::backend`, …); the main-thread halves of mixed modules stay in
+AppKit and re-export the engine's halves (`quartzcore::tree` builds
+commits, `quartzcore::render` draws layers into a CGContext, `screen`
+makes `NSScreen`s of the published outputs, `settings` turns a change
+into a run-loop perform and a redraw).
+
+Three seams keep the engine free of AppKit:
+
+- **Waking the main thread.** `backend::start` takes a `Waker`, a
+  closure the render thread calls after every message it sends and once
+  more when it stops. AppKit's signals its run-loop source; another
+  toolkit can signal a condition variable.
+- **Hearing of the desktop's settings.** The engine keeps the desktop's
+  light or dark preference and accent itself and calls the hook a toolkit
+  gives `settings::on_change` (AppKit's performs `apply_changes` on the
+  main run loop, which refreshes every view's appearance).
+- **AppKit's values.** Key events carry `NSEventModifierFlags` bits and
+  AppKit's function-key characters, which `NSEvent` passes on as they
+  are; the engine defines them itself (`keys`), and a test in AppKit holds
+  each to objc2-app-kit's.
+
+A process has one render thread, started by whichever toolkit runs it.
 
 ### Scale
 
@@ -2525,7 +2567,7 @@ AppKit measures text synchronously (`sizeWithAttributes:`,
 `boundingRectWithSize:options:attributes:context:`), so text is shaped and
 laid out on the thread that asks, and the render thread only ever sees
 glyphs: a glyph-run op names a registered face, a size, and glyph ids with
-positions in points. `crates/sidestep-appkit/src/text/` holds the stack.
+positions in points. `crates/sidestep-engine/src/text/` holds the stack.
 
 - **Fonts.** fontique finds the system's fonts through fontconfig, loaded
   at run time with `dlopen` (every Linux desktop has `libfontconfig.so.1`;

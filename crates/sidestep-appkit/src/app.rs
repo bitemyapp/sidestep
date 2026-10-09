@@ -102,9 +102,9 @@ pub(crate) fn is_active() -> bool {
 pub(crate) fn send(msg: ToRender) {
     let _ = BACKEND.try_with(|b| {
         let backend = b.get_or_init(|| {
-            let backend = backend::start(event_loop::install());
-            let _ = ANY_THREAD.set(backend.tx.clone());
-            backend
+            let signal = event_loop::install();
+            crate::settings::install();
+            backend::start(std::sync::Arc::new(move || signal.signal_and_wake()))
         });
         backend::null::sending();
         let _ = backend.tx.send(msg);
@@ -117,19 +117,7 @@ pub(crate) fn with_receiver<R>(f: impl FnOnce(&std::sync::mpsc::Receiver<FromRen
     BACKEND.with(|b| b.get().map(|backend| f(&backend.rx)))
 }
 
-/// The render thread's inbox, for threads other than the main one.
-static ANY_THREAD: std::sync::OnceLock<smithay_client_toolkit::reexports::calloop::channel::Sender<ToRender>> =
-    std::sync::OnceLock::new();
-
-/// Send to the render thread from any thread, if it's running; if it
-/// isn't (no window was ever shown), the message is dropped: without a
-/// window there's no Wayland focus to act with.
-pub(crate) fn send_if_running(msg: ToRender) {
-    if let Some(tx) = ANY_THREAD.get() {
-        backend::null::sending();
-        let _ = tx.send(msg);
-    }
-}
+pub(crate) use backend::send_if_running;
 
 /// A window was made: the application has it until it's freed.
 pub(crate) fn window_made(window: &NSWindow) {

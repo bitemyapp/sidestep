@@ -47,4 +47,66 @@ mod tests {
         assert_eq!(mac_key_code(3), NONE);
         assert_eq!(mac_key_code(u16::MAX), NONE);
     }
+
+    /// The render thread reports AppKit's modifier flags and key
+    /// characters (`sidestep_engine::keys`), which events pass on as they
+    /// are.
+    #[test]
+    fn the_engine_reports_appkits_values() {
+        use objc2_app_kit as ak;
+        use objc2_app_kit::NSEventModifierFlags as Flags;
+        use sidestep_engine::keys::{character as ch, modifier as m};
+
+        let flags = [
+            (m::CAPS_LOCK, Flags::CapsLock),
+            (m::SHIFT, Flags::Shift),
+            (m::CONTROL, Flags::Control),
+            (m::OPTION, Flags::Option),
+            (m::COMMAND, Flags::Command),
+            (m::NUMERIC_PAD, Flags::NumericPad),
+            (m::HELP, Flags::Help),
+            (m::FUNCTION, Flags::Function),
+            (m::DEVICE_INDEPENDENT, Flags::DeviceIndependentFlagsMask),
+        ];
+        for (ours, theirs) in flags {
+            assert_eq!(ours, theirs.0, "{theirs:?}");
+        }
+        let characters = [
+            (ch::DELETE, ak::NSDeleteCharacter),
+            (ch::TAB, ak::NSTabCharacter),
+            (ch::BACK_TAB, ak::NSBackTabCharacter),
+            (ch::CARRIAGE_RETURN, ak::NSCarriageReturnCharacter),
+            (ch::ENTER, ak::NSEnterCharacter),
+            (ch::UP_ARROW, ak::NSUpArrowFunctionKey),
+            (ch::DOWN_ARROW, ak::NSDownArrowFunctionKey),
+            (ch::LEFT_ARROW, ak::NSLeftArrowFunctionKey),
+            (ch::RIGHT_ARROW, ak::NSRightArrowFunctionKey),
+            (ch::F1, ak::NSF1FunctionKey),
+            (ch::F1 + 34, ak::NSF35FunctionKey),
+            (ch::INSERT, ak::NSInsertFunctionKey),
+            (ch::DELETE_FORWARD, ak::NSDeleteFunctionKey),
+            (ch::HOME, ak::NSHomeFunctionKey),
+            (ch::BEGIN, ak::NSBeginFunctionKey),
+            (ch::END, ak::NSEndFunctionKey),
+            (ch::PAGE_UP, ak::NSPageUpFunctionKey),
+            (ch::PAGE_DOWN, ak::NSPageDownFunctionKey),
+            (ch::PRINT_SCREEN, ak::NSPrintScreenFunctionKey),
+            (ch::SCROLL_LOCK, ak::NSScrollLockFunctionKey),
+            (ch::PAUSE, ak::NSPauseFunctionKey),
+            (ch::SYS_REQ, ak::NSSysReqFunctionKey),
+            (ch::BREAK, ak::NSBreakFunctionKey),
+            (ch::MENU, ak::NSMenuFunctionKey),
+            (ch::CLEAR_LINE, ak::NSClearLineFunctionKey),
+            (ch::SELECT, ak::NSSelectFunctionKey),
+            (ch::EXECUTE, ak::NSExecuteFunctionKey),
+            (ch::UNDO, ak::NSUndoFunctionKey),
+            (ch::REDO, ak::NSRedoFunctionKey),
+            (ch::FIND, ak::NSFindFunctionKey),
+            (ch::HELP, ak::NSHelpFunctionKey),
+            (ch::MODE_SWITCH, ak::NSModeSwitchFunctionKey),
+        ];
+        for (i, (ours, theirs)) in characters.into_iter().enumerate() {
+            assert_eq!(ours, theirs, "character {i}");
+        }
+    }
 }
