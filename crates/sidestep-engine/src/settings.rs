@@ -35,7 +35,7 @@ static CHANGED: AtomicBool = AtomicBool::new(false);
 /// Where to tell the render thread, once it runs.
 static WAKE: Mutex<Option<Wake>> = Mutex::new(None);
 /// How the toolkit hears of changes (see [`on_change`]).
-static HOOK: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+static HOOK: std::sync::RwLock<Option<Hook>> = std::sync::RwLock::new(None);
 /// The desktop's interface settings, as last told.
 static INTERFACE: Mutex<Interface> = Mutex::new(Interface::DEFAULT);
 
@@ -125,12 +125,14 @@ fn parse_hex(v: &str) -> Option<[f64; 3]> {
     Some([(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff].map(|c| f64::from(c) / 255.0))
 }
 
+type Hook = std::sync::Arc<dyn Fn() + Send + Sync>;
+
 /// How the toolkit hears that the settings changed: `hook` is called on
 /// the settings thread, so it only wakes the main thread, which then calls
-/// [`take_changed`] and redraws. Set once, before [`start`] (later calls
-/// are ignored).
+/// [`take_changed`] and redraws. Set before [`start`]; a later call
+/// replaces it (a toolkit that runs after another).
 pub fn on_change(hook: impl Fn() + Send + Sync + 'static) {
-    let _ = HOOK.set(Box::new(hook));
+    *HOOK.write().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(hook));
 }
 
 /// Start following the desktop's settings, once.
@@ -192,7 +194,8 @@ fn notify(dark: bool) {
         let _ = wake.render.send(crate::protocol::ToRender::ColorScheme { dark });
     }
     // The main thread applies it on its loop, in whatever mode it runs.
-    if let Some(hook) = HOOK.get() {
+    let hook = HOOK.read().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(hook) = hook {
         hook();
     }
 }

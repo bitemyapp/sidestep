@@ -462,9 +462,13 @@ pub struct Shared {
     mono: Arc<str>,
     serif: Arc<str>,
     /// Family names with spaces removed and lowercased, for PostScript
-    /// names such as `DejaVuSans-Bold`; built on first use.
-    squashed: OnceLock<HashMap<String, Arc<str>>>,
+    /// names such as `DejaVuSans-Bold`; built on first use, and again after
+    /// fonts are installed.
+    squashed: RwLock<Option<Squashed>>,
 }
+
+/// Family names by their squashed forms (see `Shared::squashed`).
+type Squashed = Arc<HashMap<String, Arc<str>>>;
 
 static SHARED: OnceLock<Shared> = OnceLock::new();
 
@@ -536,7 +540,7 @@ impl Shared {
             system,
             mono,
             serif,
-            squashed: OnceLock::new(),
+            squashed: RwLock::new(None),
         }
     }
 
@@ -553,8 +557,14 @@ impl Shared {
         }
     }
 
-    fn squashed(&self, fcx: &mut FontContext) -> &HashMap<String, Arc<str>> {
-        self.squashed.get_or_init(|| fcx.collection.family_names().map(|n| (squash(n), Arc::from(n))).collect())
+    fn squashed(&self, fcx: &mut FontContext) -> Squashed {
+        if let Some(map) = self.squashed.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            return map.clone();
+        }
+        let map: Arc<HashMap<_, _>> =
+            Arc::new(fcx.collection.family_names().map(|n| (squash(n), Arc::from(n))).collect());
+        *self.squashed.write().unwrap_or_else(|e| e.into_inner()) = Some(map.clone());
+        map
     }
 }
 
@@ -1021,6 +1031,59 @@ pub fn register(font: &FontData, coords: &[i16], synth: Synth) -> u32 {
 /// The face registered as `id`.
 pub fn face_data(id: u32) -> Option<FaceData> {
     REGISTRY.read().unwrap_or_else(|e| e.into_inner()).faces.get(id as usize).cloned()
+}
+
+/// Whether the face registered as `id` draws glyphs in color (COLR
+/// layers, or CBDT, sbix or SVG pictures, as emoji fonts do), which have
+/// no outline to draw them by. Found once a face.
+pub fn has_color(id: u32) -> bool {
+    static FOUND: LazyLock<RwLock<HashMap<u32, bool>>> = LazyLock::new(Default::default);
+    if let Some(&color) = FOUND.read().unwrap_or_else(|e| e.into_inner()).get(&id) {
+        return color;
+    }
+    let color = face_data(id).is_some_and(|face| {
+        skrifa::FontRef::from_index(face.font.data.data(), face.font.index).is_ok_and(|f| {
+            use skrifa::raw::types::Tag;
+            [*b"COLR", *b"CBDT", *b"sbix", *b"SVG "].iter().any(|t| f.table_data(Tag::new(t)).is_some())
+        })
+    });
+    FOUND.write().unwrap_or_else(|e| e.into_inner()).insert(id, color);
+    color
+}
+
+/// A font file's face `index` (0 unless the file is a collection), laid
+/// out as itself with nothing synthesized (see [`FontSpec::data`]), made
+/// the first time; `None` if it isn't a font.
+pub fn load_file_face(bytes: Vec<u8>, index: u32) -> Option<DataFamily> {
+    register_data(&FontData::new(Blob::from(bytes), index))
+}
+
+/// The faces in a font file: 1 for a font, as many as it holds for a
+/// collection, 0 if it's neither.
+pub fn face_count(bytes: &[u8]) -> u32 {
+    skrifa::raw::FileRef::new(bytes).map_or(0, |f| f.fonts().count() as u32)
+}
+
+/// Install a font file's faces for this program, as if the system had
+/// them: text names them by their own families, and weights and styles are
+/// matched among a family's faces as among the system's. Every thread's
+/// text sees them. The families they are in; none if `bytes` isn't a font
+/// file.
+pub fn install(bytes: Vec<u8>) -> Vec<Arc<str>> {
+    let shared = shared();
+    let mut fcx = shared.fcx.lock().unwrap_or_else(|e| e.into_inner());
+    let families = fcx.collection.register_fonts(Blob::from(bytes), None);
+    // Names such as `Family-Bold` find the new families too.
+    *shared.squashed.write().unwrap_or_else(|e| e.into_inner()) = None;
+    let mut names: Vec<Arc<str>> = Vec::new();
+    for (id, _) in families {
+        if let Some(name) = fcx.collection.family_name(id)
+            && !names.iter().any(|n| &**n == name)
+        {
+            names.push(name.into());
+        }
+    }
+    names
 }
 
 /// `NSFontWeight` (−1 to 1) as a CSS weight, through the named weights,

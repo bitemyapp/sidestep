@@ -86,6 +86,36 @@ impl Font {
         fonts::family_names()
     }
 
+    /// Install a font file's faces for this program, as if the system had
+    /// them: [`Font::named`] finds them by their families, and weights and
+    /// styles are matched among a family's faces as among the system's
+    /// (so a family installed with its bold file draws `bold()` from it).
+    /// The families installed; none if `bytes` isn't a font file (TrueType
+    /// or OpenType, or a collection of them).
+    pub fn install(bytes: impl Into<Vec<u8>>) -> Vec<String> {
+        fonts::install(bytes.into()).iter().map(|f| f.to_string()).collect()
+    }
+
+    /// Read a font file and [`install`](Font::install) it.
+    pub fn install_file(path: impl AsRef<std::path::Path>) -> std::io::Result<Vec<String>> {
+        Ok(Font::install(std::fs::read(path)?))
+    }
+
+    /// Face `index` of a font file (0 unless it's a collection: see
+    /// [`Font::face_count`]) at `size`, exactly as the file has it, without
+    /// installing it. Weights and styles asked of it are synthesized. `None`
+    /// if it isn't a font.
+    pub fn from_data(bytes: impl Into<Vec<u8>>, index: u32, size: f64) -> Option<Font> {
+        let family = fonts::load_file_face(bytes.into(), index)?;
+        Some(Font::of(FontSpec::data(family, size)))
+    }
+
+    /// The faces in a font file: 1 for a font, as many as a collection
+    /// holds, 0 if it's neither.
+    pub fn face_count(bytes: &[u8]) -> u32 {
+        fonts::face_count(bytes)
+    }
+
     /// This font in another weight: CSS's scale, 100 (thin) to 900
     /// (black), 400 regular and 700 bold.
     pub fn with_weight(&self, weight: f32) -> Font {
@@ -614,6 +644,28 @@ mod tests {
         let mixed = TextLayout::builder("plain bold", &style()).style(6..10, bold).build();
         assert!(mixed.size().width >= plain.size().width);
         assert_eq!(mixed.text(), "plain bold");
+    }
+
+    const DEJAVU: &[u8] = include_bytes!("../../../conformance/tests/fixtures/DejaVuSans.ttf");
+
+    #[test]
+    fn font_files_load_as_themselves_and_install_by_family() {
+        assert_eq!(Font::face_count(DEJAVU), 1);
+        assert_eq!(Font::face_count(b"not a font"), 0);
+        assert!(Font::from_data(b"not a font".to_vec(), 0, 12.0).is_none());
+        let font = Font::from_data(DEJAVU, 0, 20.0).expect("the file's face");
+        assert_eq!((font.family_name(), font.size()), ("DejaVu Sans", 20.0));
+        assert!(font.metrics().ascent > 10.0);
+        // Text laid out in it is laid out in exactly it: DejaVu Sans's
+        // "W" is about 0.99 em wide.
+        let w = measure("W", &TextStyle::new(font, Color::BLACK)).width;
+        assert!((18.0..21.0).contains(&w), "{w}");
+        assert_eq!(Font::install(DEJAVU), ["DejaVu Sans"]);
+        assert!(Font::install(b"not a font".to_vec()).is_empty());
+        let named = Font::named("DejaVu Sans", 14.0).expect("the installed family");
+        assert_eq!(named.family_name(), "DejaVu Sans");
+        // By its full name too, as names go.
+        assert!(Font::named("DejaVu Sans Bold", 14.0).is_some());
     }
 
     #[test]

@@ -28,6 +28,7 @@ pub mod codec;
 pub mod color;
 pub mod desktop;
 pub mod keys;
+pub mod momentum;
 pub mod outputs;
 pub mod palette;
 pub mod path;

@@ -50,9 +50,12 @@
 //!
 //! **Testing.** `SIDESTEP_BACKEND=null` runs a render thread without a
 //! display, which configures windows at once at the size they asked for,
-//! shows every frame at once and draws nothing (see `tests/headless.rs`).
+//! shows every frame at once and draws nothing (see `tests/headless.rs`);
+//! `tests/wayland_system.rs` drives a window under a headless compositor
+//! with a virtual pointer and other clients.
 //!
-//! A process runs one application, with this toolkit or with AppKit.
+//! A process runs one application at a time, with this toolkit or with
+//! AppKit; another may run after it.
 #![cfg(not(target_vendor = "apple"))]
 
 mod app;
@@ -66,7 +69,7 @@ mod window;
 #[doc(hidden)]
 pub mod testing;
 
-pub use app::{App, Cx, Drag, DropAction, Error, Handler, Output, Proxy, TimerId};
+pub use app::{App, Cx, Drag, DropAction, DropResponse, Error, Handler, Output, Proxy, TimerId};
 pub use canvas::{
     BlendMode, Canvas, ImageOptions, LineCap, LineJoin, LinearGradient, Paint, RadialGradient, Shadow, StrokeStyle,
 };
@@ -79,4 +82,4 @@ pub use kurbo;
 pub use text::{
     Alignment, Caret, Font, FontMetrics, Hit, LineMetrics, TextLayout, TextLayoutBuilder, TextStyle, Wrap, measure,
 };
-pub use window::{Background, Cursor, Window, WindowId, WindowOptions};
+pub use window::{Background, Corner, Cursor, PopupPosition, Window, WindowId, WindowOptions};

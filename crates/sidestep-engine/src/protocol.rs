@@ -567,7 +567,7 @@ pub struct PopupPlacement {
 /// How a menu's popup opens against its anchor, as xdg_positioner puts it:
 /// the anchor's corner it opens from, the way it grows from there, an
 /// offset in points, and what the compositor may do when it doesn't fit
-/// (flip to the other side, slide along the edge, shrink its height).
+/// (flip to the other side, slide along the edge, shrink it).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PopupLayout {
     pub corner: Corner,
@@ -577,6 +577,7 @@ pub struct PopupLayout {
     pub flip_y: bool,
     pub slide_x: bool,
     pub slide_y: bool,
+    pub resize_x: bool,
     pub resize_y: bool,
 }
 

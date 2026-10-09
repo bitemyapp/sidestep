@@ -685,8 +685,9 @@ Animation's layer trees as plain data and their compositing (`ca`), the
 text engine (`text`), the clipboard's shared state (`clipboard`), the
 compositor's outputs (`outputs`), the desktop's settings and the system
 colors they choose (`settings`, `desktop`, `palette`), image files
-(`codec`), CoreGraphics-style paths (`path`) and `SIDESTEP_TRACE_FRAMES`
-(`trace`). `sidestep-appkit` re-exports those modules at its crate root,
+(`codec`), CoreGraphics-style paths (`path`), touchpad coasting's physics
+(`momentum`) and `SIDESTEP_TRACE_FRAMES` (`trace`). `sidestep-appkit`
+re-exports those modules at its crate root,
 so its code names them as it always has (`crate::protocol`,
 `crate::backend`, …); the main-thread halves of mixed modules stay in
 AppKit and re-export the engine's halves (`quartzcore::tree` builds
@@ -709,7 +710,12 @@ Three seams keep the engine free of AppKit:
   are; the engine defines them itself (`keys`), and a test in AppKit holds
   each to objc2-app-kit's.
 
-A process has one render thread, started by whichever toolkit runs it.
+A process has one render thread at a time, started by whichever toolkit
+runs it: the render thread ends when its `Backend` is dropped (its
+channel closes), and the next `backend::start` replaces what other
+threads send through (`send_if_running`), as a toolkit's next
+`settings::on_change` replaces its hook, so one application can run after
+another.
 
 ### The native toolkit
 
@@ -724,10 +730,25 @@ through the same protocol AppKit does, and keeps AppKit's rhythm:
   thread's messages, oldest first (a move followed by another move of the
   same window, and a key repeat followed by a newer key, are dropped, as
   AppKit drops them), a proxy's wake, a change of the desktop's look or
-  accent (every window redraws), and timers that came due (kept in a
+  accent (every window redraws), timers that came due (kept in a
   `BTreeMap` by due time; a repeating timer keeps its phase and skips what
-  it missed), then runs the display pass and sleeps until woken or the
-  next deadline. An idle program sleeps with nothing armed.
+  it missed) and coasting that no frame moved on, then runs the display
+  pass and sleeps until woken or the next deadline. An idle program sleeps
+  with nothing armed. One application runs at a time; when `run` returns,
+  its windows close and its render thread stops, and another may run.
+- **Windows and showings.** A window keeps its `WindowId` for its life;
+  each time it's shown (`show_window`, after `hide_window`) it is a new
+  window to the render thread, a *showing* with an id of its own: a
+  window's first showing has the window's number, later ones count from
+  2³¹. Messages name showings and are mapped back to windows, so what the
+  render thread still says of a showing that went finds nothing (drags
+  over one are still answered). Hiding a window closes its popups and
+  tells the handler it lost the keyboard and the pointer if it had them;
+  showing it sends its title, style, size, size limits, cursor and parent
+  anew. Closing a window closes its popups first, as Wayland needs. A
+  popup opens below its anchor unless a `PopupPosition` says otherwise
+  (the positioner's anchor corner, gravity, offset, and flip, slide and
+  resize adjustments, `ResizeX` added to the protocol for it).
 - **The display pass** gives each window that needs it a `Canvas`: a
   window draws once configured, only when the render thread showed its
   last frame (so drawing keeps pace with the compositor's frame
@@ -735,8 +756,10 @@ through the same protocol AppKit does, and keeps AppKit's rhythm:
   and only if it has damage or a new title. The canvas starts by clearing
   the damage to the window's background (`FillWith` with `Copy`), records
   the handler's drawing as ops in window points, and the pass sends one
-  `Paint` of the root target and a `Present`. First frames wait, as
-  AppKit's do, for the desktop's light or dark (`settings::ready`).
+  `Paint` of the root target and a `Present`, then drops the images the
+  pass made for itself, so the message that forgets them follows the
+  paint. First frames wait, as AppKit's do, for the desktop's light or
+  dark (`settings::ready`).
 - **The canvas** (`canvas.rs`) keeps a transform (a kurbo `Affine`), a clip
   (bounds, and clip paths where it isn't a rectangle) and a blend mode and
   shadow, and turns calls into ops: a rectangle through an axis-aligned
@@ -747,33 +770,59 @@ through the same protocol AppKit does, and keeps AppKit's rhythm:
   `Image` does); groups are `BeginGroup`/`EndGroup`. Text is the glyph
   runs the text engine placed, as `Glyphs` ops from the render thread's
   glyph cache while the transform keeps glyphs upright and scales both
-  ways alike (the size scaled with it), and as their outlines, filled
-  through the drawing state, when the text is turned, mirrored or
-  stretched, or drawn with a shadow, a clip path or a blend mode, which a
-  glyph run can't carry.
+  ways alike (the size scaled with it). Turned, mirrored or stretched, or
+  drawn with a shadow, a clip path or a blend mode, which a glyph run
+  can't carry, text is drawn through the drawing state another way: its
+  outlines, filled (and for a synthesized bold face stroked too, as thick
+  as the glyph cache emboldens, a 24th of the size in pixels between a
+  quarter pixel and two; a synthesized oblique leans them); or, for a
+  color font's glyphs (COLR, CBDT, sbix or SVG, which have no outlines),
+  a picture: the run drawn upright into an image at the scale it shows at
+  (`ca::render::rasterize`), drawn through the transform.
 - **Text** (`text.rs`): a `TextLayout` is the engine's `text::lines::Frame`
   (TextKit's line layout), so it has what editing needs (the character at
   a point, carets with their secondary caret where directions meet,
   selection rectangles) as well as lines and size; its API takes byte
   offsets of UTF-8 and converts to the frame's UTF-16 indexes.
   `Canvas::draw_label` and `measure` go through string drawing's layout
-  cache instead, for labels drawn pass after pass.
+  cache instead, for labels drawn pass after pass. Font files a program
+  brings are installed in the shared font collection under their own
+  families (`fonts::install`, after which names like `Family-Bold` are
+  looked up again), so weights and styles are matched among a family's
+  faces as among the system's, or loaded as one face exactly as the file
+  has it (`Font::from_data`, through the private families CoreText's
+  data fonts use).
 - **Input** (`event.rs`) is translated from AppKit's values: modifier
   flags to `Modifiers`; a key's characters to a `Key` (AppKit's control
   characters and function-key characters to `NamedKey`s) and the text it
   types (none for keys that type nothing, for releases, and while Control
   or Super is held); input methods' changes to `Ime` commits and preedits.
+  A touchpad gesture that ends fast coasts, with AppKit's physics (the
+  engine's `momentum`, which AppKit's coasting now uses too): scroll
+  events with a `momentum` phase, a step per frame of the window or every
+  50 ms without frames, stopped by another scroll or a press (programs may
+  turn it off, `App::momentum_scrolling`).
 - **The rest**: the clipboard is the engine's shared state (text offered
   under the text MIME types, this program's own text answered without a
-  round trip while its change is current), outputs are its published
-  snapshot, and drags are answered position by position, as the render
-  thread needs, from the handler's `drag_moved`, accepting the URL list
-  (read before the drag is announced), else text, else what's offered.
+  round trip while its change is current); outputs are its published
+  snapshot, read without waiting (the render thread describes them by
+  itself once it connects, and the handler hears `outputs_changed`); and
+  drags are answered position by position, as the render thread needs,
+  from the handler's `drag_moved`: a `DropResponse` with the action, the
+  MIME type to take (one the drag offers, else the toolkit's choice: the
+  URL list, read before the drag is announced, else text, else the first
+  type offered) and whether to be asked again while the drag waits.
 
-Its tests run through the null render thread (`tests/headless.rs`):
-one application per process, so one handler plays every step, each
-waiting for its condition with a deadline; `testing` queues input as if
-the render thread had sent it.
+Its tests run through the null render thread (`tests/headless.rs`): an
+application's handler plays every step, each waiting for its condition
+with a deadline, and a second application runs after the first;
+`testing` queues input as if the render thread had sent it. Under a real
+compositor (`tests/wayland_system.rs`, run under the headless sway, and
+in CI's `wayland` job in the container `scripts/linux-run` uses), a
+virtual pointer of the test's own clicks, double-clicks and turns the
+wheel over the window and dismisses a popup by clicking outside it,
+`wtype` types, `wl-copy` and `wl-paste` trade the clipboard with it, and
+the window is hidden, shown again and clicked.
 
 ### Scale
 

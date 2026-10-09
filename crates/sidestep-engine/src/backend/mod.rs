@@ -151,8 +151,10 @@ impl Drop for MainSender {
 }
 
 /// Start the render thread; `wake` wakes the main thread's loop after each
-/// message to it (see [`Waker`]). A process has one render thread: the
-/// toolkit on its main thread starts it once and keeps the [`Backend`].
+/// message to it (see [`Waker`]). A process has one render thread at a
+/// time: the toolkit running starts it and keeps the [`Backend`], and when
+/// it drops the `Backend` the render thread ends (its channel closes), so
+/// another may start after it.
 pub fn start(wake: Waker) -> Backend {
     let backend = if null::chosen() {
         null::start(wake)
@@ -169,18 +171,19 @@ pub fn start(wake: Waker) -> Backend {
             .expect("sidestep: couldn't start the render thread");
         Backend { tx, rx }
     };
-    let _ = ANY_THREAD.set(backend.tx.clone());
+    *ANY_THREAD.write().unwrap_or_else(|e| e.into_inner()) = Some(backend.tx.clone());
     backend
 }
 
-/// The render thread's inbox, for threads other than the main one.
-static ANY_THREAD: std::sync::OnceLock<channel::Sender<ToRender>> = std::sync::OnceLock::new();
+/// The latest render thread's inbox, for threads other than the main one.
+static ANY_THREAD: std::sync::RwLock<Option<channel::Sender<ToRender>>> = std::sync::RwLock::new(None);
 
 /// Send to the render thread from any thread, if it's running; if it
-/// isn't (no window was ever shown), the message is dropped: without a
-/// window there's no Wayland focus to act with.
+/// isn't (no window was ever shown, or the toolkit that ran it stopped),
+/// the message is dropped: without a window there's no Wayland focus to
+/// act with.
 pub fn send_if_running(msg: ToRender) {
-    if let Some(tx) = ANY_THREAD.get() {
+    if let Some(tx) = ANY_THREAD.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
         null::sending();
         let _ = tx.send(msg);
     }
@@ -1579,6 +1582,7 @@ fn menu_layout(positioner: &XdgPositioner, layout: crate::protocol::PopupLayout)
         (layout.flip_y, ConstraintAdjustment::FlipY),
         (layout.slide_x, ConstraintAdjustment::SlideX),
         (layout.slide_y, ConstraintAdjustment::SlideY),
+        (layout.resize_x, ConstraintAdjustment::ResizeX),
         (layout.resize_y, ConstraintAdjustment::ResizeY),
     ] {
         if on {

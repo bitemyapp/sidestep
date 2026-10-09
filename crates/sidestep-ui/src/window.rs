@@ -8,9 +8,17 @@
 //! decorations to the program (GNOME), the render thread draws a title
 //! bar and a resize border around the content; the content keeps its
 //! coordinates, from its own top left.
+//!
+//! A window may be hidden and shown again ([`Cx::hide_window`],
+//! [`Cx::show_window`](crate::Cx::show_window)): it keeps its id, title,
+//! style and size, and each showing is a new window to the render thread
+//! (a *showing*, with an id of its own), so what it still had to say
+//! about an earlier one finds nothing.
+//!
+//! [`Cx::hide_window`]: crate::Cx::hide_window
 
 use kurbo::{Point, Rect, Size};
-use sidestep_engine::protocol::{self, PopupPlacement, SizeLimits, Style, ToRender, WindowRequest};
+use sidestep_engine::protocol::{self, PopupLayout, PopupPlacement, SizeLimits, Style, ToRender, WindowRequest};
 use smithay_client_toolkit::reexports::calloop::channel::Sender;
 
 use crate::color::Color;
@@ -36,10 +44,100 @@ pub enum Background {
     Transparent,
 }
 
+/// A corner of a rectangle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Corner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl Corner {
+    fn protocol(self) -> protocol::Corner {
+        match self {
+            Corner::TopLeft => protocol::Corner::TopLeft,
+            Corner::TopRight => protocol::Corner::TopRight,
+            Corner::BottomLeft => protocol::Corner::BottomLeft,
+            Corner::BottomRight => protocol::Corner::BottomRight,
+        }
+    }
+}
+
+/// Where a popup opens against its anchor, as the compositor places it
+/// (xdg_positioner): from the anchor rectangle's `anchor` corner, growing
+/// toward `gravity`, moved by `offset` points; and what the compositor may
+/// do where it wouldn't fit on the output: flip it to the anchor's other
+/// side, slide it along the edge, or shrink it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PopupPosition {
+    pub anchor: Corner,
+    pub gravity: Corner,
+    pub offset: (i32, i32),
+    pub flip_x: bool,
+    pub flip_y: bool,
+    pub slide_x: bool,
+    pub slide_y: bool,
+    pub resize_x: bool,
+    pub resize_y: bool,
+}
+
+impl PopupPosition {
+    /// Below the anchor, its left edges lined up, flipping above it where
+    /// there's no room below and sliding along the output's edges: a menu
+    /// bar's menu, a completion list. The default.
+    pub const BELOW: PopupPosition = PopupPosition {
+        anchor: Corner::BottomLeft,
+        gravity: Corner::BottomRight,
+        offset: (0, 0),
+        flip_x: false,
+        flip_y: true,
+        slide_x: true,
+        slide_y: true,
+        resize_x: false,
+        resize_y: false,
+    };
+
+    /// Its top left at the anchor's top left, giving way at the edges and
+    /// shrinking to fit: a context menu at a point (a 1 × 1 anchor).
+    pub const AT_POINT: PopupPosition =
+        PopupPosition { anchor: Corner::TopLeft, resize_y: true, ..PopupPosition::BELOW };
+
+    /// To the anchor's right, its top at the anchor's top, flipping to the
+    /// left where there's no room: a submenu beside its item.
+    pub const BESIDE: PopupPosition =
+        PopupPosition { anchor: Corner::TopRight, flip_x: true, flip_y: false, slide_x: false, ..PopupPosition::BELOW };
+
+    pub fn offset(mut self, x: i32, y: i32) -> PopupPosition {
+        self.offset = (x, y);
+        self
+    }
+
+    fn layout(self) -> PopupLayout {
+        PopupLayout {
+            corner: self.anchor.protocol(),
+            gravity: self.gravity.protocol(),
+            offset: self.offset,
+            flip_x: self.flip_x,
+            flip_y: self.flip_y,
+            slide_x: self.slide_x,
+            slide_y: self.slide_y,
+            resize_x: self.resize_x,
+            resize_y: self.resize_y,
+        }
+    }
+}
+
+impl Default for PopupPosition {
+    fn default() -> PopupPosition {
+        PopupPosition::BELOW
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
-enum Kind {
+pub(crate) enum Kind {
     Toplevel { parent: Option<WindowId> },
-    Popup { parent: WindowId, anchor: Rect, grab: bool },
+    Popup { parent: WindowId, anchor: Rect, grab: bool, position: PopupPosition },
 }
 
 /// What a window is asked to be when it opens.
@@ -55,6 +153,7 @@ pub struct WindowOptions {
     minimizable: bool,
     passthrough: bool,
     close_on_request: bool,
+    visible: bool,
     background: Background,
     kind: Kind,
 }
@@ -74,6 +173,7 @@ impl WindowOptions {
             minimizable: true,
             passthrough: false,
             close_on_request: true,
+            visible: true,
             background: Background::System,
             kind: Kind::Toplevel { parent: None },
         }
@@ -81,18 +181,27 @@ impl WindowOptions {
 
     /// A popup (a menu, a tooltip, a completion list): a borderless window
     /// over `parent`, opening below `anchor` (a rectangle of the parent's
-    /// content) where it fits, as the compositor places it. With `grab` it
-    /// takes the keyboard and pointer while open, as menus do, and the
-    /// compositor dismisses it at a click elsewhere.
+    /// content) where it fits, as the compositor places it (see
+    /// [`popup_position`](WindowOptions::popup_position) for elsewhere).
+    /// With `grab` it takes the keyboard and pointer while open, as menus
+    /// do, and the compositor dismisses it at a click elsewhere.
     pub fn popup(parent: WindowId, anchor: Rect, size: Size, grab: bool) -> WindowOptions {
         WindowOptions {
             size,
             decorated: false,
             resizable: false,
             close_on_request: true,
-            kind: Kind::Popup { parent, anchor, grab },
+            kind: Kind::Popup { parent, anchor, grab, position: PopupPosition::BELOW },
             ..WindowOptions::new("")
         }
+    }
+
+    /// Where a popup opens against its anchor. (Nothing for a toplevel.)
+    pub fn popup_position(mut self, position: PopupPosition) -> Self {
+        if let Kind::Popup { position: p, .. } = &mut self.kind {
+            *p = position;
+        }
+        self
     }
 
     /// The content's size, in points.
@@ -147,6 +256,13 @@ impl WindowOptions {
         self
     }
 
+    /// Open shown (the default), or hidden until
+    /// [`Cx::show_window`](crate::Cx::show_window).
+    pub fn visible(mut self, visible: bool) -> Self {
+        self.visible = visible;
+        self
+    }
+
     pub fn background(mut self, background: Background) -> Self {
         self.background = background;
         self
@@ -158,6 +274,10 @@ impl WindowOptions {
             *p = Some(parent);
         }
         self
+    }
+
+    pub(crate) fn is_visible(&self) -> bool {
+        self.visible
     }
 
     fn style(&self) -> Style {
@@ -181,13 +301,16 @@ impl WindowOptions {
 /// What the toolkit keeps of an open window.
 pub(crate) struct WindowData {
     pub id: WindowId,
+    /// The render thread's id for the current showing, while shown, and
+    /// whether it was ever shown (its first showing has its own number).
+    pub showing: Option<u32>,
+    pub shown_before: bool,
     pub title: String,
     pub style: Style,
     pub limits: SizeLimits,
     pub background: Background,
     pub close_on_request: bool,
-    /// The window a popup is part of.
-    pub popup_of: Option<WindowId>,
+    pub kind: Kind,
     pub size: Size,
     pub scale: f64,
     pub state: WindowState,
@@ -201,6 +324,8 @@ pub(crate) struct WindowData {
     /// The title goes to the render thread at the next pass.
     pub title_dirty: bool,
     pub focused: bool,
+    /// The pointer is over the content.
+    pub pointer_inside: bool,
     pub outputs: Vec<u32>,
     pub cursor: Cursor,
     pub text_input: (bool, Option<Rect>),
@@ -211,47 +336,18 @@ pub(crate) struct WindowData {
 const MAX_DAMAGE: usize = 16;
 
 impl WindowData {
-    /// Open a window on the render thread.
-    pub fn open(id: WindowId, options: &WindowOptions, tx: &Sender<ToRender>) -> WindowData {
-        let popup = match options.kind {
-            Kind::Popup { parent, anchor, grab } => Some(PopupPlacement {
-                parent: parent.0,
-                anchor: protocol::Rect::new(anchor.x0 as f32, anchor.y0 as f32, anchor.x1 as f32, anchor.y1 as f32),
-                below: true,
-                grab,
-                layout: None,
-            }),
-            Kind::Toplevel { .. } => None,
-        };
-        let style = options.style();
-        let limits = options.limits();
-        send(
-            tx,
-            ToRender::CreateWindow {
-                window: id.0,
-                width: options.size.width.round().max(1.0) as u32,
-                height: options.size.height.round().max(1.0) as u32,
-                title: options.title.clone(),
-                style,
-                limits,
-                popup,
-                sheet_of: None,
-            },
-        );
-        if let Kind::Toplevel { parent: Some(parent) } = options.kind {
-            send(tx, ToRender::SetParent { window: id.0, parent: Some(parent.0) });
-        }
+    /// What the toolkit keeps of a window, not yet shown.
+    pub fn new(id: WindowId, options: &WindowOptions) -> WindowData {
         WindowData {
             id,
+            showing: None,
+            shown_before: false,
             title: options.title.clone(),
-            style,
-            limits,
+            style: options.style(),
+            limits: options.limits(),
             background: options.background,
             close_on_request: options.close_on_request,
-            popup_of: match options.kind {
-                Kind::Popup { parent, .. } => Some(parent),
-                Kind::Toplevel { .. } => None,
-            },
+            kind: options.kind.clone(),
             size: options.size,
             scale: 1.0,
             state: WindowState::default(),
@@ -261,10 +357,84 @@ impl WindowData {
             damage: Vec::new(),
             title_dirty: true,
             focused: false,
+            pointer_inside: false,
             outputs: Vec::new(),
             cursor: Cursor::Default,
             text_input: (false, None),
         }
+    }
+
+    /// The window a popup is part of.
+    pub fn popup_of(&self) -> Option<WindowId> {
+        match self.kind {
+            Kind::Popup { parent, .. } => Some(parent),
+            Kind::Toplevel { .. } => None,
+        }
+    }
+
+    /// The window a toplevel is kept over.
+    pub fn transient_for(&self) -> Option<WindowId> {
+        match self.kind {
+            Kind::Toplevel { parent } => parent,
+            Kind::Popup { .. } => None,
+        }
+    }
+
+    /// Show the window on the render thread as showing `showing`; `parent`
+    /// is the showing of the window it's a popup of or kept over, if that
+    /// is shown.
+    pub fn show(&mut self, showing: u32, parent: Option<u32>, tx: &Sender<ToRender>) {
+        let popup = match self.kind {
+            Kind::Popup { anchor, grab, position, .. } => Some(PopupPlacement {
+                parent: parent.unwrap_or(0),
+                anchor: protocol::Rect::new(anchor.x0 as f32, anchor.y0 as f32, anchor.x1 as f32, anchor.y1 as f32),
+                below: true,
+                grab,
+                layout: (position != PopupPosition::BELOW).then(|| position.layout()),
+            }),
+            Kind::Toplevel { .. } => None,
+        };
+        send(
+            tx,
+            ToRender::CreateWindow {
+                window: showing,
+                width: self.size.width.round().max(1.0) as u32,
+                height: self.size.height.round().max(1.0) as u32,
+                title: self.title.clone(),
+                style: self.style,
+                limits: self.limits,
+                popup,
+                sheet_of: None,
+            },
+        );
+        if let (Kind::Toplevel { parent: Some(_) }, Some(parent)) = (&self.kind, parent) {
+            send(tx, ToRender::SetParent { window: showing, parent: Some(parent) });
+        }
+        // A new showing knows nothing of the pointer's appearance or of
+        // input methods.
+        if self.cursor != Cursor::Default {
+            send(tx, ToRender::SetCursor { window: showing, cursor: self.cursor });
+        }
+        self.text_input = (false, None);
+        self.showing = Some(showing);
+        self.configured = false;
+        self.frame_pending = false;
+        self.damage.clear();
+        self.title_dirty = true;
+        self.titlebar = 0;
+        self.outputs.clear();
+    }
+
+    /// Take the window off the screen.
+    pub fn hide(&mut self, tx: &Sender<ToRender>) {
+        if let Some(showing) = self.showing.take() {
+            send(tx, ToRender::CloseWindow { window: showing });
+        }
+        self.configured = false;
+        self.frame_pending = false;
+        self.damage.clear();
+        self.focused = false;
+        self.pointer_inside = false;
     }
 
     pub fn bounds(&self) -> protocol::Rect {
@@ -291,7 +461,10 @@ impl WindowData {
 
     /// Whether the next pass has anything to send.
     pub fn wants_pass(&self) -> bool {
-        self.configured && !self.frame_pending && (!self.damage.is_empty() || self.title_dirty)
+        self.showing.is_some()
+            && self.configured
+            && !self.frame_pending
+            && (!self.damage.is_empty() || self.title_dirty)
     }
 }
 
@@ -301,6 +474,9 @@ pub(crate) fn send(tx: &Sender<ToRender>, msg: ToRender) {
 }
 
 /// An open window, to ask things of: from [`Cx::window`](crate::Cx::window).
+/// What it asks of the compositor applies while the window is shown;
+/// asked of a hidden window, it waits for the next showing where it can
+/// (the title, size limits, the cursor) and is dropped otherwise.
 pub struct Window<'a> {
     pub(crate) data: &'a mut WindowData,
     pub(crate) tx: &'a Sender<ToRender>,
@@ -309,6 +485,11 @@ pub struct Window<'a> {
 impl Window<'_> {
     pub fn id(&self) -> WindowId {
         self.data.id
+    }
+
+    /// Whether the window is on the screen (not hidden).
+    pub fn is_visible(&self) -> bool {
+        self.data.showing.is_some()
     }
 
     /// The content's size, in points.
@@ -362,31 +543,45 @@ impl Window<'_> {
     pub fn set_cursor(&mut self, cursor: Cursor) {
         if self.data.cursor != cursor {
             self.data.cursor = cursor;
-            send(self.tx, ToRender::SetCursor { window: self.data.id.0, cursor });
+            if let Some(showing) = self.data.showing {
+                send(self.tx, ToRender::SetCursor { window: showing, cursor });
+            }
         }
     }
 
     pub fn set_min_size(&mut self, size: Option<Size>) {
         self.data.limits.min = size.map_or((0, 0), |s| (s.width.round() as u32, s.height.round() as u32));
-        send(self.tx, ToRender::SetSizeLimits { window: self.data.id.0, limits: self.data.limits });
+        if let Some(showing) = self.data.showing {
+            send(self.tx, ToRender::SetSizeLimits { window: showing, limits: self.data.limits });
+        }
     }
 
     pub fn set_max_size(&mut self, size: Option<Size>) {
         self.data.limits.max = size.map_or((0, 0), |s| (s.width.round() as u32, s.height.round() as u32));
-        send(self.tx, ToRender::SetSizeLimits { window: self.data.id.0, limits: self.data.limits });
+        if let Some(showing) = self.data.showing {
+            send(self.tx, ToRender::SetSizeLimits { window: showing, limits: self.data.limits });
+        }
     }
 
     pub fn set_resizable(&mut self, resizable: bool) {
         self.data.style.resizable = resizable;
-        send(self.tx, ToRender::SetStyle { window: self.data.id.0, style: self.data.style });
+        if let Some(showing) = self.data.showing {
+            send(self.tx, ToRender::SetStyle { window: showing, style: self.data.style });
+        }
     }
 
     fn request(&mut self, request: WindowRequest) {
-        send(self.tx, ToRender::Request { window: self.data.id.0, request });
+        if let Some(showing) = self.data.showing {
+            send(self.tx, ToRender::Request { window: showing, request });
+        }
     }
 
-    /// Ask the compositor for a new content size, in points.
+    /// Ask the compositor for a new content size, in points. A hidden
+    /// window shows at it next time.
     pub fn request_size(&mut self, size: Size) {
+        if self.data.showing.is_none() {
+            self.data.size = Size::new(size.width.round().max(1.0), size.height.round().max(1.0));
+        }
         self.request(WindowRequest::Resize(size.width.round().max(1.0) as u32, size.height.round().max(1.0) as u32));
     }
 
@@ -425,18 +620,39 @@ impl Window<'_> {
         }
         self.data.text_input = (wanted, caret);
         let caret = caret.map(|r| protocol::Rect::new(r.x0 as f32, r.y0 as f32, r.x1 as f32, r.y1 as f32));
-        send(self.tx, ToRender::TextInput { window: self.data.id.0, wanted, caret });
+        if let Some(showing) = self.data.showing {
+            send(self.tx, ToRender::TextInput { window: showing, wanted, caret });
+        }
     }
 
     /// The program dropped the text being composed: the input method
     /// starts over.
     pub fn reset_text_input(&mut self) {
-        send(self.tx, ToRender::ResetTextInput { window: self.data.id.0 });
+        if let Some(showing) = self.data.showing {
+            send(self.tx, ToRender::ResetTextInput { window: showing });
+        }
     }
 
     /// Where the window's content is in its own coordinates: (0, 0) to its
     /// size.
     pub fn bounds(&self) -> Rect {
         Rect::from_origin_size(Point::ZERO, self.data.size)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn popup_positions_name_xdg_placements() {
+        let below = PopupPosition::BELOW.layout();
+        assert_eq!((below.corner, below.gravity), (protocol::Corner::BottomLeft, protocol::Corner::BottomRight));
+        assert!(below.flip_y && below.slide_x && !below.resize_y);
+        let beside = PopupPosition::BESIDE.offset(-1, -4).layout();
+        assert_eq!(beside.corner, protocol::Corner::TopRight);
+        assert!(beside.flip_x && !beside.flip_y && !beside.slide_x);
+        assert_eq!(beside.offset, (-1, -4));
+        assert!(PopupPosition::AT_POINT.layout().resize_y);
     }
 }

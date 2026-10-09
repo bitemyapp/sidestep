@@ -607,18 +607,25 @@ Objective-C runtime, toward a desktop environment's own programs.
 
 Done: the engine carved out of AppKit (`sidestep-engine`, which AppKit
 now builds on, unchanged to objc2 programs); an application loop with
-timers and cross-thread wakes; toplevel windows and popups with their
+timers and cross-thread wakes, applications one after another in a
+process; toplevel windows and popups (placed as the positioner allows:
+anchor corner, gravity, offset, flip, slide, resize) with their
 compositor-owned size and state, decorations where the desktop wants
-them, cursors, size limits and requests; keys through XKB with compose
-sequences, pointer buttons, wheels and touchpad scrolling and pinches,
-input methods; a canvas over the render thread's ops (rectangles, shapes,
-strokes and dashes, gradients, images, groups, clips, shadows, blend
-modes, transforms, text upright from the glyph cache and turned as
-outlines); text layout with styles, wrapping, alignment, truncation, hit
-testing, carets and selections; the clipboard's text; dropped files and
-URLs; outputs; the desktop's appearance and system colors. Tested
-headless through the null render thread, and by hand under sway
-(`examples/ui-gallery`).
+them, cursors, size limits and requests, hidden and shown again; keys
+through XKB with compose sequences, pointer buttons, wheels and touchpad
+scrolling (coasting after a flick, with AppKit's physics, now shared) and
+pinches, input methods; a canvas over the render thread's ops
+(rectangles, shapes, strokes and dashes, gradients, images, groups,
+clips, shadows, blend modes, transforms, text upright from the glyph
+cache, turned as outlines, synthesized bold thickened, color glyphs as
+pictures); text layout with styles, wrapping, alignment, truncation, hit
+testing, carets and selections; fonts from the system and from the
+program's own files, installed or loaded as one face; the clipboard's
+text; drops, the type taken as the program asks, with periodic updates;
+outputs, read without waiting; the desktop's appearance and system
+colors. Tested headless through the null render thread and under a real
+compositor (`tests/wayland_system.rs`: a virtual pointer, `wtype`,
+`wl-clipboard`), which CI's `wayland` job runs with AppKit's.
 
 Next, roughly in order:
 

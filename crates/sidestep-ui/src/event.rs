@@ -46,8 +46,18 @@ pub enum WindowEvent {
     Scroll {
         position: Point,
         delta: ScrollDelta,
-        /// Where a touchpad gesture is; [`ScrollPhase::None`] for wheels.
+        /// Where a touchpad gesture is; [`ScrollPhase::None`] for wheels,
+        /// and for coasting.
         phase: ScrollPhase,
+        /// Where the coasting after a touchpad flick is, which the toolkit
+        /// makes (compositors don't), as AppKit makes it: [`ScrollPhase::None`]
+        /// for scrolls the user made. Coasting follows a gesture that ends
+        /// faster than 60 points a second, a step per frame the window
+        /// shows (every 50 ms when none come), slowing until it stops, the
+        /// user scrolls again or presses a button. Programs that coast on
+        /// their own leave these out (or turn them off,
+        /// [`App::momentum_scrolling`](crate::App::momentum_scrolling)).
+        momentum: ScrollPhase,
         /// At a touchpad gesture's end, the fingers' speed in points per
         /// second, for scrolling to coast on.
         velocity: Vec2,

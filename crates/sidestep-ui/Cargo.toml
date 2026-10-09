@@ -21,3 +21,9 @@ smithay-client-toolkit = { version = "0.19", default-features = false, features 
 [[test]]
 name = "headless"
 harness = false
+
+# Input, the clipboard, outputs and popups under the headless sway, with
+# other clients (see the file).
+[[test]]
+name = "wayland_system"
+harness = false

@@ -32,7 +32,7 @@ pub fn capture_pixels(on: bool) {
     *null::PIXELS.lock().unwrap_or_else(|e| e.into_inner()) = on.then(Default::default);
 }
 
-/// A window's captured pixels: width, height and premultiplied RGBA, row
+/// A window's first showing's captured pixels: width, height and premultiplied RGBA, row
 /// by row from the top left. The render thread draws a paint after the
 /// loop sends it, so look once the window has shown the frame (the next
 /// turn after drawing, or later).
@@ -102,12 +102,12 @@ pub fn inject_key(
         modifiers: flags(modifiers),
         composing: None,
     };
-    cx.inject(FromRender::Key { window: window.0, key });
+    cx.inject(FromRender::Key { window: showing(cx, window), key });
 }
 
 /// The pointer moving to `at`.
 pub fn inject_motion(cx: &mut Cx, window: WindowId, at: Point) {
-    cx.inject(FromRender::Motion { window: window.0, x: at.x, y: at.y, modifiers: 0 });
+    cx.inject(FromRender::Motion { window: showing(cx, window), x: at.x, y: at.y, modifiers: 0 });
 }
 
 /// A button pressed or released at `at`, as click `clicks` of a series.
@@ -121,7 +121,7 @@ pub fn inject_button(cx: &mut Cx, window: WindowId, at: Point, button: PointerBu
         PointerButton::Other(n) => Button::Other(n),
     };
     cx.inject(FromRender::Button {
-        window: window.0,
+        window: showing(cx, window),
         x: at.x,
         y: at.y,
         button,
@@ -135,7 +135,7 @@ pub fn inject_button(cx: &mut Cx, window: WindowId, at: Point, button: PointerBu
 /// A wheel turned by `lines` at `at`.
 pub fn inject_wheel(cx: &mut Cx, window: WindowId, at: Point, lines: Vec2) {
     cx.inject(FromRender::Scroll {
-        window: window.0,
+        window: showing(cx, window),
         x: at.x,
         y: at.y,
         dx: lines.x,
@@ -150,14 +150,14 @@ pub fn inject_wheel(cx: &mut Cx, window: WindowId, at: Point, lines: Vec2) {
 
 /// The user asking to close the window (its close button).
 pub fn inject_close_request(cx: &mut Cx, window: WindowId) {
-    cx.inject(FromRender::CloseRequested { window: window.0 });
+    cx.inject(FromRender::CloseRequested { window: showing(cx, window) });
 }
 
 /// An input method committing `text`, then composing `preedit`.
 pub fn inject_ime(cx: &mut Cx, window: WindowId, commit: Option<&str>, preedit: &str) {
     let end = preedit.len() as i32;
     cx.inject(FromRender::TextInput {
-        window: window.0,
+        window: showing(cx, window),
         commit: commit.map(str::to_owned),
         preedit: (preedit.to_owned(), end, end),
     });
@@ -170,7 +170,7 @@ pub fn inject_drag_enter(cx: &mut Cx, drag: u64, window: WindowId, at: Point, mi
     let urls = (!urls.is_empty()).then(|| ("text/uri-list".to_owned(), std::sync::Arc::from(list.into_bytes())));
     cx.inject(FromRender::DndEnter {
         drag,
-        window: window.0,
+        window: showing(cx, window),
         x: at.x,
         y: at.y,
         mimes: mimes.iter().map(|m| (*m).to_owned()).collect(),
@@ -192,5 +192,53 @@ pub fn render_id(window: WindowId) -> u32 {
 
 /// The compositor dismissing a popup (a click elsewhere).
 pub fn inject_popup_done(cx: &mut Cx, popup: WindowId) {
-    cx.inject(FromRender::PopupDone { window: popup.0 });
+    cx.inject(FromRender::PopupDone { window: showing(cx, popup) });
+}
+
+/// The id the render thread knows `window`'s current showing by, while
+/// it's shown (a window hidden and shown again gets a new one).
+pub fn showing_id(cx: &Cx, window: WindowId) -> Option<u32> {
+    cx.showing_of(window)
+}
+
+/// A touchpad scroll of `delta` points at `at`, in gesture phase `phase`;
+/// an [`ScrollPhase::Ended`](crate::ScrollPhase::Ended) one carries the
+/// fingers' `velocity` in points per second.
+pub fn inject_touchpad(
+    cx: &mut Cx,
+    window: WindowId,
+    at: Point,
+    delta: Vec2,
+    phase: crate::ScrollPhase,
+    velocity: Vec2,
+) {
+    let phase = match phase {
+        crate::ScrollPhase::None => ScrollPhase::None,
+        crate::ScrollPhase::Began => ScrollPhase::Began,
+        crate::ScrollPhase::Changed => ScrollPhase::Changed,
+        crate::ScrollPhase::Ended => ScrollPhase::Ended,
+    };
+    cx.inject(FromRender::Scroll {
+        window: showing(cx, window),
+        x: at.x,
+        y: at.y,
+        dx: delta.x,
+        dy: delta.y,
+        wheel: false,
+        modifiers: 0,
+        phase,
+        velocity: (velocity.x, velocity.y),
+        inverted: false,
+    });
+}
+
+/// A frame of `window` shown (as the null render thread
+/// sends one after each present, a test may want one more).
+pub fn inject_frame(cx: &mut Cx, window: WindowId) {
+    cx.inject(FromRender::Frame { window: showing(cx, window) });
+}
+
+/// The showing input goes to: the current one, else the first.
+fn showing(cx: &Cx, window: WindowId) -> u32 {
+    cx.showing_of(window).unwrap_or(window.0)
 }
