@@ -752,6 +752,14 @@ pub(crate) enum ToRender {
         window: WindowId,
         at: Option<f64>,
     },
+    /// Composite and copy a crop on the null render thread, then answer
+    /// without involving the main thread. Other backends answer `None`.
+    CaptureWindow {
+        window: WindowId,
+        at: f64,
+        crop: [u32; 4],
+        reply: std::sync::mpsc::Sender<Option<(u32, u32, Vec<[u8; 4]>)>>,
+    },
 }
 
 /// Where a scroll is in a touchpad gesture; `None` for wheels and other

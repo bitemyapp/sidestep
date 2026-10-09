@@ -518,10 +518,10 @@ fn canvas_rect(view: &NSViewImpl, props: &Props, scale: f64) -> Option<([f64; 4]
     Some((r, (r[2] * scale).ceil() as u32, (r[3] * scale).ceil() as u32))
 }
 
-/// A viewport moved without changing its descendants' model geometry.
-/// Keep canvases that cover the new viewport, and commit a replacement
-/// for those that do not. The commit holds presentation until the new
-/// canvas is painted, as it does for any other canvas change.
+/// What `view` (a clip view that scrolled or resized) shows changed,
+/// though its descendants' geometry didn't. Canvases cut to what shows
+/// (`canvas_rect`) that no longer cover it are drawn again; the commit
+/// holds presentation until they are painted, as for any canvas change.
 pub(crate) fn prepare_viewports(view: &NSViewImpl) {
     if views::is_hidden(view) {
         return;

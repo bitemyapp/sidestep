@@ -1,11 +1,11 @@
 //! Sheets on screen. A sheet is part of its parent window, as on macOS: its
-//! root surface is a desynchronized subsurface of the parent's root surface,
-//! placed top-centre under the parent's title bar (the top of its content)
-//! and moved when the parent resizes. It has its own canvas, buffers and
-//! frame callbacks, so it draws and presents on its own; input over it goes
-//! to the sheet's window by its surface's role, and the keyboard, which the
-//! compositor gives the parent's toplevel, the main thread hands to the
-//! sheet.
+//! root surface is a desynchronized subsurface of the parent's main surface
+//! (a toplevel's frame), placed top-centre under the parent's title bar (the
+//! top of its content) and moved when the parent resizes or its title bar
+//! changes. It has its own canvas, buffers and frame callbacks, so it draws
+//! and presents on its own; input over it goes to the sheet's window by its
+//! surface's role, and the keyboard, which the compositor gives the
+//! parent's toplevel, the main thread hands to the sheet.
 //!
 //! A subsurface's position belongs to the parent's state, applied by the
 //! parent's next commit. When the parent resizes, its own present at the
@@ -16,8 +16,8 @@
 //! rules for maximized and full-screen windows) and its present is coming.
 //!
 //! A sheet is above its parent's scroll tiles, including tiles made after
-//! it: `tiles` stacks every layer's surfaces directly above the window's
-//! own surface, so below its sheets. (Decorations sit outside the content,
+//! it: `tiles` stacks every layer's surfaces directly above the content's
+//! surface, so below its sheets. (Decorations sit outside the content,
 //! where sheets don't reach.)
 
 use smithay_client_toolkit::reexports::client::protocol::wl_subsurface::WlSubsurface;
@@ -48,7 +48,7 @@ impl Drop for Sheet {
 
 /// A new sheet's shell over `parent`, which must be on screen.
 pub(crate) fn create(state: &State, parent: WindowId) -> Option<Sheet> {
-    let parent_surface = state.windows.get(&parent)?.surface().clone();
+    let parent_surface = state.windows.get(&parent)?.main_surface().clone();
     let (subsurface, surface) = state.subcompositor.create_subsurface(parent_surface, &state.qh);
     // Drawn and presented on its own, not with the parent's commits.
     subsurface.set_desync();
@@ -62,7 +62,7 @@ pub(crate) fn place(state: &State, window: WindowId) {
     let Shell::Sheet(sheet) = &win.shell else { return };
     let Some(parent) = state.windows.get(&sheet.parent) else { return };
     let x = (parent.width as i32 - win.width as i32) / 2;
-    sheet.subsurface.set_position(x.max(0), 0);
+    sheet.subsurface.set_position(x.max(0), parent.titlebar() as i32);
 }
 
 /// Show where a sheet made or resized was placed, by committing its parent,
@@ -70,9 +70,8 @@ pub(crate) fn place(state: &State, window: WindowId) {
 pub(crate) fn commit_parent(state: &State, window: WindowId) {
     let Some(Shell::Sheet(sheet)) = state.windows.get(&window).map(|w| &w.shell) else { return };
     let Some(parent) = state.windows.get(&sheet.parent) else { return };
-    let bar = parent.titlebar() as i32;
-    if parent.geometry == (0, -bar, parent.width as i32, parent.height as i32 + bar) {
-        parent.surface().commit();
+    if parent.geometry == parent.expected_geometry() {
+        parent.main_surface().commit();
     }
 }
 
@@ -84,8 +83,8 @@ fn sheets_of(state: &State, parent: WindowId) -> impl Iterator<Item = (WindowId,
     })
 }
 
-/// `parent` took a new size: its sheets stay centred, as of its present at
-/// that size.
+/// `parent` took a new size or title bar: its sheets stay centred under the
+/// title bar, as of its present for them.
 pub(crate) fn parent_resized(state: &State, parent: WindowId) {
     let sheets: Vec<WindowId> = sheets_of(state, parent).map(|(id, _)| id).collect();
     for sheet in sheets {

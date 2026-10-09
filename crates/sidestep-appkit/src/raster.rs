@@ -155,6 +155,78 @@ pub(crate) fn paint(canvas: &mut Canvas, glyphs: &mut Glyphs, rects: &[Rect], op
     }
 }
 
+/// `paint`, timing each op (a group as one) for `SIDESTEP_TRACE_FRAMES=tiles`:
+/// a slow paint names the ops that made it slow.
+pub(crate) fn paint_timed(canvas: &mut Canvas, glyphs: &mut Glyphs, rects: &[Rect], ops: &[Op], window: u32) {
+    let started = std::time::Instant::now();
+    let mut slow: Vec<(f64, String)> = Vec::new();
+    for rect in rects {
+        let mut i = 0;
+        while i < ops.len() {
+            let mut end = i + 1;
+            if matches!(ops[i], Op::BeginGroup { .. }) {
+                let mut depth = 0;
+                for (j, op) in ops[i..].iter().enumerate() {
+                    match op {
+                        Op::BeginGroup { .. } => depth += 1,
+                        Op::EndGroup => depth -= 1,
+                        _ => {}
+                    }
+                    if depth == 0 {
+                        end = i + j + 1;
+                        break;
+                    }
+                }
+            }
+            let t = std::time::Instant::now();
+            ops::run(canvas, glyphs, rect, &ops[i..end]);
+            let ms = t.elapsed().as_secs_f64() * 1000.0;
+            if ms > 0.5 {
+                slow.push((ms, describe(&ops[i], end - i)));
+            }
+            i = end;
+        }
+    }
+    let total = started.elapsed().as_secs_f64() * 1000.0;
+    if total > 4.0 {
+        slow.sort_by(|a, b| b.0.total_cmp(&a.0));
+        eprintln!(
+            "sidestep @{:.1} ms window paint: window {window} {total:.2} ms, {} ops over {:?}",
+            crate::layers::trace_ms(),
+            ops.len(),
+            rects
+        );
+        for (ms, what) in slow.iter().take(8) {
+            eprintln!("    {ms:7.2} ms  {what}");
+        }
+    }
+}
+
+fn describe(op: &Op, count: usize) -> String {
+    let shadow = |d: &crate::protocol::Draw| if d.shadow.is_some() { " with a shadow" } else { "" };
+    match op {
+        Op::Fill { rect, .. } => format!("fill {rect:?}"),
+        Op::FillWith { rect, blend, .. } => format!("fill {blend:?} {rect:?}"),
+        Op::FillPath { path, draw, paint, .. } => format!(
+            "path fill {:?}{} {}, clip {:?}",
+            path.bounds(),
+            shadow(draw),
+            if matches!(paint, crate::protocol::Paint::Gradient(_)) { "gradient" } else { "solid" },
+            draw.clip
+        ),
+        Op::StrokePath { path, draw, .. } => {
+            format!("path stroke {:?}{}, clip {:?}", path.bounds(), shadow(draw), draw.clip)
+        }
+        Op::Image { dst, src, draw, .. } => format!("image {src:?} into {dst:?}{}, clip {:?}", shadow(draw), draw.clip),
+        Op::BeginGroup { alpha, draw } => {
+            format!("group of {count} ops, alpha {alpha}{}, clip {:?}", shadow(draw), draw.clip)
+        }
+        Op::EndGroup => "end group".into(),
+        Op::Glyphs(run) => format!("glyphs at ({}, {})", run.x, run.y),
+        Op::Composite(_) => "composite".into(),
+    }
+}
+
 /// A rectangle filled over what's there.
 pub(crate) fn fill(canvas: &mut Canvas, r: &Rect, color: Color) {
     let a = (color[3].clamp(0.0, 1.0) * 255.0 + 0.5) as u32;

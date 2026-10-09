@@ -428,6 +428,20 @@ fn shadow_of(p: &Props, parent: &[f64; 6]) -> Option<Arc<ShadowSpec>> {
 /// way it shows (so `top` is the far y end even in a flipped layer, as
 /// measured: the layer's `contentsAreFlipped` turns the contents over, not
 /// their place).
+/// Where a view's canvas, drawn for `rect` of the layer's bounds when they
+/// were `drawn_for`, shows in the bounds the layer presents now, `bounds`:
+/// the canvas is the layer's contents, placed by its gravity as an image
+/// of the bounds it was drawn for would be (by default resized with them,
+/// as a view's layer shows while an animation changes its frame).
+pub(crate) fn fit_canvas(rect: [f64; 4], drawn_for: [f64; 4], bounds: [f64; 4], gravity: Gravity) -> [f64; 4] {
+    if drawn_for == bounds || drawn_for[2] <= 0.0 || drawn_for[3] <= 0.0 {
+        return rect;
+    }
+    let [dx, dy, dw, dh] = place(gravity, bounds, [drawn_for[2], drawn_for[3]]);
+    let (sx, sy) = (dw / drawn_for[2], dh / drawn_for[3]);
+    [dx + (rect[0] - drawn_for[0]) * sx, dy + (rect[1] - drawn_for[1]) * sy, rect[2] * sx, rect[3] * sy]
+}
+
 fn place(gravity: Gravity, bounds: [f64; 4], size: [f64; 2]) -> [f64; 4] {
     let [x, y, w, h] = bounds;
     let [iw, ih] = size;

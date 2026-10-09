@@ -172,11 +172,14 @@ fn close_group(base: &mut Canvas, layers: &mut [Layer], st: &mut State, mut laye
             };
             let (lx, ly) = ((layer.x0 - target.x0) as usize, (layer.y0 - target.y0) as usize);
             let mut region = (lx, ly, lx + layer.width as usize, ly + layer.height as usize);
-            // A shadow reaches anywhere in the group's clip.
-            if layer.draw.shadow.is_some()
+            // A shadow reaches as far as what the group drew, moved by its
+            // offset and spread by its blur, within the group's clip:
+            // nowhere else does it leave any coverage.
+            if let Some(s) = &layer.draw.shadow
                 && let Some(c) = target.clip_pixels(&layer.draw, damage)
+                && let Some(cast) = shadow_reach(region, s, target.scale, c)
             {
-                region = union_region(region, c);
+                region = union_region(region, cast);
             }
             let (at_x, at_y) = ((lx - region.0) as i32, (ly - region.1) as i32);
             let paint = PixmapPaint {
@@ -192,9 +195,7 @@ fn close_group(base: &mut Canvas, layers: &mut [Layer], st: &mut State, mut laye
                         color: [shadow.color[0], shadow.color[1], shadow.color[2], shadow.color[3] * paint.opacity],
                         ..(**shadow).clone()
                     };
-                    super::effects::shadow(pm, &faded, origin.2, mask, |target, moved| {
-                        target.draw_pixmap(at_x, at_y, src, &PixmapPaint::default(), moved, None)
-                    });
+                    super::effects::shadow_of(pm, &faded, origin.2, mask, src, (at_x, at_y));
                 }
                 masked(pm, spare, mask, layer.draw.blend, |pm, mask| {
                     pm.draw_pixmap(at_x, at_y, src, &paint, Transform::identity(), mask)
@@ -252,20 +253,43 @@ fn union_region(a: (usize, usize, usize, usize), b: (usize, usize, usize, usize)
     (a.0.min(b.0), a.1.min(b.1), a.2.max(b.2), a.3.max(b.3))
 }
 
+/// The pixels the shadow `s` of what covers `caster` can reach, at `scale`
+/// pixels a point, within `clip`: the caster moved by the offset and spread
+/// by the blur. `None` if that leaves the clip.
+fn shadow_reach(
+    caster: (usize, usize, usize, usize),
+    s: &ShadowSpec,
+    scale: f32,
+    clip: (usize, usize, usize, usize),
+) -> Option<(usize, usize, usize, usize)> {
+    let (dx, dy) = ((s.dx * scale).round(), (s.dy * scale).round());
+    let spread = super::effects::reach(s.blur * scale).ceil() + 1.0;
+    let at = |v: usize, by: f32, out: f32| (v as f32 + by + out).max(0.0) as usize;
+    let r = (
+        at(caster.0, dx, -spread).max(clip.0),
+        at(caster.1, dy, -spread).max(clip.1),
+        at(caster.2, dx, spread).min(clip.2),
+        at(caster.3, dy, spread).min(clip.3),
+    );
+    (r.0 < r.2 && r.1 < r.3).then_some(r)
+}
+
 /// The pixels (of `canvas`) ops can reach within `damage`, up to the end
 /// of the group they're in (or all of them), groups and all: x0, y0, x1,
 /// y1; `None` for none.
 pub(crate) fn contents(canvas: &Canvas, damage: &Rect, ops: &[Op]) -> Option<(usize, usize, usize, usize)> {
     let mut depth = 0;
     let mut all: Option<(usize, usize, usize, usize)> = None;
-    // Groups casting shadows reach as far as their clips let the shadows.
+    // Groups casting shadows reach as far as their shadows do.
     let mut shadowed: Option<(usize, usize, usize, usize)> = None;
-    for op in ops {
+    for (i, op) in ops.iter().enumerate() {
         let reach = match op {
             Op::BeginGroup { draw, .. } => {
                 if depth == 0
-                    && draw.shadow.is_some()
-                    && let Some(r) = canvas.clip_pixels(draw, damage)
+                    && let Some(s) = &draw.shadow
+                    && let Some(c) = canvas.clip_pixels(draw, damage)
+                    && let Some(within) = contents(canvas, damage, &ops[i + 1..])
+                    && let Some(r) = shadow_reach(within, s, canvas.scale, c)
                 {
                     shadowed = Some(shadowed.map_or(r, |a| union_region(a, r)));
                 }
@@ -912,6 +936,134 @@ mod tests {
         assert_eq!(at(11, 11), [255, 0, 0, 255]);
         assert_eq!(at(9, 11), [0; 4]);
         assert_eq!(at(16, 11), [0; 4]);
+    }
+
+    /// A group's shadow is the same whatever its clip lets it reach, a
+    /// window's worth or just around the group, and nested in a group too;
+    /// and it is drawn without blurring the whole clip.
+    #[test]
+    fn group_shadows_reach_only_around_the_group() {
+        let shadow = Arc::new(ShadowSpec { dx: 3.0, dy: 4.0, blur: 8.0, color: [0.0, 0.0, 0.0, 0.6], only: false });
+        let group = |clip: Rect, nested: bool| {
+            let d = draw(clip);
+            let shadowed = Draw { shadow: Some(shadow.clone()), ..d.clone() };
+            let mut ops =
+                vec![Op::FillWith { rect: Rect::new(0.0, 0.0, 400.0, 300.0), color: [1.0; 4], blend: Blend::Copy }];
+            if nested {
+                ops.push(Op::BeginGroup { alpha: 0.9, draw: d.clone() });
+            }
+            ops.extend([
+                Op::BeginGroup { alpha: 1.0, draw: shadowed },
+                Op::FillPath {
+                    path: square(150.0, 100.0, 210.0, 140.0),
+                    even_odd: false,
+                    paint: Paint::Solid(RED),
+                    draw: d.clone(),
+                },
+                Op::Fill { rect: Rect::new(160.0, 110.0, 170.0, 120.0), color: BLUE },
+                Op::EndGroup,
+            ]);
+            if nested {
+                ops.push(Op::EndGroup);
+            }
+            ops
+        };
+        for nested in [false, true] {
+            for scale in [1.0, 2.0] {
+                let near = render(400, 300, scale, &group(Rect::new(120.0, 70.0, 250.0, 180.0), nested));
+                let wide = render(400, 300, scale, &group(Rect::new(0.0, 0.0, 400.0, 300.0), nested));
+                assert!(near == wide, "nested {nested}, {scale}×: the clip's size changed the shadow");
+                // The shadow is there, below and right of the group.
+                let w = (400.0 * scale) as usize;
+                let at = |x: f32, y: f32| channels(wide[(y * scale) as usize * w + (x * scale) as usize]);
+                assert!(at(212.0, 143.0)[0] < 250, "a shadow beside the group");
+                assert_eq!(at(380.0, 280.0), [255; 4], "and none far from it");
+            }
+        }
+        // A window-sized clip costs what the group needs, not the window.
+        let big = group(Rect::new(0.0, 0.0, 3000.0, 2000.0), false);
+        let started = std::time::Instant::now();
+        let (w, h) = (3000usize, 2000usize);
+        let mut px = vec![0u32; w * h];
+        let mut canvas = Canvas::new(&mut px, w as u32, h as u32, 0.0, 1.0);
+        paint(&mut canvas, &mut Glyphs::default(), &[Rect::new(0.0, 0.0, 3000.0, 2000.0)], &big[1..]);
+        let shadowed = started.elapsed();
+        let started = std::time::Instant::now();
+        let mut canvas = Canvas::new(&mut px, w as u32, h as u32, 0.0, 1.0);
+        paint(&mut canvas, &mut Glyphs::default(), &[Rect::new(0.0, 0.0, 3000.0, 2000.0)], &big[2..4]);
+        let plain = started.elapsed();
+        assert!(shadowed < plain * 20 + std::time::Duration::from_millis(20), "{shadowed:?} against {plain:?}");
+    }
+
+    /// A window's worth of drawing that a switch between an application's
+    /// surfaces redraws at 2×: a card's rounded fill 1,133 × 626 points, and
+    /// a composer card 753 × 123 points lifted on a soft shadow (blur 32).
+    #[test]
+    #[ignore = "a benchmark; run in release mode"]
+    fn timing_big_cards() {
+        use kurbo::Shape;
+        let (w, h, scale) = (1440.0f32, 874.0f32, 2.0f32);
+        let (pw, ph) = ((w * scale) as u32, (h * scale) as u32);
+        let mut px = vec![0u32; (pw * ph) as usize];
+        let all = Rect::new(0.0, 0.0, w, h);
+        let d = draw(all);
+        let card = |x0: f64, y0: f64, x1: f64, y1: f64, r: f64| {
+            crate::path::to_skia(&kurbo::RoundedRect::new(x0, y0, x1, y1, r).to_path(0.1)).unwrap()
+        };
+        let fill = [Op::FillPath {
+            path: card(272.0, 204.0, 1405.0, 830.0, 12.0),
+            even_odd: false,
+            paint: Paint::Solid(BLUE),
+            draw: d.clone(),
+        }];
+        let shadow = Arc::new(ShadowSpec { dx: 0.0, dy: 5.0, blur: 32.0, color: [0.1, 0.03, 0.1, 0.16], only: false });
+        let lifted = [
+            Op::BeginGroup { alpha: 1.0, draw: Draw { shadow: Some(shadow), ..d.clone() } },
+            Op::FillPath {
+                path: card(290.0, 700.0, 1043.0, 823.0, 16.0),
+                even_odd: false,
+                paint: Paint::Solid(RED),
+                draw: d.clone(),
+            },
+            Op::Fill { rect: Rect::new(300.0, 710.0, 1030.0, 812.0), color: BLUE },
+            Op::EndGroup,
+        ];
+        // The card as Core Animation composites a view: its drawing, an
+        // image as many pixels as it covers, in a group casting the shadow.
+        use crate::raster::images::{ImageData, Pixels};
+        let (iw, ih) = (1506u32, 246u32);
+        let data: Vec<u8> = (0..iw * ih).flat_map(|i| [200, (i % 251) as u8, 90, 255]).collect();
+        let image =
+            Arc::new(ImageData { key: 7, generation: 0, width: iw, height: ih, pixels: Pixels::Rgba(data.into()) });
+        let shadow2 = Arc::new(ShadowSpec { dx: 0.0, dy: 5.0, blur: 32.0, color: [0.1, 0.03, 0.1, 0.16], only: false });
+        let composited = [
+            Op::BeginGroup { alpha: 1.0, draw: Draw { shadow: Some(shadow2), ..d.clone() } },
+            Op::Image {
+                image: image.clone(),
+                src: Rect::new(0.0, 0.0, iw as f32, ih as f32),
+                dst: Rect::new(290.0, 823.0, 1043.0, 700.0),
+                alpha: 1.0,
+                quality: crate::protocol::Quality::Medium,
+                tint: None,
+                tiled: false,
+                draw: d.clone(),
+            },
+            Op::EndGroup,
+        ];
+        let plain_image = [composited[1].clone()];
+        let mut glyphs = Glyphs::default();
+        for (name, ops) in [
+            ("big rounded fill", &fill[..]),
+            ("lifted card", &lifted[..]),
+            ("view's drawing, 1:1", &plain_image[..]),
+            ("composited lifted view", &composited[..]),
+        ] {
+            let ms = crate::backend::median(|| {
+                let mut canvas = Canvas::new(&mut px, pw, ph, 0.0, scale);
+                paint(&mut canvas, &mut glyphs, &[all], ops);
+            });
+            eprintln!("{name}: {ms:.2} ms at {scale}x");
+        }
     }
 
     /// The drawing gallery's bench frame (2,000 rounded-rect fills, 1,000

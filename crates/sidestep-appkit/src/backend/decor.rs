@@ -9,12 +9,13 @@
 //! drawing as the window's content (the main thread sends it as ops), and
 //! nothing runs a subprocess to find a font.
 //!
-//! Each part is a subsurface of the window's own surface, outside it: the
-//! header above, and four strips around the whole for the shadow and the
-//! resize handles. The window's surface stays exactly the content, so the
-//! content view's coordinates don't change, and the window geometry takes
-//! in the header but not the shadow. Parts are synchronized subsurfaces:
-//! what they show changes with the next commit of the window's surface.
+//! Each part is a subsurface of the toplevel's frame (`Frame`), outside the
+//! content: the header above, and four strips around the whole for the
+//! shadow and the resize handles. The content's surface stays exactly the
+//! content, so the content view's coordinates don't change, and the window
+//! geometry (the frame) takes in the header but not the shadow. Parts are
+//! synchronized subsurfaces: what they show changes with the window's next
+//! commit.
 //! After a resize or a new scale they're drawn only by the present that
 //! brings the content drawn for it, so the two show together; changes the
 //! content doesn't follow (focus, hover, the title) are committed at once.
@@ -91,13 +92,15 @@ enum Control {
     Minimize,
 }
 
-/// A subsurface of the window's surface: a part of the decorations, or the
-/// menu bar (`menubar`).
+/// A subsurface of the window's main surface: a part of the decorations,
+/// or the menu bar (`menubar`).
 pub(super) struct Surface {
     pub(super) surface: WlSurface,
     subsurface: WlSubsurface,
     viewport: WpViewport,
     pub(super) mapped: bool,
+    /// Where it was last placed.
+    at: Option<(i32, i32)>,
 }
 
 impl Surface {
@@ -109,7 +112,15 @@ impl Surface {
     ) -> Self {
         let (subsurface, surface) = subcompositor.create_subsurface(parent.clone(), qh);
         let viewport = viewporter.get_viewport(&surface, qh, ());
-        Surface { surface, subsurface, viewport, mapped: false }
+        Surface { surface, subsurface, viewport, mapped: false, at: None }
+    }
+
+    /// Put it at `at` points in its parent, as of the parent's next commit.
+    pub(super) fn place(&mut self, at: (i32, i32)) {
+        if self.at != Some(at) {
+            self.subsurface.set_position(at.0, at.1);
+            self.at = Some(at);
+        }
     }
 
     pub(super) fn hide(&mut self) {
@@ -121,8 +132,7 @@ impl Surface {
     }
 
     /// Show a new buffer of `size` pixels (premultiplied ARGB), which `draw`
-    /// fills, at `at` points relative to the window's surface and `points`
-    /// big.
+    /// fills, at `at` points in the window's main surface and `points` big.
     fn show(
         &mut self,
         pool: &mut SlotPool,
@@ -151,7 +161,7 @@ impl Surface {
         let _ = buffer.attach_to(&self.surface);
         self.surface.damage_buffer(0, 0, pw as i32, ph as i32);
         self.viewport.set_destination(points.0 as i32, points.1 as i32);
-        self.subsurface.set_position(at.0, at.1);
+        self.place(at);
         self.surface.commit();
         self.mapped = true;
     }
@@ -308,7 +318,7 @@ impl Decor {
 
     /// Height of the header, in points: none in fullscreen.
     pub fn titlebar(&self, state: &WindowState) -> u32 {
-        if state.fullscreen { 0 } else { HEADER }
+        header_height(state)
     }
 
     /// Something shown changed since the parts were last drawn for a
@@ -357,8 +367,7 @@ impl Decor {
                 self.header.hide();
             } else if let Some(pm) = self.look.render_header(f, glyphs) {
                 let size = (pm.width(), pm.height());
-                let top = -((HEADER + f.bar) as i32);
-                self.header.show(pool, size, (0, top), (f.width, HEADER), |dst| {
+                self.header.show(pool, size, header_at(f), (f.width, HEADER), |dst| {
                     for (d, p) in dst.iter_mut().zip(pm.pixels()) {
                         *d = u32::from_be_bytes([p.alpha(), p.red(), p.green(), p.blue()]);
                     }
@@ -376,12 +385,18 @@ impl Decor {
                 }
             }
         }
+        // The content moves in the main surface when the title bar changes,
+        // and the parts with it, drawn again or not.
+        self.header.place(header_at(f));
+        for (strip, place) in self.strips.iter_mut().zip(strip_places(f)) {
+            strip.place(place.placed(f));
+        }
     }
 
     fn draw_strips(&mut self, f: &FrameInfo, pool: &mut SlotPool) {
         let shade = Shadow::new(f, theme());
         let m = MARGIN as i32;
-        for (i, place) in strip_places(f.width, f.height, f.bar).into_iter().enumerate() {
+        for (i, place) in strip_places(f).into_iter().enumerate() {
             let size = (px(place.size.0, f.scale), px(place.size.1, f.scale));
             if let Some(regions) = &self.regions {
                 let region = &regions[i];
@@ -397,7 +412,7 @@ impl Decor {
                 }
                 self.strips[i].surface.set_input_region(Some(region.wl_region()));
             }
-            self.strips[i].show(pool, size, place.at, place.size, |dst| {
+            self.strips[i].show(pool, size, place.placed(f), place.size, |dst| {
                 strip_pixels(&shade, &place, size, f.scale, dst);
             });
         }
@@ -639,14 +654,38 @@ fn title_mask(title: &TitleText, scale: f64, glyphs: &mut Glyphs) -> (u32, u32, 
 }
 
 /// Where a strip of the border goes: position and size in points,
-/// relative to the window's surface.
+/// relative to the content's top left (`placed` puts it in the main
+/// surface).
 struct StripPlace {
     part: Part,
     at: (i32, i32),
     size: (u32, u32),
 }
 
-fn strip_places(width: u32, height: u32, bar: u32) -> [StripPlace; 4] {
+impl StripPlace {
+    fn placed(&self, f: &FrameInfo) -> (i32, i32) {
+        (self.at.0, self.at.1 + content_top(f))
+    }
+}
+
+/// Height of the header, in points: none in fullscreen.
+fn header_height(state: &WindowState) -> u32 {
+    if state.fullscreen { 0 } else { HEADER }
+}
+
+/// Where the content's top is in the toplevel's frame, under the header
+/// and the menu bar: what the parts are placed from.
+fn content_top(f: &FrameInfo) -> i32 {
+    (header_height(&f.state) + f.bar) as i32
+}
+
+/// Where the header goes in the frame.
+fn header_at(f: &FrameInfo) -> (i32, i32) {
+    (0, content_top(f) - (HEADER + f.bar) as i32)
+}
+
+fn strip_places(f: &FrameInfo) -> [StripPlace; 4] {
+    let (width, height, bar) = (f.width, f.height, f.bar);
     let (m, h) = (MARGIN, height + HEADER + bar);
     let (mi, top) = (MARGIN as i32, -((HEADER + bar) as i32));
     [
@@ -999,7 +1038,7 @@ mod tests {
         for scale in [1.0, 1.5, 2.0] {
             let f = frame(&title, 300, 200, scale);
             let shade = Shadow::new(&f, theme());
-            for place in strip_places(f.width, f.height, f.bar) {
+            for place in strip_places(&f) {
                 let size = (px(place.size.0, scale), px(place.size.1, scale));
                 let mut fast = vec![0u32; (size.0 * size.1) as usize];
                 strip_pixels(&shade, &place, size, scale, &mut fast);
@@ -1051,7 +1090,7 @@ mod tests {
             let header = median(|| drop(look.render_header(&f, &mut glyphs)));
             let shade = Shadow::new(&f, theme());
             let strips = median(|| {
-                for place in strip_places(f.width, f.height, f.bar) {
+                for place in strip_places(&f) {
                     let size = (px(place.size.0, scale), px(place.size.1, scale));
                     let mut dst = vec![0u32; (size.0 * size.1) as usize];
                     strip_pixels(&shade, &place, size, scale, &mut dst);

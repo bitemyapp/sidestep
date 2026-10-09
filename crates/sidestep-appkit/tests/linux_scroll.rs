@@ -289,10 +289,11 @@ mod linux {
             // A real display pass, without manually preparing TextKit or
             // invalidating unrelated views, must prepare the exposed text.
             testing::settle();
+            // The viewport covers what shows, with what was drawn ahead.
+            let b = controller.viewportBounds();
             assert!(
-                (controller.viewportBounds().origin.y - y).abs() < 1.0,
-                "viewport stayed at {:?} after scrolling to {y}",
-                controller.viewportBounds()
+                b.origin.y <= y + 1.0 && b.origin.y + b.size.height >= y + 149.0 && b.origin.y >= y - 2048.0,
+                "viewport stayed at {b:?} after scrolling to {y}"
             );
             assert!(controller.viewportRange().is_some(), "the exposed viewport has text");
             assert!(
@@ -300,6 +301,72 @@ mod linux {
                 "newly exposed text must be painted before scrolling stops"
             );
         }
+        testing::note_painted_text(false);
+        close(&w);
+    }
+
+    /// Text is painted wherever a tile is drawn, in sight or ahead of a
+    /// scroll: a TextKit 2 view's text outside its viewport would leave
+    /// blanks in tiles that are kept and shown as they come into view. The
+    /// text view sits in a container, as a row of a list does. Scrolling
+    /// back up goes over text laid out already, which changes no layout
+    /// that would have it drawn again.
+    fn scrolling_paints_text_ahead(mtm: MainThreadMarker) {
+        let sv = NSScrollView::initWithFrame(NSScrollView::alloc(mtm), rect(0.0, 0.0, 300.0, 150.0));
+        let container = view(mtm, rect(0.0, 0.0, 300.0, 6000.0), true);
+        // More text than the view holds, so text fills it to its bottom.
+        let text = NSTextView::initWithFrame(NSTextView::alloc(mtm), rect(0.0, 40.0, 300.0, 4500.0));
+        text.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+        text.setString(&objc2_foundation::NSString::from_str(&"Every line of this is text.\n".repeat(400)));
+        container.addSubview(&text);
+        sv.setDocumentView(Some(&container));
+        // Noted from the first frame: tiles drawn then are kept.
+        testing::note_painted_text(true);
+        let (w, _, _) = shown(mtm, &[&sv]);
+        let clip = sv.contentView();
+        let scroll = |y: f64| {
+            clip.scrollToPoint(pt(0.0, y));
+            sv.reflectScrolledClipView(&clip);
+            testing::settle();
+        };
+        // Where text was painted (baselines), and whether what shows of the
+        // text has any gap in it more than a couple of lines tall.
+        let mut painted: Vec<f64> = Vec::new();
+        let check = |y: f64, painted: &mut Vec<f64>| {
+            painted.extend(testing::take_painted_text().iter().map(|run| f64::from(run.y)));
+            let t = text.frame();
+            let (top, bottom) = (y.max(t.origin.y), (y + 150.0).min(t.origin.y + t.size.height - 20.0));
+            let mut seen: Vec<f64> = painted.iter().copied().filter(|p| *p >= top && *p <= bottom + 20.0).collect();
+            seen.sort_by(f64::total_cmp);
+            let mut last = top;
+            for p in seen.iter().copied().chain([bottom + 20.0]) {
+                assert!(
+                    p - last < 40.0,
+                    "a blank from {last} to {p} shows at scroll {y}: text there was never painted"
+                );
+                last = p;
+            }
+        };
+        // Down a little at a time, as a touchpad scrolls: the tiles coming
+        // into view were drawn ahead.
+        let end = (text.frame().origin.y + text.frame().size.height).min(container.frame().size.height) - 150.0;
+        let mut y = 0.0;
+        while y < end {
+            y = (y + 40.0).min(end);
+            scroll(y);
+            check(y, &mut painted);
+        }
+        // Back up, once the tiles kept from the way down are behind.
+        painted.clear();
+        let kept = y - 3.0 * 512.0;
+        while y > 0.0 {
+            y = (y - 40.0).max(0.0);
+            scroll(y);
+            if y < kept {
+                check(y, &mut painted);
+            }
+        }
+        assert!(kept > 1000.0, "the text must be several tiles tall");
         testing::note_painted_text(false);
         close(&w);
     }
@@ -846,6 +913,7 @@ mod linux {
             ("promotion", promotion),
             ("scrolling_moves_layers", scrolling_moves_layers),
             ("scrolling_prepares_text_without_unrelated_damage", scrolling_prepares_text_without_unrelated_damage),
+            ("scrolling_paints_text_ahead", scrolling_paints_text_ahead),
             ("scrolling_refreshes_large_layer_canvases", scrolling_refreshes_large_layer_canvases),
             ("tiles_ahead_come_a_pass_late", tiles_ahead_come_a_pass_late),
             ("anchored_rows_and_columns", anchored_rows_and_columns),

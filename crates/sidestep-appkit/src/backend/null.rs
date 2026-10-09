@@ -63,6 +63,21 @@ pub(crate) static PIXELS: Mutex<Option<HashMap<WindowId, Captured>>> = Mutex::ne
 /// A window's captured width, height and pixels.
 pub(crate) type Captured = (u32, u32, Vec<u32>);
 
+/// The scale this render thread tells windows they show at (1 unless a
+/// test asks for another, `testing::use_null_backend_scale`): what the main
+/// thread draws at, and the captured pixels' scale.
+pub(crate) static SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+
+fn scale() -> u32 {
+    SCALE.load(Ordering::Relaxed).max(1)
+}
+
+/// Captured pixels for a window `width` × `height` points.
+fn captured(width: u32, height: u32) -> Captured {
+    let (w, h) = (width * scale(), height * scale());
+    (w, h, vec![0; w as usize * h as usize])
+}
+
 fn with_ca<R>(f: impl FnOnce(&mut crate::quartzcore::tree::Compositor) -> R) -> R {
     let mut ca = CA.lock().unwrap_or_else(|e| e.into_inner());
     f(ca.get_or_insert_with(Default::default))
@@ -73,7 +88,7 @@ fn capture(window: WindowId, rects: &[crate::protocol::Rect], ops: &[Op], glyphs
     let mut pixels = PIXELS.lock().unwrap_or_else(|e| e.into_inner());
     let Some(all) = pixels.as_mut() else { return };
     let Some((w, h, px)) = all.get_mut(&window) else { return };
-    let mut canvas = crate::raster::Canvas::new(px, *w, *h, 0.0, 1.0);
+    let mut canvas = crate::raster::Canvas::new(px, *w, *h, 0.0, scale() as f32);
     crate::raster::paint(&mut canvas, glyphs, rects, ops);
 }
 
@@ -92,6 +107,24 @@ fn composite(window: WindowId, at: Option<f64>, glyphs: &mut crate::raster::Glyp
             capture(window, &r.rects, &r.ops, glyphs);
         }
     }
+}
+
+/// Copy only the requested device pixels, on the render thread. An empty
+/// or out-of-bounds crop has no image; arithmetic overflow is out of bounds.
+fn cropped(window: WindowId, [x, y, width, height]: [u32; 4]) -> Option<(u32, u32, Vec<[u8; 4]>)> {
+    let all = PIXELS.lock().unwrap_or_else(|e| e.into_inner());
+    let (w, h, pixels) = all.as_ref()?.get(&window)?;
+    let right = x.checked_add(width)?;
+    let bottom = y.checked_add(height)?;
+    if width == 0 || height == 0 || right > *w || bottom > *h {
+        return None;
+    }
+    let mut out = Vec::with_capacity(width as usize * height as usize);
+    for row in y..bottom {
+        let start = row as usize * *w as usize;
+        out.extend(pixels[start + x as usize..start + right as usize].iter().map(|p| p.to_ne_bytes()));
+    }
+    Some((width, height, out))
 }
 
 pub(crate) fn request() {
@@ -134,7 +167,7 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
         window,
         width: win.width,
         height: win.height,
-        scale: 1.0,
+        scale: f64::from(scale()),
         titlebar: win.bar,
         state: win.state,
     };
@@ -154,7 +187,7 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
         match msg {
             ToRender::CreateWindow { window, width, height, popup, sheet_of, .. } => {
                 if let Some(all) = PIXELS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-                    all.insert(window, (width, height, vec![0; width as usize * height as usize]));
+                    all.insert(window, captured(width, height));
                 }
                 let win = Win { width, height, state: WindowState::default(), bar: 0 };
                 send(configure(window, &win));
@@ -189,6 +222,11 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
                 }
             }
             ToRender::Composite { window, at } => composite(window, at, &mut glyphs),
+            ToRender::CaptureWindow { window, at, crop, reply } => {
+                composite(window, Some(at), &mut glyphs);
+                // A receiver may be dropped when its diagnostic is cancelled.
+                let _ = reply.send(cropped(window, crop));
+            }
             ToRender::FrameTicks { window, on } => note(Seen::FrameTicks { window, on }),
             ToRender::Request { window, request } => {
                 note(Seen::Request { window, request: format!("{request:?}") });
@@ -198,10 +236,7 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
                     WindowRequest::Resize(w, h) => {
                         (win.width, win.height) = (w.max(1), h.max(1));
                         if let Some(all) = PIXELS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-                            all.insert(
-                                window,
-                                (win.width, win.height, vec![0; win.width as usize * win.height as usize]),
-                            );
+                            all.insert(window, captured(win.width, win.height));
                         }
                         send(configure(window, win));
                     }

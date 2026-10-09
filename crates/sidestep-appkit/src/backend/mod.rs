@@ -1,9 +1,10 @@
 //! The render thread. It owns the Wayland connection and each window's
 //! surfaces:
 //!
-//! - the root layer is the window's own surface, rasterized into a canvas and
+//! - the root layer is the content's surface, rasterized into a canvas and
 //!   presented through a few shared-memory buffers, copying and damaging only
-//!   what changed;
+//!   what changed. A popup's or a sheet's is its own surface; a toplevel's
+//!   is a subsurface of its frame ([`Frame`]);
 //! - a scroll layer is a grid of tiles, each on its own subsurface, cropped
 //!   to the scroll view with the viewporter, with an overlay above for the
 //!   views drawn over it ([`tiles`]). Scrolling moves tiles; a tile uploads
@@ -25,9 +26,9 @@
 //!
 //! Frames are paced by the compositor's frame callbacks, which are passed on
 //! to the main thread as permission to send the next frame. Each present asks
-//! for a callback on the window's surface and on one tile or overlay, and
+//! for a callback on the content's surface and on one tile or overlay, and
 //! the first to fire counts: compositors send none to a surface they
-//! consider hidden, and tiles can cover a window's own surface completely.
+//! consider hidden, and tiles can cover the content's surface completely.
 
 mod decor;
 mod dnd;
@@ -72,7 +73,9 @@ use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use smithay_client_toolkit::reexports::client::backend::ObjectId;
 use smithay_client_toolkit::reexports::client::globals::registry_queue_init;
 use smithay_client_toolkit::reexports::client::protocol::wl_callback::{self, WlCallback};
+use smithay_client_toolkit::reexports::client::protocol::wl_region::WlRegion;
 use smithay_client_toolkit::reexports::client::protocol::wl_seat::WlSeat;
+use smithay_client_toolkit::reexports::client::protocol::wl_subsurface::WlSubsurface;
 use smithay_client_toolkit::reexports::client::protocol::wl_surface::WlSurface;
 use smithay_client_toolkit::reexports::client::protocol::{wl_output, wl_shm};
 use smithay_client_toolkit::reexports::client::{Connection, Dispatch, Proxy, QueueHandle};
@@ -171,6 +174,20 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
     event_loop
         .handle()
         .insert_source(channel, |event, _, state: &mut State| match event {
+            ChannelEvent::Msg(msg) if crate::layers::tracing() => {
+                let kind = match &msg {
+                    ToRender::Paint { target: Target::Tiles(_), .. } => "a tiles paint",
+                    ToRender::Paint { target: Target::Overlay(_), .. } => "an overlay paint",
+                    ToRender::Paint { target: Target::Root, .. } => "a window paint",
+                    ToRender::Paint { target: Target::Content(_), .. } => "a layer canvas paint",
+                    ToRender::Present { .. } => "a present",
+                    ToRender::Commit(_) => "a layer commit",
+                    _ => "another message",
+                };
+                let started = std::time::Instant::now();
+                state.handle(msg);
+                tiles::note_busy(started.elapsed(), kind);
+            }
             ChannelEvent::Msg(msg) => state.handle(msg),
             ChannelEvent::Closed => state.exit = true,
         })
@@ -221,7 +238,11 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
     seat::bind_existing(&mut state, &globals);
     outputs::started(&state, &globals);
     while !state.exit {
-        if event_loop.dispatch(None, &mut state).is_err() {
+        // While tiles have paints to rasterize, look for events without
+        // waiting, and rasterize a slice after handling them: frame
+        // callbacks and the main thread's presents come first.
+        let owed = state.windows.values().any(|w| tiles::owed(&w.layers));
+        if event_loop.dispatch(owed.then_some(std::time::Duration::ZERO), &mut state).is_err() {
             break;
         }
         // The Wayland source reports only I/O errors. After a protocol error
@@ -231,8 +252,14 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
             eprintln!("sidestep: Wayland protocol error: {error}");
             break;
         }
+        state.rasterize_tiles();
     }
 }
+
+/// How long the render thread rasterizes tiles between looks for events:
+/// well inside a frame at 120 Hz, so a frame callback or a present waits
+/// on it little.
+pub(crate) const RASTER_SLICE: std::time::Duration = std::time::Duration::from_micros(2_000);
 
 pub(crate) struct State {
     registry: RegistryState,
@@ -270,11 +297,14 @@ pub(crate) struct State {
 }
 
 /// What a surface is to input. Scroll layers' surfaces take no input
-/// (see `tiles`): what's over them goes to the window's own surface.
+/// (see `tiles`): what's over them goes to the content's surface.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Role {
-    /// A window's own surface.
+    /// A window's content.
     Root(WindowId),
+    /// A toplevel's frame (see `Frame`). It takes no pointer input, but
+    /// has the keyboard and text input.
+    Frame(WindowId),
     /// Part of the decorations.
     Decor(WindowId, decor::Part),
     /// The main menu's bar above the content (see `menubar`).
@@ -284,16 +314,79 @@ pub(crate) enum Role {
 impl Role {
     fn window(self) -> WindowId {
         match self {
-            Role::Root(w) | Role::Decor(w, _) | Role::Bar(w) => w,
+            Role::Root(w) | Role::Frame(w) | Role::Decor(w, _) | Role::Bar(w) => w,
         }
     }
 }
 
 enum Shell {
-    Toplevel(Window),
+    Toplevel(Frame),
     Popup(Popup),
     /// Part of another window (see `sheet`).
     Sheet(sheet::Sheet),
+}
+
+/// A toplevel's own surface, its frame: exactly the window geometry, the
+/// title bar and the content. The content's surface, its scroll tiles, the
+/// decorations, the menu bar and sheets are all subsurfaces of the frame,
+/// side by side: nested subsurfaces stack wrongly in some compositors
+/// (Hyprland draws a tree a level at a time). The window geometry starts at
+/// the frame's origin, as compositors that place a window by its surface
+/// rather than by its geometry (Hyprland) need: with the content as the
+/// toplevel's surface, the title bar hangs above it, outside the place they
+/// give the window. The frame shows one transparent pixel stretched over
+/// the geometry and takes no pointer input, so what's seen and clicked is
+/// what's on it. Everything but sheets is synchronized with it, so one
+/// commit of the frame, after the others', shows the content, its tiles
+/// and decorations, the frame's size and the content's place in it
+/// together.
+struct Frame {
+    window: Window,
+    /// The content's subsurface of the frame, and its surface.
+    subsurface: WlSubsurface,
+    content: WlSurface,
+    viewport: WpViewport,
+    /// The pixel the frame shows, attached at its first placing.
+    pixel: Option<Buffer>,
+    /// The content's size and its top in the frame, in points, as last
+    /// placed.
+    placed: Option<(u32, u32, u32)>,
+}
+
+impl Frame {
+    /// Size the frame for `width` × `height` points of content under `top`
+    /// points of title bar, as of its next commit. Returns whether the
+    /// content moved in the frame.
+    fn place(&mut self, width: u32, height: u32, top: u32, pool: &mut SlotPool) -> bool {
+        if self.pixel.is_none()
+            && let Ok((buffer, bytes)) = pool.create_buffer(1, 1, 4, wl_shm::Format::Argb8888)
+        {
+            bytes[..4].fill(0);
+            let surface = self.window.wl_surface();
+            let _ = buffer.attach_to(surface);
+            surface.damage_buffer(0, 0, 1, 1);
+            self.pixel = Some(buffer);
+        }
+        let placed = (width, height, top);
+        let before = self.placed.replace(placed);
+        if before != Some(placed) {
+            self.viewport.set_destination(width as i32, (height + top) as i32);
+        }
+        let moved = before.map(|(_, _, t)| t) != Some(top);
+        if moved {
+            self.subsurface.set_position(0, top as i32);
+        }
+        moved
+    }
+}
+
+impl Drop for Frame {
+    fn drop(&mut self) {
+        // The content goes first; the frame's surface goes with `window`.
+        self.subsurface.destroy();
+        self.content.destroy();
+        self.viewport.destroy();
+    }
 }
 
 pub(crate) struct Win {
@@ -354,18 +447,43 @@ pub(crate) struct Win {
 }
 
 impl Win {
+    /// The content's surface, which the root layer is shown on.
     fn surface(&self) -> &WlSurface {
         match &self.shell {
-            Shell::Toplevel(w) => w.wl_surface(),
+            Shell::Toplevel(f) => &f.content,
             Shell::Popup(p) => p.wl_surface(),
             Shell::Sheet(s) => s.surface(),
         }
     }
 
+    /// The surface the shell knows the window by: a toplevel's frame, or
+    /// the content's surface. The content starts `titlebar` points down it.
+    fn main_surface(&self) -> &WlSurface {
+        match &self.shell {
+            Shell::Toplevel(f) => f.window.wl_surface(),
+            Shell::Popup(_) | Shell::Sheet(_) => self.surface(),
+        }
+    }
+
     fn toplevel(&self) -> Option<&Window> {
         match &self.shell {
-            Shell::Toplevel(w) => Some(w),
+            Shell::Toplevel(f) => Some(&f.window),
             Shell::Popup(_) | Shell::Sheet(_) => None,
+        }
+    }
+
+    /// The window geometry for the window's size: the title bar and the
+    /// content, from the main surface's origin.
+    fn expected_geometry(&self) -> (i32, i32, i32, i32) {
+        (0, 0, self.width as i32, (self.height + self.titlebar()) as i32)
+    }
+
+    /// Commit the content's surface, then the frame it is a synchronized
+    /// subsurface of, which shows what the content committed.
+    fn commit(&self) {
+        self.surface().commit();
+        if let Shell::Toplevel(f) = &self.shell {
+            f.window.wl_surface().commit();
         }
     }
 
@@ -565,6 +683,10 @@ impl State {
                 self.ca.clock = clock;
                 self.present(window);
             }
+            ToRender::CaptureWindow { reply, .. } => {
+                // Pixel capture is a null-backend diagnostic only.
+                let _ = reply.send(None);
+            }
             ToRender::SetSelection { contents } => selection::set(self, contents),
             ToRender::ReadSelection { mime, token, source, drag } => selection::read(self, mime, token, source, drag),
             ToRender::SelectionData { token, data } => selection::provided(self, token, data),
@@ -617,18 +739,18 @@ impl State {
             }
             None => None,
         };
-        let surface = match &sheet {
-            Some(sheet) => sheet.surface().clone(),
-            None => self.compositor.create_surface(&self.qh),
-        };
-        let shell = match (popup, sheet) {
-            (_, Some(sheet)) => Shell::Sheet(sheet),
+        let (shell, surface) = match (popup, sheet) {
+            (_, Some(sheet)) => {
+                let surface = sheet.surface().clone();
+                (Shell::Sheet(sheet), surface)
+            }
             (Some(placement), None) => {
+                let surface = self.compositor.create_surface(&self.qh);
                 let Some(popup) = self.create_popup(&surface, width, height, placement) else {
                     surface.destroy();
                     return;
                 };
-                Shell::Popup(popup)
+                (Shell::Popup(popup), surface)
             }
             (None, None) => {
                 let decorations = if !style.titled || force_client_decorations() {
@@ -636,16 +758,25 @@ impl State {
                 } else {
                     WindowDecorations::RequestServer
                 };
-                let w = self.xdg.create_window(surface.clone(), decorations, &self.qh);
+                let frame = self.compositor.create_surface(&self.qh);
+                let w = self.xdg.create_window(frame.clone(), decorations, &self.qh);
                 w.set_title(title);
                 w.set_app_id(app_id());
                 if let Some(token) = self.startup_token.take()
                     && let Some(activation) = &self.activation
                 {
-                    activation.activate::<State>(&surface, token);
+                    activation.activate::<State>(&frame, token);
                 }
+                let (subsurface, content) = self.subcompositor.create_subsurface(frame.clone(), &self.qh);
+                frame.set_input_region(Some(&self.empty_region()));
+                let viewport = self.viewporter.get().expect("viewporter").get_viewport(&frame, &self.qh, ());
+                self.roles.insert(frame.id(), Role::Frame(window));
                 w.commit();
-                Shell::Toplevel(w)
+                let surface = content.clone();
+                (
+                    Shell::Toplevel(Frame { window: w, subsurface, content, viewport, pixel: None, placed: None }),
+                    surface,
+                )
             }
         };
         let viewport = self.viewporter.get().expect("viewporter").get_viewport(&surface, &self.qh, ());
@@ -727,7 +858,7 @@ impl State {
             }
         }
         let parent_xdg = match &parent.shell {
-            Shell::Toplevel(w) => w.xdg_surface().clone(),
+            Shell::Toplevel(f) => f.window.xdg_surface().clone(),
             Shell::Popup(p) => p.xdg_surface().clone(),
             // Popups of sheets aren't placed yet.
             Shell::Sheet(_) => return None,
@@ -834,8 +965,8 @@ impl State {
             Activation {
                 app_id: app_id(),
                 seat_and_serial: self.seats.latest_serial(),
-                requester: focused.unwrap_or(win).surface().clone(),
-                target: win.surface().clone(),
+                requester: focused.unwrap_or(win).main_surface().clone(),
+                target: win.main_surface().clone(),
             },
         );
     }
@@ -937,7 +1068,11 @@ impl State {
         }
         let scale = win.scale;
         let mut canvas = Canvas::new(&mut win.canvas, win.px_width, win.px_height, 0.0, scale as f32);
-        raster::paint(&mut canvas, &mut self.glyphs, &rects, &ops);
+        if crate::layers::tracing_tiles() {
+            raster::paint_timed(&mut canvas, &mut self.glyphs, &rects, &ops, window);
+        } else {
+            raster::paint(&mut canvas, &mut self.glyphs, &rects, &ops);
+        }
         win.damage.extend(rects.iter().map(|r| to_px(r, scale)));
     }
 
@@ -945,9 +1080,21 @@ impl State {
     fn paint_target(&mut self, window: WindowId, target: Target, rects: Vec<Rect>, ops: Vec<Op>) {
         match target {
             Target::Root => self.paint(window, rects, ops),
-            Target::Tiles(layer) => tiles::paint(self, window, layer, false, &rects, &ops),
-            Target::Overlay(layer) => tiles::paint(self, window, layer, true, &rects, &ops),
+            Target::Tiles(layer) => tiles::paint_tiles(self, window, layer, &rects, ops),
+            Target::Overlay(layer) => tiles::paint_overlay(self, window, layer, &rects, &ops),
             Target::Content(_) => {}
+        }
+    }
+
+    /// Rasterize tiles' pending paints for a slice of time (see `tiles`).
+    fn rasterize_tiles(&mut self) {
+        let until = std::time::Instant::now() + RASTER_SLICE;
+        let State { windows, glyphs, .. } = self;
+        for win in windows.values_mut() {
+            if tiles::owed(&win.layers) && tiles::rasterize_pending(&mut win.layers, glyphs, win.scale, until) {
+                // The slice is over.
+                return;
+            }
         }
     }
 
@@ -974,7 +1121,8 @@ impl State {
         }
         if crate::layers::tracing() && count > 0 {
             eprintln!(
-                "sidestep ca frame: window {window} render: {:.3} ms, {count} redraws, {area:.0} points squared",
+                "sidestep @{:.1} ms ca frame: window {window} render: {:.3} ms, {count} redraws, {area:.0} points squared",
+                crate::layers::trace_ms(),
                 start.elapsed().as_secs_f64() * 1000.0
             );
         }
@@ -1032,9 +1180,8 @@ impl State {
         win.frame_seq += 1;
         win.frame_signalled = false;
         let seq = win.frame_seq;
-        let surface = win.surface().clone();
-        surface.frame(&self.qh, FrameTag { window, seq });
-        surface.commit();
+        win.surface().frame(&self.qh, FrameTag { window, seq });
+        win.commit();
     }
 
     /// Whether buffers take canvas pixels as they are. Canvases are RGBA
@@ -1095,35 +1242,47 @@ impl State {
         }
         self.place_decorations(window);
         let Some(win) = self.windows.get(&window) else { return };
-        let surface = win.surface();
-        surface.frame(&self.qh, FrameTag { window, seq });
-        surface.commit();
+        win.surface().frame(&self.qh, FrameTag { window, seq });
+        win.commit();
     }
 
-    /// Set the window geometry, and draw and place the decorations for the
-    /// window's current size, ahead of a commit of the root surface.
+    /// Set the window geometry, size the frame and place the content in it,
+    /// and draw and place the decorations for the window's current size,
+    /// ahead of the window's commit.
     fn place_decorations(&mut self, window: WindowId) {
         let rgba = self.rgba();
         let Some(win) = self.windows.get_mut(&window) else { return };
-        let bar = win.titlebar() as i32;
-        let geometry = (0, -bar, win.width as i32, win.height as i32 + bar);
+        let geometry = win.expected_geometry();
         if win.geometry != geometry {
             win.geometry = geometry;
             match &win.shell {
-                Shell::Toplevel(w) => {
-                    w.xdg_surface().set_window_geometry(geometry.0, geometry.1, geometry.2, geometry.3)
+                Shell::Toplevel(f) => {
+                    f.window.xdg_surface().set_window_geometry(geometry.0, geometry.1, geometry.2, geometry.3)
                 }
                 Shell::Popup(p) => p.xdg_surface().set_window_geometry(0, 0, geometry.2, geometry.3),
                 Shell::Sheet(_) => {}
             }
         }
+        let (width, height, top) = (win.width, win.height, win.titlebar());
+        let moved = match &mut win.shell {
+            Shell::Toplevel(f) => f.place(width, height, top, &mut self.pool),
+            Shell::Popup(_) | Shell::Sheet(_) => false,
+        };
         let bar = win.bar_height();
         if let Some(menubar) = &mut win.menubar {
-            menubar.draw(win.width, bar, win.scale, rgba, &mut self.pool, &mut self.glyphs);
+            menubar.draw(win.width, bar, top as i32, win.scale, rgba, &mut self.pool, &mut self.glyphs);
         }
-        let Some(mut decor) = win.decor.take() else { return };
-        decor.draw(&frame_info(win), &mut self.pool, &mut self.glyphs);
-        win.decor = Some(decor);
+        if let Some(mut decor) = win.decor.take() {
+            decor.draw(&frame_info(win), &mut self.pool, &mut self.glyphs);
+            win.decor = Some(decor);
+        }
+        if moved {
+            // Scroll tiles, sheets and carets are placed in the frame, under
+            // the title bar.
+            tiles::content_moved(self, window, top as i32);
+            sheet::parent_resized(self, window);
+            textinput::content_moved(self, window);
+        }
     }
 
     /// Draw decorations that changed (hover, focus, style) between presents,
@@ -1134,18 +1293,16 @@ impl State {
         if !win.configured {
             return;
         }
-        let bar = win.titlebar() as i32;
-        let geometry = (0, -bar, win.width as i32, win.height as i32 + bar);
         let redraw = win.decor.as_ref().is_some_and(|d| d.needs_draw(&frame_info(win)))
             || win.menubar.as_ref().is_some_and(menubar::Bar::needs_draw);
-        if !redraw && win.geometry == geometry {
+        if !redraw && win.geometry == win.expected_geometry() {
             return;
         }
         self.place_decorations(window);
         // Decorations are synchronized subsurfaces: what they show changes
-        // with the root surface's next commit.
+        // with the window's next commit.
         if let Some(win) = self.windows.get(&window) {
-            win.surface().commit();
+            win.commit();
         }
     }
 
@@ -1156,7 +1313,7 @@ impl State {
         let wanted = win.toplevel().is_some() && win.style.titled && (win.client_side || force_client_decorations());
         if wanted && win.decor.is_none() {
             let mut d = decor::Decor::new(
-                win.surface(),
+                win.main_surface(),
                 &self.compositor,
                 &self.subcompositor,
                 self.viewporter.get().expect("viewporter"),
@@ -1183,34 +1340,42 @@ impl State {
             Some(w) if w.passthrough != w.style.passthrough => w.style.passthrough,
             _ => return,
         };
-        if wanted && self.empty_region.is_none() {
-            self.empty_region = Region::new(&self.compositor).ok();
-        }
-        let empty = if wanted { self.empty_region.as_ref().map(Region::wl_region) } else { None };
+        let empty = wanted.then(|| self.empty_region());
         let Some(win) = self.windows.get_mut(&window) else { return };
         win.passthrough = empty.is_some();
         if let Some(d) = &mut win.decor {
-            d.set_passthrough(empty);
+            d.set_passthrough(empty.as_ref());
         }
-        // The root surface's commit applies its own region and, as the
-        // others are synchronized subsurfaces, theirs.
-        win.surface().set_input_region(empty);
+        // The window's commit applies the content's region and, as the
+        // others are synchronized subsurfaces, theirs. A frame never takes
+        // pointer input.
+        win.surface().set_input_region(empty.as_ref());
         if win.configured {
-            win.surface().commit();
+            win.commit();
         }
+    }
+
+    /// The input region with nothing in it, made the first time it's
+    /// wanted.
+    fn empty_region(&mut self) -> WlRegion {
+        let compositor = &self.compositor;
+        let region = self.empty_region.get_or_insert_with(|| Region::new(compositor).expect("sidestep: wl_region"));
+        region.wl_region().clone()
     }
 
     fn role(&self, surface: &WlSurface) -> Option<Role> {
         self.roles.get(&surface.id()).copied()
     }
 
-    /// Where a content surface's origin is in its window, in points: the
-    /// window's own surface takes the content's input (tiles take none),
-    /// and the menu bar sits above it.
+    /// Where a surface's origin is in its window's content, in points: the
+    /// content's surface takes the content's input (tiles take none), the
+    /// menu bar sits above it, and a frame holds it under the title bar.
     fn content_offset(&self, role: Role) -> (f64, f64) {
+        let above = |window, height: fn(&Win) -> u32| -(self.windows.get(&window).map_or(0, height) as f64);
         match role {
-            Role::Bar(window) => (0.0, -(self.windows.get(&window).map_or(0, Win::bar_height) as f64)),
-            _ => (0.0, 0.0),
+            Role::Bar(window) => (0.0, above(window, Win::bar_height)),
+            Role::Frame(window) => (0.0, above(window, Win::titlebar)),
+            Role::Root(_) | Role::Decor(..) => (0.0, 0.0),
         }
     }
 }
@@ -1275,7 +1440,7 @@ impl OutputHandler for State {
 
 impl WindowHandler for State {
     fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, window: &Window) {
-        if let Some(Role::Root(id)) = self.role(window.wl_surface()) {
+        if let Some(Role::Frame(id)) = self.role(window.wl_surface()) {
             self.send(FromRender::CloseRequested { window: id });
         }
     }
@@ -1288,7 +1453,7 @@ impl WindowHandler for State {
         configure: WindowConfigure,
         _: u32,
     ) {
-        let Some(Role::Root(id)) = self.role(window.wl_surface()) else { return };
+        let Some(Role::Frame(id)) = self.role(window.wl_surface()) else { return };
         let keyboard = seat::has_keyboard(self);
         let Some(win) = self.windows.get_mut(&id) else { return };
         let was_active = win.state.activated;

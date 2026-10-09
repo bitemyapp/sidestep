@@ -1337,11 +1337,7 @@ pub(super) fn build(
         .iter()
         .map(|&(i, _, _)| {
             let family = FontFamilyName::Named(Cow::Borrowed(&*attrs[i as usize].font.face.family));
-            [
-                FontFamilyName::Generic(GenericFamily::Emoji),
-                family,
-                FontFamilyName::Generic(GenericFamily::SansSerif),
-            ]
+            [FontFamilyName::Generic(GenericFamily::Emoji), family, FontFamilyName::Generic(GenericFamily::SansSerif)]
         })
         .collect();
     let own_emoji = settings.own_emoji;

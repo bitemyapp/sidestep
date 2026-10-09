@@ -539,7 +539,11 @@ impl Compositor {
         let content = match &l.content {
             Content::None => NodeContent::None,
             Content::Image(image, size) => NodeContent::Image { image: image.clone(), size: *size },
-            Content::Canvas(c) => NodeContent::Canvas { image: c.image(), rect: c.rect },
+            // Drawn for the model's bounds; shown in the presented ones.
+            Content::Canvas(c) => NodeContent::Canvas {
+                image: c.image(),
+                rect: super::render::fit_canvas(c.rect, l.props.bounds, props.bounds, props.gravity),
+            },
         };
         let children = l
             .sublayers

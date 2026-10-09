@@ -29,6 +29,9 @@ struct Input {
     input: ZwpTextInputV3,
     /// The window text input is on.
     focus: Option<WindowId>,
+    /// The surface it's on (a toplevel's frame, or a popup's content),
+    /// whose coordinates carets are given in.
+    surface: Option<Role>,
     enabled: bool,
     /// What arrived since the last `done`.
     preedit: Option<(String, i32, i32)>,
@@ -48,6 +51,7 @@ pub(super) fn add_seat(state: &mut State, seat: &WlSeat) {
         seat: seat.clone(),
         input,
         focus: None,
+        surface: None,
         enabled: false,
         preedit: None,
         commit: None,
@@ -79,10 +83,19 @@ pub(super) fn set_wanted(state: &mut State, window: WindowId, wanted: bool, care
         if wanted != enabled {
             apply(state, i, wanted);
         } else if wanted && caret_changed {
-            let input = &mut state.text_inputs.inputs[i];
-            if let Some(r) = caret {
-                set_caret(&input.input, r);
-            }
+            set_caret(state, i);
+            state.text_inputs.inputs[i].input.commit();
+        }
+    }
+}
+
+/// `window`'s content moved in the surface text input is on (its title bar
+/// changed): the caret moved with it.
+pub(super) fn content_moved(state: &State, window: WindowId) {
+    for i in 0..state.text_inputs.inputs.len() {
+        let input = &state.text_inputs.inputs[i];
+        if input.focus == Some(window) && input.enabled {
+            set_caret(state, i);
             input.input.commit();
         }
     }
@@ -102,25 +115,27 @@ pub(super) fn reset(state: &mut State, window: WindowId) {
 /// Enable or disable input `i` for its focused window, with the window's
 /// caret.
 fn apply(state: &mut State, i: usize, enable: bool) {
-    let caret = state.text_inputs.inputs[i].focus.and_then(|w| state.windows.get(&w)).and_then(|w| w.caret);
-    let input = &mut state.text_inputs.inputs[i];
+    let input = &state.text_inputs.inputs[i];
     if enable {
         input.input.enable();
         input.input.set_content_type(ContentHint::None, ContentPurpose::Normal);
-        if let Some(r) = caret {
-            set_caret(&input.input, r);
-        }
+        set_caret(state, i);
     } else {
         input.input.disable();
     }
     input.input.commit();
-    input.enabled = enable;
+    state.text_inputs.inputs[i].enabled = enable;
 }
 
-fn set_caret(input: &ZwpTextInputV3, r: Rect) {
-    input.set_cursor_rectangle(
-        r.x0.floor() as i32,
-        r.y0.floor() as i32,
+/// Give input `i` its window's caret, if it has one, in the coordinates of
+/// the surface the input is on.
+fn set_caret(state: &State, i: usize) {
+    let input = &state.text_inputs.inputs[i];
+    let Some(r) = input.focus.and_then(|w| state.windows.get(&w)).and_then(|w| w.caret) else { return };
+    let (dx, dy) = input.surface.map_or((0.0, 0.0), |s| state.content_offset(s));
+    input.input.set_cursor_rectangle(
+        (r.x0 - dx as f32).floor() as i32,
+        (r.y0 - dy as f32).floor() as i32,
         (r.x1 - r.x0).ceil().max(1.0) as i32,
         (r.y1 - r.y0).ceil().max(1.0) as i32,
     );
@@ -150,11 +165,10 @@ impl Dispatch<ZwpTextInputV3, ()> for State {
         let Some(i) = state.text_inputs.inputs.iter().position(|i| i.input == *proxy) else { return };
         match event {
             zwp_text_input_v3::Event::Enter { surface } => {
-                let window = state.role(&surface).and_then(|r| match r {
-                    Role::Root(w) => Some(w),
-                    _ => None,
-                });
+                let role = state.role(&surface).filter(|r| matches!(r, Role::Root(_) | Role::Frame(_)));
+                let window = role.map(Role::window);
                 state.text_inputs.inputs[i].focus = window;
+                state.text_inputs.inputs[i].surface = role;
                 if window.and_then(|w| state.windows.get(&w)).is_some_and(|w| w.text_input) {
                     apply(state, i, true);
                 }
@@ -162,6 +176,7 @@ impl Dispatch<ZwpTextInputV3, ()> for State {
             zwp_text_input_v3::Event::Leave { .. } => {
                 let input = &mut state.text_inputs.inputs[i];
                 let window = input.focus.take();
+                input.surface = None;
                 input.preedit = None;
                 input.commit = None;
                 if input.enabled {

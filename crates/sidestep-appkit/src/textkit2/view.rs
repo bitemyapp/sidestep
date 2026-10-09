@@ -21,7 +21,10 @@
 //! neither, as good as unbounded below its top (so laying the viewport out
 //! lays the whole text out: on macOS too, 20 000 lines in 0.4 s). The
 //! viewport is laid out before the view draws (`viewWillDraw`) when
-//! something moved or changed; the fragments it configured are what the
+//! something moved or changed, and again when the display pass asks for
+//! more than it holds (tiles ahead of a scroll, damage out of sight): what
+//! it reaches joins the viewport as overdraw, near what shows. The
+//! fragments it configured are what the
 //! view draws, each through `drawAtPoint:inContext:` after the view's own
 //! `drawRect:` (as AppKit draws them above it, in views of their own), with
 //! the caret above them. As on macOS, a fragment draws at the point zero,
@@ -130,6 +133,9 @@ pub(crate) type Network = (Retained<AnyObject>, Option<Retained<AnyObject>>);
 pub(crate) struct ViewState {
     /// Laid out since the layout last changed, for these bounds.
     pub clean: Cell<Option<NSRect>>,
+    /// How far drawing reached past what shows, top and bottom in the
+    /// view's coordinates: the overdraw, laid out with what shows.
+    pub overdraw: Cell<Option<(f64, f64)>>,
     /// The layout manager and content manager the view keeps alive.
     pub network: RefCell<Option<Network>>,
 }
@@ -144,12 +150,22 @@ impl ViewState {
 /// The viewport bounds of a view whose bounds are `bounds`, `visible` of
 /// which shows (what its clip view shows, not cut to its bounds; `None`: in
 /// no clip view or window, as good as all of it below its top), with its
-/// container at `origin`.
-pub(crate) fn viewport_bounds(bounds: NSRect, visible: Option<NSRect>, origin: NSPoint) -> NSRect {
-    let (top, bottom) = match visible {
+/// container at `origin`. `overdraw` (top and bottom, in the view's
+/// coordinates) is drawn though it doesn't show, and is in the viewport too.
+pub(crate) fn viewport_bounds(
+    bounds: NSRect,
+    visible: Option<NSRect>,
+    overdraw: Option<(f64, f64)>,
+    origin: NSPoint,
+) -> NSRect {
+    let (mut top, mut bottom) = match visible {
         Some(v) => (v.origin.y.max(bounds.origin.y), v.origin.y + v.size.height),
         None => (bounds.origin.y, f64::MAX / 2.0),
     };
+    if let Some((y0, y1)) = overdraw {
+        top = top.min(y0.max(bounds.origin.y));
+        bottom = bottom.max(y1);
+    }
     NSRect::new(
         NSPoint::new(bounds.origin.x - origin.x, top - origin.y),
         NSSize::new(bounds.size.width, (bottom - top).max(0.0)),

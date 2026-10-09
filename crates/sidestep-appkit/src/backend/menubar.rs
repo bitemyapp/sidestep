@@ -1,10 +1,10 @@
 //! The main menu's bar in a window, on the render thread (the main thread's
-//! part is `crate::menubar`): a subsurface of the window's surface just
-//! above it, under the header when Sidestep draws one, and inside the
-//! window geometry. The window grows by it and its content keeps its size;
-//! to the main thread the bar is part of the title bar (`Win::titlebar`),
-//! so frames, popups, sheets and size limits take it in as they take the
-//! header.
+//! part is `crate::menubar`): a subsurface of the toplevel's frame
+//! (`Frame`) just above the content, under the header when Sidestep draws
+//! one, and inside the window geometry. The window grows by it and its
+//! content keeps its size; to the main thread the bar is part of the title
+//! bar (`Win::titlebar`), so frames, popups, sheets and size limits take it
+//! in as they take the header.
 //!
 //! The main thread draws the bar (its ground and the menus' titles) as
 //! ops. They're rasterized here at the window's scale, again only when
@@ -45,16 +45,29 @@ impl Bar {
     }
 
     /// Draw it for a window `width` points wide at `scale`, `height` points
-    /// tall (0 hides it), and place it above the content; `rgba` as the
-    /// window's buffers take pixels.
-    pub fn draw(&mut self, width: u32, height: u32, scale: f64, rgba: bool, pool: &mut SlotPool, glyphs: &mut Glyphs) {
+    /// tall (0 hides it), and place it above the content, whose top is `top`
+    /// points down the window's main surface; `rgba` as the window's buffers
+    /// take pixels.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw(
+        &mut self,
+        width: u32,
+        height: u32,
+        top: i32,
+        scale: f64,
+        rgba: bool,
+        pool: &mut SlotPool,
+        glyphs: &mut Glyphs,
+    ) {
         if height == 0 {
             self.surface.hide();
             self.drawn = None;
             return;
         }
+        let at = (0, top - height as i32);
         let key = (width, height, scale.to_bits());
         if self.drawn == Some(key) && self.surface.mapped {
+            self.surface.place(at);
             return;
         }
         let (pw, ph) = (px(width, scale).max(1), px(height, scale).max(1));
@@ -63,7 +76,7 @@ impl Bar {
         let mut canvas = Canvas::new(&mut self.canvas, pw, ph, 0.0, scale as f32);
         raster::paint(&mut canvas, glyphs, &[Rect::new(0.0, 0.0, width as f32, height as f32)], &self.ops);
         let pixels = &self.canvas;
-        self.surface.show_as(pool, (pw, ph), format(rgba), (0, -(height as i32)), (width, height), |dst| {
+        self.surface.show_as(pool, (pw, ph), format(rgba), at, (width, height), |dst| {
             copy_pixels(dst, pixels, rgba);
         });
         self.drawn = Some(key);
@@ -88,7 +101,7 @@ pub(super) fn set(state: &mut State, window: WindowId, height: u32, ops: Vec<Op>
         bar.drawn = None;
     } else {
         let viewporter = state.viewporter.get().expect("viewporter");
-        let surface = Surface::new(win.surface(), &state.subcompositor, viewporter, &state.qh);
+        let surface = Surface::new(win.main_surface(), &state.subcompositor, viewporter, &state.qh);
         if win.passthrough {
             surface.surface.set_input_region(state.empty_region.as_ref().map(|r| r.wl_region()));
         }

@@ -97,7 +97,7 @@ mod linux {
         context.flushGraphics();
         NSGraphicsContext::restoreGraphicsState_class();
         let pixels = unsafe { std::slice::from_raw_parts(rep.bitmapData(), len) };
-        pixels.chunks_exact(4).filter(|p| p[3] != 0).count()
+        pixels.as_chunks::<4>().0.iter().filter(|p| p[3] != 0).count()
     }
 
     fn editor_owns_text(mtm: MainThreadMarker) {

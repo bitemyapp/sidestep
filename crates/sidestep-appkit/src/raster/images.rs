@@ -337,6 +337,12 @@ pub(crate) fn draw(
         };
         let to_level = Transform::from_scale(w0 / pixmap.width() as f32, h0 / pixmap.height() as f32);
         let pattern_xf = placed.pre_concat(to_level);
+        // An image whose pixels land one to one on whole device pixels (a
+        // view's drawing composited where it was drawn) samples each at its
+        // center, where the filter takes that pixel alone: nearest
+        // neighbour leaves the same pixels, for a fraction of the work.
+        let quality =
+            if quality != Quality::High && one_to_one(&base.pre_concat(pattern_xf)) { Quality::None } else { quality };
         with_region(canvas, st, region, |pm, spare, masks, origin| {
             // The region's pixels, from the canvas's (the origin is on the
             // layer's grid, for masks).
@@ -382,6 +388,18 @@ pub(crate) fn draw(
         cache.bytes = cache.bytes + added - dropped;
         cache.evict(image.key);
     });
+}
+
+/// Whether `m` takes image pixels to device pixels one to one: a whole
+/// number of pixels across and down, mirrored or not, without scaling.
+fn one_to_one(m: &Transform) -> bool {
+    let whole = |v: f32| (v - v.round()).abs() < 1e-3;
+    (m.sx.abs() - 1.0).abs() < 1e-5
+        && (m.sy.abs() - 1.0).abs() < 1e-5
+        && m.kx.abs() < 1e-5
+        && m.ky.abs() < 1e-5
+        && whole(m.tx)
+        && whole(m.ty)
 }
 
 #[cfg(test)]
