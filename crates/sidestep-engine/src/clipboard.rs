@@ -439,6 +439,82 @@ impl Shared {
     }
 }
 
+/// The URLs in data of `mime` (see `url_mime`).
+pub fn parse_urls(mime: &str, data: &[u8]) -> Vec<String> {
+    match mime {
+        URI_LIST => parse_uri_list(&String::from_utf8_lossy(data)),
+        GNOME_FILES => {
+            // "copy" or "cut", then a URI per line.
+            let text = String::from_utf8_lossy(data);
+            text.lines().skip(1).map(str::trim).filter(|l| !l.is_empty()).map(str::to_owned).collect()
+        }
+        MOZ_URL => {
+            // UTF-16 (as Firefox writes it) or UTF-8: the URL, then its title.
+            let text = decode_moz(data);
+            text.lines().next().map(str::trim).filter(|l| !l.is_empty()).map(|l| vec![l.to_owned()]).unwrap_or_default()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// A `text/uri-list`: one URI a line, lines ending in CRLF (or LF), `#`
+/// starting a comment line.
+pub fn parse_uri_list(text: &str) -> Vec<String> {
+    text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(str::to_owned).collect()
+}
+
+fn decode_moz(data: &[u8]) -> String {
+    let utf16 = data.len() >= 2 && data.len().is_multiple_of(2) && (data.starts_with(&[0xff, 0xfe]) || data[1] == 0);
+    if !utf16 {
+        return String::from_utf8_lossy(data).into_owned();
+    }
+    let units = data.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c));
+    char::decode_utf16(units).map(|c| c.unwrap_or('\u{fffd}')).filter(|c| *c != '\u{feff}').collect()
+}
+
+/// Whether a URI names a file, to read as `public.file-url` rather than
+/// `public.url`.
+pub fn is_file_uri(uri: &str) -> bool {
+    uri.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("file:"))
+}
+
+/// The path a `file:` URL names, with its escapes decoded, for
+/// `NSFilenamesPboardType`.
+pub fn file_path(uri: &str) -> Option<String> {
+    let rest = uri.get(5..).filter(|_| is_file_uri(uri))?;
+    // file:///path, or file://localhost/path.
+    let path = match rest.strip_prefix("//") {
+        Some(authority_and_path) => {
+            let slash = authority_and_path.find('/')?;
+            let host = &authority_and_path[..slash];
+            if !(host.is_empty() || host.eq_ignore_ascii_case("localhost")) {
+                return None;
+            }
+            &authority_and_path[slash..]
+        }
+        None => rest,
+    };
+    let path = path.split(['?', '#']).next().unwrap_or(path);
+    percent_decode(path)
+}
+
+fn percent_decode(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = text.get(i + 1..i + 3)?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

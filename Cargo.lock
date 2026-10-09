@@ -1617,6 +1617,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sidestep-ui"
+version = "0.0.1"
+dependencies = [
+ "kurbo",
+ "sidestep-engine",
+ "smithay-client-toolkit",
+ "tiny-skia",
+]
+
+[[package]]
 name = "simd-adler32"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1906,6 +1916,13 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "sidestep",
+]
+
+[[package]]
+name = "ui-gallery"
+version = "0.0.0"
+dependencies = [
+ "sidestep-ui",
 ]
 
 [[package]]

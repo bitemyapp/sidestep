@@ -201,6 +201,58 @@ On Linux, drawing is recorded on the main thread and rasterized on a
 separate render thread, and scroll views are tiled onto Wayland subsurfaces;
 see [docs/architecture.md](docs/architecture.md#appkit-a-main-thread-and-a-render-thread).
 
+## Native Linux programs
+
+Programs written for Linux alone can skip AppKit and Objective-C entirely:
+`sidestep-ui` is a Rust toolkit on the engine AppKit runs on (the render
+thread, its rasterizer, the text engine, keyboards and input methods, the
+clipboard, drag and drop, decorations, the desktop's appearance), with no
+Objective-C runtime in the program. A program is a `Handler`: it opens
+windows, hears their events, and draws them on a `Canvas` when they need
+it.
+
+```toml
+[dependencies]
+sidestep-ui = { git = "https://github.com/bitemyapp/sidestep" }
+```
+
+```rust
+use sidestep_ui::kurbo::{Point, RoundedRect};
+use sidestep_ui::*;
+
+struct Hello;
+
+impl Handler for Hello {
+    fn launched(&mut self, cx: &mut Cx) {
+        cx.open_window(WindowOptions::new("Hello").size(400.0, 200.0));
+    }
+
+    fn draw(&mut self, _cx: &mut Cx, _window: WindowId, canvas: &mut Canvas) {
+        let accent = canvas.system_color(SystemColor::Accent);
+        canvas.fill(&RoundedRect::new(20.0, 20.0, 380.0, 180.0, 12.0), accent);
+        let style = TextStyle::new(Font::system(24.0).bold(), Color::WHITE);
+        canvas.draw_label("Hello from Sidestep", &style, Point::new(40.0, 80.0));
+    }
+}
+
+fn main() {
+    App::new().run(Hello).expect("a Wayland display");
+}
+```
+
+It doesn't depend on objc2, so it needs no overlay, and its programs link
+no Objective-C runtime or framework classes. The API is early (no widgets yet: programs draw their own, on events, a canvas and
+text layout with hit testing, carets and selections); see the
+[roadmap](docs/roadmap.md#native-toolkit) for what comes next.
+`examples/ui-gallery` draws shapes, gradients, shadows and text in every
+script, and writes a button and a text field (typing, input methods,
+selection, the clipboard) on the toolkit:
+
+```sh
+scripts/linux-cargo build -p ui-gallery
+SHOT=/work/target/ui.png scripts/linux-run scripts/headless-wayland /target/debug/ui-gallery
+```
+
 ## How it works
 
 objc2 already supports GNUstep's runtime ABI. Sidestep implements that ABI in
