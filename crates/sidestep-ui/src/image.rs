@@ -79,6 +79,12 @@ impl Image {
 
     fn of(width: u32, height: u32, pixels: Pixels, scale: f64) -> Image {
         let data = Arc::new(ImageData { key: next_key(), generation: 0, width, height, pixels });
+        Image::from_data(data, scale)
+    }
+
+    /// Pixels the engine made (a key of their own), at `scale` points per
+    /// pixel.
+    pub(crate) fn from_data(data: Arc<ImageData>, scale: f64) -> Image {
         Image { pixels: Arc::new(Shared(data)), scale }
     }
 

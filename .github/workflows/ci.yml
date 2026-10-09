@@ -25,6 +25,20 @@ jobs:
       - run: cargo test --workspace
       - run: cargo test --workspace --release
 
+  # Under a real compositor: AppKit's and the native toolkit's system tests
+  # run in the container scripts/linux-cargo builds in (sway, wtype and
+  # wl-clipboard from scripts/linux.Dockerfile), under a headless sway, with
+  # other clients on the other side of the clipboard, drags, keys and a
+  # virtual pointer. (The test job runs them too, but without a display
+  # they say so and pass.)
+  wayland:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: scripts/linux-run scripts/headless-wayland cargo test -p sidestep-ui --test wayland_system
+      - run: scripts/linux-run scripts/headless-wayland cargo test -p sidestep-appkit --test wayland_system
+
   lint:
     runs-on: ubuntu-latest
     steps:

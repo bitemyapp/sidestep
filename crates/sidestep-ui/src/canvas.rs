@@ -253,6 +253,9 @@ pub struct Canvas {
     scale: f64,
     damage: Vec<protocol::Rect>,
     appearance: Appearance,
+    /// Images made for this pass (text turned with color glyphs), kept
+    /// until its paint is sent.
+    temporaries: Vec<Image>,
 }
 
 fn prect(r: Rect) -> protocol::Rect {
@@ -307,6 +310,7 @@ impl Canvas {
             scale,
             damage,
             appearance,
+            temporaries: Vec::new(),
         };
         // Damaged pixels start over: as the background, or transparent.
         let ground = background.map_or([0.0; 4], Color::raw);
@@ -316,12 +320,14 @@ impl Canvas {
         canvas
     }
 
-    /// The ops recorded, groups closed.
-    pub(crate) fn finish(mut self) -> Vec<Op> {
+    /// The ops recorded, groups closed, and the images made for them, to
+    /// drop once they're sent (the render thread forgets an image's pixels
+    /// when its last handle goes, which must come after the paint).
+    pub(crate) fn finish(mut self) -> (Vec<Op>, Vec<Image>) {
         for _ in 0..self.groups {
             self.ops.push(Op::EndGroup);
         }
-        self.ops
+        (self.ops, self.temporaries)
     }
 
     /// The window's content size, in points.
@@ -653,6 +659,7 @@ impl Canvas {
                         clip: self.state.clip,
                     }));
                 }
+                None if fonts::has_color(run.font) => self.glyph_picture(run, origin),
                 None => self.glyph_outlines(run, origin),
             }
         }
@@ -665,9 +672,19 @@ impl Canvas {
         }
     }
 
+    /// Device pixels per point where the current transform draws: the
+    /// window's scale times how much the transform scales areas by.
+    fn pixels_per_point(&self) -> f64 {
+        let [a, b, c, d, _, _] = self.state.xf.as_coeffs();
+        self.scale * (a * d - b * c).abs().sqrt().max(1e-3)
+    }
+
     /// A run's glyphs as their outlines, filled through the drawing state:
     /// text turned, mirrored or stretched, or with a shadow, a clip shape
-    /// or a blend mode, which the glyph cache can't draw.
+    /// or a blend mode, which the glyph cache can't draw. A synthesized
+    /// bold face's outlines are stroked as well as filled, thickening them
+    /// as the glyph cache thickens them (by a 24th of the size in pixels,
+    /// a quarter pixel to two); a synthesized oblique leans them.
     fn glyph_outlines(&mut self, run: &PlacedRun, origin: Point) {
         let Some(face) = fonts::face_data(run.font) else { return };
         let scale = f64::from(run.size) / outline::units_per_em(&face.font);
@@ -682,9 +699,59 @@ impl Canvas {
             glyph.apply_affine(at * Affine::new([1.0, 0.0, skew, -1.0, 0.0, 0.0]));
             path.extend(glyph);
         }
-        if !path.elements().is_empty() {
-            self.fill_path(path, false, Paint::Solid(Color::from_raw(run.color)));
+        if path.elements().is_empty() {
+            return;
         }
+        let color = Color::from_raw(run.color);
+        if !face.embolden {
+            self.fill_path(path, false, Paint::Solid(color));
+            return;
+        }
+        let px = self.pixels_per_point();
+        let width = (f64::from(run.size) * px / 24.0).clamp(0.25, 2.0) / px;
+        let stroke = StrokeStyle::new(width).with_join(LineJoin::Round);
+        // Opaque in a group, so the fill and stroke don't double up where
+        // the text is translucent.
+        let draw = |c: &mut Canvas, color: Color| {
+            c.fill_path(path.clone(), false, Paint::Solid(color));
+            c.stroke(&path, &stroke, color);
+        };
+        if color.a < 1.0 {
+            self.group(color.a, |c| draw(c, Color { a: 1.0, ..color }));
+        } else {
+            draw(self, color);
+        }
+    }
+
+    /// A run of color glyphs (emoji), which have no outlines, turned,
+    /// mirrored or stretched: drawn upright from the glyph cache into an
+    /// image at the size it shows at, then drawn through the drawing state.
+    fn glyph_picture(&mut self, run: &PlacedRun, origin: Point) {
+        // What the glyphs can cover, around their origins (a glyph reaches
+        // about its size up and right from its origin, less below).
+        let origins = run.glyphs.iter().map(|g| Point::new(f64::from(g.x), f64::from(g.y)));
+        let Some(spread) = origins.map(|p| Rect::from_points(p, p)).reduce(|a, b| a.union(b)) else { return };
+        let reach = f64::from(run.size) * 1.25;
+        let area = Rect::new(spread.x0 - reach * 0.25, spread.y0 - reach, spread.x1 + reach, spread.y1 + reach * 0.5);
+        let px = self.pixels_per_point().clamp(0.25, 8.0);
+        let (w, h) = ((area.width() * px).ceil(), (area.height() * px).ceil());
+        if !(1.0..=4096.0).contains(&w) || !(1.0..=4096.0).contains(&h) {
+            return;
+        }
+        let upright = Op::Glyphs(GlyphRun {
+            font: run.font,
+            size: run.size,
+            x: -area.x0 as f32,
+            y: -area.y0 as f32,
+            glyphs: run.glyphs.clone(),
+            color: run.color,
+            clip: protocol::Rect::new(0.0, 0.0, area.width() as f32, area.height() as f32),
+        });
+        let Some(pixels) = sidestep_engine::ca::render::rasterize(&[upright], w as u32, h as u32, px) else { return };
+        let image = Image::from_data(pixels, 1.0 / px);
+        let dst = area + origin.to_vec2();
+        self.draw_image(&image, Rect::from_origin_size(dst.origin(), (w / px, h / px)));
+        self.temporaries.push(image);
     }
 }
 
@@ -699,7 +766,7 @@ mod tests {
 
     #[test]
     fn passes_start_by_clearing_their_damage() {
-        let ops = canvas().finish();
+        let ops = canvas().finish().0;
         assert!(matches!(ops[..], [Op::FillWith { blend: Blend::Copy, color: [1.0, 1.0, 1.0, 1.0], .. }]));
     }
 
@@ -709,7 +776,7 @@ mod tests {
         c.translate((10.0, 20.0));
         c.clip_rect(Rect::new(0.0, 0.0, 5.0, 5.0));
         c.fill_rect(Rect::new(-10.0, -10.0, 50.0, 50.0), Color::BLACK);
-        let ops = c.finish();
+        let ops = c.finish().0;
         let Op::Fill { rect, .. } = &ops[1] else { panic!("a fill: {ops:?}") };
         assert_eq!(*rect, protocol::Rect::new(10.0, 20.0, 15.0, 25.0));
     }
@@ -719,7 +786,7 @@ mod tests {
         let mut c = canvas();
         c.rotate(0.5);
         c.fill_rect(Rect::new(0.0, 0.0, 10.0, 10.0), Color::BLACK);
-        assert!(matches!(c.finish()[1], Op::FillPath { draw: Draw { aa: false, .. }, .. }));
+        assert!(matches!(c.finish().0[1], Op::FillPath { draw: Draw { aa: false, .. }, .. }));
     }
 
     #[test]
@@ -737,10 +804,45 @@ mod tests {
     fn groups_close_even_when_left_open() {
         let mut c = canvas();
         c.group(0.5, |c| c.fill(&Rect::new(0.0, 0.0, 10.0, 10.0), Color::BLACK));
-        let ops = c.finish();
+        let ops = c.finish().0;
         assert!(matches!(ops[1], Op::BeginGroup { alpha: 0.5, .. }));
         assert!(matches!(ops[2], Op::FillPath { .. }));
         assert!(matches!(ops[3], Op::EndGroup));
+    }
+
+    #[test]
+    fn turned_synthesized_bold_is_thickened() {
+        let dejavu = include_bytes!("../../../conformance/tests/fixtures/DejaVuSans.ttf");
+        // The file has no bold face of its own: bold is synthesized.
+        let bold = crate::Font::from_data(&dejavu[..], 0, 20.0).expect("a face").bold();
+        let mut c = canvas();
+        c.rotate(0.2);
+        c.draw_label("H", &TextStyle::new(bold, Color::BLACK), Point::new(20.0, 20.0));
+        let (ops, _) = c.finish();
+        assert!(ops.iter().any(|op| matches!(op, Op::FillPath { .. })), "{ops:?}");
+        let Some(Op::StrokePath { stroke, .. }) = ops.iter().find(|op| matches!(op, Op::StrokePath { .. })) else {
+            panic!("the outline stroked too: {ops:?}");
+        };
+        // 20 pt at scale 1 thickens by 20/24 of a pixel.
+        assert!((stroke.width - 20.0 / 24.0).abs() < 0.01, "{}", stroke.width);
+    }
+
+    #[test]
+    fn turned_color_glyphs_are_pictures() {
+        let style = TextStyle::new(crate::Font::system(20.0), Color::BLACK);
+        let laid = crate::text::label("🎉", &style);
+        if !laid.runs.iter().any(|r| fonts::has_color(r.font)) {
+            eprintln!("skipped: no color emoji font");
+            return;
+        }
+        let mut c = canvas();
+        c.rotate(0.3);
+        c.draw_label("🎉", &style, Point::new(20.0, 20.0));
+        let (ops, temporaries) = c.finish();
+        assert!(ops.iter().any(|op| matches!(op, Op::Image { .. })), "{ops:?}");
+        assert_eq!(temporaries.len(), 1, "the picture is kept until its paint is sent");
+        let (w, h) = temporaries[0].pixel_size();
+        assert!(w >= 20 && h >= 20, "{w} × {h}");
     }
 
     #[test]
@@ -754,7 +856,7 @@ mod tests {
         c.restore();
         c.rotate(0.3);
         c.draw_label("Hi", &style, Point::new(10.0, 10.0));
-        let ops = c.finish();
+        let ops = c.finish().0;
         let runs: Vec<&GlyphRun> =
             ops.iter().filter_map(|op| if let Op::Glyphs(r) = op { Some(r) } else { None }).collect();
         assert_eq!(runs.len(), 2, "{ops:?}");

@@ -90,6 +90,14 @@ pub fn snapshot(seen: u64, start: impl FnOnce()) -> Option<(u64, Vec<Output>)> {
     (p.generation != seen).then(|| (p.generation, p.outputs.clone()))
 }
 
+/// The latest snapshot, without waiting: none before the render thread
+/// first described the outputs (it does by itself once it connects, and
+/// tells the main thread with `FromRender::ScreensChanged`).
+pub fn latest() -> Option<Vec<Output>> {
+    let p = published();
+    p.settled.then(|| p.outputs.clone())
+}
+
 /// Whether some snapshot since the first was a change.
 pub fn changed_since_first() -> bool {
     published().changed

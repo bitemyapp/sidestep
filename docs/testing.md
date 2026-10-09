@@ -66,6 +66,14 @@ touches is a race. `grep -n Concurrent conformance/tests/*.rs` lists them.
 - **Only macOS knows the other applications.** Validation of
   `hideOtherApplications:` or `unhideAllApplications:` depends on what else
   is running and hidden, so the tests pin those answers on Sidestep only.
+- **Input is injected only under the headless sway.** A test that drives
+  a compositor with a virtual pointer or keyboard (`sidestep-ui`'s
+  `tests/wayland_system.rs`) runs only where `scripts/headless-wayland`
+  set `WLR_BACKENDS=headless`, and says so and passes elsewhere: on a
+  desktop it would move the user's pointer and click. It opens popups
+  from a press, as menus open (a grab needs a press's serial), and clicks
+  outside the program's windows to have the compositor dismiss one (a
+  click on another of its windows goes to that window).
 - **Linux tests wait for first frames by their condition**
   (`testing::settle_first_frames`): a window's first frame waits for the
   desktop's appearance, which the null render thread never tells.

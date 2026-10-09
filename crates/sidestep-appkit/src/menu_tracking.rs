@@ -143,6 +143,7 @@ pub(crate) fn at_point() -> PopupLayout {
         flip_y: true,
         slide_x: true,
         slide_y: true,
+        resize_x: false,
         resize_y: true,
     }
 }
@@ -920,6 +921,7 @@ impl Session {
             flip_y: false,
             slide_x: false,
             slide_y: true,
+            resize_x: false,
             resize_y: true,
         };
         let view = MenuView::new(self.mtm, &sub, 0.0);
