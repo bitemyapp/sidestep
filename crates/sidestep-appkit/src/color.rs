@@ -44,6 +44,8 @@ use objc2_app_kit::{
 use objc2_core_graphics::CGColor;
 use objc2_foundation::{NSArray, NSCopying, NSInteger, NSRect, NSString, NSUInteger, NSZone};
 
+pub(crate) use sidestep_engine::color::{encoded, gray_of, linear, luminance};
+
 use crate::palette::{self, System};
 use crate::protocol::{Blend, Color};
 
@@ -335,17 +337,6 @@ pub(crate) fn from_srgb(space: Space, rgb: [f64; 3]) -> Vec<f64> {
     }
 }
 
-/// The luminance of sRGB `rgb`, in linear light.
-fn luminance(rgb: [f64; 3]) -> f64 {
-    0.2126 * linear(rgb[0]) + 0.7152 * linear(rgb[1]) + 0.0722 * linear(rgb[2])
-}
-
-/// The gray of sRGB `rgb`: its luminance, weighed in linear light, encoded
-/// again as sRGB encodes.
-pub(crate) fn gray_of(rgb: [f64; 3]) -> f64 {
-    encoded(luminance(rgb))
-}
-
 /// Generic RGB's and Generic Gray's transfer curve, undone: a power of 1.8
 /// with no linear part. Neither space is extended, so values are clamped
 /// first, as macOS clamps them.
@@ -389,19 +380,6 @@ pub(crate) fn srgb_to_generic(c: [f64; 3]) -> [f64; 3] {
 /// sRGB to linear Generic RGB.
 pub(crate) fn srgb_to_generic_linear(c: [f64; 3]) -> [f64; 3] {
     mat(SRGB_TO_GENERIC, c.map(linear))
-}
-
-/// sRGB's transfer curve, undone; odd, so extended values keep their sign.
-pub(crate) fn linear(v: f64) -> f64 {
-    let a = v.abs();
-    let l = if a <= 0.04045 { a / 12.92 } else { ((a + 0.055) / 1.055).powf(2.4) };
-    l.copysign(v)
-}
-
-pub(crate) fn encoded(v: f64) -> f64 {
-    let a = v.abs();
-    let e = if a <= 0.003_130_8 { a * 12.92 } else { 1.055 * a.powf(1.0 / 2.4) - 0.055 };
-    e.copysign(v)
 }
 
 fn mat(m: [[f64; 3]; 3], v: [f64; 3]) -> [f64; 3] {

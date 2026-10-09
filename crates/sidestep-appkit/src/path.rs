@@ -20,13 +20,15 @@
 use std::cell::{Cell, RefCell};
 use std::sync::{Arc, Mutex};
 
-use kurbo::{Affine, BezPath, ParamCurveNearest, PathEl, Point, Shape};
+use kurbo::{Affine, BezPath, PathEl, Point, Shape};
 use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{NSObject, NSObjectProtocol};
 use objc2::{AnyThread, ClassType, DefinedClass, Message, define_class, msg_send};
 use objc2_app_kit::{NSBezierPath, NSBezierPathElement, NSLineCapStyle, NSLineJoinStyle, NSWindingRule};
 use objc2_core_graphics::CGPath;
 use objc2_foundation::{NSAffineTransform, NSCopying, NSInteger, NSPoint, NSRect, NSSize, NSZone};
+
+pub(crate) use sidestep_engine::path::{closed, kappa, on_outline, tight_bounds, to_skia};
 
 use crate::protocol::{Op, Paint, StrokeSpec};
 
@@ -682,12 +684,6 @@ fn rect_elements(r: NSRect) -> Vec<PathEl> {
     ]
 }
 
-/// How far a cubic's control points sit along the tangents, as a fraction
-/// of the radius, to draw an arc of `angle` radians.
-pub(crate) fn kappa(angle: f64) -> f64 {
-    4.0 / 3.0 * (angle / 4.0).tan()
-}
-
 impl NSBezierPathImpl {
     fn do_move(&self, p: NSPoint) {
         self.edit(|path| path.move_to(point(p)));
@@ -937,34 +933,6 @@ pub(crate) fn bez_path(p: &NSBezierPath) -> BezPath {
     imp(p).ivars().path.borrow().clone()
 }
 
-/// `path` as tiny-skia draws it.
-pub(crate) fn to_skia(path: &BezPath) -> Option<Arc<tiny_skia::Path>> {
-    let mut pb = tiny_skia::PathBuilder::with_capacity(path.elements().len(), path.elements().len() * 3);
-    let f = |p: Point| (p.x as f32, p.y as f32);
-    for el in path.iter() {
-        match el {
-            PathEl::MoveTo(p) => {
-                let (x, y) = f(p);
-                pb.move_to(x, y);
-            }
-            PathEl::LineTo(p) => {
-                let (x, y) = f(p);
-                pb.line_to(x, y);
-            }
-            PathEl::QuadTo(c, p) => {
-                let ((cx, cy), (x, y)) = (f(c), f(p));
-                pb.quad_to(cx, cy, x, y);
-            }
-            PathEl::CurveTo(c1, c2, p) => {
-                let ((ax, ay), (bx, by), (x, y)) = (f(c1), f(c2), f(p));
-                pb.cubic_to(ax, ay, bx, by, x, y);
-            }
-            PathEl::ClosePath => pb.close(),
-        }
-    }
-    pb.finish().map(Arc::new)
-}
-
 fn empty_path() -> tiny_skia::Path {
     // A degenerate rectangle: clipping to it leaves nothing.
     tiny_skia::PathBuilder::from_rect(tiny_skia::Rect::from_xywh(0.0, 0.0, 0.0001, 0.0001).expect("a rectangle"))
@@ -989,54 +957,6 @@ fn stroke_path(path: &Option<Arc<tiny_skia::Path>>, style: &Style) {
         let op = Op::StrokePath { path: path.clone(), stroke, paint: Paint::Solid(st.gs.stroke), draw: st.gs.draw() };
         st.push(op);
     });
-}
-
-/// The tight bounds: curve extrema, not control points; a lone move
-/// counts as a point.
-pub(crate) fn tight_bounds(path: &BezPath) -> Option<kurbo::Rect> {
-    let mut bounds: Option<kurbo::Rect> = None;
-    let mut add = |r: kurbo::Rect| bounds = Some(bounds.map_or(r, |b| b.union(r)));
-    for seg in path.segments() {
-        add(seg.bounding_box());
-    }
-    for el in path.iter() {
-        if let PathEl::MoveTo(p) = el {
-            add(kurbo::Rect::from_points(p, p));
-        }
-    }
-    bounds
-}
-
-/// Whether `p` lies on one of `path`'s segments, to within rounding.
-pub(crate) fn on_outline(path: &BezPath, p: Point) -> bool {
-    let eps = 1e-9 * (1.0 + p.x.abs().max(p.y.abs()));
-    path.segments().any(|seg| {
-        let b = seg.bounding_box().inflate(eps, eps);
-        b.contains(p) && seg.nearest(p, eps * 0.1).distance_sq <= eps * eps
-    })
-}
-
-/// The path with every open subpath closed, as filling sees it.
-pub(crate) fn closed(path: &BezPath) -> BezPath {
-    let mut out = BezPath::new();
-    let mut open = false;
-    for el in path.iter() {
-        match el {
-            PathEl::MoveTo(_) => {
-                if open {
-                    out.close_path();
-                }
-                open = false;
-            }
-            PathEl::ClosePath => open = false,
-            _ => open = true,
-        }
-        out.push(el);
-    }
-    if open {
-        out.close_path();
-    }
-    out
 }
 
 /// Each subpath backward, as AppKit reverses them: an open one starts at
@@ -1219,15 +1139,5 @@ mod tests {
                 PathEl::LineTo(p(0.0, 0.0)),
             ]
         );
-    }
-
-    #[test]
-    fn open_subpaths_fill_as_if_closed() {
-        let tri = path(&[
-            PathEl::MoveTo(Point::ZERO),
-            PathEl::LineTo((10.0, 0.0).into()),
-            PathEl::LineTo((0.0, 10.0).into()),
-        ]);
-        assert_ne!(closed(&tri).winding((2.0, 2.0).into()), 0);
     }
 }

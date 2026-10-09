@@ -205,6 +205,36 @@ mod linux {
         l
     }
 
+    fn asynchronous_pixel_crops(mtm: MainThreadMarker) {
+        for scale in [1, 2] {
+            testing::use_null_backend_scale(scale);
+            let (w, painter) = shown(mtm);
+            let blue = blue_square(&painter.layer().unwrap());
+            show(&w);
+            let crop = [5 * scale, 65 * scale, 30 * scale, 30 * scale];
+            let reply = testing::request_window_pixels(&w, testing::media_time(), crop);
+            // The render thread can answer without any main-thread pumping.
+            let (width, height, pixels) = reply
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("render thread answered")
+                .expect("valid crop");
+            assert_eq!((width, height), (crop[2], crop[3]));
+            assert_eq!(pixels.len(), (width * height) as usize);
+            near(pixels[0], [255, 0, 0, 255], 0);
+            near(pixels[((15 * scale) * width + 15 * scale) as usize], [0, 0, 255, 255], 0);
+            for invalid in [[0, 0, 0, 1], [0, 100 * scale, 1, 1], [200 * scale, 0, 1, 1], [u32::MAX, 0, 2, 1]] {
+                let reply = testing::request_window_pixels(&w, testing::media_time(), invalid);
+                assert!(
+                    reply.recv_timeout(std::time::Duration::from_secs(5)).expect("render thread answered").is_none()
+                );
+            }
+            blue.removeFromSuperlayer();
+            w.close();
+            testing::settle();
+        }
+        testing::use_null_backend_scale(1);
+    }
+
     fn views_and_layers_composite(mtm: MainThreadMarker) {
         let (w, painter) = shown(mtm);
         // The view's drawing is its layer's canvas.
@@ -257,6 +287,14 @@ mod linux {
         // isn't asked for anything.
         let p = testing::presented_layer(&blue, begin + LONG / 2.0).expect("on the render thread");
         assert!((p.position[0] - 70.0).abs() < 1e-6, "{:?}", p.position);
+        // Queue distinct times before receiving either: each reply must
+        // own its frame, not the pixels from whichever composite ran last.
+        let middle = testing::request_window_pixels(&w, begin + LONG / 2.0, [70, 80, 1, 1]);
+        let end = testing::request_window_pixels(&w, begin + 2.0 * LONG, [70, 80, 1, 1]);
+        let middle = middle.recv_timeout(std::time::Duration::from_secs(5)).unwrap().unwrap();
+        let end = end.recv_timeout(std::time::Duration::from_secs(5)).unwrap().unwrap();
+        near(middle.2[0], [0, 0, 255, 255], 0);
+        near(end.2[0], [255, 0, 0, 255], 0);
         testing::composite_at(&w, begin + LONG / 2.0);
         near(px(&w, 70, 80), [0, 0, 255, 255], 0);
         near(px(&w, 20, 80), [255, 0, 0, 255], 0);
@@ -344,6 +382,165 @@ mod linux {
             );
         }
         assert!(done.get(), "animation completion must not wait for mouse tracking to end");
+        w.close();
+        testing::settle();
+    }
+
+    /// A segmented switch drawn under a control, as an application draws
+    /// its own: a track, a pill behind the chosen segment that slides to
+    /// the next on an animation of its translation, a wash and a seed shown
+    /// on the press, and the seed sweeping the segment through `animator`
+    /// as it fades out, while the window's content is drawn again around
+    /// it. A view's drawing shows in the bounds its layer presents, so the
+    /// seed grows from its sliver rather than showing whole at its old
+    /// origin: nothing is drawn outside the track, the seed and the wash
+    /// stay in their segment, the pill is never taller than one, and once
+    /// it settles the window holds what drawing it still would.
+    fn switch_moves_without_trails(mtm: MainThreadMarker) {
+        // At 2× too, as most displays now are.
+        for scale in [1, 2] {
+            testing::use_null_backend_scale(scale);
+            switch_at_scale(mtm, scale);
+        }
+        testing::use_null_backend_scale(1);
+    }
+
+    fn switch_at_scale(mtm: MainThreadMarker, scale: u32) {
+        // SAFETY: a plain window.
+        let w = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                rect(0.0, 0.0, 400.0, 100.0),
+                NSWindowStyleMask::Titled,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        // SAFETY: Rust owns the window, so closing it mustn't release it.
+        unsafe { w.setReleasedWhenClosed(false) };
+        let page = Painter::new(mtm, rect(0.0, 0.0, 400.0, 100.0), [0.0, 0.0, 0.0]);
+        w.setContentView(Some(&page));
+        let container = NSView::initWithFrame(NSView::alloc(mtm), rect(20.0, 30.0, 260.0, 30.0));
+        container.setWantsLayer(true);
+        page.addSubview(&container);
+        // Parts as applications make them: boxes filled with a color, with
+        // round corners.
+        let part = |frame: NSRect, color: [f64; 3], radius: f64| {
+            let b = objc2_app_kit::NSBox::initWithFrame(objc2_app_kit::NSBox::alloc(mtm), frame);
+            b.setBoxType(objc2_app_kit::NSBoxType::Custom);
+            b.setTitlePosition(objc2_app_kit::NSTitlePosition::NoTitle);
+            b.setContentViewMargins(NSSize::new(0.0, 0.0));
+            b.setBorderWidth(0.0);
+            b.setCornerRadius(radius);
+            b.setFillColor(&NSColor::colorWithSRGBRed_green_blue_alpha(color[0], color[1], color[2], 1.0));
+            b.setWantsLayer(true);
+            container.addSubview(&b);
+            let view: Retained<NSView> = Retained::into_super(b);
+            view
+        };
+        let segment = |i: f64| rect(3.0 + 127.0 * i, 3.0, 127.0, 24.0);
+        let seed_frame = |r: NSRect| rect(r.origin.x, r.origin.y + 4.0, 3.0, r.size.height - 8.0);
+        let _track = part(rect(0.0, 0.0, 260.0, 30.0), [0.5, 0.5, 0.5], 15.0);
+        let wash = part(segment(0.0), [0.0, 0.0, 1.0], 12.0);
+        wash.setAlphaValue(0.0);
+        let pill = part(segment(1.0), [1.0, 0.0, 0.0], 12.0);
+        // Made the segment's height, as the application makes it, then given
+        // its seed's frame at the press.
+        let seed: Retained<NSView> = part(rect(0.0, 0.0, 3.0, 24.0), [0.0, 1.0, 0.0], 1.5);
+        seed.setAlphaValue(0.0);
+        w.makeKeyAndOrderFront(None);
+        testing::settle_first_frames();
+        show(&w);
+        let group = |changes: &dyn Fn()| {
+            let changes = block2::RcBlock::new(move |context: std::ptr::NonNull<NSAnimationContext>| {
+                // SAFETY: the group hands its live context to the block.
+                let context = unsafe { context.as_ref() };
+                context.setDuration(LONG);
+                context.setTimingFunction(Some(&linear()));
+                changes();
+            });
+            NSAnimationContext::runAnimationGroup(&changes);
+        };
+        // The press on the first segment: the wash and the seed are in by the
+        // time the button comes up, as a quick fade-in is by a click's end.
+        wash.setFrame(segment(0.0));
+        seed.setFrame(seed_frame(segment(0.0)));
+        wash.setAlphaValue(0.38);
+        seed.setAlphaValue(1.0);
+        show(&w);
+        // The release: the window's content changes all over (the switch's
+        // action shows another surface), the pill slides over, the seed
+        // sweeps and fades.
+        page.setNeedsDisplay(true);
+        pill.setFrame(segment(0.0));
+        let slide = CABasicAnimation::animationWithKeyPath(Some(&NSString::from_str("transform.translation.x")));
+        // SAFETY: numbers are what a translation animates between.
+        unsafe {
+            slide.setFromValue(Some(&objc2_foundation::NSNumber::new_f64(127.0)));
+            slide.setToValue(Some(&objc2_foundation::NSNumber::new_f64(0.0)));
+        }
+        slide.setDuration(LONG);
+        slide.setTimingFunction(Some(&linear()));
+        pill.layer().unwrap().addAnimation_forKey(&slide, Some(&NSString::from_str("slide")));
+        group(&|| {
+            seed.animator().setFrame(segment(0.0));
+            seed.animator().setAlphaValue(0.0);
+            wash.animator().setAlphaValue(0.0);
+        });
+        show(&w);
+        let seed_layer = seed.layer().unwrap();
+        let begin = unsafe { seed_layer.animationForKey(&NSString::from_str("position")) }
+            .or_else(|| unsafe { seed_layer.animationForKey(&NSString::from_str("bounds")) })
+            .expect("the seed's frame animates")
+            .beginTime();
+        // The track's pixels, from the window content's top left, and the
+        // first segment's (where the seed sweeps and the wash tints).
+        let track = (20 * scale, 40 * scale, 280 * scale, 70 * scale);
+        let first = (23 * scale, 43 * scale, 150 * scale, 67 * scale);
+        let check = |t: f64, at: &str| {
+            testing::composite_at(&w, t);
+            let (width, height, pixels) = testing::window_pixels(&w).expect("captured pixels");
+            assert_eq!((width, height), (400 * scale, 100 * scale), "captured at {scale}×");
+            let (mut red_top, mut red_bottom) = (u32::MAX, 0);
+            for y in 0..height {
+                for x in 0..width {
+                    let [r, g, b, _] = pixels[(y * width + x) as usize];
+                    let inside = x >= track.0 && x < track.2 && y >= track.1 && y < track.3;
+                    assert!(inside || (r, g, b) == (0, 0, 0), "{at}: ({r}, {g}, {b}) at ({x}, {y}), outside the track");
+                    if r > 200 && g < 60 && b < 60 {
+                        red_top = red_top.min(y);
+                        red_bottom = red_bottom.max(y + 1);
+                    }
+                    let in_first = x >= first.0 && x < first.2 && y >= first.1 && y < first.3;
+                    // The seed (green) and the wash (blue) stay in the
+                    // segment they sweep and tint.
+                    let (r, g, b) = (i32::from(r), i32::from(g), i32::from(b));
+                    assert!(in_first || g <= r.max(b) + 24, "{at}: the seed at ({x}, {y}), outside its segment");
+                    assert!(in_first || b <= r.max(g) + 24, "{at}: the wash at ({x}, {y}), outside its segment");
+                }
+            }
+            assert!(red_bottom > red_top, "{at}: the pill shows");
+            assert!(
+                red_bottom - red_top <= 24 * scale,
+                "{at}: the pill spans rows {red_top}..{red_bottom}, more than a segment"
+            );
+            pixels
+        };
+        for step in 0..=20 {
+            let t = begin + LONG * f64::from(step) / 20.0;
+            check(t, &format!("{scale}×, at {step}/20"));
+        }
+        // Settled: what drawing the switch still would.
+        let settled = check(begin + LONG * 2.0, &format!("{scale}×, settled"));
+        for layer in [pill.layer().unwrap(), seed_layer.clone(), wash.layer().unwrap()] {
+            layer.removeAllAnimations();
+        }
+        page.setNeedsDisplay(true);
+        container.setNeedsDisplay(true);
+        show(&w);
+        testing::composite_at(&w, begin + LONG * 2.0);
+        let (_, _, still) = testing::window_pixels(&w).expect("captured pixels");
+        assert!(settled == still, "{scale}×: the settled switch differs from drawing it still");
         w.close();
         testing::settle();
     }
@@ -603,6 +800,7 @@ mod linux {
         let aqua = NSAppearance::appearanceNamed(unsafe { NSAppearanceNameAqua }).expect("Aqua");
         NSApplication::sharedApplication(mtm).setAppearance(Some(&aqua));
         let tests: &[Test] = &[
+            ("asynchronous_pixel_crops", asynchronous_pixel_crops),
             ("views_and_layers_composite", views_and_layers_composite),
             ("animations_draw_on_the_render_thread", animations_draw_on_the_render_thread),
             (
@@ -610,6 +808,7 @@ mod linux {
                 animator_interpolates_without_enabling_implicit_changes,
             ),
             ("animator_resizes_and_completes_while_tracking", animator_resizes_and_completes_while_tracking),
+            ("switch_moves_without_trails", switch_moves_without_trails),
             ("opacity_and_transitions", opacity_and_transitions),
             ("masks_hide_what_they_leave_out", masks_hide_what_they_leave_out),
             ("views_update_their_layers", views_update_their_layers),

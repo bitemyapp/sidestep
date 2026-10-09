@@ -51,7 +51,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::ptr::NonNull;
 use std::sync::OnceLock;
-use std::sync::mpsc::{self, TryRecvError};
+use std::sync::mpsc::TryRecvError;
 use std::time::Instant;
 
 use block2::RcBlock;
@@ -172,35 +172,6 @@ pub(crate) fn queued() {
     UNSEEN.with(|u| u.set(true));
     if !PERFORMING.with(Cell::get) {
         signal();
-    }
-}
-
-/// The render thread's sender to the main thread: each message wakes the
-/// main loop through the event source. When the render thread stops (a
-/// Wayland protocol error ends its connection) the sender goes away, which
-/// also wakes the loop, to see the channel closed.
-pub(crate) struct MainSender {
-    tx: Option<mpsc::Sender<FromRender>>,
-    signal: SourceSignal,
-}
-
-impl MainSender {
-    pub(crate) fn new(tx: mpsc::Sender<FromRender>, signal: SourceSignal) -> MainSender {
-        MainSender { tx: Some(tx), signal }
-    }
-
-    pub(crate) fn send(&self, msg: FromRender) -> Result<(), mpsc::SendError<FromRender>> {
-        self.tx.as_ref().expect("the sender is only taken when dropped").send(msg)?;
-        self.signal.signal_and_wake();
-        Ok(())
-    }
-}
-
-impl Drop for MainSender {
-    fn drop(&mut self) {
-        // Closed first, so the woken loop finds it closed.
-        drop(self.tx.take());
-        self.signal.signal_and_wake();
     }
 }
 

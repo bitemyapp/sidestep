@@ -224,7 +224,8 @@ pictures on macOS for comparison):
 - `NSGradient`, `NSShadow`, `NSVisualEffectView` (an opaque material),
   `alphaValue`, and `NSAnimationContext` (a Core Animation transaction, in
   which layer-backed views' frame and alpha changes animate while it
-  allows implicit animation; changes through `animator` apply at once).
+  allows implicit animation, as do changes through a view's `animator`;
+  a window's apply at once).
 - CoreGraphics (`coregraphics/`, the gallery's `SCENARIO=cg` page):
   `CGContext` sharing `NSGraphicsContext`'s graphics state (paths, fills,
   strokes, dashes, clips and clips to masks, blend modes, alpha, shadows,
@@ -366,7 +367,7 @@ Next:
   pasteboards.
 - Drawing: text under a rotated transform (glyph runs take a translation
   only), pattern colors (and `patternImage` on threads other than the
-  image's), `-[NSView lockFocus]`, `animator` animating over time, blur behind
+  image's), `-[NSView lockFocus]`, a window's `animator` animating, blur behind
   visual effect views (no Wayland protocol yet), and batching a bitmap
   context's operations instead of rasterizing each at once (layouts other
   than RGBA are unpacked and packed for each).
@@ -387,7 +388,7 @@ Next:
   between layers), `rotationMode`, `contentsCenter`, filters, conic
   gradients, the continuous corner's exact curve, keyframes' tension,
   continuity and bias, overdamped springs as macOS moves them, a layer's
-  own duration and repeats, `animator` animating, `CATextLayer`,
+  own duration and repeats, a window's `animator` animating, `CATextLayer`,
   `CAReplicatorLayer`, `CAScrollLayer`, `CATransformLayer`, `CATiledLayer`
   and `CAEmitterLayer` (`CAMetalLayer` and `CAOpenGLLayer` wait for a GPU
   renderer), and drawing layer trees with a GPU (see architecture.md's
@@ -598,6 +599,60 @@ Next:
 
 Omperor, the motivating application, building for Linux with no source
 changes beyond `use sidestep as _;`.
+
+## Native toolkit
+
+`sidestep-ui`: Linux programs on Sidestep's engine without AppKit or the
+Objective-C runtime, toward a desktop environment's own programs.
+
+Done: the engine carved out of AppKit (`sidestep-engine`, which AppKit
+now builds on, unchanged to objc2 programs); an application loop with
+timers and cross-thread wakes, applications one after another in a
+process; toplevel windows and popups (placed as the positioner allows:
+anchor corner, gravity, offset, flip, slide, resize) with their
+compositor-owned size and state, decorations where the desktop wants
+them, cursors, size limits and requests, hidden and shown again; keys
+through XKB with compose sequences, pointer buttons, wheels and touchpad
+scrolling (coasting after a flick, with AppKit's physics, now shared) and
+pinches, input methods; a canvas over the render thread's ops
+(rectangles, shapes, strokes and dashes, gradients, images, groups,
+clips, shadows, blend modes, transforms, text upright from the glyph
+cache, turned as outlines, synthesized bold thickened, color glyphs as
+pictures); text layout with styles, wrapping, alignment, truncation, hit
+testing, carets and selections; fonts from the system and from the
+program's own files, installed or loaded as one face; the clipboard's
+text; drops, the type taken as the program asks, with periodic updates;
+outputs, read without waiting; the desktop's appearance and system
+colors. Tested headless through the null render thread and under a real
+compositor (`tests/wayland_system.rs`: a virtual pointer, `wtype`,
+`wl-clipboard`), which CI's `wayland` job runs with AppKit's.
+
+Next, roughly in order:
+
+- **Scrolling layers.** The tiled scroll layers AppKit's scroll views use
+  (`PlaceLayer`, tile paints drawn ahead and rasterized between frames),
+  as a native `Layer`: content that scrolls without redrawing, which
+  lists and editors need. AppKit's `layers.rs` decides which tiles to
+  paint and keep; its policy should move into the engine so both toolkits
+  share it.
+- **Animation.** The engine composites and animates Core Animation's
+  layer trees on the render thread; a native layer tree on it, with
+  implicit transitions and display-link ticks (`FrameTicks`), so
+  animations don't cost the main thread a frame each.
+- **Widgets.** A retained view tree with layout, focus and the key view
+  loop, hit testing and the theme's painting of controls (AppKit's
+  `theme` paints from data, and could move into the engine as AppKit's
+  controls' look), then controls: buttons, text fields and text views on
+  `TextLayout`, lists, scroll views, menus.
+- **Desktop surfaces**, for a desktop environment's own programs:
+  wlr-layer-shell panels, docks, wallpapers and overlays; session lock;
+  output management; foreign toplevel lists for task switchers.
+- **Services**: the portals AppKit's panels and workspace use (file
+  choosers, opening URIs), notifications, drags out of the program, the
+  clipboard's other types, rich text.
+- **AppKit on the toolkit.** As the native toolkit grows, AppKit's
+  window, event and layer machinery can become wrappers of its, so the
+  two share one implementation instead of two clients of the engine.
 
 ## Swift
 

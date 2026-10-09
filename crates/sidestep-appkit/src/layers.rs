@@ -100,11 +100,7 @@ const MEMORY_CAP: usize = 96 << 20;
 /// How long a pass may have spent before it puts tiles ahead off.
 const PREFETCH_BUDGET: Duration = Duration::from_millis(4);
 
-/// Whether `SIDESTEP_TRACE_FRAMES` asks for counters (read once).
-pub(crate) fn tracing() -> bool {
-    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *TRACE.get_or_init(|| std::env::var_os("SIDESTEP_TRACE_FRAMES").is_some_and(|v| v != "0"))
-}
+pub(crate) use sidestep_engine::trace::{trace_ms, tracing, tracing_tiles};
 
 /// Where damage goes: the layer's own, or, for a view drawn in an overlay,
 /// only the overlays over that layer (keyed by the layer's id with its low
@@ -324,19 +320,23 @@ impl Drop for ModeGuard {
 /// What a pass did, for `SIDESTEP_TRACE_FRAMES`, and whether it changed
 /// anything the render thread shows.
 #[derive(Default)]
-struct Counts {
-    tiles: usize,
-    paints: usize,
+pub(crate) struct Counts {
+    pub tiles: usize,
+    pub paints: usize,
     /// Layers placed, dropped or given fewer tiles.
-    placed: usize,
+    pub placed: usize,
+    /// The window's scroll layers.
+    pub layers: usize,
+    /// Tiles ahead were put off for want of time: the next pass draws them.
+    pub put_off: bool,
 }
 
 /// Record everything that changed in `window` for the render thread: place
 /// its layers, draw new and damaged tiles, the window's surface and the
 /// overlays; then have `present` present the frame (told whether anything
 /// changed), and draw tiles ahead. Does nothing while a pass of the window
-/// is running. Returns whether tiles ahead were put off to another pass.
-pub(crate) fn display(window: &NSWindowImpl, present: impl FnOnce(bool)) -> bool {
+/// is running. Returns what it did, and whether tiles ahead were put off.
+pub(crate) fn display(window: &NSWindowImpl, present: impl FnOnce(bool)) -> Counts {
     let start = Instant::now();
     let mut counts = Counts::default();
     // Out of the window while the pass runs, with a stand-in noting what
@@ -344,7 +344,7 @@ pub(crate) fn display(window: &NSWindowImpl, present: impl FnOnce(bool)) -> bool
     let mut layers = {
         let mut kept = window.layers().borrow_mut();
         if kept.out.is_some() {
-            return false;
+            return counts;
         }
         std::mem::replace(&mut *kept, Layers { layers: HashMap::new(), out: Some(Meanwhile::default()) })
     };
@@ -429,17 +429,9 @@ pub(crate) fn display(window: &NSWindowImpl, present: impl FnOnce(bool)) -> bool
     }
     let stand_in = std::mem::replace(&mut *window.layers().borrow_mut(), layers);
     drop(stand_in);
-    if tracing() {
-        eprintln!(
-            "sidestep frame: window {} main: {:.2} ms, {} tiles recorded, {} paints, {} layers",
-            window.id(),
-            start.elapsed().as_secs_f64() * 1000.0,
-            counts.tiles,
-            counts.paints,
-            plans.len()
-        );
-    }
-    put_off
+    counts.layers = plans.len();
+    counts.put_off = put_off;
+    counts
 }
 
 /// Clip views that gained or lost their layers: flag them, tell the render
@@ -938,7 +930,19 @@ fn draw_root(window: &NSWindowImpl, damage: &[Rect], scale: f64, ring: Option<&N
     let base = Xf { tx: 0.0, a: -1.0, ty: height };
     let size = window.content_size();
     let all = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
-    for area in coalesce(damage.to_vec()) {
+    let areas = coalesce(damage.to_vec());
+    if tracing_tiles() {
+        let size = |r: &Rect| f64::from((r.x1 - r.x0) * (r.y1 - r.y0));
+        eprintln!(
+            "sidestep @{:.1} ms window damage: {} rects, {:.0} points squared, drawn as {} areas, {:.0} points squared",
+            trace_ms(),
+            damage.len(),
+            damage.iter().map(size).sum::<f64>(),
+            areas.len(),
+            areas.iter().map(size).sum::<f64>()
+        );
+    }
+    for area in areas {
         crate::context::begin_recording(base, scale);
         graphics::push(Op::Fill { rect: area, color });
         if let Some(content) = &content {
@@ -973,7 +977,34 @@ fn record_tiles(window: &NSWindowImpl, plan: &Plan, area: Rect, scale: f64, ring
         }
     }
     let ops = graphics::end_recording();
+    if tracing_tiles() {
+        let glyphs = ops.iter().filter(|op| matches!(op, Op::Glyphs(_))).count();
+        let shows = visible_part(&plan.place);
+        eprintln!(
+            "sidestep @{:.1} ms tile: window {} layer {:#x} [{:.0}, {:.0}, {:.0}, {:.0}] {}: {} ops, {} glyph runs; \
+             the layer shows [{:.0}, {:.0}, {:.0}, {:.0}]",
+            trace_ms(),
+            window.id(),
+            plan.id,
+            area.x0,
+            area.y0,
+            area.x1,
+            area.y1,
+            if AHEAD.with(Cell::get) { "ahead" } else { "in view or damaged" },
+            ops.len(),
+            glyphs,
+            shows.x0,
+            shows.y0,
+            shows.x1,
+            shows.y1
+        );
+    }
     app::send(ToRender::Paint { window: window.id(), target: Target::Tiles(plan.id), rects: vec![area], ops });
+}
+
+thread_local! {
+    /// Tiles ahead are being recorded (for `SIDESTEP_TRACE_FRAMES=tiles`).
+    static AHEAD: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Place a layer and draw what its viewport needs: tiles coming into view,
@@ -1132,7 +1163,9 @@ fn prefetch(
     for key in ahead {
         layer.valid.insert(key);
         let area = grid.padded(key, scale);
+        AHEAD.with(|a| a.set(true));
         record_tiles(window, plan, area, scale, ring);
+        AHEAD.with(|a| a.set(false));
         counts.tiles += 1;
         counts.paints += 1;
         note_tiles(layer, &area);

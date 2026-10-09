@@ -1539,6 +1539,7 @@ dependencies = [
  "parley",
  "png",
  "rustix 1.1.5",
+ "sidestep-engine",
  "sidestep-foundation",
  "sidestep-runtime",
  "skrifa",
@@ -1564,6 +1565,25 @@ dependencies = [
  "objc2-image-io",
  "objc2-quartz-core",
  "sidestep",
+]
+
+[[package]]
+name = "sidestep-engine"
+version = "0.0.1"
+dependencies = [
+ "fontique",
+ "icu_properties",
+ "icu_provider",
+ "image",
+ "kbvm",
+ "kurbo",
+ "parley",
+ "rustix 1.1.5",
+ "skrifa",
+ "smithay-client-toolkit",
+ "swash",
+ "tiny-skia",
+ "wayland-cursor",
 ]
 
 [[package]]
@@ -1594,6 +1614,16 @@ version = "0.0.1"
 dependencies = [
  "libc",
  "objc2",
+]
+
+[[package]]
+name = "sidestep-ui"
+version = "0.0.1"
+dependencies = [
+ "kurbo",
+ "sidestep-engine",
+ "smithay-client-toolkit",
+ "tiny-skia",
 ]
 
 [[package]]
@@ -1886,6 +1916,13 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "sidestep",
+]
+
+[[package]]
+name = "ui-gallery"
+version = "0.0.0"
+dependencies = [
+ "sidestep-ui",
 ]
 
 [[package]]

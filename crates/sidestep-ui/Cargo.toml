@@ -1,0 +1,29 @@
+[package]
+name = "sidestep-ui"
+description = "A native Rust UI toolkit for Linux on Sidestep's engine: windows, input, drawing and text through Wayland, with no Objective-C runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Linux (and other non-Apple Unix) only: on macOS, programs use AppKit
+# through objc2.
+[target.'cfg(not(target_vendor = "apple"))'.dependencies]
+sidestep-engine.workspace = true
+# Geometry in the API (points, rectangles, transforms, shapes), re-exported.
+kurbo = { version = "0.13", default-features = false, features = ["std"] }
+tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
+smithay-client-toolkit = { version = "0.19", default-features = false, features = ["calloop"] }
+
+# Windows, input and drawing through the null render thread (see the
+# file).
+[[test]]
+name = "headless"
+harness = false
+
+# Input, the clipboard, outputs and popups under the headless sway, with
+# other clients (see the file).
+[[test]]
+name = "wayland_system"
+harness = false

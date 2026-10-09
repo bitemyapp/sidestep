@@ -10,6 +10,8 @@ repository.workspace = true
 [target.'cfg(not(target_vendor = "apple"))'.dependencies]
 sidestep-runtime.workspace = true
 sidestep-foundation.workspace = true
+# The render thread, rasterizer and text engine, shared with sidestep-ui.
+sidestep-engine.workspace = true
 objc2 = { workspace = true, features = ["gnustep-2-1"] }
 block2 = { workspace = true, features = ["gnustep-2-1"] }
 objc2-foundation = { workspace = true, features = ["gnustep-2-1", "NSObject", "NSString", "NSDictionary", "NSGeometry", "NSNotification", "NSTimer", "NSDate", "NSZone", "NSRange", "block2", "NSArray", "NSData", "NSValue", "NSAffineTransform", "NSURL", "objc2-core-foundation", "NSRunLoop", "NSUserDefaults", "NSBundle", "NSObjCRuntime", "NSIndexSet", "NSEnumerator", "NSAttributedString", "NSLocale", "NSError", "NSFileWrapper"] }

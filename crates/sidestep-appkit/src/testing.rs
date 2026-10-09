@@ -20,61 +20,9 @@ use objc2_app_kit::NSWindow;
 use sidestep_foundation::runloop::Mode;
 
 use crate::backend::null;
+pub use crate::backend::null::{PaintedText, Seen};
 use crate::event_loop;
 use crate::protocol::{Button, FromRender, Key, ScrollPhase, WindowState};
-
-/// What the main thread asked the null render thread for, besides drawing.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Seen {
-    /// A window was shown; a popup or a sheet names its parent.
-    Created {
-        window: u32,
-        width: u32,
-        height: u32,
-        popup_of: Option<u32>,
-        sheet_of: Option<u32>,
-    },
-    Closed {
-        window: u32,
-    },
-    /// The pointer's shape over a window's content, by its cursor-theme name.
-    Cursor {
-        window: u32,
-        name: String,
-    },
-    CursorHidden {
-        hidden: bool,
-        until_moved: bool,
-    },
-    /// A request (activation, resizing, moving, …), as its debug form.
-    Request {
-        window: u32,
-        request: String,
-    },
-    /// The window a window belongs over.
-    Parent {
-        window: u32,
-        parent: Option<u32>,
-    },
-    /// Display links asked for each frame of the window, or stopped.
-    FrameTicks {
-        window: u32,
-        on: bool,
-    },
-}
-
-/// A run of text the main thread asked the null render thread to paint.
-#[derive(Clone, Debug, PartialEq)]
-pub struct PaintedText {
-    pub window: u32,
-    /// Straight sRGB red, green, blue and alpha, 0 to 1.
-    pub color: [f32; 4],
-    /// Where the run starts on its baseline, in the points of what it was
-    /// painted into: the window's content, or the document of a scroll
-    /// view (whose content is painted into tiles of its own).
-    pub x: f32,
-    pub y: f32,
-}
 
 /// Start (or stop) writing down the text painted, for
 /// [`take_painted_text`].
@@ -402,8 +350,16 @@ pub fn render_layer_count() -> usize {
     null::CA.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(0, |ca| ca.layer_count())
 }
 
-/// Keep the pixels of windows shown from now on (at scale 1) as the null
-/// render thread would draw them, composites included, or stop.
+/// Have the null render thread show windows at `scale` (whole: 1, 2, 3),
+/// so the main thread draws at it and captured pixels have it. Call before
+/// the first window is shown.
+pub fn use_null_backend_scale(scale: u32) {
+    null::SCALE.store(scale.max(1), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Keep the pixels of windows shown from now on (at the null render
+/// thread's scale, 1 unless asked) as it would draw them, composites
+/// included, or stop.
 pub fn capture_pixels(on: bool) {
     *null::PIXELS.lock().unwrap_or_else(|e| e.into_inner()) = on.then(Default::default);
 }
@@ -417,11 +373,37 @@ pub fn window_pixels(window: &NSWindow) -> Option<(u32, u32, Vec<[u8; 4]>)> {
     Some((*w, *h, px.iter().map(|p| p.to_ne_bytes()).collect()))
 }
 
+/// Ask the null render thread to composite at `t` and copy a crop, without
+/// waiting or locking the pixel buffer on the calling thread. `crop` is
+/// [x, y, width, height] in device pixels from the content's top left.
+/// The reply holds width, height and premultiplied RGBA pixels, or `None`
+/// if capture is disabled, the window/crop is invalid, or this isn't the
+/// null backend. Move the receiver to a worker for encoding or file I/O;
+/// never wait for its reply on the GUI thread. Enable `capture_pixels`
+/// before showing the window, and bound the number of requests in flight.
+pub fn request_window_pixels(
+    window: &NSWindow,
+    t: f64,
+    crop: [u32; 4],
+) -> std::sync::mpsc::Receiver<Option<crate::protocol::Capture>> {
+    let (reply, receiver) = std::sync::mpsc::channel();
+    crate::app::send(crate::protocol::ToRender::CaptureWindow { window: showing_id(window), at: t, crop, reply });
+    receiver
+}
+
 /// Have the null render thread draw `window`'s layer trees as they show at
 /// the media time `t` (as a frame would), and wait for it.
 pub fn composite_at(window: &NSWindow, t: f64) {
     crate::app::send(crate::protocol::ToRender::Composite { window: showing_id(window), at: Some(t) });
     settle();
+}
+
+/// Ask the null render thread to draw `window`'s layer trees as they show
+/// at `t`, without waiting: the pixels have it once it gets to it. For
+/// code that can't run the loop to wait, as a timer inside a tracking
+/// loop can't.
+pub fn request_composite_at(window: &NSWindow, t: f64) {
+    crate::app::send(crate::protocol::ToRender::Composite { window: showing_id(window), at: Some(t) });
 }
 
 /// `CACurrentMediaTime()`.

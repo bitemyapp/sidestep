@@ -299,33 +299,9 @@ pub(crate) fn current_look() -> Look {
     current().look()
 }
 
-/// The desktop's preference: dark, and high contrast (set by `settings`).
-static SYSTEM: AtomicU8 = AtomicU8::new(0);
-const DARK: u8 = 1;
-const CONTRAST: u8 = 2;
-/// Set once the desktop answered (or said nothing within the wait).
-const KNOWN: u8 = 4;
-
-/// The desktop's appearance.
+/// The desktop's appearance (kept by `sidestep_engine::settings`).
 pub(crate) fn system() -> Id {
-    let bits = SYSTEM.load(Ordering::Relaxed);
-    Id::of_look(match (bits & DARK != 0, bits & CONTRAST != 0) {
-        (false, false) => Look::Light,
-        (true, false) => Look::Dark,
-        (false, true) => Look::LightContrast,
-        (true, true) => Look::DarkContrast,
-    })
-}
-
-/// Record the desktop's appearance; true if it changed.
-pub(crate) fn set_system(dark: bool, contrast: bool) -> bool {
-    let bits = KNOWN | if dark { DARK } else { 0 } | if contrast { CONTRAST } else { 0 };
-    SYSTEM.swap(bits, Ordering::Relaxed) != bits
-}
-
-/// Whether the desktop's appearance is known yet.
-pub(crate) fn system_known() -> bool {
-    SYSTEM.load(Ordering::Relaxed) & KNOWN != 0
+    Id::of_look(sidestep_engine::settings::system_look())
 }
 
 pub(crate) fn app_appearance() -> Option<Id> {

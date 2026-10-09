@@ -227,10 +227,11 @@ pub(crate) fn follow_clip_view(view: &NSViewImpl) {
     set_flag(view, FOLLOWS_CLIP, true);
 }
 
-/// A clip view scrolled or resized: documents that follow it need layout.
+/// A clip view scrolled or resized: documents that follow it need layout,
+/// and what it shows needs `viewWillDraw` before the next frame.
 pub(crate) fn clip_moved(clip: &NSViewImpl) {
     if let Some(window) = views::window_of(clip) {
-        window.needs_view_preparation();
+        window.clip_exposed(views::as_view(clip));
     }
     for sub in views::subviews(clip).iter() {
         let s = views::imp(sub);
@@ -870,20 +871,31 @@ fn lay_out(view: &NSViewImpl, layout: bool) {
     }
 }
 
-/// The window's pass before a frame: layout, then `viewWillDraw` if
-/// anything will be drawn or a scroll exposed content, and layout again
-/// for anything that asked for it there.
+/// The window's pass before a frame: layout, then `viewWillDraw`, and
+/// layout again for anything that asked for it there. `viewWillDraw` goes
+/// down the whole tree when anything will be drawn, else only into clip
+/// views that scrolled or resized: moving tiles draws no pixels, but what
+/// shows changed (a TextKit view lays out its viewport, and keeps what
+/// showed in place), and tiles may come into view. Their layer-backed
+/// views' canvases follow what shows.
 pub(crate) fn run(window: &NSWindowImpl) {
     let Some(content) = window.content() else { return };
     let root = views::imp(&content);
     lay_out(root, true);
-    let prepare = window.take_view_preparation();
-    if prepare || window.has_damage() {
+    let exposed = window.take_exposed();
+    let damaged = window.has_damage();
+    if damaged {
         content.viewWillDraw();
-        lay_out(root, true);
-        if prepare {
-            crate::quartzcore::backing::prepare_viewports(root);
+    } else {
+        for clip in &exposed {
+            clip.viewWillDraw();
         }
+    }
+    if damaged || !exposed.is_empty() {
+        lay_out(root, true);
+    }
+    for clip in &exposed {
+        crate::quartzcore::backing::prepare_viewports(views::imp(clip));
     }
 }
 

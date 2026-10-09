@@ -792,7 +792,13 @@ as unbounded, so laying the viewport out lays out all of the text, as on
 macOS (20 000 lines in 0.4 s there). The viewport is laid out before the
 view draws (`viewWillDraw`) when layout changed or the view scrolled; text
 that showed before stays in place on screen when laying out what is above it
-moves it (the view scrolls by as much). The fragments configured draw after
+moves it (the view scrolls by as much). Drawing can reach past what shows:
+the display pass draws scroll tiles ahead of a scroll, and the damage to
+tiles out of sight, and keeps what it drew. So a draw reaching past the
+viewport adds what it reaches to it, as overdraw (kept within two heights of
+what shows, and at least 1024 points), laid out and configured before the
+fragments draw, as AppKit lays out its overdraw: text drawn only where it
+shows would leave blanks in tiles that show later. The fragments configured draw after
 the view's `drawRect:` (as macOS draws them above it, in views of their
 own), with the marked text and the caret above them, so a subclass drawing
 in `drawRect:` draws under the text. The view sizes to the usage bounds (the

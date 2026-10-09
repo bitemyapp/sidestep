@@ -13,11 +13,21 @@ objc2, block2                     from crates.io (objc2 with the fork's fixes);
           class symbols ._OBJC_CLASS_<Name>, _Block_copy, _NSConcreteStackBlock
 sidestep-runtime                  the Objective-C runtime, in Rust
 sidestep-foundation, -appkit      framework classes, in Rust, via define_class!
+sidestep-engine                   the render thread, rasterizer and text
+                                  engine under AppKit; no Objective-C
 ```
+
+A program written for Linux alone can use the engine through a native Rust
+toolkit instead, `sidestep-ui`, and link no Objective-C at all (see
+[The native toolkit](#the-native-toolkit)).
 
 The objc2 fork's fixes are pending upstream; `tools/objc2-overlay` applies
 them to the published crates at build time (see
 [abi.md](abi.md#fixed-in-the-objc2-fork-pending-upstream)).
+
+AppKit's half that never touches the Objective-C runtime is a crate of its
+own, `sidestep-engine` (see [The engine](#the-engine)), so other toolkits
+can draw and take input through it too.
 
 [objc2]: https://github.com/madsmtm/objc2
 
@@ -639,7 +649,9 @@ everything that touches pixels or the display server to a render thread.
 - **Rendering.** The render thread owns the Wayland connection through
   smithay-client-toolkit. It rasterizes operations on the CPU into a cache
   per layer (tiny-skia for paths and images, swash for glyphs), only inside damaged
-  rectangles. The window surface is presented from a few shared-memory
+  rectangles; a scroll layer's tiles keep their paints and rasterize them
+  between frames, in slices, so a tile drawn ahead of a scroll never holds
+  up the next frame. The window surface is presented from a few shared-memory
   buffers, each remembering what changed since it was last written, so a
   frame copies and damages only changed pixels. A Wayland protocol error
   ends the connection; the render thread then stops, and the main thread,
@@ -663,6 +675,155 @@ This design keeps GPU wake-ups and uploads proportional to what changed,
 which is what dominates power on a mostly idle desktop. A GPU rasterizer can
 replace the CPU one behind the same operations later.
 
+### The engine
+
+Everything below the line the two threads talk across lives in
+`crates/sidestep-engine`, which links no Objective-C: the messages
+(`protocol`), the render thread and its Wayland backends, the real one
+and the null one tests use (`backend`), the rasterizer (`raster`), Core
+Animation's layer trees as plain data and their compositing (`ca`), the
+text engine (`text`), the clipboard's shared state (`clipboard`), the
+compositor's outputs (`outputs`), the desktop's settings and the system
+colors they choose (`settings`, `desktop`, `palette`), image files
+(`codec`), CoreGraphics-style paths (`path`), touchpad coasting's physics
+(`momentum`) and `SIDESTEP_TRACE_FRAMES` (`trace`). `sidestep-appkit`
+re-exports those modules at its crate root,
+so its code names them as it always has (`crate::protocol`,
+`crate::backend`, …); the main-thread halves of mixed modules stay in
+AppKit and re-export the engine's halves (`quartzcore::tree` builds
+commits, `quartzcore::render` draws layers into a CGContext, `screen`
+makes `NSScreen`s of the published outputs, `settings` turns a change
+into a run-loop perform and a redraw).
+
+Three seams keep the engine free of AppKit:
+
+- **Waking the main thread.** `backend::start` takes a `Waker`, a
+  closure the render thread calls after every message it sends and once
+  more when it stops. AppKit's signals its run-loop source; another
+  toolkit can signal a condition variable.
+- **Hearing of the desktop's settings.** The engine keeps the desktop's
+  light or dark preference and accent itself and calls the hook a toolkit
+  gives `settings::on_change` (AppKit's performs `apply_changes` on the
+  main run loop, which refreshes every view's appearance).
+- **AppKit's values.** Key events carry `NSEventModifierFlags` bits and
+  AppKit's function-key characters, which `NSEvent` passes on as they
+  are; the engine defines them itself (`keys`), and a test in AppKit holds
+  each to objc2-app-kit's.
+
+A process has one render thread at a time, started by whichever toolkit
+runs it: the render thread ends when its `Backend` is dropped (its
+channel closes), and the next `backend::start` replaces what other
+threads send through (`send_if_running`), as a toolkit's next
+`settings::on_change` replaces its hook, so one application can run after
+another.
+
+### The native toolkit
+
+`crates/sidestep-ui` is the engine's other toolkit: a Rust API for
+programs written for Linux alone, with no Objective-C runtime in them
+(its dependency tree has no objc2 crate). It drives the render thread
+through the same protocol AppKit does, and keeps AppKit's rhythm:
+
+- **The loop** (`app.rs`) runs on the thread that calls `App::run`. The
+  render thread's waker and the settings hook signal a condition variable
+  (and so do `Proxy`s from other threads); each turn handles the render
+  thread's messages, oldest first (a move followed by another move of the
+  same window, and a key repeat followed by a newer key, are dropped, as
+  AppKit drops them), a proxy's wake, a change of the desktop's look or
+  accent (every window redraws), timers that came due (kept in a
+  `BTreeMap` by due time; a repeating timer keeps its phase and skips what
+  it missed) and coasting that no frame moved on, then runs the display
+  pass and sleeps until woken or the next deadline. An idle program sleeps
+  with nothing armed. One application runs at a time; when `run` returns,
+  its windows close and its render thread stops, and another may run.
+- **Windows and showings.** A window keeps its `WindowId` for its life;
+  each time it's shown (`show_window`, after `hide_window`) it is a new
+  window to the render thread, a *showing* with an id of its own: a
+  window's first showing has the window's number, later ones count from
+  2³¹. Messages name showings and are mapped back to windows, so what the
+  render thread still says of a showing that went finds nothing (drags
+  over one are still answered). Hiding a window closes its popups and
+  tells the handler it lost the keyboard and the pointer if it had them;
+  showing it sends its title, style, size, size limits, cursor and parent
+  anew. Closing a window closes its popups first, as Wayland needs. A
+  popup opens below its anchor unless a `PopupPosition` says otherwise
+  (the positioner's anchor corner, gravity, offset, and flip, slide and
+  resize adjustments, `ResizeX` added to the protocol for it).
+- **The display pass** gives each window that needs it a `Canvas`: a
+  window draws once configured, only when the render thread showed its
+  last frame (so drawing keeps pace with the compositor's frame
+  callbacks, and a window the compositor isn't showing stops drawing),
+  and only if it has damage or a new title. The canvas starts by clearing
+  the damage to the window's background (`FillWith` with `Copy`), records
+  the handler's drawing as ops in window points, and the pass sends one
+  `Paint` of the root target and a `Present`, then drops the images the
+  pass made for itself, so the message that forgets them follows the
+  paint. First frames wait, as AppKit's do, for the desktop's light or
+  dark (`settings::ready`).
+- **The canvas** (`canvas.rs`) keeps a transform (a kurbo `Affine`), a clip
+  (bounds, and clip paths where it isn't a rectangle) and a blend mode and
+  shadow, and turns calls into ops: a rectangle through an axis-aligned
+  transform with nothing else set is a `Fill` of whole pixels; shapes are
+  `FillPath`s and `StrokePath`s of their kurbo paths; images are `Image`
+  ops of the engine's `ImageData` (a file is decoded on the render thread
+  the first time it's drawn, and its cache entry goes when the last
+  `Image` does); groups are `BeginGroup`/`EndGroup`. Text is the glyph
+  runs the text engine placed, as `Glyphs` ops from the render thread's
+  glyph cache while the transform keeps glyphs upright and scales both
+  ways alike (the size scaled with it). Turned, mirrored or stretched, or
+  drawn with a shadow, a clip path or a blend mode, which a glyph run
+  can't carry, text is drawn through the drawing state another way: its
+  outlines, filled (and for a synthesized bold face stroked too, as thick
+  as the glyph cache emboldens, a 24th of the size in pixels between a
+  quarter pixel and two; a synthesized oblique leans them); or, for a
+  color font's glyphs (COLR, CBDT, sbix or SVG, which have no outlines),
+  a picture: the run drawn upright into an image at the scale it shows at
+  (`ca::render::rasterize`), drawn through the transform.
+- **Text** (`text.rs`): a `TextLayout` is the engine's `text::lines::Frame`
+  (TextKit's line layout), so it has what editing needs (the character at
+  a point, carets with their secondary caret where directions meet,
+  selection rectangles) as well as lines and size; its API takes byte
+  offsets of UTF-8 and converts to the frame's UTF-16 indexes.
+  `Canvas::draw_label` and `measure` go through string drawing's layout
+  cache instead, for labels drawn pass after pass. Font files a program
+  brings are installed in the shared font collection under their own
+  families (`fonts::install`, after which names like `Family-Bold` are
+  looked up again), so weights and styles are matched among a family's
+  faces as among the system's, or loaded as one face exactly as the file
+  has it (`Font::from_data`, through the private families CoreText's
+  data fonts use).
+- **Input** (`event.rs`) is translated from AppKit's values: modifier
+  flags to `Modifiers`; a key's characters to a `Key` (AppKit's control
+  characters and function-key characters to `NamedKey`s) and the text it
+  types (none for keys that type nothing, for releases, and while Control
+  or Super is held); input methods' changes to `Ime` commits and preedits.
+  A touchpad gesture that ends fast coasts, with AppKit's physics (the
+  engine's `momentum`, which AppKit's coasting now uses too): scroll
+  events with a `momentum` phase, a step per frame of the window or every
+  50 ms without frames, stopped by another scroll or a press (programs may
+  turn it off, `App::momentum_scrolling`).
+- **The rest**: the clipboard is the engine's shared state (text offered
+  under the text MIME types, this program's own text answered without a
+  round trip while its change is current); outputs are its published
+  snapshot, read without waiting (the render thread describes them by
+  itself once it connects, and the handler hears `outputs_changed`); and
+  drags are answered position by position, as the render thread needs,
+  from the handler's `drag_moved`: a `DropResponse` with the action, the
+  MIME type to take (one the drag offers, else the toolkit's choice: the
+  URL list, read before the drag is announced, else text, else the first
+  type offered) and whether to be asked again while the drag waits.
+
+Its tests run through the null render thread (`tests/headless.rs`): an
+application's handler plays every step, each waiting for its condition
+with a deadline, and a second application runs after the first;
+`testing` queues input as if the render thread had sent it. Under a real
+compositor (`tests/wayland_system.rs`, run under the headless sway, and
+in CI's `wayland` job in the container `scripts/linux-run` uses), a
+virtual pointer of the test's own clicks, double-clicks and turns the
+wheel over the window and dismisses a popup by clicking outside it,
+`wtype` types, `wl-copy` and `wl-paste` trade the clipboard with it, and
+the window is hidden, shown again and clicked.
+
 ### Scale
 
 Operations stay in points. Each window renders at its output's scale: the
@@ -673,8 +834,9 @@ says, a new window takes the outputs' scale when they agree, so on
 integer-scaled outputs its first frame is drawn at the right one; a
 fractional scale is known only once the window is mapped (wl_output rounds
 it up), so there the first frame is drawn at the integer scale and the
-window draws again. Every surface, tiles and decorations included, gets a
-buffer of `points × scale` pixels (rounded as the fractional-scale protocol
+window draws again. Every surface that shows something, tiles and
+decorations included (not a toplevel's frame, one transparent pixel), gets
+a buffer of `points × scale` pixels (rounded as the fractional-scale protocol
 asks) and a wp_viewporter destination of its size in points, so the
 compositor maps buffer pixels to screen pixels one to one instead of
 resampling. A tile cut by its scroll view shows a crop of whole buffer
@@ -931,10 +1093,11 @@ clears the sheet's parent and attaches the next. While a sheet is
 attached the parent refuses mouse input and the sheet is key in its place
 (the compositor's keyboard stays on the parent's toplevel). On screen a
 sheet is part of its parent: a desynchronized subsurface of the parent's
-surface with its own canvas, buffers and frame callbacks, placed
-top-centre under the title bar and kept there when the parent resizes,
-above the parent's scroll tiles (`backend/tiles.rs` stacks tiles
-directly above the window's surface, so below its sheets). Its position is the parent's state: a parent's resize
+frame (see [Windows and decorations](#windows-and-decorations)) with its
+own canvas, buffers and frame callbacks, placed top-centre under the title
+bar and kept there when the parent resizes or its title bar changes, above
+the parent's scroll tiles (`backend/tiles.rs` stacks tiles directly above
+the content's surface, so below its sheets). Its position is the parent's state: a parent's resize
 leaves it to the parent's own present at the new size, so a configure
 never makes an extra commit, and a sheet made or resized commits the
 parent only if the parent shows its current size. A sheet of a window
@@ -986,7 +1149,9 @@ one `frame` reports. A name another live window holds can't be taken.
 **Testing without a display.** `SIDESTEP_BACKEND=null` (or
 `sidestep_appkit::testing::use_null_backend`) starts a render thread that
 answers as a compositor would, at once and always the same way, draws
-nothing, and writes down what it was asked; the `testing` module plays
+nothing (unless asked to keep windows' pixels, `testing::capture_pixels`,
+at the scale `testing::use_null_backend_scale` gives windows, 1 unless
+asked), and writes down what it was asked; the `testing` module plays
 the compositor's part for input, adding messages to the main thread's
 inbox, and runs the loop until everything was answered and handled.
 `crates/sidestep-appkit/tests/linux_events.rs` uses it.
@@ -1029,12 +1194,29 @@ with an input grab, the start of menus. A titled child window stays a
 toplevel with its parent as xdg parent, which compositors keep it above,
 and a modal window gets the window its session came from.
 
+A toplevel's own surface is its frame: exactly the window geometry,
+showing one transparent pixel stretched over it and taking no pointer
+input. The content's surface sits on it under the title bar (the menu bar,
+under the header where Sidestep draws one), and the content's scroll
+tiles, the decorations, the menu bar and sheets are subsurfaces of the
+frame too, side by side rather than nested, as Hyprland draws a tree of
+subsurfaces a level at a time and would put a deeper tile over a sheet.
+The window geometry so starts at the frame's origin, which compositors
+that place a window by its surface's origin rather than by its geometry
+(Hyprland) need: with the content as the toplevel's surface, the title bar
+hung above the place they gave the window, cut off at the top, with as
+much left empty at the bottom. Everything but sheets is synchronized with
+the frame, which commits last, so the content, its tiles and decorations,
+the frame's size and the content's place in it show together. The
+keyboard and input methods are on the frame, so a caret's rectangle goes
+to an input method in the frame's coordinates.
+
 Where the compositor leaves decorations to the client (GNOME's does; a
 compositor without xdg-decoration, or one answering with client mode),
 the render thread draws them: an Adwaita-like header bar with the title and
 close, maximize and minimize buttons (as the style mask and the
 compositor's capabilities allow), a shadow and a resize border. Each part
-is a subsurface outside the window's own surface, so the content view's
+is a subsurface of the frame outside the content's surface, so the content view's
 coordinates don't change; the window geometry takes in the header but not
 the shadow, and the parts are synchronized subsurfaces. After a resize or
 a new scale they're drawn by the present that brings the content drawn
@@ -1310,7 +1492,15 @@ compositor.
   box blurs (a Gaussian of half the radius), moved by the offset in base
   coordinates (up is up, flipped or not) and drawn under it; the coverage
   is taken wherever it can reach the pixels being drawn, so a shadow
-  doesn't change with how the damage was cut or crosses tiles. Gradients are
+  doesn't change with how the damage was cut or crosses tiles. It is
+  worked out only as far as it reaches (what casts it, moved by the
+  offset and spread by the blur, within the clip), not over the whole
+  clip; a group's coverage is its layer's alpha, taken as it is; and the
+  blurs run along rows and then down columns a row at a time, with an
+  exact multiply for each mean, so a window-wide group with a soft shadow
+  costs what its shadow covers. An image whose pixels land one to one on
+  whole device pixels (a view's drawing, composited where it was drawn) is
+  sampled without filtering, which leaves the same pixels. Gradients are
   tiny-skia shaders, two-point conical for the radial ones; where the
   options don't extend them, the filled shape is the band they cover.
 - **Images.** An `NSImage` holds representations and draws the smallest
@@ -1346,14 +1536,19 @@ compositor.
   symbol names to Sidestep's own line drawings, template images drawn by
   a handler, sized and weighted by an `NSImageSymbolConfiguration`. No SF
   Symbols artwork is used; other names give nil.
-- **Animation.** `animator` is the view or window itself (as objc2 types
-  it), so changes made through it apply at once. An `NSAnimationContext`
-  group is a Core Animation transaction with the group's duration and
-  timing function: layers changed in it animate over them, and so do
-  layer-backed views' frame and alpha changes while the group allows
-  implicit animation (see [Core Animation](#core-animation)). The context
-  keeps its settings per group and runs completion handlers from the run
-  loop once a group's duration has passed.
+- **Animation.** A view's `animator` is a proxy (typed as the view, as
+  objc2 types it) that makes each change in an animation group, its own
+  unless one is open, with implicit animation allowed for that change
+  alone: a layer-backed view's frame, bounds and alpha animate over the
+  group's duration on the render thread, and other messages are passed on.
+  A window's `animator` is the window, so its changes apply at once. An
+  `NSAnimationContext` group is a Core Animation transaction with the
+  group's duration and timing function: layers changed in it animate over
+  them, and so do layer-backed views' frame and alpha changes while the
+  group allows implicit animation (see [Core Animation](#core-animation)).
+  The context keeps its settings per group and runs completion handlers
+  from the run loop once a group's duration has passed, in the common
+  modes, so while a control tracks the mouse too.
 
 ### CoreGraphics
 
@@ -2143,7 +2338,16 @@ damaged rectangle reaches, margins included) and presents; then, while it
 has spent less than 4 ms, it draws one tile ahead in the direction the
 layer moved (downward when it hasn't), after `prepareContentInRect:` to
 the document, which the render thread rasterizes while the compositor
-shows the frame. Tiles more
+shows the frame. What a pass draws, it keeps until it is damaged, so
+views must draw all of what they are asked to, shown or not (a TextKit 2
+text view takes what it is asked for into its viewport as overdraw, see
+[Text](#text)). Before a pass draws, the clip views that scrolled or
+resized since the last get `viewWillDraw` down their documents (the whole
+window does when anything is damaged): what shows changed even when every
+pixel is in tiles, so a text view lays out its viewport and keeps what
+showed in place, and layer-backed views whose canvases are cut to what
+shows (see [Core Animation](#core-animation)) draw a new one once what
+shows leaves theirs. Tiles more
 than two tiles from the viewport go, and the farthest from their viewports
 while a window's tiles hold more than 96 MB. An opaque clip view
 background makes the layer opaque: its tiles are cleared to that color and
@@ -2186,7 +2390,16 @@ which is how the main thread draws a tile it starts keeping, and a paint
 reaching into the margin of a tile nobody keeps leaves it out. So a tile
 keeps its canvas exactly as long as the main thread keeps the tile (a
 dropped tile's canvas serves the next new one), and the memory cap counts
-every canvas. A tile has buffers only while it is on screen: two, each
+every canvas. A paint costs its message nothing: each tile it reaches
+keeps it, pending, and the render thread rasterizes pending paints oldest
+first while nothing else waits, in slices of 2 ms (it looks for events
+without sleeping while any are left, and rasterizes a slice after handling
+them), so frame callbacks and presents come first; a present finishes the
+pending paints of the tiles it shows before showing them, so no frame
+shows a tile half drawn. A slice ends between operations, never inside a
+group (whose layer lives only while one run draws it), so a tile holds
+what rasterizing it at once would have left (`backend::tiles`'s
+`slices_rasterize_what_painting_at_once_would`). A tile has buffers only while it is on screen: two, each
 remembering the rectangles it misses (as the window's own buffers do), so
 a change uploads only its pixels. An overlay is placed and cropped from
 the origin and viewport of the layer it sits in, with a point's margin of
@@ -2199,9 +2412,23 @@ layer nested in no other, committed for it. So a fling uploads nothing
 until a tile comes into view, scrolling a scroll view of scroll views
 uploads nothing to their overlays, appending a line to a log pinned to its
 end uploads the line, and a caret blinking in a scroll view commits two
-surfaces. `SIDESTEP_TRACE_FRAMES=1` prints, for each pass, the main
-thread's time and the tiles it recorded, and for each present the bytes
-uploaded to tiles, overlays and the window and the surfaces committed.
+surfaces. `SIDESTEP_TRACE_FRAMES=1` prints, each line stamped with the
+milliseconds since the first so the two threads' lines line up, for each
+pass the main thread's time (with what layout and `viewWillDraw`, and
+layer-backed views' canvases, took of it) and the tiles it recorded, and
+for each present the render thread's time on the main thread's messages
+since the last present (and the longest of them, and what it was), what
+the present spent on its layers and on finishing the tiles it showed, the
+time spent rasterizing tiles between frames (and in how many slices), the
+bytes uploaded to tiles, overlays and the window, and the surfaces
+committed. `SIDESTEP_TRACE_FRAMES=tiles` adds a line for each tile paint
+(where it is, whether it was drawn ahead, and how many operations and
+glyph runs it holds, which shows a view leaving a tile blank), for each
+tile a present had to finish (how many paints and operations, over what),
+for each text view that damages itself after laying out (where), and for
+each slow paint of the window's surface its damage and its slowest
+operations (what they are, how long each took), which show what a slow
+present was redrawing.
 
 ### Core Animation
 
@@ -2304,7 +2531,12 @@ belongs in paint order, and each layer-backed view's `drawRect:` goes into
 its layer's canvas on the render thread (`Target::Content` paints, redrawn
 where the view was invalidated; a canvas more than 4096 pixels a side
 holds a window of that size placed on a 512-point grid around what's
-visible, moved only when what's visible leaves it). A view that
+visible, moved only when what's visible leaves it). A canvas shows in the
+bounds the layer presents, placed by its gravity as an image of the
+bounds it was drawn for would be: while an animation changes a view's
+frame, its drawing resizes with the layer (as AppKit's does by default)
+rather than showing whole from the animated origin, past the bounds the
+frame's damage covers. A view that
 `wantsUpdateLayer` (a plain view does; one that draws doesn't) gets
 `updateLayer` when its layer displays at a commit, as on macOS: at the
 first commit that finds it in a window, and after each time it or its
@@ -2383,7 +2615,7 @@ count and autoreversing don't limit its sublayers' time; the `frame` key
 path doesn't animate, and gradient `colors` and `locations` don't when
 the model has none; a value function given a value macOS raises for (a
 lone number for a scale or translation, a missing `from` or `to`) does
-nothing; changes made through `animator` apply at once; the continuous
+nothing; changes made through a window's `animator` apply at once; the continuous
 corner curve (`render::rounded_rect`'s table, of which only the reach is
 measured) is tighter near the edge than macOS's; `renderInContext:` follows the screen where macOS's
 `renderInContext:` doesn't (it draws sublayers by `zPosition`, and honors
@@ -2452,7 +2684,7 @@ AppKit measures text synchronously (`sizeWithAttributes:`,
 `boundingRectWithSize:options:attributes:context:`), so text is shaped and
 laid out on the thread that asks, and the render thread only ever sees
 glyphs: a glyph-run op names a registered face, a size, and glyph ids with
-positions in points. `crates/sidestep-appkit/src/text/` holds the stack.
+positions in points. `crates/sidestep-engine/src/text/` holds the stack.
 
 - **Fonts.** fontique finds the system's fonts through fontconfig, loaded
   at run time with `dlopen` (every Linux desktop has `libfontconfig.so.1`;
@@ -2675,7 +2907,8 @@ positions in points. `crates/sidestep-appkit/src/text/` holds the stack.
   clicks, and whose `drawAtPoint:inContext:` is called) take part as on
   macOS. A text view in TextKit 2 mode (the default, as on macOS) reaches
   its layout through one adapter (`textkit2::view::Geo`) for selection,
-  carets, clicks and commands, lays out its viewport in `viewWillDraw`, and
+  carets, clicks and commands, lays out its viewport in `viewWillDraw` (and
+  again, as overdraw, when a pass draws a tile beyond it), and
   draws the fragments its viewport controller configured after its
   `drawRect:` (the display pass's `layers::record` calls it), as macOS
   draws them in views above it: each at the point zero, the drawing state's
