@@ -1,0 +1,38 @@
+[package]
+name = "sidestep-engine"
+description = "Sidestep's drawing and display engine: the Wayland render thread, its rasterizer and text engine, shared by sidestep-appkit and sidestep-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Linux (and other non-Apple Unix) only; nothing here touches the
+# Objective-C runtime.
+[target.'cfg(not(target_vendor = "apple"))'.dependencies]
+smithay-client-toolkit = { version = "0.19", default-features = false, features = ["calloop"] }
+tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
+# Path geometry: bounds, winding, flattening, stroking.
+kurbo = { version = "0.13", default-features = false, features = ["std"] }
+# Image files, all in pure Rust: PNG, JPEG (zune-jpeg), GIF, WebP, BMP,
+# TIFF and ICO.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico"] }
+# Keymaps and compose sequences, in pure Rust: no libxkbcommon at build or
+# run time.
+kbvm = { version = "0.2", default-features = false, features = ["compose"] }
+# Themed cursors, for compositors without wp_cursor_shape_v1.
+wayland-cursor = "0.31"
+# Non-blocking clipboard pipes; already built for the Wayland crates.
+rustix = { version = "1", default-features = false, features = ["std"] }
+# Text: parley lays out (bidi, line breaking, shaping with harfrust),
+# fontique finds fonts through the system's fontconfig, loaded at run time
+# with dlopen, and swash rasterizes glyphs. See docs/architecture.md.
+parley = { version = "0.11.1", default-features = false, features = ["std", "system"] }
+fontique = { version = "0.11.1", default-features = false, features = ["std", "system", "fontconfig-dlopen"] }
+skrifa = { version = "0.44", default-features = false, features = ["std"] }
+swash = { version = "0.2.10", default-features = false, features = ["std", "scale", "render"] }
+# Routes ICU's diagnostics (parley's segmenter has no CJK dictionary, and
+# says so on every CJK line in debug builds) to the `log` crate.
+icu_provider = { version = "2.1", default-features = false, features = ["logging"] }
+# Which characters are emoji, to draw them in color (compiled into the binary).
+icu_properties = { version = "2.1", default-features = false, features = ["compiled_data"] }

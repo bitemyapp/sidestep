@@ -1739,6 +1739,7 @@ dependencies = [
  "parley",
  "png",
  "rustix 1.1.5",
+ "sidestep-engine",
  "sidestep-foundation",
  "sidestep-runtime",
  "skrifa",
@@ -1780,6 +1781,25 @@ dependencies = [
  "objc2-core-services",
  "objc2-foundation",
  "sidestep-foundation",
+]
+
+[[package]]
+name = "sidestep-engine"
+version = "0.0.1"
+dependencies = [
+ "fontique",
+ "icu_properties",
+ "icu_provider",
+ "image",
+ "kbvm",
+ "kurbo",
+ "parley",
+ "rustix 1.1.5",
+ "skrifa",
+ "smithay-client-toolkit",
+ "swash",
+ "tiny-skia",
+ "wayland-cursor",
 ]
 
 [[package]]

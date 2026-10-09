@@ -30,9 +30,9 @@
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::ptr::NonNull;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
-use kurbo::{Affine, BezPath, PathEl, Point, Shape as _, Vec2};
+use kurbo::{Affine, BezPath, PathEl, Point, Shape as _};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
 use objc2::{AnyThread, DefinedClass, define_class, msg_send};
@@ -45,363 +45,69 @@ use objc2_foundation::{NSString, NSUInteger};
 
 use super::geometry::{affine_at, edges};
 
-/// A quarter turn's control-point distance, as a fraction of the radius.
-fn quarter() -> f64 {
-    crate::path::kappa(std::f64::consts::FRAC_PI_2)
-}
-
-/// A path's elements as CoreGraphics builds them.
-#[derive(Debug, Default)]
-pub(crate) struct Shape {
-    pub path: BezPath,
-    /// Where the current subpath started: the current point after a close.
-    start: Option<Point>,
-    /// The rectangle this is, when it was made as one
-    /// (`CGPathCreateWithRect` or `CGPathAddRect` onto nothing, untransformed),
-    /// which `CGPathIsRect` answers as CoreGraphics does, whatever its size.
-    made_rect: Option<CGRect>,
-    /// The path as tiny-skia draws it, made on first use.
-    drawn: OnceLock<Option<Arc<tiny_skia::Path>>>,
-}
-
-impl Clone for Shape {
-    fn clone(&self) -> Self {
-        Shape { path: self.path.clone(), start: self.start, made_rect: self.made_rect, drawn: self.drawn.clone() }
-    }
-}
-
-impl PartialEq for Shape {
-    fn eq(&self, other: &Self) -> bool {
-        self.path.elements() == other.path.elements()
-    }
-}
+pub(crate) use sidestep_engine::path::Shape;
 
 fn apply(m: Option<Affine>, p: Point) -> Point {
     m.map_or(p, |m| m * p)
 }
 
-impl Shape {
-    pub fn from_path(path: BezPath) -> Shape {
-        let start = subpath_start(&path);
-        Shape { path, start, made_rect: None, drawn: OnceLock::new() }
-    }
-
-    pub fn elements(&self) -> &[PathEl] {
-        self.path.elements()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.path.elements().is_empty()
-    }
-
-    /// Something changed: drop what drawing made.
-    fn changed(&mut self) {
-        self.drawn = OnceLock::new();
-        self.made_rect = None;
-    }
-
+/// What CoreGraphics adds to a [`Shape`] in its own terms: rectangles as
+/// `CGRect`s (standardized, the null rectangle's ellipse at infinity),
+/// `CGPathIsRect` and stroking with its caps and joins.
+pub(crate) trait CgShape {
     /// Add a rectangle, remembering it was made as one if it's all there
     /// is and has no transform (see [`as_rect`](Self::as_rect)).
-    pub fn add_rect_made(&mut self, r: CGRect, m: Option<Affine>) {
-        let whole = self.is_empty() && m.is_none_or(|m| m == Affine::IDENTITY);
-        self.add_rect(r, m);
-        if whole {
-            self.made_rect = Some(super::geometry::standardize(r));
-        }
-    }
-
-    /// The current point, (0, 0) for none.
-    pub fn current(&self) -> Point {
-        match self.path.elements().last() {
-            Some(PathEl::MoveTo(p) | PathEl::LineTo(p) | PathEl::QuadTo(_, p) | PathEl::CurveTo(_, _, p)) => *p,
-            Some(PathEl::ClosePath) => self.start.unwrap_or(Point::ZERO),
-            None => Point::ZERO,
-        }
-    }
-
-    pub fn move_to(&mut self, p: Point) {
-        if let Some(PathEl::MoveTo(last)) = self.path.elements_mut().last_mut() {
-            *last = p;
-        } else {
-            self.path.move_to(p);
-        }
-        self.start = Some(p);
-        self.changed();
-    }
-
-    /// Append a segment, if there's a current point to start it from.
-    fn segment(&mut self, el: PathEl) -> bool {
-        if self.is_empty() {
-            return false;
-        }
-        self.path.push(el);
-        self.changed();
-        true
-    }
-
-    pub fn line_to(&mut self, p: Point) -> bool {
-        self.segment(PathEl::LineTo(p))
-    }
-
-    pub fn quad_to(&mut self, c: Point, p: Point) -> bool {
-        self.segment(PathEl::QuadTo(c, p))
-    }
-
-    pub fn curve_to(&mut self, c1: Point, c2: Point, p: Point) -> bool {
-        self.segment(PathEl::CurveTo(c1, c2, p))
-    }
-
-    pub fn close(&mut self) {
-        if !matches!(self.path.elements().last(), None | Some(PathEl::ClosePath)) {
-            self.path.close_path();
-            self.changed();
-        }
-    }
-
-    pub fn add_rect(&mut self, r: CGRect, m: Option<Affine>) {
-        let (x0, y0, x1, y1) = edges(r);
-        self.move_to(apply(m, Point::new(x0, y0)));
-        for p in [(x1, y0), (x1, y1), (x0, y1)] {
-            self.line_to(apply(m, p.into()));
-        }
-        self.close();
-    }
-
-    pub fn add_lines(&mut self, points: &[Point], m: Option<Affine>) {
-        let Some((first, rest)) = points.split_first() else { return };
-        self.move_to(apply(m, *first));
-        for p in rest {
-            self.line_to(apply(m, *p));
-        }
-    }
-
+    fn add_rect_made(&mut self, r: CGRect, m: Option<Affine>);
+    fn add_cg_rect(&mut self, r: CGRect, m: Option<Affine>);
     /// Four quarter ellipses counterclockwise from the right edge's middle,
     /// closed.
-    pub fn add_ellipse(&mut self, r: CGRect, m: Option<Affine>) {
-        let (x0, y0, x1, y1) = edges(r);
-        // The null rectangle's ellipse is at infinity, as CoreGraphics puts it.
-        let null = super::geometry::is_null(r);
-        let (rx, ry) = if null { (0.0, 0.0) } else { ((x1 - x0) / 2.0, (y1 - y0) / 2.0) };
-        let (cx, cy) = (x0 + rx, y0 + ry);
-        let (kx, ky) = (rx * quarter(), ry * quarter());
-        let p = |x: f64, y: f64| apply(m, Point::new(x, y));
-        self.move_to(p(x1, cy));
-        self.curve_to(p(x1, cy + ky), p(cx + kx, y1), p(cx, y1));
-        self.curve_to(p(cx - kx, y1), p(x0, cy + ky), p(x0, cy));
-        self.curve_to(p(x0, cy - ky), p(cx - kx, y0), p(cx, y0));
-        self.curve_to(p(cx + kx, y0), p(x1, cy - ky), p(x1, cy));
-        self.close();
-    }
-
+    fn add_cg_ellipse(&mut self, r: CGRect, m: Option<Affine>);
     /// A rectangle with corners `w` × `h` (at most half its size), from its
     /// right edge's middle counterclockwise, closed; a plain rectangle
     /// without corners.
-    pub fn add_rounded_rect(&mut self, r: CGRect, w: f64, h: f64, m: Option<Affine>) {
-        let (x0, y0, x1, y1) = edges(r);
-        if w.is_nan() || h.is_nan() || w <= 0.0 || h <= 0.0 {
-            self.add_rect(r, m);
-            return;
-        }
-        let (w, h) = (w.min((x1 - x0) / 2.0), h.min((y1 - y0) / 2.0));
-        let (kw, kh) = (w * quarter(), h * quarter());
-        let p = |x: f64, y: f64| apply(m, Point::new(x, y));
-        self.move_to(p(x1, (y0 + y1) / 2.0));
-        self.line_to(p(x1, y1 - h));
-        self.curve_to(p(x1, y1 - h + kh), p(x1 - w + kw, y1), p(x1 - w, y1));
-        self.line_to(p(x0 + w, y1));
-        self.curve_to(p(x0 + w - kw, y1), p(x0, y1 - h + kh), p(x0, y1 - h));
-        self.line_to(p(x0, y0 + h));
-        self.curve_to(p(x0, y0 + h - kh), p(x0 + w - kw, y0), p(x0 + w, y0));
-        self.line_to(p(x1 - w, y0));
-        self.curve_to(p(x1 - w + kw, y0), p(x1, y0 + h - kh), p(x1, y0 + h));
-        self.close();
-    }
-
-    /// An arc of the circle around `c` from angle `start` (radians) through
-    /// `sweep` (none or more) counterclockwise or clockwise, in quarter
-    /// turns from the start and then what's left. It begins with a move on
-    /// an empty path and a line from the current point otherwise.
-    ///
-    /// As CoreGraphics does (measured on macOS): a sweep of more than a
-    /// thousand turns adds nothing at all; one that isn't a number, or of
-    /// next to nothing, adds only its start.
-    pub fn add_sweep(&mut self, c: Point, r: f64, start: f64, sweep: f64, clockwise: bool, m: Option<Affine>) {
-        /// Sweeps below this add no curve.
-        const NOTHING: f64 = 1e-8;
-        if !(start.is_finite() && r.is_finite()) || sweep > 2000.0 * std::f64::consts::PI {
-            return;
-        }
-        let dir = if clockwise { -1.0 } else { 1.0 };
-        let at = |a: f64| {
-            let (s, co) = a.sin_cos();
-            (Point::new(c.x + r * co, c.y + r * s), Vec2::new(-r * s, r * co) * dir)
-        };
-        let (p0, _) = at(start);
-        if self.is_empty() {
-            self.move_to(apply(m, p0));
-        } else {
-            self.line_to(apply(m, p0));
-        }
-        if !sweep.is_finite() {
-            return;
-        }
-        let q = std::f64::consts::FRAC_PI_2;
-        let (mut a0, mut left) = (start, sweep);
-        // At most 4000 quarter turns, and what's left.
-        while left > NOTHING {
-            let step = left.min(q);
-            let k = if step == q { quarter() } else { crate::path::kappa(step) };
-            let ((q0, d0), (q1, d1)) = (at(a0), at(a0 + dir * step));
-            self.curve_to(apply(m, q0 + d0 * k), apply(m, q1 - d1 * k), apply(m, q1));
-            a0 += dir * step;
-            left -= step;
-        }
-    }
-
-    /// `CGPathAddArc`'s arc: counterclockwise (in unflipped coordinates) or
-    /// clockwise from `start` to `end`.
-    pub fn add_arc(&mut self, c: Point, r: f64, start: f64, end: f64, clockwise: bool, m: Option<Affine>) {
-        let tau = std::f64::consts::TAU;
-        let sweep = match (clockwise, end >= start) {
-            // Past the start the way it goes: that far, however many turns.
-            (false, true) => end - start,
-            (true, false) => start - end,
-            // The other way round: part of a turn, a whole one clockwise
-            // for a whole turn's difference.
-            (false, false) => (end - start).rem_euclid(tau),
-            (true, true) => tau - (end - start).rem_euclid(tau),
-        };
-        self.add_sweep(c, r, start, sweep, clockwise, m);
-    }
-
-    /// A line toward `p1`, then an arc of radius `r` tangent to the lines
-    /// from the current point to `p1` and from `p1` to `p2`. Nothing on an
-    /// empty path.
-    pub fn add_arc_to(&mut self, p1: Point, p2: Point, r: f64, m: Option<Affine>) {
-        if self.is_empty() {
-            return;
-        }
-        // The current point in the arc's own coordinates.
-        let p0 = match m {
-            Some(m) if m.determinant() != 0.0 => m.inverse() * self.current(),
-            _ => self.current(),
-        };
-        let (a, b) = (p0 - p1, p2 - p1);
-        if a.hypot2() == 0.0 || r == 0.0 {
-            // A corner with no arc: a line to it, and an arc of nothing.
-            let at = apply(m, p1);
-            self.line_to(at);
-            self.curve_to(at, at, at);
-            return;
-        }
-        let cross = a.cross(b);
-        if b.hypot2() == 0.0 || cross.abs() <= 1e-12 * a.hypot() * b.hypot() {
-            self.line_to(apply(m, p1));
-            return;
-        }
-        let (u, v) = (a.normalize(), b.normalize());
-        let angle = u.dot(v).clamp(-1.0, 1.0).acos();
-        let d = r / (angle / 2.0).tan();
-        let t0 = p1 + u * d;
-        let center = p1 + (u + v).normalize() * (r / (angle / 2.0).sin());
-        let clockwise = cross > 0.0;
-        let a0 = (t0 - center).atan2();
-        let sweep = std::f64::consts::PI - angle;
-        let sweep =
-            if (sweep - std::f64::consts::FRAC_PI_2).abs() < 1e-12 { std::f64::consts::FRAC_PI_2 } else { sweep };
-        self.add_sweep(center, r, a0, sweep, clockwise, m);
-    }
-
-    /// Another path's elements, transformed, after these: its first move
-    /// replaces a move this ends with.
-    pub fn add_shape(&mut self, other: &Shape, m: Option<Affine>) {
-        for el in other.path.elements() {
-            match *el {
-                PathEl::MoveTo(p) => self.move_to(apply(m, p)),
-                PathEl::LineTo(p) => {
-                    self.segment(PathEl::LineTo(apply(m, p)));
-                }
-                PathEl::QuadTo(c, p) => {
-                    self.segment(PathEl::QuadTo(apply(m, c), apply(m, p)));
-                }
-                PathEl::CurveTo(c1, c2, p) => {
-                    self.segment(PathEl::CurveTo(apply(m, c1), apply(m, c2), apply(m, p)));
-                }
-                PathEl::ClosePath => self.close(),
-            }
-        }
-    }
-
-    /// This shape transformed.
-    pub fn transformed(&self, m: Affine) -> Shape {
-        let mut path = self.path.clone();
-        path.apply_affine(m);
-        Shape { path, start: self.start.map(|p| m * p), made_rect: None, drawn: OnceLock::new() }
-    }
-
-    /// The bounds of every point, control points too; `None` when empty.
-    pub fn control_bounds(&self) -> Option<kurbo::Rect> {
-        let mut points = self.path.elements().iter().flat_map(|el| {
-            let pts: Vec<Point> = match *el {
-                PathEl::MoveTo(p) | PathEl::LineTo(p) => vec![p],
-                PathEl::QuadTo(c, p) => vec![c, p],
-                PathEl::CurveTo(a, b, p) => vec![a, b, p],
-                PathEl::ClosePath => vec![],
-            };
-            pts
-        });
-        let first = points.next()?;
-        Some(points.fold(kurbo::Rect::from_points(first, first), |r, p| r.union_pt(p)))
-    }
-
-    /// The tight bounds: curves' extremes, not their control points.
-    pub fn tight_bounds(&self) -> Option<kurbo::Rect> {
-        crate::path::tight_bounds(&self.path)
-    }
-
-    /// Whether `p` is inside, a point on the outline counting as inside
-    /// whatever the rule, open subpaths taken as closed.
-    pub fn contains(&self, p: Point, even_odd: bool) -> bool {
-        let closed = crate::path::closed(&self.path);
-        crate::path::on_outline(&closed, p) || {
-            let winding = closed.winding(p);
-            if even_odd { winding % 2 != 0 } else { winding != 0 }
-        }
-    }
-
+    fn add_cg_rounded_rect(&mut self, r: CGRect, w: f64, h: f64, m: Option<Affine>);
     /// The rectangle this is, if it's one, as `CGPathIsRect` answers
     /// (measured on macOS): a rectangle made as one, whatever its size; or
-    /// a move and three lines along the axes, the first of them vertical,
-    /// closed. (macOS answers no for the same four corners taken the other
-    /// way round, or with a fourth line back to the start.)
-    pub fn as_rect(&self) -> Option<CGRect> {
-        if let Some(r) = self.made_rect {
-            return Some(r);
-        }
-        let [PathEl::MoveTo(a), PathEl::LineTo(b), PathEl::LineTo(c), PathEl::LineTo(d), PathEl::ClosePath] =
-            *self.path.elements()
-        else {
-            return None;
-        };
-        let (vertical, horizontal) = (|p: Point, q: Point| p.x == q.x, |p: Point, q: Point| p.y == q.y);
-        let rect = vertical(a, b) && horizontal(b, c) && vertical(c, d) && horizontal(d, a) && a != b && b != c;
-        if !rect {
-            return None;
-        }
-        let r = kurbo::Rect::from_points(a, c);
-        Some(super::geometry::rect(r.x0, r.y0, r.width(), r.height()))
-    }
-
-    /// The path as tiny-skia draws it, made once.
-    pub fn drawn(&self) -> Option<Arc<tiny_skia::Path>> {
-        self.drawn.get_or_init(|| crate::path::to_skia(&self.path)).clone()
-    }
-
+    /// one its elements trace ([`Shape::traced_rect`]).
+    fn as_rect(&self) -> Option<CGRect>;
     /// The outline of this stroked, as a fill, as `CGPathCreateCopyByStrokingPath`
     /// makes it: a negative width is taken as its size, and a subpath of no
     /// length with round or square caps is a dot (a circle, or a square
     /// standing on a corner, as macOS makes it).
-    pub fn stroked(&self, width: f64, cap: CGLineCap, join: CGLineJoin, miter: f64) -> BezPath {
+    fn stroked(&self, width: f64, cap: CGLineCap, join: CGLineJoin, miter: f64) -> BezPath;
+}
+
+impl CgShape for Shape {
+    fn add_rect_made(&mut self, r: CGRect, m: Option<Affine>) {
+        let whole = self.is_empty() && m.is_none_or(|m| m == Affine::IDENTITY);
+        self.add_cg_rect(r, m);
+        if whole {
+            let s = super::geometry::standardize(r);
+            self.made_rect = Some([s.origin.x, s.origin.y, s.size.width, s.size.height]);
+        }
+    }
+
+    fn add_cg_rect(&mut self, r: CGRect, m: Option<Affine>) {
+        self.add_rect(edges(r), m);
+    }
+
+    fn add_cg_ellipse(&mut self, r: CGRect, m: Option<Affine>) {
+        self.add_ellipse(edges(r), super::geometry::is_null(r), m);
+    }
+
+    fn add_cg_rounded_rect(&mut self, r: CGRect, w: f64, h: f64, m: Option<Affine>) {
+        self.add_rounded_rect(edges(r), w, h, m);
+    }
+
+    fn as_rect(&self) -> Option<CGRect> {
+        if let Some([x, y, w, h]) = self.made_rect {
+            return Some(super::geometry::rect(x, y, w, h));
+        }
+        let r = self.traced_rect()?;
+        Some(super::geometry::rect(r.x0, r.y0, r.width(), r.height()))
+    }
+
+    fn stroked(&self, width: f64, cap: CGLineCap, join: CGLineJoin, miter: f64) -> BezPath {
         let width = width.abs();
         let style = kurbo::Stroke {
             width,
@@ -479,14 +185,6 @@ fn cap_of(cap: CGLineCap) -> kurbo::Cap {
         CGLineCap::Square => kurbo::Cap::Square,
         _ => kurbo::Cap::Butt,
     }
-}
-
-/// Where the last subpath of `path` starts.
-fn subpath_start(path: &BezPath) -> Option<Point> {
-    path.elements().iter().rev().find_map(|el| match el {
-        PathEl::MoveTo(p) => Some(*p),
-        _ => None,
-    })
 }
 
 pub(crate) struct PathIvars {
@@ -705,7 +403,7 @@ pub unsafe extern "C-unwind" fn CGPathCreateWithEllipseInRect(
 ) -> Option<NonNull<CGPath>> {
     // SAFETY: as the caller promises.
     let m = unsafe { affine_at(transform) };
-    made(|s| s.add_ellipse(rect, m))
+    made(|s| s.add_cg_ellipse(rect, m))
 }
 
 /// # Safety
@@ -720,7 +418,7 @@ pub unsafe extern "C-unwind" fn CGPathCreateWithRoundedRect(
 ) -> Option<NonNull<CGPath>> {
     // SAFETY: as the caller promises.
     let m = unsafe { affine_at(transform) };
-    made(|s| s.add_rounded_rect(rect, corner_width, corner_height, m))
+    made(|s| s.add_cg_rounded_rect(rect, corner_width, corner_height, m))
 }
 
 /// # Safety
@@ -735,7 +433,7 @@ pub unsafe extern "C-unwind" fn CGPathAddRoundedRect(
     corner_height: CGFloat,
 ) {
     // SAFETY: as the caller promises.
-    unsafe { edit(path, transform, |s, m| s.add_rounded_rect(rect, corner_width, corner_height, m)) }
+    unsafe { edit(path, transform, |s, m| s.add_cg_rounded_rect(rect, corner_width, corner_height, m)) }
 }
 
 /// # Safety
@@ -999,7 +697,7 @@ pub unsafe extern "C-unwind" fn CGPathAddRects(
     // SAFETY: as the caller promises.
     let rects = unsafe { super::slice(rects, count) };
     // SAFETY: as the caller promises.
-    unsafe { edit(path, m, |s, m| rects.iter().for_each(|r| s.add_rect(*r, m))) }
+    unsafe { edit(path, m, |s, m| rects.iter().for_each(|r| s.add_cg_rect(*r, m))) }
 }
 
 /// # Safety
@@ -1028,7 +726,7 @@ pub unsafe extern "C-unwind" fn CGPathAddEllipseInRect(
     rect: CGRect,
 ) {
     // SAFETY: as the caller promises.
-    unsafe { edit(path, m, |s, m| s.add_ellipse(rect, m)) }
+    unsafe { edit(path, m, |s, m| s.add_cg_ellipse(rect, m)) }
 }
 
 /// # Safety

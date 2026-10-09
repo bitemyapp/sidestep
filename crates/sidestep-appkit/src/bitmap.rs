@@ -963,6 +963,15 @@ impl NSBitmapImageRepImpl {
 
     /// The pixels as an image file of `kind`, in an `NSData`.
     fn encoded(&self, kind: NSBitmapImageFileType, quality: Option<f64>) -> Option<Retained<AnyObject>> {
+        use crate::codec::Encoding;
+        let kind = match kind {
+            NSBitmapImageFileType::PNG => Encoding::Png,
+            NSBitmapImageFileType::TIFF => Encoding::Tiff,
+            NSBitmapImageFileType::BMP => Encoding::Bmp,
+            NSBitmapImageFileType::GIF => Encoding::Gif,
+            NSBitmapImageFileType::JPEG => Encoding::Jpeg,
+            _ => return None,
+        };
         let (w, h, rgba) = self.straight_rgba()?;
         let bytes = crate::codec::encode(kind, w, h, &rgba, quality)?;
         crate::image_rep::make_data(&bytes)
