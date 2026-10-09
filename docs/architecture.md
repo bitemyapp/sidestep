@@ -17,6 +17,10 @@ sidestep-engine                   the render thread, rasterizer and text
                                   engine under AppKit; no Objective-C
 ```
 
+A program written for Linux alone can use the engine through a native Rust
+toolkit instead, `sidestep-ui`, and link no Objective-C at all (see
+[The native toolkit](#the-native-toolkit)).
+
 The objc2 fork's fixes are pending upstream; `tools/objc2-overlay` applies
 them to the published crates at build time (see
 [abi.md](abi.md#fixed-in-the-objc2-fork-pending-upstream)).
@@ -706,6 +710,70 @@ Three seams keep the engine free of AppKit:
   each to objc2-app-kit's.
 
 A process has one render thread, started by whichever toolkit runs it.
+
+### The native toolkit
+
+`crates/sidestep-ui` is the engine's other toolkit: a Rust API for
+programs written for Linux alone, with no Objective-C runtime in them
+(its dependency tree has no objc2 crate). It drives the render thread
+through the same protocol AppKit does, and keeps AppKit's rhythm:
+
+- **The loop** (`app.rs`) runs on the thread that calls `App::run`. The
+  render thread's waker and the settings hook signal a condition variable
+  (and so do `Proxy`s from other threads); each turn handles the render
+  thread's messages, oldest first (a move followed by another move of the
+  same window, and a key repeat followed by a newer key, are dropped, as
+  AppKit drops them), a proxy's wake, a change of the desktop's look or
+  accent (every window redraws), and timers that came due (kept in a
+  `BTreeMap` by due time; a repeating timer keeps its phase and skips what
+  it missed), then runs the display pass and sleeps until woken or the
+  next deadline. An idle program sleeps with nothing armed.
+- **The display pass** gives each window that needs it a `Canvas`: a
+  window draws once configured, only when the render thread showed its
+  last frame (so drawing keeps pace with the compositor's frame
+  callbacks, and a window the compositor isn't showing stops drawing),
+  and only if it has damage or a new title. The canvas starts by clearing
+  the damage to the window's background (`FillWith` with `Copy`), records
+  the handler's drawing as ops in window points, and the pass sends one
+  `Paint` of the root target and a `Present`. First frames wait, as
+  AppKit's do, for the desktop's light or dark (`settings::ready`).
+- **The canvas** (`canvas.rs`) keeps a transform (a kurbo `Affine`), a clip
+  (bounds, and clip paths where it isn't a rectangle) and a blend mode and
+  shadow, and turns calls into ops: a rectangle through an axis-aligned
+  transform with nothing else set is a `Fill` of whole pixels; shapes are
+  `FillPath`s and `StrokePath`s of their kurbo paths; images are `Image`
+  ops of the engine's `ImageData` (a file is decoded on the render thread
+  the first time it's drawn, and its cache entry goes when the last
+  `Image` does); groups are `BeginGroup`/`EndGroup`. Text is the glyph
+  runs the text engine placed, as `Glyphs` ops from the render thread's
+  glyph cache while the transform keeps glyphs upright and scales both
+  ways alike (the size scaled with it), and as their outlines, filled
+  through the drawing state, when the text is turned, mirrored or
+  stretched, or drawn with a shadow, a clip path or a blend mode, which a
+  glyph run can't carry.
+- **Text** (`text.rs`): a `TextLayout` is the engine's `text::lines::Frame`
+  (TextKit's line layout), so it has what editing needs (the character at
+  a point, carets with their secondary caret where directions meet,
+  selection rectangles) as well as lines and size; its API takes byte
+  offsets of UTF-8 and converts to the frame's UTF-16 indexes.
+  `Canvas::draw_label` and `measure` go through string drawing's layout
+  cache instead, for labels drawn pass after pass.
+- **Input** (`event.rs`) is translated from AppKit's values: modifier
+  flags to `Modifiers`; a key's characters to a `Key` (AppKit's control
+  characters and function-key characters to `NamedKey`s) and the text it
+  types (none for keys that type nothing, for releases, and while Control
+  or Super is held); input methods' changes to `Ime` commits and preedits.
+- **The rest**: the clipboard is the engine's shared state (text offered
+  under the text MIME types, this program's own text answered without a
+  round trip while its change is current), outputs are its published
+  snapshot, and drags are answered position by position, as the render
+  thread needs, from the handler's `drag_moved`, accepting the URL list
+  (read before the drag is announced), else text, else what's offered.
+
+Its tests run through the null render thread (`tests/headless.rs`):
+one application per process, so one handler plays every step, each
+waiting for its condition with a deadline; `testing` queues input as if
+the render thread had sent it.
 
 ### Scale
 

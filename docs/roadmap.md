@@ -600,6 +600,53 @@ Next:
 Omperor, the motivating application, building for Linux with no source
 changes beyond `use sidestep as _;`.
 
+## Native toolkit
+
+`sidestep-ui`: Linux programs on Sidestep's engine without AppKit or the
+Objective-C runtime, toward a desktop environment's own programs.
+
+Done: the engine carved out of AppKit (`sidestep-engine`, which AppKit
+now builds on, unchanged to objc2 programs); an application loop with
+timers and cross-thread wakes; toplevel windows and popups with their
+compositor-owned size and state, decorations where the desktop wants
+them, cursors, size limits and requests; keys through XKB with compose
+sequences, pointer buttons, wheels and touchpad scrolling and pinches,
+input methods; a canvas over the render thread's ops (rectangles, shapes,
+strokes and dashes, gradients, images, groups, clips, shadows, blend
+modes, transforms, text upright from the glyph cache and turned as
+outlines); text layout with styles, wrapping, alignment, truncation, hit
+testing, carets and selections; the clipboard's text; dropped files and
+URLs; outputs; the desktop's appearance and system colors. Tested
+headless through the null render thread, and by hand under sway
+(`examples/ui-gallery`).
+
+Next, roughly in order:
+
+- **Scrolling layers.** The tiled scroll layers AppKit's scroll views use
+  (`PlaceLayer`, tile paints drawn ahead and rasterized between frames),
+  as a native `Layer`: content that scrolls without redrawing, which
+  lists and editors need. AppKit's `layers.rs` decides which tiles to
+  paint and keep; its policy should move into the engine so both toolkits
+  share it.
+- **Animation.** The engine composites and animates Core Animation's
+  layer trees on the render thread; a native layer tree on it, with
+  implicit transitions and display-link ticks (`FrameTicks`), so
+  animations don't cost the main thread a frame each.
+- **Widgets.** A retained view tree with layout, focus and the key view
+  loop, hit testing and the theme's painting of controls (AppKit's
+  `theme` paints from data, and could move into the engine as AppKit's
+  controls' look), then controls: buttons, text fields and text views on
+  `TextLayout`, lists, scroll views, menus.
+- **Desktop surfaces**, for a desktop environment's own programs:
+  wlr-layer-shell panels, docks, wallpapers and overlays; session lock;
+  output management; foreign toplevel lists for task switchers.
+- **Services**: the portals AppKit's panels and workspace use (file
+  choosers, opening URIs), notifications, drags out of the program, the
+  clipboard's other types, rich text.
+- **AppKit on the toolkit.** As the native toolkit grows, AppKit's
+  window, event and layer machinery can become wrappers of its, so the
+  two share one implementation instead of two clients of the engine.
+
 ## Swift
 
 Research, after Rust works. Swift on Linux is normally built without

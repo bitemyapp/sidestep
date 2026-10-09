@@ -1835,6 +1835,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sidestep-ui"
+version = "0.0.1"
+dependencies = [
+ "kurbo",
+ "sidestep-engine",
+ "smithay-client-toolkit",
+ "tiny-skia",
+]
+
+[[package]]
 name = "sidestep-uniform-type-identifiers"
 version = "0.0.1"
 dependencies = [
@@ -2140,6 +2150,13 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "sidestep",
+]
+
+[[package]]
+name = "ui-gallery"
+version = "0.0.0"
+dependencies = [
+ "sidestep-ui",
 ]
 
 [[package]]
