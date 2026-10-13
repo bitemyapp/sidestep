@@ -70,6 +70,8 @@ pub(crate) mod id {
     // ImageIO's, which Sidestep's AppKit defines too.
     pub const CG_IMAGE_SOURCE: CFTypeID = 113;
     pub const CG_IMAGE_DESTINATION: CFTypeID = 114;
+    // CoreGraphics' events, likewise.
+    pub const CG_EVENT: CFTypeID = 115;
     // CoreText's, likewise (a font is an `NSFont`, a font descriptor an
     // `NSFontDescriptor`, as on macOS).
     pub const CT_FONT: CFTypeID = 120;
@@ -107,6 +109,7 @@ const FRAMEWORK_TYPES: &[(&str, CFTypeID, &str)] = &[
     ("_SidestepCGPattern", id::CG_PATTERN, "CGPattern"),
     ("_SidestepCGImageSource", id::CG_IMAGE_SOURCE, "CGImageSource"),
     ("_SidestepCGImageDestination", id::CG_IMAGE_DESTINATION, "CGImageDestination"),
+    ("_SidestepCGEvent", id::CG_EVENT, "CGEvent"),
     ("NSFont", id::CT_FONT, "CTFont"),
     ("NSFontDescriptor", id::CT_FONT_DESCRIPTOR, "CTFontDescriptor"),
     ("_SidestepCTLine", id::CT_LINE, "CTLine"),

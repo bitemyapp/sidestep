@@ -268,6 +268,21 @@ define_class!(
             Some(make(ivars))
         }
 
+        /// The event a `CGEvent`'s fields describe (see
+        /// `coregraphics::event`), with no window.
+        #[unsafe(method_id(eventWithCGEvent:))]
+        fn event_with_cg_event(event: &objc2_core_graphics::CGEvent) -> Option<Retained<NSEvent>> {
+            crate::coregraphics::event::of(event).map(|e| from_cg(&e.fields()))
+        }
+
+        /// A new `CGEvent` of the event's fields, owned by the event as
+        /// AppKit's is (autoreleased).
+        #[unsafe(method(CGEvent))]
+        fn cg_event(&self) -> *mut objc2_core_graphics::CGEvent {
+            let event = crate::coregraphics::event::as_cg(crate::coregraphics::event::with_fields(to_cg(self.ivars())));
+            Retained::autorelease_return(event)
+        }
+
         #[unsafe(method_id(addLocalMonitorForEventsMatchingMask:handler:))]
         fn add_local_monitor(mask: NSEventMask, handler: &DynBlock<dyn Fn(NonNull<NSEvent>) -> *mut NSEvent>) -> Option<Retained<AnyObject>> {
             Some(add_monitor(mask, handler))
@@ -494,8 +509,120 @@ define_class!(
     unsafe impl NSObjectProtocol for NSEventImpl {}
 );
 
+/// `CGScrollPhase` (1, 2, 4, 8, 128) as `NSEventPhase`, and back.
+const SCROLL_PHASES: [(i64, NSEventPhase); 5] = [
+    (1, NSEventPhase::Began),
+    (2, NSEventPhase::Changed),
+    (4, NSEventPhase::Ended),
+    (8, NSEventPhase::Cancelled),
+    (128, NSEventPhase::MayBegin),
+];
+
+/// `CGMomentumScrollPhase` (begin, continue, end) as `NSEventPhase`.
+const MOMENTUM_PHASES: [(i64, NSEventPhase); 3] =
+    [(1, NSEventPhase::Began), (2, NSEventPhase::Changed), (3, NSEventPhase::Ended)];
+
+fn phase_from(table: &[(i64, NSEventPhase)], value: i64) -> NSEventPhase {
+    table.iter().find(|(cg, _)| *cg == value).map_or(NSEventPhase::None, |(_, ns)| *ns)
+}
+
+fn phase_to(table: &[(i64, NSEventPhase)], phase: NSEventPhase) -> i64 {
+    table.iter().find(|(_, ns)| *ns == phase).map_or(0, |(cg, _)| *cg)
+}
+
+fn is_mouse(kind: NSEventType) -> bool {
+    use NSEventType as T;
+    [
+        T::LeftMouseDown,
+        T::LeftMouseUp,
+        T::RightMouseDown,
+        T::RightMouseUp,
+        T::OtherMouseDown,
+        T::OtherMouseUp,
+        T::MouseMoved,
+        T::LeftMouseDragged,
+        T::RightMouseDragged,
+        T::OtherMouseDragged,
+    ]
+    .contains(&kind)
+}
+
+/// An event from a `CGEvent`'s fields. Their types and modifier bits are
+/// AppKit's; the location turns from global top-left coordinates into
+/// AppKit's screen coordinates, the timestamp from nanoseconds into
+/// seconds. A scroll is precise when continuous, with point deltas; its
+/// coarse deltas are the fixed-point line deltas where set, else the line
+/// deltas.
+fn from_cg(f: &crate::coregraphics::event::Fields) -> Retained<NSEvent> {
+    use objc2_core_graphics::CGEventField as F;
+    let kind = NSEventType(f.kind as _);
+    let y = crate::screen::first_screen_height().map_or(f.location.y, |h| h - f.location.y);
+    let mut ivars = EventIvars::new(kind, NSPoint::new(f.location.x, y), f.flags as Modifiers, None);
+    ivars.timestamp = f.timestamp as f64 / 1e9;
+    if kind == NSEventType::ScrollWheel {
+        let lines = |delta, fixed| if f.has(fixed) { f.double(fixed) } else { f.integer(delta) as f64 };
+        let coarse = (
+            lines(F::ScrollWheelEventDeltaAxis2, F::ScrollWheelEventFixedPtDeltaAxis2),
+            lines(F::ScrollWheelEventDeltaAxis1, F::ScrollWheelEventFixedPtDeltaAxis1),
+        );
+        ivars.precise = f.integer(F::ScrollWheelEventIsContinuous) != 0;
+        ivars.delta = coarse;
+        ivars.scrolling = if ivars.precise {
+            (f.double(F::ScrollWheelEventPointDeltaAxis2), f.double(F::ScrollWheelEventPointDeltaAxis1))
+        } else {
+            coarse
+        };
+        ivars.phase = phase_from(&SCROLL_PHASES, f.integer(F::ScrollWheelEventScrollPhase));
+        ivars.momentum = phase_from(&MOMENTUM_PHASES, f.integer(F::ScrollWheelEventMomentumPhase));
+    } else if is_mouse(kind) {
+        ivars.button = f.integer(F::MouseEventButtonNumber) as isize;
+        ivars.clicks = f.integer(F::MouseEventClickState) as isize;
+        ivars.pressure = f.double(F::MouseEventPressure) as f32;
+    } else if kind == NSEventType::KeyDown || kind == NSEventType::KeyUp {
+        ivars.key_code = f.integer(F::KeyboardEventKeycode) as u16;
+        ivars.repeat = f.integer(F::KeyboardEventAutorepeat) != 0;
+    }
+    make(ivars)
+}
+
+/// An event's fields as a `CGEvent` holds them: `from_cg` the other way.
+fn to_cg(e: &EventIvars) -> crate::coregraphics::event::Fields {
+    use objc2_core_graphics::CGEventField as F;
+    let mut location = e.location;
+    if let Some(window) = &e.window {
+        // SAFETY: convertPointToScreen: takes and returns an NSPoint.
+        location = unsafe { msg_send![&**window, convertPointToScreen: location] };
+    }
+    let y = crate::screen::first_screen_height().map_or(location.y, |h| h - location.y);
+    let mut f = crate::coregraphics::event::Fields::default();
+    f.kind = e.kind.0 as u32;
+    f.location = objc2_core_foundation::CGPoint::new(location.x, y);
+    f.flags = e.modifiers.0 as u64;
+    f.timestamp = (e.timestamp * 1e9) as u64;
+    if e.kind == NSEventType::ScrollWheel {
+        f.set_integer(F::ScrollWheelEventIsContinuous, e.precise as i64);
+        f.set_integer(F::ScrollWheelEventDeltaAxis1, e.delta.1.round() as i64);
+        f.set_integer(F::ScrollWheelEventDeltaAxis2, e.delta.0.round() as i64);
+        f.set_double(F::ScrollWheelEventFixedPtDeltaAxis1, e.delta.1);
+        f.set_double(F::ScrollWheelEventFixedPtDeltaAxis2, e.delta.0);
+        let points = if e.precise { e.scrolling } else { (e.scrolling.0 * 10.0, e.scrolling.1 * 10.0) };
+        f.set_double(F::ScrollWheelEventPointDeltaAxis1, points.1);
+        f.set_double(F::ScrollWheelEventPointDeltaAxis2, points.0);
+        f.set_integer(F::ScrollWheelEventScrollPhase, phase_to(&SCROLL_PHASES, e.phase));
+        f.set_integer(F::ScrollWheelEventMomentumPhase, phase_to(&MOMENTUM_PHASES, e.momentum));
+    } else if is_mouse(e.kind) {
+        f.set_integer(F::MouseEventButtonNumber, e.button as i64);
+        f.set_integer(F::MouseEventClickState, e.clicks as i64);
+        f.set_double(F::MouseEventPressure, e.pressure as f64);
+    } else if e.kind == NSEventType::KeyDown || e.kind == NSEventType::KeyUp {
+        f.set_integer(F::KeyboardEventKeycode, e.key_code as i64);
+        f.set_integer(F::KeyboardEventAutorepeat, e.repeat as i64);
+    }
+    f
+}
+
 /// Seconds since the process started, as event timestamps count.
-fn uptime() -> f64 {
+pub(crate) fn uptime() -> f64 {
     static START: OnceLock<Instant> = OnceLock::new();
     START.get_or_init(Instant::now).elapsed().as_secs_f64()
 }

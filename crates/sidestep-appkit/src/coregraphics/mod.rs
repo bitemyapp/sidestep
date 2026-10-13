@@ -39,6 +39,8 @@
 //! - [`font`]: `CGFont`, over font files' tables (skrifa); text drawn
 //!   through a CGContext (`CGContextShowGlyphs…`) goes through CoreText's
 //!   glyph drawing (`coretext::draw`).
+//! - [`event`]: `CGEvent` as a value, made and read by programs and
+//!   converted to and from `NSEvent`s.
 //!
 //! CoreGraphics lives in `sidestep-appkit` because it shares AppKit's
 //! graphics state, rasterizer, image cache and text: a CGContext *is*
@@ -56,15 +58,17 @@
 //! `CGPathCreateCopyByNormalizing`); color spaces as property lists or
 //! from platform (ColorSync) objects; HDR content light levels
 //! (`CGImage…ContentAverageLightLevel…`, `…CalculatedHDRStats`); CMYK and
-//! 5-bit bitmap contexts (refused); and CGEvent, CGDisplay and CGWindow,
-//! which belong to the window server. `scripts/link-closure` lists these
-//! as known gaps, so `crates/sidestep/tests/link_closure_coregraphics.rs`
-//! links everything else objc2-core-graphics declares.
+//! 5-bit bitmap contexts (refused); and posting CGEvents, event taps and
+//! sources, CGDisplay and CGWindow, which belong to the window server.
+//! `scripts/link-closure` lists these as known gaps, so
+//! `crates/sidestep/tests/link_closure_coregraphics.rs` links everything
+//! else objc2-core-graphics declares.
 
 pub(crate) mod bitmap;
 pub(crate) mod color;
 pub(crate) mod context;
 pub(crate) mod data;
+pub(crate) mod event;
 pub(crate) mod font;
 pub(crate) mod geometry;
 pub(crate) mod gradient;

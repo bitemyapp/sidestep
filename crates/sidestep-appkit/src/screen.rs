@@ -387,6 +387,13 @@ fn new_screen(mtm: MainThreadMarker, output: u32) -> Retained<NSScreen> {
     unsafe { Retained::cast_unchecked(screen) }
 }
 
+/// The first screen's height: what global coordinates with their origin at
+/// the top left (CoreGraphics') flip against to become AppKit's. None off
+/// the main thread, or without a screen.
+pub(crate) fn first_screen_height() -> Option<f64> {
+    screens().first().map(|s| imp(s).ivars().geometry.get().frame.size.height)
+}
+
 /// `mainScreen`: the key window's screen, else the first.
 fn main_screen() -> Option<Retained<NSScreen>> {
     let screens = screens();
