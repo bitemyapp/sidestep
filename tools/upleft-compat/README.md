@@ -45,8 +45,10 @@ AppIntents and speech synthesis unavailable on Linux, retains timer/manual
 updater checks without Network.framework wake-ups, and handles libc/encoding
 ABI differences. Patch 6 uses Linux's monotonic clock for timing. Patch 7 makes
 the optional Sparkle classes resolve dynamically, matching the existing
-availability check when Sparkle is absent. These are consumer adaptations,
-not Sidestep API replacements.
+availability check when Sparkle is absent; patch 8 does the same for the four
+Sparkle classes `sparkle_bridge_tests` allocates, so it links without Sparkle
+and reports the cases that need it as skipped. These are consumer
+adaptations, not Sidestep API replacements.
 The patches contain Upleft code under [its MIT license](LICENSE-upleft).
 
 ## Verified and remaining coverage
