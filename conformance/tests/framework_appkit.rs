@@ -371,9 +371,10 @@ define_class!(
 );
 
 /// A view of an intrinsic width whose labels sit in stack views, nothing
-/// holding hard to any of their widths: it fits to its intrinsic width, and
-/// the labels get theirs, not less. (Upleft's document identity in the
-/// toolbar: its title and folder.)
+/// holding hard to any of their widths, and get their text after it lays
+/// out: it fits to its intrinsic width, and each label gets its text and
+/// padding (its fitting size), so none truncates. (Upleft's document
+/// identity in the toolbar: its title and folder.)
 fn labels_in_stacks(mtm: MainThreadMarker) {
     let low = NSLayoutPriorityDefaultLow;
     let horizontal = NSLayoutConstraintOrientation::Horizontal;
@@ -435,7 +436,7 @@ fn labels_in_stacks(mtm: MainThreadMarker) {
     context.setStringValue(&NSString::from_str("~/Documents/notes"));
     host.layoutSubtreeIfNeeded();
     for l in [&title, &context] {
-        let (have, want) = (l.frame().size.width, l.intrinsicContentSize().width);
+        let (have, want) = (l.frame().size.width, l.fittingSize().width);
         assert!(have >= want - 0.5, "{:?}: {have} wide, not {want}", l.stringValue());
     }
 }
