@@ -417,10 +417,12 @@ define_class!(
 );
 
 impl NSURLImpl {
+    /// The host as written: none when the authority is empty, but an empty
+    /// one after a user (`https://user@/x`, as macOS has it).
     fn host_text(&self) -> Option<&str> {
         let (s, p) = self.absolute();
         let host = &s[p.host.clone()?];
-        (!host.is_empty()).then_some(host)
+        (!host.is_empty() || p.user.is_some()).then_some(host)
     }
 
     fn port_value(&self) -> Option<i64> {

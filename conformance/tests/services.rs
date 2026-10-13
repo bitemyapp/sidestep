@@ -539,6 +539,10 @@ fn url_components_of_strings() {
     // macOS 26: no URL, or one without a host).
     let spaced = NSURL::URLWithString(&ns("https://exa mple.com/a"));
     assert!(spaced.as_ref().is_none_or(|u| u.host().is_none()), "{spaced:?}");
+    // An empty host after a user is one; no authority is none (the same
+    // probe).
+    assert_eq!(text(url("https://user@/x").host()).as_deref(), Some(""));
+    assert_eq!(text(url("http:///path").host()), None);
 }
 
 #[test]
