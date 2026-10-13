@@ -21,6 +21,7 @@
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::VecDeque;
 use std::mem::ManuallyDrop;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::time::{Duration, Instant};
 
@@ -969,7 +970,101 @@ pub(crate) fn launched() {
     if app.ivars().launching.replace(false) {
         // The desktop's portal, ready for the first panel or URL.
         crate::portal::prewarm();
+        if let Ok(cwd) = std::env::current_dir() {
+            open_launch_documents(app, &launch_documents(std::env::args_os().skip(1), &cwd));
+        }
         tell(app, name!(NSApplicationDidFinishLaunchingNotification));
+    }
+}
+
+/// Something the command line asks the program to open.
+#[derive(Debug, PartialEq)]
+enum LaunchDocument {
+    /// An existing file or directory, made absolute.
+    Path(PathBuf),
+    /// A URL with a scheme (`file:///…`, `https://…`), as a desktop
+    /// entry's `%U` passes them.
+    Url(String),
+}
+
+/// The documents on the command line, as a desktop entry's `%F` or `%U`
+/// (or a shell) passes them to a program on Linux, where macOS sends an
+/// open-documents event instead. Arguments starting with `-` are defaults
+/// (`-Key value`, as `NSArgumentDomain` reads them) and are passed over with
+/// their values; after `--`, every argument is a document. A path counts
+/// only if it exists, so a stray word (a test harness's filter) opens
+/// nothing.
+fn launch_documents(args: impl IntoIterator<Item = std::ffi::OsString>, cwd: &Path) -> Vec<LaunchDocument> {
+    let mut documents = Vec::new();
+    let mut args = args.into_iter();
+    let mut options = true;
+    while let Some(arg) = args.next() {
+        let text = arg.to_string_lossy();
+        if options && text == "--" {
+            options = false;
+            continue;
+        }
+        if options && text.len() > 1 && text.starts_with('-') {
+            // A default's value, unless the next argument is an option too.
+            let _ = args.next();
+            continue;
+        }
+        let scheme = text.split_once(':').map(|(s, _)| s);
+        if let Some(s) = scheme
+            && s.len() > 1
+            && s.chars().all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
+            && text.contains(":/")
+        {
+            documents.push(LaunchDocument::Url(text.into_owned()));
+            continue;
+        }
+        let path = cwd.join(&arg);
+        if path.exists() {
+            documents.push(LaunchDocument::Path(path));
+        }
+    }
+    documents
+}
+
+/// Hand the delegate what launching was asked to open, before it hears that
+/// launching finished, as AppKit does: `application:openURLs:` if it has
+/// it, else (for files) `application:openFiles:`, else `application:openFile:`
+/// for each.
+fn open_launch_documents(app: &NSApplicationImpl, documents: &[LaunchDocument]) {
+    use objc2_foundation::NSURL;
+    if documents.is_empty() {
+        return;
+    }
+    let Some(delegate) = app.delegate_object() else { return };
+    let urls: Vec<Retained<NSURL>> = documents
+        .iter()
+        .filter_map(|document| match document {
+            LaunchDocument::Path(path) => Some(NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()))),
+            LaunchDocument::Url(url) => NSURL::URLWithString(&NSString::from_str(url)),
+        })
+        .collect();
+    if responds(&delegate, sel!(application:openURLs:)) {
+        let urls = array_of(&urls);
+        // SAFETY: the delegate method takes the application and an NSArray
+        // of NSURLs.
+        let _: () = unsafe { msg_send![&*delegate, application: app, openURLs: &*urls] };
+        return;
+    }
+    let paths: Vec<Retained<NSString>> = urls.iter().filter(|u| u.isFileURL()).filter_map(|u| u.path()).collect();
+    if paths.is_empty() {
+        return;
+    }
+    if responds(&delegate, sel!(application:openFiles:)) {
+        let paths = array_of(&paths);
+        // SAFETY: the delegate method takes the application and an NSArray
+        // of path NSStrings.
+        let _: () = unsafe { msg_send![&*delegate, application: app, openFiles: &*paths] };
+    } else if responds(&delegate, sel!(application:openFile:)) {
+        for path in &paths {
+            // SAFETY: the delegate method takes the application and a path,
+            // and returns BOOL.
+            let _: bool = unsafe { msg_send![&*delegate, application: app, openFile: &**path] };
+        }
     }
 }
 
@@ -1166,5 +1261,47 @@ fn last_window_check() {
         && unsafe { msg_send![&*delegate, applicationShouldTerminateAfterLastWindowClosed: &*app] }
     {
         app.terminate(None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn launch_documents_are_existing_paths_and_urls_not_defaults() {
+        let dir = std::env::temp_dir().join(format!("sidestep-launch-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("folder")).unwrap();
+        std::fs::write(dir.join("notes.md"), "").unwrap();
+        std::fs::write(dir.join("-dash.md"), "").unwrap();
+        let args = [
+            "notes.md",
+            "-NSDocumentRevisionsDebugMode",
+            "YES",
+            "missing.md",
+            "folder",
+            "file:///tmp/a%20b.md",
+            "https://example.com/x",
+            "C:/not-a-url-scheme",
+            "--",
+            "-dash.md",
+        ];
+        let found = launch_documents(args.iter().map(std::ffi::OsString::from), &dir);
+        assert_eq!(
+            found,
+            [
+                LaunchDocument::Path(dir.join("notes.md")),
+                LaunchDocument::Path(dir.join("folder")),
+                LaunchDocument::Url("file:///tmp/a%20b.md".into()),
+                LaunchDocument::Url("https://example.com/x".into()),
+                LaunchDocument::Path(dir.join("-dash.md")),
+            ]
+        );
+        // Absolute paths stay as they are; a test harness's filter opens
+        // nothing.
+        let absolute = dir.join("notes.md");
+        let found = launch_documents([absolute.clone().into_os_string(), "some_test_name".into()], Path::new("/"));
+        assert_eq!(found, [LaunchDocument::Path(absolute)]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
