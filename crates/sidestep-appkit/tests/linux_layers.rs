@@ -214,15 +214,19 @@ mod linux {
             let crop = [5 * scale, 65 * scale, 30 * scale, 30 * scale];
             let reply = testing::request_window_pixels(&w, testing::media_time(), crop);
             // The render thread can answer without any main-thread pumping.
-            let (width, height, pixels) = reply.recv_timeout(std::time::Duration::from_secs(5))
-                .expect("render thread answered").expect("valid crop");
+            let (width, height, pixels) = reply
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("render thread answered")
+                .expect("valid crop");
             assert_eq!((width, height), (crop[2], crop[3]));
             assert_eq!(pixels.len(), (width * height) as usize);
             near(pixels[0], [255, 0, 0, 255], 0);
             near(pixels[((15 * scale) * width + 15 * scale) as usize], [0, 0, 255, 255], 0);
             for invalid in [[0, 0, 0, 1], [0, 100 * scale, 1, 1], [200 * scale, 0, 1, 1], [u32::MAX, 0, 2, 1]] {
                 let reply = testing::request_window_pixels(&w, testing::media_time(), invalid);
-                assert!(reply.recv_timeout(std::time::Duration::from_secs(5)).expect("render thread answered").is_none());
+                assert!(
+                    reply.recv_timeout(std::time::Duration::from_secs(5)).expect("render thread answered").is_none()
+                );
             }
             blue.removeFromSuperlayer();
             w.close();

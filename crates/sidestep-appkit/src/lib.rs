@@ -102,11 +102,11 @@ mod test_objects;
 #[doc(hidden)]
 pub mod testing;
 mod text;
-mod toolbar;
 #[doc(hidden)]
 pub mod textkit;
 mod textkit2;
 mod theme;
+mod toolbar;
 mod tooltip;
 mod tracking;
 mod view_layout;
