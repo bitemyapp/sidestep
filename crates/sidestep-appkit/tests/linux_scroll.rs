@@ -29,7 +29,7 @@ mod linux {
         NSApplication, NSBackingStoreType, NSCursor, NSFont, NSResponder, NSScrollView, NSScrollerPart,
         NSScrollerStyle, NSTextView, NSView, NSViewLayerContentsRedrawPolicy, NSWindow, NSWindowStyleMask,
     };
-    use objc2_foundation::{NSNotification, NSNotificationCenter, NSPoint, NSRect, NSSize};
+    use objc2_foundation::{NSNotification, NSNotificationCenter, NSPoint, NSRect, NSSize, NSString};
     use sidestep_appkit::testing::{self, LayerInfo, Seen};
 
     thread_local!(static LOG: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) });
@@ -764,6 +764,40 @@ mod linux {
         close(&w);
     }
 
+    /// And it redraws there: the text a new layout changes (an edit, a new
+    /// size) is damaged in the tiles as far as the text reaches, not only
+    /// as far as the document's bounds.
+    fn text_past_the_document_redraws(mtm: MainThreadMarker) {
+        let sv = NSScrollView::initWithFrame(NSScrollView::alloc(mtm), rect(10.0, 20.0, 300.0, 150.0));
+        sv.setHasVerticalScroller(true);
+        let tv = NSTextView::initWithFrame(NSTextView::alloc(mtm), rect(0.0, 0.0, 100.0, 1000.0));
+        tv.setHorizontallyResizable(false);
+        tv.setVerticallyResizable(false);
+        // SAFETY: the view's own container.
+        let c = unsafe { tv.textContainer() }.expect("a container");
+        c.setWidthTracksTextView(false);
+        c.setSize(NSSize::new(250.0, 1.0e7));
+        tv.setString(&NSString::from_str("MMMM MMMM MMMM MMMM MMMM MMMM MMMM MMMM"));
+        sv.setDocumentView(Some(&tv));
+        tv.setFrameSize(NSSize::new(100.0, 1000.0));
+        let (w, _, _) = shown(mtm, &[&sv]);
+        let painted = || layer_of(&testing::scroll_layers(&w), &sv).expect("a layer").tile_area;
+        // The document's bounds, for comparison: 100 points across.
+        let before = painted();
+        tv.setNeedsDisplayInRect(tv.bounds());
+        testing::settle();
+        let bounds = painted() - before;
+        assert!(bounds > 0.0);
+        // An edit lays the text out again from the top, over the same rows:
+        // 250 points across, as far as the container.
+        let before = painted();
+        tv.setString(&NSString::from_str("M"));
+        testing::settle();
+        let edit = painted() - before;
+        assert!(edit > 2.0 * bounds, "the edit repainted {edit} points squared, the bounds {bounds}");
+        close(&w);
+    }
+
     fn growing_documents_draw_what_they_gain(mtm: MainThreadMarker) {
         // A document that draws nothing itself, one that draws (which
         // macOS has redraw whole on every resize), and one that draws but
@@ -949,6 +983,7 @@ mod linux {
             ("page_actions_reach_the_scroll_view", page_actions_reach_the_scroll_view),
             ("damage_goes_where_it_is_drawn", damage_goes_where_it_is_drawn),
             ("layers_take_in_text_past_the_document", layers_take_in_text_past_the_document),
+            ("text_past_the_document_redraws", text_past_the_document_redraws),
             ("growing_documents_draw_what_they_gain", growing_documents_draw_what_they_gain),
             ("layers_are_capped", layers_are_capped),
             ("tile_memory_is_capped", tile_memory_is_capped),

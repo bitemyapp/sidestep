@@ -1196,8 +1196,12 @@ pub(crate) fn placement(view: &NSViewImpl) -> Option<Placement> {
         _ => root_xf(root, window.content_height()),
     };
     // The root's bounds are its layer's (or the window's content); between
-    // it and the view, ancestors that clip to their bounds.
-    let mut clip = xf.rect(bounds(root));
+    // it and the view, ancestors that clip to their bounds. A clip view's
+    // document that doesn't clip draws into the layer's tiles as far as it
+    // reaches (a TextKit 2 text view's fragments past its bounds), so
+    // damage there counts.
+    let mut clip =
+        if layer != ROOT_LAYER && !clips_to_bounds(root) { xf.rect(reach(root)) } else { xf.rect(bounds(root)) };
     for pair in chain.windows(2).rev() {
         let (child, parent) = (pair[0], pair[1]);
         xf = step(child, is_flipped(parent), frame(child)).then(&xf);
