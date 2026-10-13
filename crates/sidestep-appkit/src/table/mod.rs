@@ -82,6 +82,9 @@ sidestep_runtime::static_class!(pub NSTABLEROWVIEW, NSTABLEROWVIEW_META = "NSTab
 sidestep_runtime::static_class!(pub NSTABLECELLVIEW, NSTABLECELLVIEW_META = "NSTableCellView", || {
     let _ = row::NSTableCellViewImpl::class();
 });
+sidestep_runtime::static_class!(pub NSTABLEHEADERCELL, NSTABLEHEADERCELL_META = "NSTableHeaderCell", || {
+    let _ = column::NSTableHeaderCellImpl::class();
+});
 sidestep_runtime::static_class!(pub NSTABLEHEADERVIEW, NSTABLEHEADERVIEW_META = "NSTableHeaderView", || {
     let _ = row::NSTableHeaderViewImpl::class();
 });

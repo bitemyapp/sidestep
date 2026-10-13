@@ -7,7 +7,7 @@ use std::cell::{Cell, RefCell};
 use objc2::rc::{Allocated, Retained, Weak};
 use objc2::runtime::{AnyObject, NSObject};
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send};
-use objc2_app_kit::{NSTableColumn, NSTableColumnResizingOptions, NSTableView};
+use objc2_app_kit::{NSActionCell, NSCell, NSTableColumn, NSTableColumnResizingOptions, NSTableView, NSTextFieldCell};
 use objc2_foundation::{NSObjectProtocol, NSString};
 
 pub(crate) struct ColumnIvars {
@@ -16,7 +16,8 @@ pub(crate) struct ColumnIvars {
     width: Cell<f64>,
     min: Cell<f64>,
     max: Cell<f64>,
-    title: RefCell<Retained<NSString>>,
+    /// The header cell, which holds the title; made when first asked for.
+    header: RefCell<Option<Retained<NSCell>>>,
     editable: Cell<bool>,
     hidden: Cell<bool>,
     resizing: Cell<NSTableColumnResizingOptions>,
@@ -32,7 +33,7 @@ impl ColumnIvars {
             width: Cell::new(100.0),
             min: Cell::new(10.0),
             max: Cell::new(f32::MAX as f64),
-            title: RefCell::new(NSString::from_str("Field")),
+            header: RefCell::new(None),
             editable: Cell::new(true),
             hidden: Cell::new(false),
             resizing: Cell::new(
@@ -131,14 +132,27 @@ define_class!(
             }
         }
 
+        /// The header cell's text, as on macOS.
         #[unsafe(method_id(title))]
         fn title(&self) -> Retained<NSString> {
-            self.ivars().title.borrow().clone()
+            self.header_cell().stringValue()
         }
 
         #[unsafe(method(setTitle:))]
         fn set_title(&self, title: &NSString) {
-            let old = self.ivars().title.replace(objc2_foundation::NSCopying::copy(title));
+            self.header_cell().setStringValue(title);
+        }
+
+        /// The cell the column's header shows: an `NSTableHeaderCell`
+        /// holding the title, made when first asked for.
+        #[unsafe(method_id(headerCell))]
+        fn header_cell_method(&self) -> Retained<NSCell> {
+            self.header_cell()
+        }
+
+        #[unsafe(method(setHeaderCell:))]
+        fn set_header_cell(&self, cell: &NSCell) {
+            let old = self.ivars().header.replace(Some(cell.retain()));
             drop(old);
         }
 
@@ -218,9 +232,36 @@ define_class!(
     unsafe impl NSObjectProtocol for NSTableColumnImpl {}
 );
 
+define_class!(
+    /// `NSTableHeaderCell`: the text field cell a column's header shows.
+    #[unsafe(super(NSTextFieldCell, NSActionCell, NSCell, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "NSTableHeaderCell"]
+    pub(crate) struct NSTableHeaderCellImpl;
+);
+
 impl NSTableColumnImpl {
     fn table(&self) -> Option<Retained<NSTableView>> {
         self.ivars().table.borrow().as_ref().and_then(Weak::load)
+    }
+
+    /// The header cell, made with the default title ("Field", as on macOS)
+    /// the first time it's asked for.
+    fn header_cell(&self) -> Retained<NSCell> {
+        if let Some(cell) = self.ivars().header.borrow().clone() {
+            return cell;
+        }
+        let title = NSString::from_str("Field");
+        // By name, as the runtime's linked shell loads the class.
+        let class = objc2::runtime::AnyClass::get(c"NSTableHeaderCell").expect("NSTableHeaderCell is linked");
+        // SAFETY: a text field cell class: +alloc, and NSTextFieldCell's
+        // initializer.
+        let cell: Retained<NSCell> = unsafe {
+            let cell: Allocated<NSCell> = msg_send![class, alloc];
+            msg_send![cell, initTextCell: &*title]
+        };
+        self.ivars().header.replace(Some(cell.clone()));
+        cell
     }
 
     /// Visibility changed: the table lays out again.
