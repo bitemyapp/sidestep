@@ -127,6 +127,15 @@ pub(crate) fn byte_length(s: &str, encoding: u32) -> NSUInteger {
     encoding::byte_length(&text, encoding)
 }
 
+/// `localizedStandardCompare:` of two strings, which JSON's sorted keys
+/// follow.
+pub(crate) fn standard_order(a: &str, b: &str) -> std::cmp::Ordering {
+    fn text(s: &str) -> Text<'_> {
+        Text::plain(s.as_bytes(), wtf8::utf16_len(s.as_bytes()), wtf8::flags_of(s.as_bytes(), false))
+    }
+    compare::standard(&text(a), &text(b))
+}
+
 /// Whether `other` holds exactly the text `this`.
 pub(crate) fn equals(this: &str, other: &NSString) -> bool {
     equal_bytes(this.as_bytes(), other)
