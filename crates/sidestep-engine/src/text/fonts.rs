@@ -2,12 +2,13 @@
 //! for, and the registry that names faces to the render thread.
 //!
 //! fontique finds the system's fonts through fontconfig, which it loads at
-//! run time with `dlopen`, so the desktop's configuration decides what
-//! `sans-serif`, `monospace` and `system-ui` mean and which families fill
-//! in for missing glyphs. Without fontconfig, the usual font directories
-//! are scanned instead and well-known families stand in for the generic
-//! ones; fallback for other scripts then only covers what those families
-//! do. `SIDESTEP_FONT` and `SIDESTEP_MONO_FONT` name font files that take
+//! run time with `dlopen` (from wherever [`system`](crate::system) finds
+//! it, NixOS's store included), so the desktop's configuration decides
+//! what `sans-serif`, `monospace` and `system-ui` mean and which families
+//! fill in for missing glyphs. Without fontconfig, the usual font
+//! directories and the data directories' are scanned instead and
+//! well-known families stand in for the generic ones; fallback for other
+//! scripts then only covers what those families do. `SIDESTEP_FONT` and `SIDESTEP_MONO_FONT` name font files that take
 //! the place of the system and monospaced fonts.
 //!
 //! Opening the collection reads fontconfig's configuration and cache, which
@@ -486,7 +487,8 @@ pub fn prewarm() {
     });
 }
 
-/// Where fonts live when fontconfig can't be loaded.
+/// Where fonts live when fontconfig can't be loaded, before the data
+/// directories' `fonts` and the user's own.
 const FONT_DIRS: &[&str] = &["/usr/share/fonts", "/usr/local/share/fonts"];
 const SANS: &[&str] = &["Cantarell", "Noto Sans", "DejaVu Sans", "Liberation Sans", "FreeSans"];
 const MONO: &[&str] = &["Noto Sans Mono", "DejaVu Sans Mono", "Liberation Mono", "FreeMono"];
@@ -495,15 +497,23 @@ const SERIF: &[&str] = &["Noto Serif", "DejaVu Serif", "Liberation Serif", "Free
 impl Shared {
     fn open() -> Shared {
         // fontique asks fontconfig for the generic families as it opens the
-        // collection, and panics if fontconfig has no fonts at all; the
-        // font directories are scanned instead then.
+        // collection, and panics if fontconfig has no fonts at all (or
+        // can't be loaded); the font directories are scanned instead then.
+        crate::system::load_fontconfig();
         let open = |system_fonts| Collection::new(CollectionOptions { shared: true, system_fonts });
         let mut collection = std::panic::catch_unwind(|| open(true)).unwrap_or_else(|_| open(false));
         let mut source_cache = SourceCache::new_shared();
         if collection.family_names().next().is_none() {
             let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
             let user = home.iter().flat_map(|h| [h.join(".local/share/fonts"), h.join(".fonts")]);
-            collection.load_fonts_from_paths(FONT_DIRS.iter().map(std::path::PathBuf::from).chain(user));
+            let data = crate::system::data_dirs().into_iter().map(|d| d.join("fonts"));
+            let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+            for dir in FONT_DIRS.iter().map(std::path::PathBuf::from).chain(data).chain(user) {
+                if !dirs.contains(&dir) {
+                    dirs.push(dir);
+                }
+            }
+            collection.load_fonts_from_paths(dirs);
             for (generic, names) in [
                 (GenericFamily::SansSerif, SANS),
                 (GenericFamily::SystemUi, SANS),

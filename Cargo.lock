@@ -1793,6 +1793,7 @@ dependencies = [
  "image",
  "kbvm",
  "kurbo",
+ "libloading",
  "parley",
  "rustix 1.1.5",
  "skrifa",

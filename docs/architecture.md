@@ -864,7 +864,8 @@ Wayland shows a client no other program's input.
 - **Keys.** Keymaps are compiled with [kbvm], a pure Rust XKB
   implementation, so neither building nor running needs libxkbcommon.
   `characters` apply every modifier (Control-A types U+0001, as on macOS)
-  and the locale's compose sequences and dead keys;
+  and the locale's compose sequences and dead keys (X11's compose tables,
+  found as [NixOS](#nixos) needs);
   `charactersIgnoringModifiers` apply Shift only. Keys that type nothing
   get AppKit's function-key characters (`NSUpArrowFunctionKey`, …) and
   control characters (Return is `\r`, Backspace `NSDeleteCharacter`).
@@ -2688,7 +2689,8 @@ positions in points. `crates/sidestep-engine/src/text/` holds the stack.
 
 - **Fonts.** fontique finds the system's fonts through fontconfig, loaded
   at run time with `dlopen` (every Linux desktop has `libfontconfig.so.1`;
-  nothing is linked at build time). So the desktop's configuration decides
+  nothing is linked at build time; on NixOS it's found as
+  [below](#nixos)). So the desktop's configuration decides
   what `system-ui`, `sans-serif` and `monospace` are and which families
   fill in for missing glyphs, as it does for GTK and Qt programs. The system
   font is `system-ui` (else `sans-serif`), the monospaced one `monospace`.
@@ -3230,3 +3232,38 @@ has no display and passes without checking:
 ```sh
 scripts/linux-run scripts/headless-wayland cargo test -p sidestep-appkit --test wayland_system
 ```
+
+### NixOS
+
+A distribution laid out as most are keeps what the engine loads at run time
+where every program looks: `libfontconfig.so.1` on the library path, X11's
+compose tables in `/usr/share/X11/locale` (and XKB's keymap data, which
+only tests use, in `/usr/share/X11/xkb`). NixOS keeps each package under
+its own prefix in the store, so a program built there with plain Cargo
+finds none of them by name. `sidestep-engine`'s `system` module looks for
+each in turn, so the same source runs on both without wrappers:
+
+1. where the environment says (`LD_LIBRARY_PATH`, `XLOCALEDIR`,
+   `XKB_CONFIG_ROOT`);
+2. where the build said: `SIDESTEP_FONTCONFIG` (the library file),
+   `SIDESTEP_XLOCALEDIR` and `SIDESTEP_XKB_CONFIG_ROOT`, read when the
+   engine compiles. A Nix package or shell sets them to store paths, as
+   nixpkgs builds libxkbcommon, and the program's closure then keeps them;
+3. the usual places;
+4. the data directories (`$XDG_DATA_DIRS`, which on NixOS lists the
+   system's and the user's profiles); for fontconfig, the `lib` directory
+   beside each, and the library the system's own `fc-match` runs with, read
+   from its ELF run path. NixOS's font configuration installs `fc-match`,
+   so a plain `cargo build` there loads the system's fontconfig.
+
+Only the compose tables have no place on a NixOS system unless a profile
+links `share/X11/locale` (libX11's) or the build names it; without them
+dead keys type nothing, as on any system without compose data. Foundation's
+time zones are read where jiff reads them: `$TZDIR`, `/usr/share/zoneinfo`,
+then NixOS's `/etc/zoneinfo`.
+
+On a NixOS host, `cargo test` runs the Linux tests natively, with the
+system's fonts rather than the container's DejaVu, which a few text tests
+expect. The keyboard tests build keymaps by layout name, which needs XKB's
+data: they say they were skipped without it (set `XKB_CONFIG_ROOT` to
+xkeyboard-config's `share/X11/xkb` to run them).

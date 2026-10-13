@@ -1,9 +1,10 @@
 //! `NSTimeZone`, over jiff's IANA time zones.
 //!
 //! A time zone is either a named zone from the system's tz database
-//! (`/usr/share/zoneinfo`, through jiff) or a fixed offset from GMT. The
-//! system zone comes from `$TZ`, then `/etc/localtime`, as the C library
-//! has it; the default zone is the system zone until set.
+//! (`$TZDIR`, `/usr/share/zoneinfo` or NixOS's `/etc/zoneinfo`, through
+//! jiff) or a fixed offset from GMT. The system zone comes from `$TZ`,
+//! then `/etc/localtime`, as the C library has it; the default zone is the
+//! system zone until set.
 //!
 //! Abbreviations are the database's, except that numeric ones and fixed
 //! offsets read as macOS writes them (`GMT+5:30`). Long names ("Eastern
@@ -437,7 +438,7 @@ define_class!(
 
         #[unsafe(method_id(timeZoneDataVersion))]
         fn time_zone_data_version() -> Retained<NSString> {
-            NSString::from_str(std::fs::read_to_string("/usr/share/zoneinfo/+VERSION").unwrap_or_default().trim())
+            NSString::from_str(&data_version())
         }
 
         #[unsafe(method_id(name))]
@@ -622,6 +623,26 @@ fn zone_for_abbreviation(abbreviation: &str) -> Option<&'static str> {
     })
 }
 
+/// The tz database's directory, as jiff finds it: `$TZDIR`, then the
+/// usual place, then NixOS's.
+fn zoneinfo() -> std::path::PathBuf {
+    let dirs = std::env::var_os("TZDIR").into_iter().map(std::path::PathBuf::from);
+    dirs.chain(["/usr/share/zoneinfo", "/etc/zoneinfo"].map(std::path::PathBuf::from))
+        .find(|d| d.is_dir())
+        .unwrap_or_else(|| "/usr/share/zoneinfo".into())
+}
+
+/// The tz database's version (`2026a`): its `+VERSION` file, or the
+/// version line its `tzdata.zi` starts with where there's none (NixOS).
+fn data_version() -> String {
+    let dir = zoneinfo();
+    if let Ok(version) = std::fs::read_to_string(dir.join("+VERSION")) {
+        return version.trim().to_string();
+    }
+    let zi = std::fs::read_to_string(dir.join("tzdata.zi")).unwrap_or_default();
+    zi.lines().next().and_then(|l| l.strip_prefix("# version ")).unwrap_or_default().trim().to_string()
+}
+
 /// The names in the tz database: region directories' zone files.
 fn known_names() -> Vec<String> {
     fn walk(dir: &std::path::Path, prefix: &str, out: &mut Vec<String>) {
@@ -637,11 +658,12 @@ fn known_names() -> Vec<String> {
             }
         }
     }
+    let dir = zoneinfo();
     let mut out = Vec::new();
     for region in
         ["Africa", "America", "Antarctica", "Arctic", "Asia", "Atlantic", "Australia", "Europe", "Indian", "Pacific"]
     {
-        walk(&std::path::Path::new("/usr/share/zoneinfo").join(region), region, &mut out);
+        walk(&dir.join(region), region, &mut out);
     }
     out.push("GMT".into());
     out.sort();
@@ -685,5 +707,14 @@ mod tests {
         assert_eq!(short_gmt(-3600), "GMT-1");
         assert_eq!(long_gmt(19800), "GMT+05:30");
         assert_eq!(long_gmt(0), "GMT+00:00");
+    }
+
+    /// The database is read where jiff reads it, NixOS's `/etc/zoneinfo`
+    /// included; `zones` above already needs it.
+    #[test]
+    fn the_database_lists_its_zones_and_version() {
+        assert!(known_names().iter().any(|n| n == "America/New_York"), "{}", zoneinfo().display());
+        let version = data_version();
+        assert!(version.len() >= 5 && version[..4].bytes().all(|b| b.is_ascii_digit()), "{version:?}");
     }
 }

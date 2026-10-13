@@ -15,7 +15,8 @@
 //! Beside them: the clipboard's shared state ([`clipboard`]), the
 //! compositor's outputs ([`outputs`]), the desktop's settings and system
 //! colors ([`settings`], [`palette`]), image files ([`codec`]), paths
-//! ([`path`]) and `SIDESTEP_TRACE_FRAMES` ([`trace`]).
+//! ([`path`]), where the system's libraries and data are ([`system`]) and
+//! `SIDESTEP_TRACE_FRAMES` ([`trace`]).
 //!
 //! This crate's API serves the toolkits and changes with them; programs
 //! use a toolkit.
@@ -35,5 +36,6 @@ pub mod path;
 pub mod protocol;
 pub mod raster;
 pub mod settings;
+pub mod system;
 pub mod text;
 pub mod trace;

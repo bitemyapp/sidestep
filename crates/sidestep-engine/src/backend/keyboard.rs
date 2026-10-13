@@ -77,7 +77,7 @@ pub struct Compose {
 /// keyboard, and reading it takes a few milliseconds.
 fn compose_table() -> Option<&'static ComposeTable> {
     static TABLE: OnceLock<Option<ComposeTable>> = OnceLock::new();
-    TABLE.get_or_init(|| Context::default().compose_table_builder().build(Quiet)).as_ref()
+    TABLE.get_or_init(|| crate::system::xkb_context().compose_table_builder().build(Quiet)).as_ref()
 }
 
 /// Start loading the compose table on a thread of its own, so the render
@@ -311,12 +311,21 @@ mod tests {
 
     use super::*;
 
-    /// A US keymap from the system's XKB data, as a compositor would send.
-    fn us() -> Keymap {
-        let context = Context::default();
-        let groups: Vec<_> = Group::from_layouts_and_variants("us", "").collect();
-        let keymap = context.keymap_from_names(Quiet, None, None, Some(&groups), None);
-        Keymap::parse(keymap.format().to_string().as_bytes()).expect("the keymap parses")
+    /// A keymap from the system's XKB data, as a compositor would send.
+    /// Without XKB data (a NixOS system whose profiles have none) there's
+    /// nothing to check: compositors send their keymaps whole.
+    fn layout(layout: &str, variant: &str) -> Option<Keymap> {
+        if crate::system::xkb_config_root().is_none() {
+            eprintln!("no XKB data (set XKB_CONFIG_ROOT): skipped");
+            return None;
+        }
+        let groups: Vec<_> = Group::from_layouts_and_variants(layout, variant).collect();
+        let keymap = crate::system::xkb_context().keymap_from_names(Quiet, None, None, Some(&groups), None);
+        Some(Keymap::parse(keymap.format().to_string().as_bytes()).expect("the keymap parses"))
+    }
+
+    fn us() -> Option<Keymap> {
+        layout("us", "")
     }
 
     fn state(mods: ModifierMask) -> Components {
@@ -332,7 +341,7 @@ mod tests {
 
     #[test]
     fn letters_and_shift() {
-        let map = us();
+        let Some(map) = us() else { return };
         let t = map.translate(&state(ModifierMask::NONE), xkb(evdev::A), None);
         assert_eq!((t.characters.as_str(), t.unmodified.as_str()), ("a", "a"));
         assert!(t.repeats && !t.modifier);
@@ -344,7 +353,7 @@ mod tests {
 
     #[test]
     fn control_and_command() {
-        let map = us();
+        let Some(map) = us() else { return };
         let t = map.translate(&state(ModifierMask::CONTROL), xkb(evdev::A), None);
         assert_eq!((t.characters.as_str(), t.unmodified.as_str()), ("\u{1}", "a"));
         let t = map.translate(&state(ModifierMask::SUPER), xkb(evdev::A), None);
@@ -357,7 +366,7 @@ mod tests {
 
     #[test]
     fn caps_lock_is_a_locked_flag() {
-        let map = us();
+        let Some(map) = us() else { return };
         let mut c = Components::default();
         c.mods_locked = ModifierMask::LOCK;
         c.update_effective();
@@ -368,7 +377,7 @@ mod tests {
 
     #[test]
     fn keys_that_type_nothing() {
-        let map = us();
+        let Some(map) = us() else { return };
         let none = state(ModifierMask::NONE);
         let chars = |code| map.translate(&none, xkb(code), None).characters;
         assert_eq!(chars(evdev::ENTER), "\r");
@@ -390,7 +399,7 @@ mod tests {
 
     #[test]
     fn modifier_keys_are_flags_only() {
-        let map = us();
+        let Some(map) = us() else { return };
         for code in [evdev::LEFTSHIFT, evdev::RIGHTCTRL, evdev::LEFTALT, evdev::LEFTMETA, evdev::CAPSLOCK] {
             let t = map.translate(&state(ModifierMask::NONE), xkb(code), None);
             assert!(t.modifier, "{code:?}");
@@ -400,7 +409,7 @@ mod tests {
 
     #[test]
     fn keypad_follows_num_lock() {
-        let map = us();
+        let Some(map) = us() else { return };
         let with = map.translate(&state(ModifierMask::NUM_LOCK), xkb(evdev::KP1), None);
         assert_eq!(with.characters, "1");
         assert_ne!(with.key_flags & modifier::NUMERIC_PAD, 0);
@@ -412,13 +421,13 @@ mod tests {
     #[test]
     #[ignore]
     fn keyboard_timing() {
-        let context = Context::default();
+        let Some(map) = us() else { return };
+        let context = crate::system::xkb_context();
         let groups: Vec<_> = Group::from_layouts_and_variants("us", "").collect();
         let text = context.keymap_from_names(Quiet, None, None, Some(&groups), None).format().to_string();
         let parse = super::super::median(|| drop(Keymap::parse(text.as_bytes())));
-        let compose_load = super::super::median(|| drop(Context::default().compose_table_builder().build(Quiet)));
+        let compose_load = super::super::median(|| drop(context.compose_table_builder().build(Quiet)));
         println!("the locale's compose table loads in {compose_load:.2} ms");
-        let map = us();
         let shifted = state(ModifierMask::SHIFT);
         let keys = [evdev::A, evdev::_1, evdev::ENTER, evdev::LEFT, evdev::F1, evdev::SPACE, evdev::Q, evdev::KP1];
         let mut compose = Compose::new();
@@ -436,10 +445,7 @@ mod tests {
     #[test]
     fn dead_keys_compose() {
         // US international: the apostrophe key is a dead acute.
-        let context = Context::default();
-        let groups: Vec<_> = Group::from_layouts_and_variants("us", "intl").collect();
-        let keymap = context.keymap_from_names(Quiet, None, None, Some(&groups), None);
-        let map = Keymap::parse(keymap.format().to_string().as_bytes()).unwrap();
+        let Some(map) = layout("us", "intl") else { return };
         let Some(_) = compose_table() else {
             // No compose data on this system; nothing to check.
             return;

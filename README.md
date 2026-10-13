@@ -104,7 +104,8 @@ SCENARIO=scroll cargo run -p appkit-slice
 
 **Linux** runs the same source on Sidestep. It needs a Wayland session (X11
 isn't supported yet). Fonts come from the system's fontconfig, loaded when
-the program runs, as every desktop has it; `SIDESTEP_FONT` and
+the program runs, as every desktop has it (NixOS's too, from its store;
+see [docs/architecture.md](docs/architecture.md#nixos)); `SIDESTEP_FONT` and
 `SIDESTEP_MONO_FONT` can name a sans and a monospaced font file to use
 instead. Nothing else is needed: no libobjc, no GNUstep, and nothing to
 build against beyond the C runtime every Rust program links.
