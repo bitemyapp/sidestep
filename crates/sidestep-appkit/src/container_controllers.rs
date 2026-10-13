@@ -220,7 +220,12 @@ define_class!(
         #[unsafe(method(selectedTabViewItemIndex))]
         fn selected(&self) -> isize { let tab = tab(self); tab.selectedTabViewItem().map_or(-1, |i| tab.indexOfTabViewItem(&i)) }
         #[unsafe(method(setSelectedTabViewItemIndex:))]
-        fn set_selected(&self, index: isize) { tab(self).selectTabViewItemAtIndex(index); }
+        fn set_selected(&self, index: isize) {
+            // Observable, as AppKit's (Upleft remembers the pane by it).
+            sidestep_foundation::observing::will_change(self, "selectedTabViewItemIndex");
+            tab(self).selectTabViewItemAtIndex(index);
+            sidestep_foundation::observing::did_change(self, "selectedTabViewItemIndex");
+        }
         #[unsafe(method_id(tabViewItemForViewController:))]
         fn for_controller(&self, vc: &NSViewController) -> Option<Retained<NSTabViewItem>> { tab(self).tabViewItems().iter().find(|item| item.viewController(self.mtm()).is_some_and(|c| std::ptr::eq(&*c, vc))) }
     }

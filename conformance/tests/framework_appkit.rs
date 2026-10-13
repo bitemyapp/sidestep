@@ -190,7 +190,22 @@ fn containers(mtm: MainThreadMarker) {
     tabs.addTabViewItem(&ia);
     tabs.addTabViewItem(&ib);
     tabs.view().setFrame(rect(0.0, 0.0, 300.0, 200.0));
+    // Selecting is observable (Upleft remembers its settings pane by it).
+    let observer = PropertyObserver::alloc(mtm).set_ivars(Default::default());
+    let observer: Retained<PropertyObserver> = unsafe { msg_send![super(observer), init] };
+    let key = NSString::from_str("selectedTabViewItemIndex");
+    let context = 42usize as *mut std::ffi::c_void;
+    unsafe {
+        let _: () = msg_send![&*tabs, addObserver: &*observer, forKeyPath: &*key, options: 1usize, context: context];
+    }
     tabs.setSelectedTabViewItemIndex(1);
+    unsafe {
+        let _: () = msg_send![&*tabs, removeObserver: &*observer, forKeyPath: &*key, context: context];
+    }
+    let changes = observer.ivars().borrow();
+    let new = changes.last().and_then(|c| c.objectForKey(&NSString::from_str("new")));
+    assert_eq!(new.and_then(|n| n.downcast_ref::<NSNumber>().map(|n| n.integerValue())), Some(1));
+    drop(changes);
     assert_eq!(tabs.tabViewItems().count(), 2);
     assert_eq!(tabs.selectedTabViewItemIndex(), 1);
     assert!(unsafe { b.view().superview() }.is_some());
