@@ -1425,6 +1425,27 @@ define_class!(
                 _ => self as *const Self as usize >> 4,
             }
         }
+
+        /// What the color is, as AppKit writes it: a color of components
+        /// by its space and components (`sRGB IEC61966-2.1 colorspace 1 0
+        /// 0 1`, `NSCalibratedRGBColorSpace 1 0 0 1`), a system color by
+        /// its name; others as any object.
+        #[unsafe(method_id(description))]
+        fn description(&self) -> Retained<NSString> {
+            match &self.ivars().repr {
+                Repr::Components { space, c } => {
+                    let space_text = match space.color_space_name() {
+                        "NSCustomColorSpace" => format!("{} colorspace", space.localized_name()),
+                        name => name.to_owned(),
+                    };
+                    let values: Vec<String> = c[..=space.components()].iter().map(|&v| g(v)).collect();
+                    NSString::from_str(&format!("{space_text} {}", values.join(" ")))
+                }
+                Repr::Catalog { color, alpha: None } => NSString::from_str(&format!("Catalog color: System {}", color.name())),
+                // SAFETY: NSObject's description.
+                _ => unsafe { msg_send![super(self), description] },
+            }
+        }
     }
 
     unsafe impl NSCopying for NSColorImpl {}
@@ -1803,9 +1824,29 @@ fn convert(c: &NSColorImpl, target: Space) -> Option<Retained<NSColor>> {
     }
 }
 
+/// `v` as `%g` writes it: six significant digits, no trailing zeros.
+pub(crate) fn g(v: f64) -> String {
+    if v == 0.0 || !v.is_finite() {
+        return if v == 0.0 { "0".into() } else { v.to_string() };
+    }
+    let digits = (5 - v.abs().log10().floor() as i32).clamp(0, 17) as usize;
+    let s = format!("{v:.digits$}");
+    let s = if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.') } else { &s };
+    if s == "-0" { "0".into() } else { s.to_owned() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numbers_as_percent_g() {
+        let cases =
+            [(0.2, "0.2"), (1.0, "1"), (1.0 / 3.0, "0.333333"), (12.5, "12.5"), (0.0, "0"), (123456.7, "123457")];
+        for (v, text) in cases {
+            assert_eq!(g(v), text, "{v}");
+        }
+    }
 
     #[test]
     fn hsb_round_trips() {
