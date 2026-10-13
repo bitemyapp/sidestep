@@ -758,7 +758,7 @@ pub(crate) enum ToRender {
         window: WindowId,
         at: f64,
         crop: [u32; 4],
-        reply: std::sync::mpsc::Sender<Option<(u32, u32, Vec<[u8; 4]>)>>,
+        reply: std::sync::mpsc::Sender<Option<crate::testing::Pixels>>,
     },
 }
 
