@@ -2240,7 +2240,15 @@ impl NSTextViewImpl {
         let sel = self.selection();
         let moved = moved_by_edit(sel, old, range.length);
         if moved != sel || self.ivars().ranges.borrow().len() > 1 {
-            self.set_selection_internal(moved, false);
+            if self.tlm().is_some() {
+                // TextKit 2 keeps the selection as the layout manager's text
+                // selections, which move with the text: the view's own setter
+                // isn't sent while the storage is mid-edit, as TextKit 1's is.
+                // (Upleft's override reads state it updates after the edit.)
+                self.apply_selection(moved, false);
+            } else {
+                self.set_selection_internal(moved, false);
+            }
         }
     }
 
