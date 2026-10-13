@@ -59,6 +59,7 @@ mod color;
 mod context;
 mod coregraphics;
 mod coretext;
+mod default_apps;
 mod effect_view;
 mod gesture;
 mod glass;

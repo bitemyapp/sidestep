@@ -554,6 +554,31 @@ define_class!(
             self.has(flag::EDITABLE)
         }
 
+        /// Itself, for the Services menu, when its selection can go out as
+        /// text (plain, or RTF in a rich text view) or nothing goes out, and
+        /// text can come back where it's editable or nothing comes back;
+        /// else what the responders after it answer.
+        #[unsafe(method_id(validRequestorForSendType:returnType:))]
+        fn valid_requestor(&self, send: Option<&NSString>, take: Option<&NSString>) -> Option<Retained<AnyObject>> {
+            let rich = self.has(flag::RICH);
+            let text = |kind: &NSString| {
+                let kind = kind.to_string();
+                ["public.utf8-plain-text", "NSStringPboardType"].contains(&kind.as_str())
+                    || (rich && ["public.rtf", "NSRTFPboardType"].contains(&kind.as_str()))
+            };
+            // SAFETY: -selectedRange takes nothing and returns an NSRange.
+            let selected: NSRange = unsafe { msg_send![self, selectedRange] };
+            let sends = send.is_none_or(|kind| text(kind) && selected.length > 0);
+            let takes = take.is_none_or(|kind| text(kind) && self.has(flag::EDITABLE));
+            if (send.is_some() || take.is_some()) && sends && takes {
+                // SAFETY: every object is an AnyObject.
+                Some(unsafe { Retained::cast_unchecked::<AnyObject>(self.retain()) })
+            } else {
+                // SAFETY: NSResponder's answer, up the chain.
+                unsafe { msg_send![super(self), validRequestorForSendType: send, returnType: take] }
+            }
+        }
+
         /// The view's drag types follow (`updateDragTypeRegistration`),
         /// when the flag changes, as on macOS.
         #[unsafe(method(setEditable:))]

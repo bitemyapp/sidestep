@@ -55,8 +55,8 @@ use objc2::rc::{Allocated, Retained, Weak};
 use objc2::runtime::{AnyObject, NSObject, ProtocolObject, Sel};
 use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSBezierPath, NSColor, NSEvent, NSEventModifierFlags, NSResponder, NSTableColumn, NSTableHeaderView,
-    NSTableRowView, NSTableView, NSTableViewAnimationOptions, NSTableViewColumnAutoresizingStyle,
+    NSApplication, NSBezierPath, NSColor, NSDragOperation, NSEvent, NSEventModifierFlags, NSResponder, NSTableColumn,
+    NSTableHeaderView, NSTableRowView, NSTableView, NSTableViewAnimationOptions, NSTableViewColumnAutoresizingStyle,
     NSTableViewDataSource, NSTableViewDelegate, NSTableViewGridLineStyle, NSTableViewRowSizeStyle,
     NSTableViewSelectionHighlightStyle, NSTableViewStyle, NSUserInterfaceItemIdentification, NSView, NSWindow,
 };
@@ -149,6 +149,9 @@ struct Realized {
 
 pub(crate) struct TableIvars {
     columns: RefCell<Vec<Retained<NSTableColumn>>>,
+    /// What drags from the table allow, to local and other destinations
+    /// (kept: Sidestep's views don't start drags yet).
+    drag_masks: Cell<(NSDragOperation, NSDragOperation)>,
     data_source: RefCell<Option<Weak<AnyObject>>>,
     delegate: RefCell<Option<Weak<AnyObject>>>,
     header: RefCell<Option<Retained<NSView>>>,
@@ -199,6 +202,7 @@ impl Default for TableIvars {
     fn default() -> Self {
         TableIvars {
             columns: RefCell::default(),
+            drag_masks: Cell::new((NSDragOperation::Every, NSDragOperation::None)),
             data_source: RefCell::new(None),
             delegate: RefCell::new(None),
             header: RefCell::new(None),
@@ -333,6 +337,18 @@ define_class!(
         }
 
         // Settings.
+
+        #[unsafe(method(setDraggingSourceOperationMask:forLocal:))]
+        fn set_dragging_source_operation_mask(&self, mask: NSDragOperation, local: bool) {
+            let (inside, outside) = self.ivars().drag_masks.get();
+            self.ivars().drag_masks.set(if local { (mask, outside) } else { (inside, mask) });
+        }
+
+        #[unsafe(method(draggingSourceOperationMaskForLocal:))]
+        fn dragging_source_operation_mask(&self, local: bool) -> NSDragOperation {
+            let (inside, outside) = self.ivars().drag_masks.get();
+            if local { inside } else { outside }
+        }
 
         #[unsafe(method(allowsColumnReordering))]
         fn allows_column_reordering(&self) -> bool {

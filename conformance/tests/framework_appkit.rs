@@ -1,4 +1,5 @@
-//! Container ownership, text-layer pixels, glass content, and PDF output.
+//! Container ownership, text-layer pixels, glass content, PDF output, the
+//! application icon, table drag masks and the Services question.
 mod common;
 use common::rect;
 use objc2::rc::{Retained, autoreleasepool};
@@ -264,6 +265,52 @@ fn printing(mtm: MainThreadMarker) {
     assert_eq!(view.frame().size, NSSize::new(200.0, 800.0));
     std::fs::remove_file(path).unwrap();
 }
+
+/// What tables allow drags from them to do, the application's icon, and
+/// the Services menu's question to a text view: it answers with itself for
+/// plain text it can send or take, and the chain after it answers the rest.
+fn services_icons_and_drag_masks(mtm: MainThreadMarker) {
+    let table = NSTableView::initWithFrame(NSTableView::alloc(mtm), rect(0.0, 0.0, 200.0, 100.0));
+    table.setDraggingSourceOperationMask_forLocal(NSDragOperation::Move, true);
+    table.setDraggingSourceOperationMask_forLocal(NSDragOperation::Copy, false);
+    let mask = |local: bool| -> NSDragOperation {
+        // SAFETY: the method takes a BOOL and answers the mask.
+        unsafe { msg_send![&*table, draggingSourceOperationMaskForLocal: local] }
+    };
+    assert_eq!((mask(true), mask(false)), (NSDragOperation::Move, NSDragOperation::Copy));
+
+    let app = NSApplication::sharedApplication(mtm);
+    let original = app.applicationIconImage().expect("an icon");
+    let replacement = NSImage::initWithSize(NSImage::alloc(), NSSize::new(16.0, 16.0));
+    // SAFETY: the setter takes an image or nil.
+    unsafe { app.setApplicationIconImage(Some(&replacement)) };
+    assert!(app.applicationIconImage().is_some_and(|i| std::ptr::eq(&*i, &*replacement)));
+    // SAFETY: as above.
+    unsafe { app.setApplicationIconImage(None) };
+    assert!(app.applicationIconImage().is_some());
+    drop(original);
+
+    let text = NSTextView::initWithFrame(NSTextView::alloc(mtm), rect(0.0, 0.0, 200.0, 100.0));
+    text.setString(&NSString::from_str("some text"));
+    let plain = NSString::from_str("public.utf8-plain-text");
+    let png = NSString::from_str("public.png");
+    let ask = |send: Option<&NSString>, take: Option<&NSString>| -> Option<Retained<AnyObject>> {
+        // SAFETY: the method takes two pasteboard types and answers an object.
+        unsafe { msg_send![&*text, validRequestorForSendType: send, returnType: take] }
+    };
+    let is_text = |answer: Option<Retained<AnyObject>>| {
+        answer.is_some_and(|a| std::ptr::eq(&*a, (&*text as *const NSTextView).cast()))
+    };
+    text.setSelectedRange(NSRange::new(0, 4));
+    assert!(is_text(ask(Some(&plain), None)), "the selection goes out as text");
+    assert!(is_text(ask(None, Some(&plain))), "text comes back into an editable view");
+    assert!(ask(Some(&png), None).is_none(), "nothing after it takes images");
+    text.setSelectedRange(NSRange::new(0, 0));
+    assert!(ask(Some(&plain), None).is_none(), "no selection, nothing to send");
+    text.setEditable(false);
+    assert!(ask(None, Some(&plain)).is_none(), "nothing comes back into a view that can't be edited");
+}
+
 fn main() {
     let mtm = MainThreadMarker::new().unwrap();
     for (name, test) in [
@@ -275,6 +322,7 @@ fn main() {
         ("pan gestures", gestures),
         ("custom sharing service", sharing),
         ("window property observation", window_observation),
+        ("services, icons and drag masks", services_icons_and_drag_masks),
     ] {
         autoreleasepool(|_| test(mtm));
         println!("test {name} ... ok");

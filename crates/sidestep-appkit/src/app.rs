@@ -401,6 +401,8 @@ pub(crate) struct AppIvars {
     windows_menu: RefCell<Option<Retained<AnyObject>>>,
     services_menu: RefCell<Option<Retained<AnyObject>>>,
     help_menu: RefCell<Option<Retained<AnyObject>>>,
+    /// The icon `setApplicationIconImage:` gave, else the one found.
+    icon: RefCell<Option<Retained<AnyObject>>>,
 }
 
 define_class!(
@@ -426,6 +428,7 @@ define_class!(
                 windows_menu: RefCell::new(None),
                 services_menu: RefCell::new(None),
                 help_menu: RefCell::new(None),
+                icon: RefCell::new(None),
             });
             // SAFETY: NSResponder's designated initializer.
             let this: Retained<Self> = unsafe { msg_send![super(this), init] };
@@ -440,6 +443,18 @@ define_class!(
         #[unsafe(method_id(mainMenu))]
         fn main_menu(&self) -> Option<Retained<AnyObject>> {
             self.ivars().main_menu.borrow().clone()
+        }
+
+        /// The icon set, else the application's own (see `app_icon`).
+        #[unsafe(method_id(applicationIconImage))]
+        fn application_icon_image(&self) -> Retained<AnyObject> {
+            self.ivars().icon.borrow_mut().get_or_insert_with(app_icon).clone()
+        }
+
+        /// A nil image goes back to the application's own.
+        #[unsafe(method(setApplicationIconImage:))]
+        fn set_application_icon_image(&self, image: Option<&AnyObject>) {
+            *self.ivars().icon.borrow_mut() = image.map(|i| i.retain());
         }
 
         #[unsafe(method_id(servicesMenu))]
@@ -1247,6 +1262,31 @@ pub(crate) fn update_active() {
 /// window is left on screen, the delegate is asked whether to quit.
 pub(crate) fn window_closed() {
     sidestep_foundation::runloop::main().perform(&[Mode::DEFAULT], last_window_check);
+}
+
+/// The application's own icon, as AppKit finds it: the image file its
+/// bundle names (`CFBundleIconFile`, `CFBundleIconName`), an image named
+/// `NSApplicationIcon`, the icon of its desktop entry (named by its bundle
+/// identifier); else an empty 128-point image, where AppKit has a generic
+/// application icon.
+fn app_icon() -> Retained<AnyObject> {
+    use objc2::AnyThread;
+    use objc2_app_kit::NSImage;
+    let bundle = objc2_foundation::NSBundle::mainBundle();
+    let declared = ["CFBundleIconFile", "CFBundleIconName"].into_iter().find_map(|key| {
+        let name = bundle.objectForInfoDictionaryKey(&NSString::from_str(key))?.downcast::<NSString>().ok()?;
+        NSImage::imageNamed(&name)
+    });
+    let installed = || {
+        let id = bundle.bundleIdentifier()?;
+        let file = crate::default_apps::icon_file(&format!("{id}.desktop"))?;
+        NSImage::initWithContentsOfFile(NSImage::alloc(), &NSString::from_str(&file.to_string_lossy()))
+    };
+    let image = declared
+        .or_else(|| NSImage::imageNamed(&NSString::from_str("NSApplicationIcon")))
+        .or_else(installed)
+        .unwrap_or_else(|| NSImage::initWithSize(NSImage::alloc(), objc2_foundation::NSSize::new(128.0, 128.0)));
+    Retained::into_super(Retained::into_super(image))
 }
 
 fn last_window_check() {
