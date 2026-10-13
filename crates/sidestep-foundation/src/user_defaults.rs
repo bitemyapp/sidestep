@@ -6,7 +6,10 @@
 //! application's, named by its bundle identifier or process name, or a
 //! suite's), suites added with `addSuiteNamed:`, `NSGlobalDomain`, and
 //! the registration domain. Domains are shared by every instance in the
-//! process, as on macOS; so is the registration domain.
+//! process, as on macOS; so is the registration domain. What macOS's
+//! system settings keep in `NSGlobalDomain` comes from the desktop instead
+//! ([`set_desktop_defaults`]): `AppleInterfaceStyle` is "Dark" while it is
+//! dark.
 //!
 //! A persistent domain named `N` lives in `$XDG_CONFIG_HOME/N/defaults.plist`
 //! as an XML property list, read on first use. Changes go to memory and a
@@ -70,6 +73,26 @@ struct Persistent {
     dirty: bool,
     /// Removed: its file goes at the next write.
     removed: bool,
+}
+
+/// What answers the desktop's keys and values in `NSGlobalDomain`.
+pub type DesktopDefaults = fn() -> Vec<(&'static str, &'static str)>;
+
+/// What the desktop keeps in `NSGlobalDomain`, as macOS's system settings
+/// keep `AppleInterfaceStyle` there: asked at each lookup, ahead of what
+/// the domain holds, and never stored.
+static DESKTOP: RwLock<Option<DesktopDefaults>> = RwLock::new(None);
+
+/// Have `values` answer what the desktop keeps in `NSGlobalDomain` (set by
+/// AppKit, which follows the desktop's settings).
+pub fn set_desktop_defaults(values: DesktopDefaults) {
+    *crate::thread::lock_write(&DESKTOP) = Some(values);
+}
+
+/// The desktop's values for `NSGlobalDomain` now.
+fn desktop() -> Vec<(&'static str, &'static str)> {
+    let values = *crate::thread::lock_read(&DESKTOP);
+    values.map(|values| values()).unwrap_or_default()
 }
 
 fn store() -> &'static RwLock<Store> {
@@ -479,8 +502,14 @@ impl NSUserDefaultsImpl {
                 ensure_loaded(name);
             }
         }
+        let desktop = desktop();
         let store = crate::thread::lock_read(store());
         list.iter().find_map(|(name, persistent)| {
+            if name == GLOBAL
+                && let Some((_, value)) = desktop.iter().find(|(k, _)| *k == key)
+            {
+                return Some(Value::String((*value).to_string()));
+            }
             if *persistent {
                 store.persistent.get(name)?.values.get(key).cloned()
             } else {
@@ -497,6 +526,7 @@ impl NSUserDefaultsImpl {
                 ensure_loaded(name);
             }
         }
+        let desktop = desktop();
         let store = crate::thread::lock_read(store());
         let mut out = plist::Dictionary::new();
         for (name, persistent) in list.iter().rev() {
@@ -504,6 +534,11 @@ impl NSUserDefaultsImpl {
                 if *persistent { store.persistent.get(name).map(|d| &*d.values) } else { store.volatile.get(name) };
             for (key, value) in values.into_iter().flatten() {
                 out.insert(key.clone(), value.clone());
+            }
+            if name == GLOBAL {
+                for (key, value) in &desktop {
+                    out.insert((*key).to_string(), Value::String((*value).to_string()));
+                }
             }
         }
         out

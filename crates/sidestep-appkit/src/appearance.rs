@@ -313,7 +313,12 @@ pub(crate) fn set_app_appearance(id: Option<Id>) {
 }
 
 pub(crate) fn app_effective() -> Id {
-    app_appearance().unwrap_or_else(system)
+    app_effective_with(app_appearance())
+}
+
+/// What the application's effective appearance is with `own` its own.
+pub(crate) fn app_effective_with(own: Option<Id>) -> Id {
+    own.unwrap_or_else(system)
 }
 
 // Views and windows.
@@ -385,7 +390,7 @@ fn walk(view: &crate::views::NSViewImpl, changed: &mut Vec<Retained<NSView>>) {
 }
 
 /// The application's or the desktop's appearance changed: refresh every
-/// window.
+/// window, and the menu bars in them.
 pub(crate) fn refresh_all() {
     for window in crate::app::windows_for_appearance() {
         if let Some(content) = window.contentView() {
@@ -393,6 +398,7 @@ pub(crate) fn refresh_all() {
         }
         crate::window::imp(&window).damage_all();
     }
+    crate::menubar::appearance_changed();
 }
 
 #[cfg(test)]

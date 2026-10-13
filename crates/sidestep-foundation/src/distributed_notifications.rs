@@ -133,6 +133,13 @@ fn post(center: &Center, name: &NSString, object: Option<&NSString>, info: Optio
         immediate,
     });
 }
+/// Deliver `name` to this process's observers of the default center, as
+/// macOS's system delivers what the desktop says
+/// (`AppleInterfaceThemeChangedNotification`). Every program hears the
+/// desktop itself, so this isn't sent to the others. On the main thread.
+pub fn post_from_desktop(name: &str) {
+    received(&default_center(), Event { name: name.to_string(), object: None, info: None, immediate: false });
+}
 fn deliver(target: &AnyObject, selector: Sel, event: &Event) {
     let name = NSString::from_str(&event.name);
     let object = event.object.as_ref().map(|s| NSString::from_str(s));

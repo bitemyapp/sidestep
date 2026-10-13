@@ -8,9 +8,11 @@
 //! `frameRectForContentRect:` take it in and `contentLayoutRect` leaves it
 //! out. The render thread shows it (`backend::menubar`) as ops drawn here:
 //! the menus' titles in the menu bar font, the first one, when it has no
-//! title, the program's name. It is drawn again only when what it shows
-//! changes (the main menu or its menus' titles, the title shown open), at
-//! the end of the turn in which that happened.
+//! title, the program's name, in its window's appearance, as the rest of
+//! the window's chrome. It is drawn again only when what it shows changes
+//! (the main menu or its menus' titles, the title shown open, the
+//! window's effective appearance), at the end of the turn in which that
+//! happened.
 //!
 //! A click on a title opens its menu below it, through the menu tracking
 //! loop; while one is open, moving over another title opens that one, and
@@ -57,6 +59,8 @@ struct Shown {
     height: u32,
     titles: Vec<Title>,
     open: Option<usize>,
+    /// The appearance it was drawn in: its window's.
+    look: crate::appearance::Id,
 }
 
 thread_local! {
@@ -150,8 +154,9 @@ fn titles(main: &NSMenu) -> Vec<Title> {
 }
 
 /// The bar's ops: its ground, a line along its bottom, and the titles,
-/// the open one on the accent.
-fn draw(titles: &[Title], height: u32, open: Option<usize>) -> Vec<Op> {
+/// the open one on the accent, in its window's appearance.
+fn draw(titles: &[Title], height: u32, open: Option<usize>, look: crate::appearance::Id) -> Vec<Op> {
+    let _look = crate::appearance::Drawing::push(look);
     let p = theme::palette();
     let h = height as f64;
     let wide = 1.0e5;
@@ -222,6 +227,14 @@ pub(crate) fn visibility_changed() {
     schedule();
 }
 
+/// A window's appearance, the application's or the desktop's changed: bars
+/// are drawn in their windows'.
+pub(crate) fn appearance_changed() {
+    if SHOWN.with(|s| !s.borrow().is_empty()) {
+        schedule();
+    }
+}
+
 /// A window came on screen: a titled one may show a bar (menus, tooltips
 /// and other borderless windows don't).
 pub(crate) fn window_shown(window: &NSWindow) {
@@ -256,11 +269,13 @@ fn refresh() {
             continue;
         }
         let open_here = open.as_ref().filter(|(w, _)| std::ptr::eq(&**w, &*window)).map(|(_, i)| *i);
-        let same = before.is_some_and(|b| b.height == height && b.titles == titles && b.open == open_here);
+        let look = crate::appearance::window_effective(crate::window::imp(&window));
+        let same =
+            before.is_some_and(|b| b.height == height && b.titles == titles && b.open == open_here && b.look == look);
         if !same {
-            sends.push(ToRender::MenuBar { window: id, height, ops: draw(&titles, height, open_here) });
+            sends.push(ToRender::MenuBar { window: id, height, ops: draw(&titles, height, open_here, look) });
         }
-        keep.push(Shown { window: Weak::new(&window), id, height, titles: titles.clone(), open: open_here });
+        keep.push(Shown { window: Weak::new(&window), id, height, titles: titles.clone(), open: open_here, look });
     }
     SHOWN.with(|s| *s.borrow_mut() = keep);
     for msg in sends {

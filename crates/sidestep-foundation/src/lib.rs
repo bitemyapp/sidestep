@@ -92,6 +92,9 @@ mod affine;
 
 pub use const_string::{ConstStr, ConstantString};
 pub use notification::notification;
+// What the desktop says, from AppKit.
+pub use distributed_notifications::post_from_desktop;
+pub use user_defaults::set_desktop_defaults;
 
 #[doc(hidden)]
 pub use attributed::{RunRef, clip_to_limit, with_runs};

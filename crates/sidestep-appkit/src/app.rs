@@ -786,12 +786,27 @@ define_class!(
             crate::appearance::app_appearance().map(crate::appearance::get)
         }
 
+        /// Observable, as `effectiveAppearance` is (programs follow it with
+        /// KVO).
         #[unsafe(method(setAppearance:))]
         fn set_appearance(&self, appearance: Option<&objc2_app_kit::NSAppearance>) {
-            crate::appearance::set_app_appearance(appearance.map(crate::appearance::id_of));
+            let effective = crate::appearance::app_effective();
+            let id = appearance.map(crate::appearance::id_of);
+            let moves = crate::appearance::app_effective_with(id) != effective;
+            sidestep_foundation::observing::will_change(self, "appearance");
+            if moves {
+                sidestep_foundation::observing::will_change(self, "effectiveAppearance");
+            }
+            crate::appearance::set_app_appearance(id);
             crate::appearance::refresh_all();
+            if moves {
+                sidestep_foundation::observing::did_change(self, "effectiveAppearance");
+            }
+            sidestep_foundation::observing::did_change(self, "appearance");
         }
 
+        /// Its own appearance, else the desktop's; observable, and changes
+        /// with the desktop's (`settings::apply_changes`).
         #[unsafe(method_id(effectiveAppearance))]
         fn effective_appearance(&self) -> Retained<objc2_app_kit::NSAppearance> {
             crate::appearance::get(crate::appearance::app_effective())

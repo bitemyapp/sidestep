@@ -153,3 +153,9 @@ harness = false
 [[test]]
 name = "linux_layers"
 harness = false
+
+# Appearance changes repainting shown windows and their menu bars, and the
+# desktop's reaching programs, through the null render thread (Linux only).
+[[test]]
+name = "linux_appearance"
+harness = false

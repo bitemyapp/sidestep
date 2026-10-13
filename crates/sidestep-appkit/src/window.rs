@@ -1630,6 +1630,7 @@ define_class!(
                 crate::appearance::refresh(&content);
             }
             self.damage_all();
+            crate::menubar::appearance_changed();
         }
 
         #[unsafe(method_id(effectiveAppearance))]

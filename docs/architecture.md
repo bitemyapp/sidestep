@@ -2077,6 +2077,12 @@ answered or 150 ms have passed, so a dark desktop doesn't flash a light
 window; without a bus or a portal the answer is light at once.
 `SIDESTEP_APPEARANCE=light` or `dark` (else `SIDESTEP_THEME`) and
 `SIDESTEP_ACCENT=#rrggbb` override the desktop.
+Programs hear of its light or dark as macOS tells them: `NSGlobalDomain`'s
+`AppleInterfaceStyle` is "Dark" while it is dark (asked of the engine at
+each lookup, never stored), a switch posts
+`AppleInterfaceThemeChangedNotification` to the program's own distributed
+observers (every program hears the desktop itself), and the application's
+`effectiveAppearance`, unless it set its own, changes observably.
 
 
 ### Views, layout and containers
@@ -3153,8 +3159,9 @@ the workspace against stand-ins for the desktop's programs.
   bar in the window, and Wayland has nowhere else for it. Every titled
   window that isn't a panel or a sheet shows the main menu as a bar under
   the title bar (or at the top, when the compositor draws the
-  decorations), drawn on the main thread as ops and rasterized on the
-  render thread onto a subsurface. The window grows by the bar and its
+  decorations), drawn on the main thread as ops in its window's
+  appearance, like the rest of the chrome, and rasterized on the render
+  thread onto a subsurface. The window grows by the bar and its
   content keeps its size: to the frame arithmetic the bar is part of the
   title bar (`frameRectForContentRect:` includes it, `contentLayoutRect`
   leaves it out). A click on a title opens its menu; moving across titles

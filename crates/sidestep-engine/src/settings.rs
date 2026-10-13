@@ -234,6 +234,15 @@ pub fn take_changed() -> bool {
     CHANGED.swap(false, Ordering::Acquire)
 }
 
+/// For tests: the desktop switches to dark or light (and high contrast or
+/// not), as if the portal said so.
+#[doc(hidden)]
+pub fn change_for_testing(dark: bool, contrast: bool) {
+    if set_system(dark, contrast) {
+        notify(dark);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

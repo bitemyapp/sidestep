@@ -118,6 +118,14 @@ pub fn settle_first_frames() {
     settle();
 }
 
+/// The desktop switches to dark or light, as the portal says when the
+/// user switches it, and the main thread hears (the change is applied on
+/// its loop, as it would be, so this settles).
+pub fn set_desktop_dark(dark: bool) {
+    sidestep_engine::settings::change_for_testing(dark, false);
+    settle();
+}
+
 /// Run the main loop in the default mode for `ms` milliseconds, sending
 /// events as the application's main loop does.
 pub fn run_for(ms: u64) {

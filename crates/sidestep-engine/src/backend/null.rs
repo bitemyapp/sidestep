@@ -73,6 +73,9 @@ pub struct PaintedText {
     /// view (whose content is painted into tiles of its own).
     pub x: f32,
     pub y: f32,
+    /// On the window's menu bar (`x` and `y` in the bar's points), not in
+    /// its content.
+    pub bar: bool,
 }
 
 /// Asked for by a test, before the render thread started.
@@ -314,13 +317,24 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
                 }
                 if let Some(text) = TEXT.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
                     let runs = ops.iter().filter_map(|op| match op {
-                        Op::Glyphs(run) => Some(PaintedText { window, color: run.color, x: run.x, y: run.y }),
+                        Op::Glyphs(run) => {
+                            Some(PaintedText { window, color: run.color, x: run.x, y: run.y, bar: false })
+                        }
                         _ => None,
                     });
                     text.extend(runs);
                 }
             }
-            ToRender::MenuBar { window, height, .. } => {
+            ToRender::MenuBar { window, height, ops } => {
+                if let Some(text) = TEXT.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                    let runs = ops.iter().filter_map(|op| match op {
+                        Op::Glyphs(run) => {
+                            Some(PaintedText { window, color: run.color, x: run.x, y: run.y, bar: true })
+                        }
+                        _ => None,
+                    });
+                    text.extend(runs);
+                }
                 if let Some(win) = windows.get_mut(&window).filter(|w| w.bar != height) {
                     win.bar = height;
                     send(configure(window, win));
