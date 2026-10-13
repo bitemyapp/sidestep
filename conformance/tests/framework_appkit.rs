@@ -357,6 +357,89 @@ fn pinned_inside_a_split_pane(mtm: MainThreadMarker) {
     }
 }
 
+define_class!(
+    #[unsafe(super(NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "SidestepFrameworkIdentity"]
+    struct Identity;
+    impl Identity {
+        #[unsafe(method(intrinsicContentSize))]
+        fn intrinsic(&self) -> NSSize {
+            NSSize::new(220.0, 36.0)
+        }
+    }
+);
+
+/// A view of an intrinsic width whose labels sit in stack views, nothing
+/// holding hard to any of their widths: it fits to its intrinsic width, and
+/// the labels get theirs, not less. (Upleft's document identity in the
+/// toolbar: its title and folder.)
+fn labels_in_stacks(mtm: MainThreadMarker) {
+    let low = NSLayoutPriorityDefaultLow;
+    let horizontal = NSLayoutConstraintOrientation::Horizontal;
+    let label = |text: &str| {
+        let l = NSTextField::labelWithString(&NSString::from_str(text), mtm);
+        l.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
+        l.setMaximumNumberOfLines(1);
+        l.setContentCompressionResistancePriority_forOrientation(low, horizontal);
+        l.setContentHuggingPriority_forOrientation(low, horizontal);
+        l
+    };
+    let title = label("");
+    title.setFont(Some(&NSFont::systemFontOfSize_weight(12.5, unsafe { NSFontWeightSemibold })));
+    let state = NSTextField::labelWithString(&NSString::from_str("Edited"), mtm);
+    state.setHidden(true);
+    let context = label("");
+    context.setFont(Some(&NSFont::systemFontOfSize(10.0)));
+    let title_row = NSStackView::new(mtm);
+    title_row.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
+    title_row.setAlignment(NSLayoutAttribute::CenterY);
+    title_row.setDetachesHiddenViews(true);
+    title_row.addArrangedSubview(&title);
+    let secondary = NSStackView::new(mtm);
+    secondary.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
+    secondary.setAlignment(NSLayoutAttribute::CenterY);
+    secondary.setSpacing(5.0);
+    secondary.setDetachesHiddenViews(true);
+    secondary.addArrangedSubview(&state);
+    secondary.addArrangedSubview(&context);
+    let column = NSStackView::new(mtm);
+    column.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
+    column.setAlignment(NSLayoutAttribute::Leading);
+    column.setSpacing(1.0);
+    column.addArrangedSubview(&title_row);
+    column.addArrangedSubview(&secondary);
+    let host: Retained<Identity> = unsafe { msg_send![Identity::alloc(mtm), initWithFrame: NSRect::ZERO] };
+    let proxy = NSView::new(mtm);
+    proxy.setTranslatesAutoresizingMaskIntoConstraints(false);
+    column.setTranslatesAutoresizingMaskIntoConstraints(false);
+    host.addSubview(&proxy);
+    host.addSubview(&column);
+    host.setContentCompressionResistancePriority_forOrientation(low, horizontal);
+    host.setContentHuggingPriority_forOrientation(low, horizontal);
+    NSLayoutConstraint::activateConstraints(&NSArray::from_retained_slice(&[
+        proxy.leadingAnchor().constraintEqualToAnchor(&host.leadingAnchor()),
+        proxy.centerYAnchor().constraintEqualToAnchor(&host.centerYAnchor()),
+        proxy.widthAnchor().constraintEqualToConstant(18.0),
+        proxy.heightAnchor().constraintEqualToConstant(18.0),
+        column.leadingAnchor().constraintEqualToAnchor_constant(&proxy.trailingAnchor(), 5.0),
+        column.trailingAnchor().constraintLessThanOrEqualToAnchor(&host.trailingAnchor()),
+        column.centerYAnchor().constraintEqualToAnchor(&host.centerYAnchor()),
+    ]));
+    let fitting = host.fittingSize();
+    assert_eq!(fitting.width, 220.0, "{fitting:?}");
+    host.setFrame(rect(0.0, 0.0, fitting.width, 32.0));
+    host.layoutSubtreeIfNeeded();
+    // The window titles them later.
+    title.setStringValue(&NSString::from_str("sample.md"));
+    context.setStringValue(&NSString::from_str("~/Documents/notes"));
+    host.layoutSubtreeIfNeeded();
+    for l in [&title, &context] {
+        let (have, want) = (l.frame().size.width, l.intrinsicContentSize().width);
+        assert!(have >= want - 0.5, "{:?}: {have} wide, not {want}", l.stringValue());
+    }
+}
+
 fn main() {
     let mtm = MainThreadMarker::new().unwrap();
     for (name, test) in [
@@ -370,6 +453,7 @@ fn main() {
         ("window property observation", window_observation),
         ("services, icons and drag masks", services_icons_and_drag_masks),
         ("pinned inside a split pane", pinned_inside_a_split_pane),
+        ("labels in stacks", labels_in_stacks),
     ] {
         autoreleasepool(|_| test(mtm));
         println!("test {name} ... ok");
