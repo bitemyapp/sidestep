@@ -1699,6 +1699,18 @@ fn cg_scroll_events_become_ns_events(_mtm: MainThreadMarker) {
     let ns = NSEvent::eventWithCGEvent(&wheel).expect("an NSEvent");
     assert!(!ns.hasPreciseScrollingDeltas());
     assert!(ns.scrollingDeltaY() < 0.0 && ns.scrollingDeltaX() == 0.0, "{}", ns.scrollingDeltaY());
+
+    // A pixel event made a wheel's: not continuous, and lines set over the
+    // point deltas, which a wheel's scrolling deltas are (Upleft's
+    // synthetic wheel).
+    let made = scroll();
+    let event = Some(&*made);
+    CGEvent::set_integer_value_field(event, F::ScrollWheelEventIsContinuous, 0);
+    CGEvent::set_double_value_field(event, F::ScrollWheelEventPointDeltaAxis1, 3.0);
+    CGEvent::set_integer_value_field(event, F::ScrollWheelEventDeltaAxis1, 3);
+    let ns = NSEvent::eventWithCGEvent(&made).expect("an NSEvent");
+    assert!(!ns.hasPreciseScrollingDeltas());
+    assert!((ns.scrollingDeltaY() - 3.0).abs() < 1e-3, "{}", ns.scrollingDeltaY());
 }
 
 type Test = (&'static str, fn(MainThreadMarker));

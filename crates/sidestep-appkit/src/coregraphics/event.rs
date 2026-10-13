@@ -6,7 +6,8 @@
 //!
 //! An event is its type, location (global, top-left origin), flags,
 //! timestamp (nanoseconds on `NSEvent`'s clock) and its numbered fields,
-//! each kept as it was set: integer or double, read back as either.
+//! each kept as it was set: integer or double, read back as either (a
+//! scroll axis's whole and fixed-point line deltas are one, set together).
 //! Scroll-wheel events made by `CGEventCreateScrollWheelEvent2` fill in the
 //! fields of their unit: pixels make a continuous event with point deltas,
 //! lines an event with line deltas.
@@ -283,7 +284,14 @@ pub extern "C-unwind" fn CGEventGetIntegerValueField(event: Option<&CGEvent>, fi
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn CGEventSetIntegerValueField(event: Option<&CGEvent>, field: CGEventField, value: i64) {
     if let Some(e) = get(event) {
-        e.update(|f| f.set_integer(field, value));
+        e.update(|f| {
+            f.set_integer(field, value);
+            // A scroll's lines, as a whole number and in fixed point, are one
+            // delta: setting one sets the other.
+            if let Some(fixed) = fixed_point_of(field) {
+                f.set_double(fixed, value as f64);
+            }
+        });
     }
 }
 
@@ -295,6 +303,26 @@ pub extern "C-unwind" fn CGEventGetDoubleValueField(event: Option<&CGEvent>, fie
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn CGEventSetDoubleValueField(event: Option<&CGEvent>, field: CGEventField, value: f64) {
     if let Some(e) = get(event) {
-        e.update(|f| f.set_double(field, value));
+        e.update(|f| {
+            f.set_double(field, value);
+            if let Some(lines) = whole_lines_of(field) {
+                f.set_integer(lines, value.round() as i64);
+            }
+        });
     }
+}
+
+/// A scroll axis's whole lines field and its fixed-point twin.
+const LINE_FIELDS: [(CGEventField, CGEventField); 3] = [
+    (CGEventField::ScrollWheelEventDeltaAxis1, CGEventField::ScrollWheelEventFixedPtDeltaAxis1),
+    (CGEventField::ScrollWheelEventDeltaAxis2, CGEventField::ScrollWheelEventFixedPtDeltaAxis2),
+    (CGEventField::ScrollWheelEventDeltaAxis3, CGEventField::ScrollWheelEventFixedPtDeltaAxis3),
+];
+
+fn fixed_point_of(field: CGEventField) -> Option<CGEventField> {
+    LINE_FIELDS.iter().find(|(lines, _)| *lines == field).map(|(_, fixed)| *fixed)
+}
+
+fn whole_lines_of(field: CGEventField) -> Option<CGEventField> {
+    LINE_FIELDS.iter().find(|(_, fixed)| *fixed == field).map(|(lines, _)| *lines)
 }
