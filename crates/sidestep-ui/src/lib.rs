@@ -11,7 +11,9 @@
 //! with what happens; it opens windows, draws them on a [`Canvas`] when
 //! they need it, and lays text out with [`TextLayout`].
 //!
-//! ```no_run
+// On macOS the crate is empty, so the example isn't built there.
+#![cfg_attr(not(target_vendor = "apple"), doc = "```no_run")]
+#![cfg_attr(target_vendor = "apple", doc = "```ignore")]
 //! use sidestep_ui::{App, Canvas, Color, Cx, Font, Handler, TextStyle, WindowId, WindowOptions};
 //! use sidestep_ui::kurbo::{Point, RoundedRect};
 //!
