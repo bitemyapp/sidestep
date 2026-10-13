@@ -958,6 +958,14 @@ impl State {
             return;
         }
         win.sent_limits = Some(limits);
+        if crate::trace::tracing() {
+            eprintln!(
+                "sidestep @{:.1} ms limits: window {window} min {:?} max {:?}",
+                crate::trace::trace_ms(),
+                limits.min,
+                limits.max
+            );
+        }
         let Some(w) = win.toplevel() else { return };
         w.set_min_size((min != (0, 0)).then_some(limits.min));
         w.set_max_size((max != (0, 0)).then_some(limits.max));
@@ -1539,11 +1547,25 @@ impl WindowHandler for State {
             d.set_capabilities(configure.capabilities);
         }
         // The configured size is the window geometry: the title bar and
-        // the content.
+        // the content. A window that can't be resized keeps its own size,
+        // as xdg-shell lets a client outside full screen and maximized:
+        // a tiling compositor offers its tile before the window maps, then
+        // floats it at its own size, as its fixed limits ask. Taking the
+        // tile would make that the window's fixed size.
         let bar = win.titlebar();
-        let width = configure.new_size.0.map_or(win.width, |w| w.get());
-        let height = configure.new_size.1.map_or(win.height, |h| h.get().saturating_sub(bar));
+        let keep = !win.style.resizable && !win.state.fullscreen && !win.state.maximized;
+        let size = if keep { (None, None) } else { configure.new_size };
+        let width = size.0.map_or(win.width, |w| w.get());
+        let height = size.1.map_or(win.height, |h| h.get().saturating_sub(bar));
         let before = win.configured.then_some((win.width, win.height));
+        if crate::trace::tracing() {
+            eprintln!(
+                "sidestep @{:.1} ms configure: window {id} offered {:?} {:?}, took {width}x{height} under a {bar} point title bar",
+                crate::trace::trace_ms(),
+                configure.new_size,
+                configure.state
+            );
+        }
         outputs::learned(self, id, None, configure.suggested_bounds);
         self.apply_limits(id);
         self.resize(id, width, height);

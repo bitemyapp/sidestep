@@ -3,7 +3,8 @@
 //! clipboard, a drag source of the test's own (another Wayland client,
 //! dragging two files from its window onto ours with a virtual pointer),
 //! `swaymsg` adding an output, moving the window to it and changing its
-//! scale, and `wtype` giving the window the keyboard (and so the input
+//! scale, and tiling a window that can't be resized (which keeps its
+//! size), and `wtype` giving the window the keyboard (and so the input
 //! serial the clipboard needs). Linux only, and only under a compositor;
 //! run it under the headless sway:
 //!
@@ -153,6 +154,35 @@ mod linux {
     /// A sway command (in single quotes to the shell).
     fn swaymsg(command: &str) {
         sh(&format!("swaymsg -s \"$(ls \"$XDG_RUNTIME_DIR\"/sway-ipc.*.sock | head -n1)\" -- '{command}' >/dev/null"));
+    }
+
+    /// A window that can't be resized keeps its size when the compositor
+    /// offers it another. sway floats it, as its limits are fixed; tiled,
+    /// it's offered a tile, as Hyprland offers its tile before mapping a
+    /// window, and it keeps its own size rather than taking the tile's.
+    fn fixed_size(app: &NSApplication, mtm: MainThreadMarker) {
+        // SAFETY: a titled window that can't be resized.
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                NSWindow::alloc(mtm),
+                NSRect::new(NSPoint::ZERO, NSSize::new(320.0, 240.0)),
+                NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        // SAFETY: the test keeps its reference.
+        unsafe { window.setReleasedWhenClosed(false) };
+        window.setTitle(&NSString::from_str("Fixed size"));
+        window.makeKeyAndOrderFront(None);
+        pump_for(app, Duration::from_millis(500));
+        let size = || window.contentView().expect("a content view").frame().size;
+        assert_eq!(size(), NSSize::new(320.0, 240.0));
+        swaymsg("[title=\"Fixed size\"] floating disable");
+        pump_for(app, Duration::from_millis(500));
+        assert_eq!(size(), NSSize::new(320.0, 240.0), "it keeps its size in a tile");
+        window.close();
+        pump_for(app, Duration::from_millis(300));
     }
 
     fn texts(types: Option<Retained<NSArray<NSString>>>) -> Vec<String> {
@@ -819,10 +849,11 @@ mod linux {
         };
         // The screens last: moving the window to another output leaves it
         // without the keyboard.
-        let tests: [(&str, &dyn Fn()); 4] = [
+        let tests: [(&str, &dyn Fn()); 5] = [
             ("foreign_clipboard", &|| clipboard(foreign_clipboard)),
             ("our_clipboard", &|| clipboard(our_clipboard)),
             ("drag_and_drop", &|| drag_and_drop(&app, &window, mtm)),
+            ("fixed_size_windows_keep_their_size", &|| fixed_size(&app, mtm)),
             ("screens", &|| screens(&app, &window, mtm)),
         ];
         if has_wtype {
