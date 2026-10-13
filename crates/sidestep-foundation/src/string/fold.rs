@@ -17,8 +17,8 @@
 
 use icu_casemap::CaseMapperBorrowed;
 use icu_normalizer::{ComposingNormalizerBorrowed, DecomposingNormalizerBorrowed};
-use icu_properties::CodePointMapData;
-use icu_properties::props::{GeneralCategory, GeneralCategoryGroup, GraphemeClusterBreak};
+use icu_properties::props::{ExtendedPictographic, GeneralCategory, GeneralCategoryGroup, GraphemeClusterBreak};
+use icu_properties::{CodePointMapData, CodePointSetData};
 use icu_segmenter::GraphemeClusterSegmenter;
 
 use super::index::Text;
@@ -170,6 +170,19 @@ pub(crate) fn cluster_bounds(s: &str) -> Vec<usize> {
             && b[at + 1] == b'\n'
         {
             out.push(at + 1);
+        }
+        // A joiner (U+200C, U+200D) joins only an emoji sequence: after
+        // anything else it is a sequence of its own, as only marks join a
+        // character in Foundation's sequences.
+        if let Some(&next) = icu.get(k + 1)
+            && let Some(first) = s[at..next].chars().next()
+            && !CodePointSetData::new::<ExtendedPictographic>().contains(first)
+        {
+            for (offset, c) in s[at..next].char_indices().skip(1) {
+                if matches!(c, '\u{200C}' | '\u{200D}') && out.last() != Some(&(at + offset)) {
+                    out.push(at + offset);
+                }
+            }
         }
     }
     out
