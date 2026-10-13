@@ -1,8 +1,13 @@
 # Upleft through objc2
 
-This runner archives Upleft's committed HEAD, applies Linux platform adapters,
-and links it to this checkout of Sidestep. It does not edit Upleft, its vendor
-submodules, or its test assertions. All framework calls remain objc2 calls.
+To work on Upleft for Linux with Cargo directly, use Upleft's `linux` branch,
+which carries these adapters as commits and names this checkout as a
+dependency (`../sidestep`); its `docs/LINUX.md` says how to set it up.
+
+This runner instead archives Upleft's committed HEAD, applies Linux platform
+adapters, and links it to this checkout of Sidestep, for checking an unmodified
+Upleft revision. It does not edit Upleft, its vendor submodules, or its test
+assertions. All framework calls remain objc2 calls.
 
 It needs Sidestep's normal Linux build dependencies, Python 3.12 or newer,
 Git, Cargo, and Upleft's initialized vendor submodules. Run from the Sidestep
