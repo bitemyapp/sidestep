@@ -56,6 +56,7 @@ pub(crate) mod code {
     pub(crate) const FILE_READ_UNKNOWN: isize = 256;
     pub(crate) const FILE_READ_NO_PERMISSION: isize = 257;
     pub(crate) const FILE_READ_INVALID_FILE_NAME: isize = 258;
+    pub(crate) const FILE_READ_CORRUPT_FILE: isize = 259;
     pub(crate) const FILE_READ_NO_SUCH_FILE: isize = 260;
     pub(crate) const FILE_READ_UNSUPPORTED_SCHEME: isize = 262;
     pub(crate) const FILE_READ_TOO_LARGE: isize = 263;
@@ -303,6 +304,14 @@ impl Cocoa {
                     "The file couldn\u{2019}t be opened because the file name is incorrect.",
                 ),
                 Some("The file name is invalid."),
+                None,
+            ),
+            code::FILE_READ_CORRUPT_FILE => (
+                file(
+                    "The file {} couldn\u{2019}t be opened because it isn\u{2019}t in the correct format.",
+                    "The file couldn\u{2019}t be opened because it isn\u{2019}t in the correct format.",
+                ),
+                Some("The file isn\u{2019}t in the correct format."),
                 None,
             ),
             code::FILE_READ_NO_SUCH_FILE => (

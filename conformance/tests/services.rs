@@ -1241,6 +1241,12 @@ fn error_constants_and_texts() {
             &[(key(NSFilePathErrorKey), ns("/tmp/nope.txt").into())]
         ))));
         assert!(text_of(&a).contains("nope.txt"), "file errors name the file: {}", text_of(&a));
+        // A file in no format it can be read in, named by nothing (Upleft's
+        // probe of macOS 26: undecodable UTF-8).
+        assert_eq!(
+            text_of(&error("NSCocoaErrorDomain", 259, &[])),
+            "The file couldn\u{2019}t be opened because it isn\u{2019}t in the correct format."
+        );
     }
 }
 
