@@ -2346,8 +2346,13 @@ impl NSWindowImpl {
 fn set_content_view(window: &NSWindowImpl, view: Option<&NSView>) {
     let old = window.ivars().content.replace(view.map(|v| v.retain()));
     if let Some(old) = old {
-        // SAFETY: the window no longer holds the view.
-        unsafe { old.setNextResponder(None) };
+        // A view the program has already put in another view (often the
+        // new content view) keeps the link its new superview gave it (to its
+        // view controller, when it has one).
+        if views::superview_of(views::imp(&old)).is_none() {
+            // SAFETY: the window no longer holds the view.
+            unsafe { old.setNextResponder(None) };
+        }
         views::set_window(views::imp(&old), None);
     }
     if let Some(view) = view {
