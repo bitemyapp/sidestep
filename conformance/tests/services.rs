@@ -535,6 +535,10 @@ fn url_components_of_strings() {
         assert!(made.as_ref().is_none_or(|u| u.scheme().is_none()), "{string:?}");
     }
     assert!(NSURL::URLWithString(&ns("http://host:abc/p")).is_none());
+    // Encoding makes no host of one holding a space (Upleft's probe of
+    // macOS 26: no URL, or one without a host).
+    let spaced = NSURL::URLWithString(&ns("https://exa mple.com/a"));
+    assert!(spaced.as_ref().is_none_or(|u| u.host().is_none()), "{spaced:?}");
 }
 
 #[test]

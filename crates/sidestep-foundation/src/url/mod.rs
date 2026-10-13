@@ -786,11 +786,11 @@ fn init_file(
 }
 
 /// The string a URL keeps: encoded, or `None` if it needed encoding and
-/// mustn't be.
+/// mustn't be, or can't be (a host with a space).
 pub(crate) fn prepare(string: &str, encode: bool) -> Option<String> {
     if parse::is_valid(string) {
         Some(string.to_string())
-    } else if encode {
+    } else if encode && !parse::host_needs_encoding(string) {
         Some(parse::encode_invalid(string))
     } else {
         None
