@@ -7,9 +7,10 @@
 //! filling (evenly or in proportion to intrinsic sizes), or with equal gaps
 //! or equally spaced centers. Across it, the alignment places each view,
 //! and clipping resistance keeps views inside. The stack hugs its content
-//! just below a view's default hugging, so a stack sized by its content
-//! fits it and a view in a stack that is too big doesn't stretch unless it
-//! hugs less.
+//! just below a view's default hugging (its size shrinks to it; in gravity
+//! areas its edges and the gaps between areas draw in too), so a stack
+//! sized by its content fits it and a view in a stack that is too big
+//! doesn't stretch unless it hugs less, or has no intrinsic size.
 //!
 //! Hidden views drop out when `detachesHiddenViews` (the default), and a
 //! view whose visibility priority is `NotVisible` is hidden and dropped.
@@ -664,6 +665,16 @@ pub(crate) fn build(plan: &Plan, stack: [Variable; 4], views: &[[Variable; 4]]) 
             let (a, b) = (present[0][0], present[present.len() - 1][present[present.len() - 1].len() - 1]);
             add(pos(a) - start_inset, Ge, clip);
             add(end(b) - size + end_inset, Le, clip);
+            // The stack hugs its content: its edges and the gaps between
+            // areas draw in as far as the spacing. A stack held larger
+            // stretches a view that hugs less (one with no intrinsic size).
+            let hug = Weight::Priority(plan.hugging[0]);
+            add(pos(a) - start_inset, Eq, hug);
+            add(end(b) - size + end_inset, Eq, hug);
+            for pair in present.windows(2) {
+                let (a, b) = (pair[0][pair[0].len() - 1], pair[1][0]);
+                add(pos(b) - end(a) - plan.spacing, Eq, hug);
+            }
             if let Some(&a) = groups[0].first() {
                 add(pos(a) - start_inset, Eq, required);
             }
