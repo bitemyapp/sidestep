@@ -742,6 +742,28 @@ mod linux {
         close(&w);
     }
 
+    /// A TextKit 2 text view draws the text its wider container lays out
+    /// past its edge (views don't clip), so the layer of the clip view it
+    /// is the document of reaches as far.
+    fn layers_take_in_text_past_the_document(mtm: MainThreadMarker) {
+        let sv = NSScrollView::initWithFrame(NSScrollView::alloc(mtm), rect(10.0, 20.0, 300.0, 150.0));
+        sv.setHasVerticalScroller(true);
+        let tv = NSTextView::initWithFrame(NSTextView::alloc(mtm), rect(0.0, 0.0, 100.0, 1000.0));
+        tv.setHorizontallyResizable(false);
+        tv.setVerticallyResizable(false);
+        // SAFETY: the view's own container.
+        let c = unsafe { tv.textContainer() }.expect("a container");
+        c.setWidthTracksTextView(false);
+        c.setSize(NSSize::new(250.0, 1.0e7));
+        sv.setDocumentView(Some(&tv));
+        tv.setFrameSize(NSSize::new(100.0, 1000.0));
+        let (w, _, _) = shown(mtm, &[&sv]);
+        let layers = testing::scroll_layers(&w);
+        let l = layer_of(&layers, &sv).expect("a layer");
+        assert_eq!(l.extent, [0.0, 0.0, 250.0, 1000.0]);
+        close(&w);
+    }
+
     fn growing_documents_draw_what_they_gain(mtm: MainThreadMarker) {
         // A document that draws nothing itself, one that draws (which
         // macOS has redraw whole on every resize), and one that draws but
@@ -926,6 +948,7 @@ mod linux {
             ("hidden_overlay_scrollers_let_clicks_through", hidden_overlay_scrollers_let_clicks_through),
             ("page_actions_reach_the_scroll_view", page_actions_reach_the_scroll_view),
             ("damage_goes_where_it_is_drawn", damage_goes_where_it_is_drawn),
+            ("layers_take_in_text_past_the_document", layers_take_in_text_past_the_document),
             ("growing_documents_draw_what_they_gain", growing_documents_draw_what_they_gain),
             ("layers_are_capped", layers_are_capped),
             ("tile_memory_is_capped", tile_memory_is_capped),

@@ -601,7 +601,9 @@ fn plan(window: &NSWindowImpl) -> Vec<Plan> {
         for sub in views::subviews(c).iter() {
             let s = views::imp(sub);
             if !views::is_hidden(s) {
-                let r = views::step(s, flipped, views::frame(s)).then(&lxf).rect(views::bounds(s));
+                // As far as the document draws: past its bounds where it
+                // doesn't clip (a text view's text, wider than it).
+                let r = views::step(s, flipped, views::frame(s)).then(&lxf).rect(views::reach(s));
                 extent = Some(extent.map_or(r, |e| e.union(&r)));
             }
         }
