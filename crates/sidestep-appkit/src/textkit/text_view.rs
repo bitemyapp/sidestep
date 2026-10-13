@@ -496,7 +496,7 @@ define_class!(
             self.track_frame(self.as_view().frame().size);
             self.size_to_text();
             // Its fragments reach from where the container sits.
-            crate::views::reach_changed(crate::views::imp(self.as_view()), false);
+            content_reach_changed(self.as_view());
             self.as_view().setNeedsDisplay(true);
         }
 
@@ -1669,6 +1669,15 @@ pub(crate) fn content_reach(view: &AnyObject) -> Option<NSRect> {
     Some(NSRect::new(NSPoint::new(origin.x, bounds.origin.y), NSSize::new(container.width, bounds.size.height)))
 }
 
+/// Where a text view's fragments may draw changed (its container's size
+/// or its inset): the overflows that take them in, and its layer's canvas,
+/// follow.
+pub(crate) fn content_reach_changed(view: &NSView) {
+    let v = crate::views::imp(view);
+    crate::views::reach_changed(v, false);
+    crate::quartzcore::backing::extent_changed(v);
+}
+
 /// Draw a TextKit 2 text view's fragments, marked text and caret, over
 /// `dirty` (the view's points), after its `drawRect:`.
 pub(crate) fn draw_content(view: &AnyObject, dirty: NSRect) {
@@ -2434,6 +2443,14 @@ impl NSTextViewImpl {
                 NSPoint::new(b.origin.x, top),
                 NSSize::new(b.size.width, bottom - top),
             ));
+            // Fragments past the bounds, which AppKit's fragment views mark
+            // themselves (`setNeedsDisplayInRect:` stops at the bounds).
+            if let Some(r) = content_reach(view)
+                && (r.origin.x < b.origin.x || r.origin.x + r.size.width > b.origin.x + b.size.width)
+            {
+                let rows = NSRect::new(NSPoint::new(r.origin.x, top), NSSize::new(r.size.width, bottom - top));
+                crate::views::invalidate(crate::views::imp(view), rows);
+            }
         }
     }
 

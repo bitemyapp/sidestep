@@ -436,6 +436,31 @@ fn drawing(mtm: MainThreadMarker) {
     assert!(dark > 5, "text drawn: {dark} dark pixels");
 }
 
+/// Views don't clip to their bounds, so the text a container wider than
+/// its text view lays out shows past the view's edge, in its superview.
+fn drawing_past_the_view(mtm: MainThreadMarker) {
+    let (cs, _tlm, c) = network(280.0);
+    cs.textStorage().expect("a storage").setAttributedString(&objc2_foundation::NSAttributedString::from_nsstring(
+        &NSString::from_str("MMMM MMMM MMMM MMMM MMMM MMMM MMMM MMMM"),
+    ));
+    let tv = NSTextView::initWithFrame_textContainer(NSTextView::alloc(mtm), rect(0.0, 0.0, 100.0, 40.0), Some(&c));
+    tv.setDrawsBackground(false);
+    tv.setTextColor(Some(&objc2_app_kit::NSColor::blackColor()));
+    tv.setFont(Some(&NSFont::systemFontOfSize(14.0)));
+    let host = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, 300.0, 40.0));
+    host.addSubview(&tv);
+    let rep = common::snapshot(&host, 1.0);
+    // Dark pixels well right of the view's edge, where the first line goes on.
+    let dark = (120..260)
+        .flat_map(|x| (0..40).map(move |y| (x, y)))
+        .filter(|&(x, y)| {
+            let p = common::pixel(&rep, x, y);
+            p[3] > 0 && p[0] < 128 && p[1] < 128 && p[2] < 128
+        })
+        .count();
+    assert!(dark > 20, "text drawn past the view: {dark} dark pixels");
+}
+
 /// A fragment whose rendering surface reaches below its frame draws for
 /// a rect that meets only that part of it.
 fn rendering_surface(mtm: MainThreadMarker) {
@@ -619,6 +644,7 @@ fn main() {
         ("viewport_bounds", viewport_bounds),
         ("viewport_layout", viewport_layout),
         ("drawing", drawing),
+        ("drawing_past_the_view", drawing_past_the_view),
         ("rendering_surface", rendering_surface),
         ("viewport_past_the_view", viewport_past_the_view),
         ("size_to_fit", size_to_fit),

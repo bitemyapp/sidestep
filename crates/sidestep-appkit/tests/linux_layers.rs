@@ -33,7 +33,7 @@ mod linux {
     use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
     use objc2_app_kit::{
         NSAnimatablePropertyContainer, NSAnimationContext, NSAppearance, NSAppearanceNameAqua, NSApplication,
-        NSBackingStoreType, NSColor, NSRectFill, NSView, NSWindow, NSWindowStyleMask,
+        NSBackingStoreType, NSColor, NSFont, NSRectFill, NSTextView, NSView, NSWindow, NSWindowStyleMask,
     };
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
     use objc2_core_graphics::CGColor;
@@ -635,6 +635,44 @@ mod linux {
         testing::settle();
     }
 
+    /// A TextKit 2 text view doesn't clip: what a container wider than it
+    /// lays out shows past its edge, in its superview's layer (AppKit draws
+    /// the fragments in views of their own, which don't clip either).
+    fn text_shows_past_its_view(mtm: MainThreadMarker) {
+        let (w, painter) = shown(mtm);
+        let tv = NSTextView::initWithFrame(NSTextView::alloc(mtm), rect(10.0, 10.0, 60.0, 40.0));
+        // SAFETY: the view's own container.
+        let c = unsafe { tv.textContainer() }.expect("a container");
+        c.setWidthTracksTextView(false);
+        c.setSize(NSSize::new(180.0, 1.0e7));
+        tv.setDrawsBackground(false);
+        tv.setTextColor(Some(&NSColor::blackColor()));
+        tv.setFont(Some(&NSFont::systemFontOfSize(14.0)));
+        tv.setString(&NSString::from_str("MMMM MMMM MMMM MMMM MMMM MMMM"));
+        painter.addSubview(&tv);
+        show(&w);
+        // Black text well right of the view's edge (x 70), over the red.
+        let past = |w: &NSWindow| {
+            let (width, _, pixels) = testing::window_pixels(w).expect("captured pixels");
+            (90..180)
+                .flat_map(|x| (40..100).map(move |y| (x, y)))
+                .filter(|&(x, y)| {
+                    let [r, g, b, _] = pixels[(y * width + x) as usize];
+                    r < 128 && g < 128 && b < 128
+                })
+                .count()
+        };
+        let dark = past(&w);
+        assert!(dark > 20, "text past the view: {dark} dark pixels");
+        // An edit redraws there too.
+        tv.setString(&NSString::from_str(""));
+        show(&w);
+        assert_eq!(past(&w), 0, "the text past the view is gone");
+        tv.removeFromSuperview();
+        w.close();
+        testing::settle();
+    }
+
     fn kept_animations_end_once(mtm: MainThreadMarker) {
         let (w, painter) = shown(mtm);
         let root = painter.layer().expect("a layer");
@@ -812,6 +850,7 @@ mod linux {
             ("opacity_and_transitions", opacity_and_transitions),
             ("masks_hide_what_they_leave_out", masks_hide_what_they_leave_out),
             ("views_update_their_layers", views_update_their_layers),
+            ("text_shows_past_its_view", text_shows_past_its_view),
             ("kept_animations_end_once", kept_animations_end_once),
             ("still_layers_want_no_frames", still_layers_want_no_frames),
             ("layers_and_views_go", layers_and_views_go),

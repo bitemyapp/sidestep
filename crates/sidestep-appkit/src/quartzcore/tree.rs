@@ -735,7 +735,11 @@ impl Compositor {
         let mut props = l.props.clone();
         present(&mut props, &l.anims, local);
         let m = compose(&props.to_superlayer(), parent);
-        let mut bx = own_box(&props, &m, parent);
+        let canvas = match &l.content {
+            Content::Canvas(c) => Some(c.rect),
+            _ => None,
+        };
+        let mut bx = own_box(&props, canvas, &m, parent);
         let transition = l.transitions.iter().rev().find_map(|(anim, _)| {
             l.anims.iter().find(|a| a.id == *anim).and_then(|spec| transition_progress(spec, local))
         });
@@ -784,10 +788,16 @@ impl Compositor {
     }
 }
 
-/// The box a layer draws in itself (target points): its bounds, a shape
-/// layer's path and stroke, and its shadow.
-fn own_box(p: &Props, m: &[f64; 6], parent: &[f64; 6]) -> Rect {
+/// The box a layer draws in itself (target points): its bounds, a view's
+/// canvas (a text view's reaches past them), a shape layer's path and
+/// stroke, and its shadow.
+fn own_box(p: &Props, canvas: Option<[f64; 4]>, m: &[f64; 6], parent: &[f64; 6]) -> Rect {
     let mut r = p.bounds;
+    if let Some(c) = canvas {
+        let (x0, y0) = (r[0].min(c[0]), r[1].min(c[1]));
+        let (x1, y1) = ((r[0] + r[2]).max(c[0] + c[2]), (r[1] + r[3]).max(c[1] + c[3]));
+        r = [x0, y0, x1 - x0, y1 - y0];
+    }
     if let Kind::Shape(s) = &p.kind
         && let Some(shape) = &s.path
         && let Some(b) = crate::path::tight_bounds(&shape.path)
