@@ -14,7 +14,8 @@
 //! Environment variables win over `$XDG_CONFIG_HOME/user-dirs.dirs`, which
 //! is read once, on first use; relative values are ignored, as the XDG
 //! specification says. Other directories have no Linux counterpart and
-//! give no paths.
+//! give no paths. `$CFFIXED_USER_HOME`, as on macOS, moves the home and
+//! every user folder with it: the per-user XDG variables are ignored then.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -163,9 +164,26 @@ pub(crate) fn parse_user_dirs(text: &str, home: &Path) -> Vec<(String, PathBuf)>
         .collect()
 }
 
-/// The current user's home: `$HOME` when it is absolute, else the
-/// password database's entry, else "/".
+/// `$CFFIXED_USER_HOME`, when absolute: macOS's override of the user's home
+/// for Foundation, which tests set to sandbox themselves.
+fn fixed_home() -> Option<PathBuf> {
+    std::env::var_os("CFFIXED_USER_HOME").map(PathBuf::from).filter(|p| p.is_absolute())
+}
+
+/// A variable as the resolver reads it. With a fixed home, every user
+/// folder follows it, so the per-user XDG folders, which name the real
+/// home's, don't count; the system's (`XDG_DATA_DIRS`) still do.
+fn user_var(name: &str, fixed: bool, var: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let per_user = name.starts_with("XDG_") && (name.ends_with("_HOME") || name.ends_with("_DIR"));
+    if fixed && per_user { None } else { var(name) }
+}
+
+/// The current user's home: `$CFFIXED_USER_HOME` or `$HOME` when absolute,
+/// else the password database's entry, else "/".
 pub(crate) fn home() -> PathBuf {
+    if let Some(home) = fixed_home() {
+        return home;
+    }
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from).filter(|p| p.is_absolute()) {
         return home;
     }
@@ -232,7 +250,8 @@ pub(crate) fn current_user() -> Option<&'static Passwd> {
 
 /// `$XDG_CONFIG_HOME`, or `~/.config`.
 pub(crate) fn config_home() -> PathBuf {
-    let var = |name: &str| std::env::var(name).ok();
+    let fixed = fixed_home().is_some();
+    let var = |name: &str| user_var(name, fixed, |n| std::env::var(n).ok());
     let no_user_dirs = |_: &Path| Vec::new();
     Env { var: &var, home: home(), user_dirs: &no_user_dirs }.config_home()
 }
@@ -247,7 +266,8 @@ pub(crate) fn temporary() -> PathBuf {
 pub(crate) fn search_path(directory: usize, mask: usize) -> Vec<PathBuf> {
     static USER_DIRS: OnceLock<Vec<(String, PathBuf)>> = OnceLock::new();
     let home = home();
-    let var = |name: &str| std::env::var(name).ok();
+    let fixed = fixed_home().is_some();
+    let var = |name: &str| user_var(name, fixed, |n| std::env::var(n).ok());
     let user_dirs = |file: &Path| {
         USER_DIRS
             .get_or_init(|| std::fs::read_to_string(file).map(|t| parse_user_dirs(&t, &home)).unwrap_or_default())
@@ -269,6 +289,16 @@ mod tests {
             assert!(file.ends_with("user-dirs.dirs"));
             parse_user_dirs(text, Path::new("/home/u"))
         }
+    }
+
+    #[test]
+    fn a_fixed_home_hides_the_user_folders() {
+        let env =
+            vars(&[("XDG_DATA_HOME", "/real/data"), ("XDG_DATA_DIRS", "/usr/share"), ("XDG_MUSIC_DIR", "/real/m")]);
+        assert_eq!(user_var("XDG_DATA_HOME", true, &env), None);
+        assert_eq!(user_var("XDG_MUSIC_DIR", true, &env), None);
+        assert_eq!(user_var("XDG_DATA_DIRS", true, &env).as_deref(), Some("/usr/share"));
+        assert_eq!(user_var("XDG_DATA_HOME", false, &env).as_deref(), Some("/real/data"));
     }
 
     #[test]
