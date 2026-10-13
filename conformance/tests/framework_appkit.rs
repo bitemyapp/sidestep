@@ -311,6 +311,52 @@ fn services_icons_and_drag_masks(mtm: MainThreadMarker) {
     assert!(ask(None, Some(&plain)).is_none(), "nothing comes back into a view that can't be edited");
 }
 
+/// A split view controller as a window's content view controller, its split
+/// view then moved into a new content view, and constraints pinning a view
+/// to its pane's edges: the pane fills the split view, and the pinned view
+/// its pane, once the window lays out. (Upleft's document window.)
+fn pinned_inside_a_split_pane(mtm: MainThreadMarker) {
+    let window = window(mtm);
+    let pane = NSView::initWithFrame(NSView::alloc(mtm), NSRect::ZERO);
+    let child = NSViewController::new(mtm);
+    child.setView(&pane);
+    let split = NSSplitViewController::new(mtm);
+    split.addSplitViewItem(&NSSplitViewItem::splitViewItemWithViewController(&child));
+    window.setContentViewController(Some(&split));
+    // The split view moves into a stage that constraints pin it to, so the
+    // solver sizes it and it sizes its pane.
+    let stage = NSView::new(mtm);
+    let split_view = split.view();
+    split_view.setTranslatesAutoresizingMaskIntoConstraints(false);
+    stage.addSubview(&split_view);
+    NSLayoutConstraint::activateConstraints(&NSArray::from_retained_slice(&[
+        split_view.leadingAnchor().constraintEqualToAnchor(&stage.leadingAnchor()),
+        split_view.trailingAnchor().constraintEqualToAnchor(&stage.trailingAnchor()),
+        split_view.topAnchor().constraintEqualToAnchor(&stage.topAnchor()),
+        split_view.bottomAnchor().constraintEqualToAnchor(&stage.bottomAnchor()),
+    ]));
+    let holder = NSViewController::new(mtm);
+    holder.setView(&stage);
+    holder.addChildViewController(&split);
+    window.setContentViewController(Some(&holder));
+    let pinned = NSView::initWithFrame(NSView::alloc(mtm), NSRect::ZERO);
+    pinned.setTranslatesAutoresizingMaskIntoConstraints(false);
+    pane.addSubview(&pinned);
+    NSLayoutConstraint::activateConstraints(&NSArray::from_retained_slice(&[
+        pinned.leadingAnchor().constraintEqualToAnchor(&pane.leadingAnchor()),
+        pinned.trailingAnchor().constraintEqualToAnchor(&pane.trailingAnchor()),
+        pinned.topAnchor().constraintEqualToAnchor_constant(&pane.topAnchor(), 40.0),
+        pinned.bottomAnchor().constraintEqualToAnchor(&pane.bottomAnchor()),
+    ]));
+    for size in [NSSize::new(400.0, 300.0), NSSize::new(500.0, 350.0)] {
+        window.setContentSize(size);
+        window.layoutIfNeeded();
+        assert_eq!(pane.frame().size, size, "the pane fills the split view");
+        let expected = NSSize::new(size.width, size.height - 40.0);
+        assert_eq!(pinned.frame().size, expected, "pinned in a {size:?} pane: {:?}", pinned.frame());
+    }
+}
+
 fn main() {
     let mtm = MainThreadMarker::new().unwrap();
     for (name, test) in [
@@ -323,6 +369,7 @@ fn main() {
         ("custom sharing service", sharing),
         ("window property observation", window_observation),
         ("services, icons and drag masks", services_icons_and_drag_masks),
+        ("pinned inside a split pane", pinned_inside_a_split_pane),
     ] {
         autoreleasepool(|_| test(mtm));
         println!("test {name} ... ok");

@@ -620,7 +620,7 @@ pub(crate) fn autoresize(view: &NSViewImpl, frame: NSRect, set: impl FnOnce()) {
 /// translates its mask, or the root, has its generated constraints made
 /// again from its new frame.
 pub(crate) fn frame_changed(view: &NSViewImpl) {
-    if APPLYING.get() || !view_layout::engine_hint(view) {
+    if APPLYING.get() == Some(view as *const NSViewImpl) || !view_layout::engine_hint(view) {
         return;
     }
     let root = root_of(view);
@@ -657,11 +657,13 @@ pub(crate) fn intrinsic_size_changed(view: &NSViewImpl) {
     ask_for_pass(root);
 }
 
-thread_local!(static APPLYING: Cell<bool> = const { Cell::new(false) });
+thread_local!(static APPLYING: Cell<Option<*const NSViewImpl>> = const { Cell::new(None) });
 
-/// Set frames the solver found, telling `frame_changed` they are its own.
-fn apply(f: impl FnOnce()) {
-    let before = APPLYING.replace(true);
+/// Set the frame the solver found for `view`, telling `frame_changed` it
+/// is the solver's own. Frames that change in turn (a split view sizing its
+/// panes as it resizes) are their views' own, which the solver must learn.
+fn apply(view: &NSViewImpl, f: impl FnOnce()) {
+    let before = APPLYING.replace(Some(view as *const NSViewImpl));
     f();
     APPLYING.set(before);
 }
@@ -714,7 +716,7 @@ pub(crate) fn solve(view: &NSViewImpl) {
     if let Some(size) = size {
         let size = engine::round_frame(NSRect::new(NSPoint::ZERO, size), 1.0).size;
         if views::frame(root).size != size {
-            apply(|| views::as_view(root).setFrameSize(size));
+            apply(root, || views::as_view(root).setFrameSize(size));
         }
     }
 }
@@ -743,13 +745,11 @@ pub(crate) fn layout_subviews(view: &NSViewImpl) {
     }) else {
         return;
     };
-    apply(|| {
-        for (sub, frame) in frames {
-            if sub.frame() != frame {
-                sub.setFrame(frame);
-            }
+    for (sub, frame) in frames {
+        if sub.frame() != frame {
+            apply(views::imp(&sub), || sub.setFrame(frame));
         }
-    });
+    }
 }
 
 // Guides.
