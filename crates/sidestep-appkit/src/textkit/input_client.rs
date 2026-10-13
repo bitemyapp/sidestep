@@ -6,9 +6,12 @@
 //! Text being composed lives in the text storage, in the typing
 //! attributes, drawn underlined; the view remembers its range. Each update
 //! from the input method (`setMarkedText:…`, `insertText:replacementRange:`)
-//! is one transaction. Composing doesn't register undo on its way: the
-//! text it replaced is kept aside, and committing registers one action
-//! that puts that back, so undoing a composition undoes it whole.
+//! is one transaction. A composition registers one undo action as it
+//! begins, as AppKit's does (inside the group the input method's event or
+//! the program opened: programs that don't group by event open one around
+//! `setMarkedText:…` and none around `unmarkText`), which puts back the text
+//! it replaced and grows with it; committing registers nothing more, so
+//! undoing a composition undoes it whole.
 //!
 //! `doCommandBySelector:` offers the command to the delegate's
 //! `textView:doCommandBySelector:` first (a field editor's delegate, the
@@ -171,10 +174,11 @@ fn insert(v: &NSTextViewImpl, text: &AnyObject, range: NSRange) {
     };
     super::field_editor::before_insert(v);
     match (marked, composition(v)) {
-        (Some(_), Some(original)) => {
-            // One undo for the whole composition.
-            super::edit::user_replace_quietly(v, target, &string);
-            super::edit::register_composition(v, target.location, string.length(), original);
+        (Some(_), Some(_)) => {
+            // One undo for the whole composition, registered when it began.
+            if super::edit::user_replace_quietly(v, target, &string) {
+                super::edit::grow_composition(v, string.length() as isize - target.length as isize);
+            }
         }
         _ => {
             let before = v.selection();
@@ -218,6 +222,16 @@ fn mark(v: &NSTextViewImpl, text: &AnyObject, selected: NSRange, replacement: NS
         return;
     }
     let len = string.length();
+    // The composition's undo is registered as it begins, as AppKit does (in
+    // the undo group the input method's event, or the program, opened), and
+    // covers each change after; committing registers nothing more.
+    match (marked, composition(v)) {
+        (None, Some(original)) if len > 0 || original.length() > 0 => {
+            super::edit::register_composition(v, target.location, len, original)
+        }
+        (Some(m), _) => super::edit::grow_composition(v, len as isize - m.length as isize),
+        (None, _) => {}
+    }
     v.ivars().marked.set((len > 0).then(|| NSRange::new(target.location, len)));
     let loc = (target.location + selected.location).min(target.location + len);
     let sel = NSRange::new(loc, selected.length.min(target.location + len - loc));
@@ -255,13 +269,10 @@ fn set_composition(v: &NSTextViewImpl, original: Option<Retained<NSAttributedStr
     });
 }
 
-/// `unmarkText`: the marked text stays as it is, committed.
+/// `unmarkText`: the marked text stays as it is, committed (its undo was
+/// registered as composing began).
 pub(crate) fn unmark(v: &NSTextViewImpl) {
-    let marked = v.marked_range();
     v.ivars().marked.set(None);
-    if let (Some(m), Some(original)) = (marked, composition(v)) {
-        super::edit::register_composition(v, m.location, m.length, original);
-    }
     set_composition(v, None);
     v.as_view().setNeedsDisplay(true);
 }
