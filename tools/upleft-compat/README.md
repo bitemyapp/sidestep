@@ -77,19 +77,22 @@ On Upleft `6d465855c9c9121594dcd02b5e193b5765485fe5`:
   pixels, PDF saving, toolbars, safe areas, gestures, sharing and window KVO.
   See [the implementation limits](../../docs/abi.md#framework-classes-used-by-upleft).
 
-Upleft's own tests, run through this runner on NixOS against this branch
-(`test -p upleft-app -p upleft`, and the library crates `upleft-core`,
+Upleft's own tests on NixOS against this branch, built with Cargo on Upleft's
+`linux` branch (the same code this runner builds) on the null backend: the
+app (`-p upleft-app -p upleft`) and the library crates (`upleft-core`,
 `-render`, `-markup`, `-swift-text`, `-mermaid`, `-elk`, `-math`,
-`-foundation`, `-cli` and `-spotlight-metadata`):
+`-foundation`, `-cli` and `-spotlight-metadata`). Every test binary runs to
+the end, and 1838 of 1852 tests pass. The 14 that fail:
 
-- The app: 568 of 570 pass. The two failures are platform differences: a file
-  URL's path comes back decomposed (NFD) on macOS, and App Intents need
-  Apple's SDK.
-- The libraries: 1244 of 1256 pass. Failing: URL normalization (the same
-  platform difference, in four tests), sentence tokenization that splits
-  after "Dr." (two), four math typesetting positions, rendered-link hit
-  testing, and the streamed-message comparison, which now differs only in
-  Upleft's own path token value, described by address.
+- platform differences: a file URL's path is composed (NFC) here and
+  decomposed (NFD) on macOS (five tests), and App Intents need Apple's SDK
+  (one);
+- sentence tokenization, which splits after "Dr." (two), in the Linux
+  adaptation rather than Sidestep;
+- four math typesetting positions;
+- rendered-link hit testing;
+- the streamed-message comparison, which differs only in Upleft's own path
+  token value, described by its address.
 
 The app also runs under a headless compositor, opening a document from the
 command line and rendering Markdown, with the text past a narrow text view's
