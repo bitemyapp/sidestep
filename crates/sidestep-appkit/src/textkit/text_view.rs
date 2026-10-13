@@ -495,6 +495,8 @@ define_class!(
             self.ivars().inset.set(inset);
             self.track_frame(self.as_view().frame().size);
             self.size_to_text();
+            // Its fragments reach from where the container sits.
+            crate::views::reach_changed(crate::views::imp(self.as_view()), false);
             self.as_view().setNeedsDisplay(true);
         }
 
@@ -1649,6 +1651,22 @@ static ANY_TEXT_KIT_2: std::sync::atomic::AtomicBool = std::sync::atomic::Atomic
 /// above what its `drawRect:` draws.
 pub(crate) fn draws_text_kit_2(view: &AnyObject) -> bool {
     ANY_TEXT_KIT_2.load(std::sync::atomic::Ordering::Relaxed) && as_impl(view).is_some_and(|tv| tv.tlm().is_some())
+}
+
+/// Where a TextKit 2 text view's fragments may draw, in its coordinates:
+/// its text container's rectangle across, as tall as the view. AppKit
+/// draws fragments in views of their own, so text laid out wider than its
+/// text view shows past it (views don't clip to their bounds); `None` for
+/// other views.
+pub(crate) fn content_reach(view: &AnyObject) -> Option<NSRect> {
+    if !draws_text_kit_2(view) {
+        return None;
+    }
+    let tv = as_impl(view)?;
+    let container = tv.container()?.size();
+    let origin = tv.origin();
+    let bounds = tv.as_view().bounds();
+    Some(NSRect::new(NSPoint::new(origin.x, bounds.origin.y), NSSize::new(container.width, bounds.size.height)))
 }
 
 /// Draw a TextKit 2 text view's fragments, marked text and caret, over

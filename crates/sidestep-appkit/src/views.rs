@@ -908,6 +908,12 @@ pub(crate) fn overflow(view: &NSViewImpl) -> Overflow {
         let s = sticking_out(grow_by(frame(sub), out), b);
         o = Overflow { left: o.left.max(s.left), right: o.right.max(s.right), vertical: o.vertical.max(s.vertical) };
     }
+    // A TextKit 2 text view's fragments, which AppKit draws in views of
+    // their own, reach as far as its text container does.
+    if let Some(own) = crate::textkit::text_view::content_reach(as_view(view)) {
+        let s = sticking_out(own, b);
+        o = Overflow { left: o.left.max(s.left), right: o.right.max(s.right), vertical: o.vertical.max(s.vertical) };
+    }
     view.ivars().overflow.set(Some(o));
     o
 }
@@ -1218,7 +1224,14 @@ pub(crate) fn invalidate(view: &NSViewImpl, rect: NSRect) {
     }
     let Some(window) = window_of(view) else { return };
     let Some(p) = placement(view) else { return };
-    let r = p.xf.rect(rect).intersect(&p.xf.rect(bounds(view))).intersect(&p.clip).round_out();
+    // A TextKit 2 text view's fragments draw past its bounds (`overflow`),
+    // so they redraw there too; other views redraw only their bounds.
+    let limit = if !clips_to_bounds(view) && crate::textkit::text_view::draws_text_kit_2(as_view(view)) {
+        reach(view)
+    } else {
+        bounds(view)
+    };
+    let r = p.xf.rect(rect).intersect(&p.xf.rect(limit)).intersect(&p.clip).round_out();
     if !r.is_empty() {
         window.invalidate(crate::layers::damage_key(p.layer, p.overlay), r);
     }
