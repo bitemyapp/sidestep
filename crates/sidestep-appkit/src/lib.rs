@@ -35,6 +35,7 @@ mod autolayout;
 mod backend;
 mod clipboard;
 mod constants;
+mod container_controllers;
 mod controllers;
 mod controls;
 mod cursor;
@@ -59,6 +60,8 @@ mod context;
 mod coregraphics;
 mod coretext;
 mod effect_view;
+mod gesture;
+mod glass;
 mod gradient;
 mod image;
 mod image_rep;
@@ -88,6 +91,7 @@ mod scroll;
 mod scroller;
 mod settings;
 mod shadow;
+mod sharing;
 mod split;
 mod string_drawing;
 mod symbols;
@@ -98,6 +102,7 @@ mod test_objects;
 #[doc(hidden)]
 pub mod testing;
 mod text;
+mod toolbar;
 #[doc(hidden)]
 pub mod textkit;
 mod textkit2;
@@ -119,6 +124,7 @@ mod menubar;
 mod panels;
 mod popup_button;
 mod portal;
+mod printing;
 mod workspace;
 
 sidestep_runtime::static_class!(pub NSRESPONDER, NSRESPONDER_META = "NSResponder", || {

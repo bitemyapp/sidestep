@@ -33,6 +33,7 @@ pub(crate) mod props;
 pub(crate) mod render;
 pub(crate) mod shape;
 pub(crate) mod spec;
+mod text;
 pub(crate) mod transaction;
 pub(crate) mod transform;
 pub(crate) mod tree;

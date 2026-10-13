@@ -34,6 +34,7 @@ type Unretained<T> = Cell<Option<NonNull<T>>>;
 // NSView
 
 pub(crate) struct ViewIvars {
+    gestures: RefCell<Vec<Retained<objc2_app_kit::NSGestureRecognizer>>>,
     frame: Cell<NSRect>,
     bounds_origin: Cell<NSPoint>,
     superview: Unretained<NSView>,
@@ -77,6 +78,7 @@ pub(crate) struct ViewIvars {
 impl ViewIvars {
     fn new(frame: NSRect) -> Self {
         ViewIvars {
+            gestures: RefCell::new(Vec::new()),
             frame: Cell::new(frame),
             bounds_origin: Cell::new(NSPoint::ZERO),
             superview: Cell::new(None),
@@ -123,6 +125,15 @@ define_class!(
     pub(crate) struct NSViewImpl;
 
     impl NSViewImpl {
+        #[unsafe(method_id(gestureRecognizers))]
+        fn gestures(&self) -> Retained<objc2_foundation::NSArray<objc2_app_kit::NSGestureRecognizer>> { objc2_foundation::NSArray::from_retained_slice(&self.ivars().gestures.borrow()) }
+        #[unsafe(method(addGestureRecognizer:))]
+        fn add_gesture(&self, gesture: &objc2_app_kit::NSGestureRecognizer) { if let Some(view)=gesture.view() { view.removeGestureRecognizer(gesture); } self.ivars().gestures.borrow_mut().push(gesture.retain()); crate::gesture::attach(gesture,Some(as_view(self))); }
+        #[unsafe(method(removeGestureRecognizer:))]
+        fn remove_gesture(&self, gesture: &objc2_app_kit::NSGestureRecognizer) { self.ivars().gestures.borrow_mut().retain(|g| !std::ptr::eq(&**g,gesture)); crate::gesture::attach(gesture,None); }
+        #[unsafe(method(setGestureRecognizers:))]
+        fn set_gestures(&self, gestures: &objc2_foundation::NSArray<objc2_app_kit::NSGestureRecognizer>) { let this=as_view(self); let old=self.ivars().gestures.borrow().clone(); for g in old { this.removeGestureRecognizer(&g); } for g in gestures { this.addGestureRecognizer(&g); } }
+
         #[unsafe(method_id(initWithFrame:))]
         fn init_with_frame(this: Allocated<Self>, frame: NSRect) -> Retained<Self> {
             let this = this.set_ivars(ViewIvars::new(frame));

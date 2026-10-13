@@ -341,6 +341,16 @@ define_class!(
             unsafe { write_url(self.contents(), url, options, error) }
         }
 
+        #[unsafe(method_id(compressedDataUsingAlgorithm:error:))]
+        fn compressed(&self, algorithm: isize, error: *mut *mut NSError) -> Option<Retained<NSData>> {
+            compression(self.contents(), algorithm, false, error)
+        }
+
+        #[unsafe(method_id(decompressedDataUsingAlgorithm:error:))]
+        fn decompressed(&self, algorithm: isize, error: *mut *mut NSError) -> Option<Retained<NSData>> {
+            compression(self.contents(), algorithm, true, error)
+        }
+
         #[unsafe(method_id(base64EncodedStringWithOptions:))]
         fn base64_string(&self, options: NSUInteger) -> Retained<NSString> {
             NSString::from_str(&base64::encode(self.contents(), options))
@@ -875,6 +885,55 @@ pub unsafe fn bytes(data: &NSData) -> &[u8] {
 pub fn to_vec(data: &NSData) -> Vec<u8> {
     // SAFETY: the bytes are copied before anything else runs.
     unsafe { bytes(data) }.to_vec()
+}
+
+// Apple's documented Zlib compression format is raw DEFLATE (RFC 1951),
+// without the RFC 1950 header/trailer. Other algorithms report an error.
+// https://developer.apple.com/documentation/compression/compression_zlib
+fn compression(input: &[u8], algorithm: isize, decode: bool, error: *mut *mut NSError) -> Option<Retained<NSData>> {
+    let result = (|| -> Result<Vec<u8>, ()> {
+        if algorithm != 3 {
+            return Err(());
+        }
+        if !decode {
+            use std::io::Write;
+            let mut encoder = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(5));
+            encoder.write_all(input).map_err(|_| ())?;
+            return encoder.finish().map_err(|_| ());
+        }
+        let mut decoder = flate2::Decompress::new(false);
+        let mut output = Vec::new();
+        let mut buffer = [0u8; 16384];
+        loop {
+            let before_in = decoder.total_in();
+            let before_out = decoder.total_out();
+            let status = decoder
+                .decompress(&input[before_in as usize..], &mut buffer, flate2::FlushDecompress::None)
+                .map_err(|_| ())?;
+            let count = (decoder.total_out() - before_out) as usize;
+            output.extend_from_slice(&buffer[..count]);
+            if status == flate2::Status::StreamEnd {
+                return Ok(output);
+            }
+            if decoder.total_in() == before_in && count == 0 {
+                return Err(());
+            }
+        }
+    })();
+    match result {
+        Ok(bytes) => Some(NSData::with_bytes(&bytes)),
+        Err(()) => {
+            let code = if decode { 5377 } else { 5376 };
+            // SAFETY: the Objective-C error parameter is null or writable.
+            unsafe {
+                crate::error::set(
+                    error,
+                    NSError::errorWithDomain_code_userInfo(&NSString::from_str("NSCocoaErrorDomain"), code, None),
+                );
+            }
+            None
+        }
+    }
 }
 
 #[cfg(test)]

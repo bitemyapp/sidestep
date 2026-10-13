@@ -12,6 +12,7 @@
 
 use objc2::ClassType;
 
+mod apple_script;
 mod attributed;
 mod base64;
 mod bidi;
@@ -25,10 +26,14 @@ mod date;
 mod date_format;
 mod date_formatter;
 mod dictionary;
+mod directory_enumerator;
 mod dispatch;
+mod distributed_notifications;
 mod error;
+mod file_handle;
 mod file_manager;
 mod file_wrapper;
+mod formatters;
 mod functions;
 mod geometry;
 mod invocation;
@@ -38,6 +43,7 @@ mod lock;
 mod notification;
 pub mod notification_center;
 mod objc_runtime;
+pub mod observing;
 mod operation;
 mod path;
 mod perform;
@@ -53,6 +59,7 @@ mod time_zone;
 mod timer;
 mod undo;
 mod url;
+mod url_loading;
 mod user_defaults;
 mod uuid;
 mod xdg;

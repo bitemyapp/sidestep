@@ -96,8 +96,24 @@ const EXPECT_NONE: Expect = Expect {
 /// `NSTextAlignment` on GNUStep, 7 `NSCreate*PboardType` returns not
 /// retained (rule), 8 `CGColorSpaceCopyBaseColorSpace` nullable (rule), 9
 /// the `AutoreleaseSafe` negative impls hidden from stable (`sidestep`
-/// only).
+/// only), 10 GNUstep in CoreServices and 11 UniformTypeIdentifiers (rules).
 const CRATES: &[Pinned] = &[
+    Pinned {
+        name: "objc2-uniform-type-identifiers",
+        version: "0.3.2",
+        sha256: "7902ac02859fc1f7045f8b598c63f1ae0cc7efeaa06a9bc9f3d9a3c955974fa4",
+        patches: &[],
+        generated: Generated::Yes,
+        expect: EXPECT_NONE,
+    },
+    Pinned {
+        name: "objc2-core-services",
+        version: "0.3.2",
+        sha256: "583300ad934cba24ff5292aee751ecc070f7ca6b39a574cc21b7b5e588e06a0b",
+        patches: &[],
+        generated: Generated::Yes,
+        expect: Expect { gates_added: 19, darwin_items: 2, dependencies_moved: 1, ..EXPECT_NONE },
+    },
     Pinned {
         name: "objc2",
         version: "0.6.4",
@@ -129,7 +145,7 @@ const CRATES: &[Pinned] = &[
             patch!("objc2-foundation", "5-nsurl-path-helpers.patch"),
         ],
         generated: Generated::Yes,
-        expect: Expect { items_removed: 12, ..EXPECT_NONE },
+        expect: Expect { gates_removed: 28, items_removed: 12, dependencies_moved: 1, ..EXPECT_NONE },
     },
     Pinned {
         name: "objc2-app-kit",
@@ -138,10 +154,10 @@ const CRATES: &[Pinned] = &[
         patches: &[patch!("objc2-app-kit", "6-nstextalignment.patch")],
         generated: Generated::Yes,
         expect: Expect {
-            gates_removed: 80,
+            gates_removed: 94,
             gates_added: 2,
             bridging_apple_only: 10,
-            dependencies_moved: 3,
+            dependencies_moved: 4,
             returns_not_retained: 2,
             ..EXPECT_NONE
         },
@@ -308,7 +324,11 @@ fn read_generated(dir: &Path) -> Result<Vec<generated::File>, String> {
     for entry in entries {
         let path = entry.path();
         if path.is_dir() {
-            return Err(format!("{}: nested generated modules aren't supported", path.display()));
+            for mut file in read_generated(&path)? {
+                file.path = format!("{}/{}", entry.file_name().to_string_lossy(), file.path);
+                files.push(file);
+            }
+            continue;
         }
         if path.extension().is_some_and(|e| e == "rs") {
             let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -572,5 +592,25 @@ fn main() -> ExitCode {
             eprintln!("objc2-overlay: error: {e}");
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_nested_generated_modules_with_relative_paths() {
+        let dir = env::temp_dir().join(format!("objc2-overlay-nested-{}", std::process::id()));
+        fs::create_dir_all(dir.join("Group")).unwrap();
+        fs::write(dir.join("mod.rs"), "root\n").unwrap();
+        fs::write(dir.join("Group/mod.rs"), "group\n").unwrap();
+        fs::write(dir.join("Group/Example.rs"), "example\n").unwrap();
+        let files = read_generated(&dir).unwrap();
+        let mut names: Vec<_> = files.iter().map(|f| f.path.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, ["Group/Example.rs", "Group/mod.rs", "mod.rs"]);
+        assert_eq!(files.iter().find(|f| f.path == "Group/Example.rs").unwrap().lines, ["example"]);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

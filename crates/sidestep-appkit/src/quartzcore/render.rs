@@ -716,7 +716,7 @@ pub(crate) fn record_draw_in_context(layer: &CALayerImpl) -> Drawn {
         }
     }
     let rec = crate::context::end_recording();
-    Drawn::Ops(Arc::new(rec.ops), [w, h], scale)
+    Drawn::Ops(Arc::new(crate::string_drawing::finish(rec.ops, rec.pending)), [w, h], scale)
 }
 
 /// The image a drawn layer's backing store is (`contents`, after

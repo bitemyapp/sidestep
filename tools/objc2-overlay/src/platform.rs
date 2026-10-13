@@ -40,12 +40,19 @@ pub enum Model {
     /// The configs the published crates were generated with.
     Published,
     /// With the fork's `gnustep = true` in CoreGraphics, QuartzCore,
-    /// CoreText and ImageIO (fork commit 3).
+    /// CoreText and ImageIO (fork commit 3), CoreServices (commit 10) and UniformTypeIdentifiers (commit 11).
     Fork,
 }
 
-/// The crates fork commit 3 marks as supporting GNUStep.
-pub const NEWLY_GNUSTEP: &[&str] = &["objc2-core-graphics", "objc2-quartz-core", "objc2-core-text", "objc2-image-io"];
+/// The crates fork commits 3, 10 and 11 mark as supporting GNUStep.
+pub const NEWLY_GNUSTEP: &[&str] = &[
+    "objc2-core-graphics",
+    "objc2-quartz-core",
+    "objc2-core-text",
+    "objc2-image-io",
+    "objc2-core-services",
+    "objc2-uniform-type-identifiers",
+];
 
 /// The Apple-only part of `libc` (Mach ports, `cpu_type_t`, `boolean_t`,
 /// malloc zones): `configs/libc-darwin.toml` in fork commit 3.
@@ -60,12 +67,13 @@ pub fn library(krate: &str, model: Model) -> Option<Platforms> {
         "objc2" | "block2" | "dispatch2" | "libc" | "bitflags" => apple(true),
         "objc2-core-foundation" | "objc2-foundation" => apple(true),
         "objc2-app-kit" => macos(true),
-        // Fork commit 3.
-        "objc2-core-graphics" | "objc2-core-text" | "objc2-image-io" => apple(fork),
+        // Fork commits 3, 10 and 11.
+        "objc2-core-graphics" | "objc2-core-text" | "objc2-image-io" | "objc2-core-services" => apple(fork),
         "objc2-quartz-core" => no_watchos(fork),
         // Apple only.
-        "objc2-cloud-kit" | "objc2-core-data" | "objc2-core-services" | "objc2-core-video" => apple(false),
-        "objc2-uniform-type-identifiers" => apple(false),
+        "objc2-cloud-kit" | "objc2-core-data" | "objc2-core-video" => apple(false),
+        "objc2-uniform-type-identifiers" => apple(fork),
+        "objc2-security" => apple(false),
         "objc2-core-image" | "objc2-io-surface" | "objc2-metal" => no_watchos(false),
         "objc2-open-gl" => macos(false),
         _ => return None,

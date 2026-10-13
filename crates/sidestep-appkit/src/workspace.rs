@@ -172,6 +172,11 @@ define_class!(
             None
         }
 
+        #[unsafe(method_id(URLForApplicationWithBundleIdentifier:))]
+        fn url_for_application_with_identifier(&self, identifier: &NSString) -> Option<Retained<NSURL>> {
+            application_url(identifier)
+        }
+
         #[unsafe(method_id(fullPathForApplication:))]
         fn full_path_for_application(&self, _name: &NSString) -> Option<Retained<NSString>> {
             None
@@ -239,6 +244,34 @@ define_class!(
 
     unsafe impl NSObjectProtocol for NSWorkspaceImpl {}
 );
+
+/// Desktop IDs are the Linux equivalent of registered application identifiers.
+/// A macOS-only bundle identifier has no match unless its application installs
+/// a desktop entry under that ID.
+fn application_url(identifier: &NSString) -> Option<Retained<NSURL>> {
+    let bundle = objc2_foundation::NSBundle::mainBundle();
+    if bundle.bundleIdentifier().as_deref() == Some(identifier) {
+        return Some(bundle.bundleURL());
+    }
+    let id = identifier.to_string();
+    if id.is_empty() || id.contains('/') || id.contains('\\') || id == "." || id == ".." {
+        return None;
+    }
+    let mut roots = Vec::new();
+    if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
+        roots.push(std::path::PathBuf::from(data));
+    } else if let Some(home) = std::env::var_os("HOME") {
+        roots.push(std::path::PathBuf::from(home).join(".local/share"));
+    }
+    let dirs = std::env::var_os("XDG_DATA_DIRS").unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+    roots.extend(std::env::split_paths(&dirs));
+    let file = if id.ends_with(".desktop") { id } else { format!("{id}.desktop") };
+    roots
+        .into_iter()
+        .map(|r| r.join("applications").join(&file))
+        .find(|p| p.is_file())
+        .map(|p| NSURL::fileURLWithPath(&NSString::from_str(&p.to_string_lossy())))
+}
 
 /// Open `url`, then run `done` (on the portal thread) with whether it
 /// went; the Cocoa error code if it can't: 260 for a file that isn't there,

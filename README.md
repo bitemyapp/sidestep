@@ -201,6 +201,39 @@ On Linux, drawing is recorded on the main thread and rasterized on a
 separate render thread, and scroll views are tiled onto Wayland subsurfaces;
 see [docs/architecture.md](docs/architecture.md#appkit-a-main-thread-and-a-render-thread).
 
+## File watching and metadata
+
+`sidestep` also links `sidestep-core-services`. Existing objc2 programs can
+use CoreServices' FSEvents streams on Linux: recursive file notifications,
+batched callbacks on dispatch queues or run loops, CFArray or C-string
+paths, stop/restart, exclusion paths, and root-change notifications.
+The objc2 overlay now includes `objc2-core-services`; regenerate it after
+updating Sidestep.
+
+`MDItem` supports filesystem attributes and the common metadata keys,
+including the keys Upleft's metadata exporter writes. Linux has no
+Spotlight index: indexed content attributes are absent. FSEvents has no
+persistent journal here; historical requests report that a rescan is
+needed. Per-device streams, writer-identity flags and extended event data
+are not implemented. This is the file-watching and metadata slice of
+CoreServices, not its legacy Carbon or LaunchServices APIs.
+
+UniformTypeIdentifiers is linked as well: UTType objects resolve common
+filename extensions and MIME tags, preserve conformance relationships and
+read custom types from the app's bundle declarations. Open/save panels use
+these objects for their file filters. Dispatch work items support cancellation,
+completion and barriers, and NSFileManager supports atomic file replacement
+for save-and-watch workflows. See [the ABI coverage](docs/abi.md#uniformtypeidentifiers-and-cancellable-work)
+for limits.
+
+Foundation and AppKit also provide the framework classes used to link Upleft
+through its original objc2 API: URL sessions and protocols, file handles,
+calendars and formatters, distributed notifications, container controllers,
+toolbars, pan gestures, text layers, glass views, printing and sharing.
+The [Upleft compatibility runner](tools/upleft-compat/README.md) builds an
+archived consumer checkout; [framework coverage](docs/abi.md#framework-classes-used-by-upleft)
+describes the implemented behavior and remaining limits.
+
 ## How it works
 
 objc2 already supports GNUstep's runtime ABI. Sidestep implements that ABI in

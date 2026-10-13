@@ -1,0 +1,22 @@
+From 523d4107c6f27d2793065f662cf1a80dd54dc191 Mon Sep 17 00:00:00 2001
+From: Chris Allen <cma@bitemyapp.com>
+Date: Fri, 9 Oct 2026 16:16:53 -0500
+Subject: [PATCH] Allow UniformTypeIdentifiers bindings on non-Apple runtimes
+
+Signed-off-by: Chris Allen <cma@bitemyapp.com>
+---
+ .../objc2-uniform-type-identifiers/translation-config.toml       | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/framework-crates/objc2-uniform-type-identifiers/translation-config.toml b/framework-crates/objc2-uniform-type-identifiers/translation-config.toml
+index d4fd1977..6e938eef 100644
+--- a/framework-crates/objc2-uniform-type-identifiers/translation-config.toml
++++ b/framework-crates/objc2-uniform-type-identifiers/translation-config.toml
+@@ -7,3 +7,4 @@ ios = "14.0"
+ tvos = "14.0"
+ watchos = "7.0"
+ visionos = "1.0"
++gnustep = true
+-- 
+2.55.0
+

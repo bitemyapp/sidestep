@@ -398,6 +398,8 @@ pub(crate) struct AppIvars {
     main_menu: RefCell<Option<Retained<AnyObject>>>,
     /// The Window menu, which lists the windows (see `menu::add_window_item`).
     windows_menu: RefCell<Option<Retained<AnyObject>>>,
+    services_menu: RefCell<Option<Retained<AnyObject>>>,
+    help_menu: RefCell<Option<Retained<AnyObject>>>,
 }
 
 define_class!(
@@ -421,6 +423,8 @@ define_class!(
                 launching: Cell::new(false),
                 main_menu: RefCell::new(None),
                 windows_menu: RefCell::new(None),
+                services_menu: RefCell::new(None),
+                help_menu: RefCell::new(None),
             });
             // SAFETY: NSResponder's designated initializer.
             let this: Retained<Self> = unsafe { msg_send![super(this), init] };
@@ -435,6 +439,28 @@ define_class!(
         #[unsafe(method_id(mainMenu))]
         fn main_menu(&self) -> Option<Retained<AnyObject>> {
             self.ivars().main_menu.borrow().clone()
+        }
+
+        #[unsafe(method_id(servicesMenu))]
+        fn services_menu(&self) -> Option<Retained<AnyObject>> {
+            self.ivars().services_menu.borrow().clone()
+        }
+
+        #[unsafe(method(setServicesMenu:))]
+        fn set_services_menu(&self, menu: Option<&AnyObject>) {
+            let old = self.ivars().services_menu.replace(menu.map(|m| m.retain()));
+            drop(old);
+        }
+
+        #[unsafe(method_id(helpMenu))]
+        fn help_menu(&self) -> Option<Retained<AnyObject>> {
+            self.ivars().help_menu.borrow().clone()
+        }
+
+        #[unsafe(method(setHelpMenu:))]
+        fn set_help_menu(&self, menu: Option<&AnyObject>) {
+            let old = self.ivars().help_menu.replace(menu.map(|m| m.retain()));
+            drop(old);
         }
 
         #[unsafe(method(setMainMenu:))]

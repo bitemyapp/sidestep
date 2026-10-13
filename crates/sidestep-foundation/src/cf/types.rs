@@ -92,6 +92,7 @@ pub(crate) mod id {
 /// `NSFont` and `NSFontDescriptor`, which CoreText's fonts and descriptors
 /// are) and the names `CFCopyTypeIDDescription` gives them.
 const FRAMEWORK_TYPES: &[(&str, CFTypeID, &str)] = &[
+    ("_SidestepMDItem", 201, "MDItem"),
     ("_SidestepCGColorSpace", id::CG_COLOR_SPACE, "CGColorSpace"),
     ("_SidestepCGColor", id::CG_COLOR, "CGColor"),
     ("_SidestepCGPath", id::CG_PATH, "CGPath"),
@@ -140,7 +141,7 @@ const BRIDGED: &[(&str, CFTypeID)] = &[
     ("NSTimer", id::RUN_LOOP_TIMER),
     ("_SidestepCFRunLoop", id::RUN_LOOP),
     ("NSBundle", id::BUNDLE),
-    ("_SidestepCFCalendar", id::CALENDAR),
+    ("NSCalendar", id::CALENDAR),
     ("_SidestepCFReadStream", id::READ_STREAM),
     ("_SidestepCFWriteStream", id::WRITE_STREAM),
     ("_SidestepCFFileSecurity", id::FILE_SECURITY),

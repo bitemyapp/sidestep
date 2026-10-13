@@ -244,6 +244,8 @@ pub(crate) struct ViewAuto {
     /// Active constraints naming this view, or a guide it owns, as an item.
     naming: Vec<Retained<NSLayoutConstraint>>,
     guides: Vec<Retained<NSLayoutGuide>>,
+    safe_area: Option<(Retained<NSLayoutGuide>, [Retained<NSLayoutConstraint>; 4])>,
+    additional_safe_area: NSEdgeInsets,
     anchors: anchor::Anchors,
     /// Hugging (horizontal, vertical), then compression resistance.
     priorities: [f32; 4],
@@ -259,6 +261,8 @@ impl Default for ViewAuto {
             installed: Vec::new(),
             naming: Vec::new(),
             guides: Vec::new(),
+            safe_area: None,
+            additional_safe_area: NSEdgeInsets { top: 0.0, left: 0.0, bottom: 0.0, right: 0.0 },
             anchors: Default::default(),
             priorities: DEFAULT_PRIORITIES,
             engine: None,
@@ -672,6 +676,7 @@ pub(crate) fn needs_solve(view: &NSViewImpl) -> bool {
 /// views that moved.
 pub(crate) fn solve(view: &NSViewImpl) {
     let root = root_of(view);
+    refresh_safe_areas(views::as_view(root));
     let window = views::window_of(root);
     let Some((changed, size, content)) = with_engine(root, |e| {
         fresh(root, e);
@@ -748,6 +753,78 @@ pub(crate) fn layout_subviews(view: &NSViewImpl) {
 }
 
 // Guides.
+
+fn safe_area_rect(view: &NSView) -> NSRect {
+    let bounds = view.bounds();
+    let mut rect = bounds;
+    if let Some(parent) = unsafe { view.superview() } {
+        let inherited = view.convertRect_fromView(safe_area_rect(&parent), Some(&parent));
+        rect = views::intersection(rect, inherited).unwrap_or(NSRect::new(bounds.origin, NSSize::ZERO));
+    } else if let Some(window) = view.window() {
+        let usable = view.convertRect_fromView(window.contentLayoutRect(), None);
+        rect = views::intersection(rect, usable).unwrap_or(NSRect::new(bounds.origin, NSSize::ZERO));
+    }
+    let extra = read_auto(views::imp(view), |a| a.additional_safe_area).unwrap_or(NSEdgeInsets {
+        top: 0.0,
+        left: 0.0,
+        bottom: 0.0,
+        right: 0.0,
+    });
+    rect.origin.x += extra.left;
+    rect.origin.y += if view.isFlipped() { extra.top } else { extra.bottom };
+    rect.size.width = (rect.size.width - extra.left - extra.right).max(0.0);
+    rect.size.height = (rect.size.height - extra.top - extra.bottom).max(0.0);
+    rect
+}
+
+fn safe_area_insets(view: &NSView) -> NSEdgeInsets {
+    let b = view.bounds();
+    let r = safe_area_rect(view);
+    let low = r.origin.y - b.origin.y;
+    let high = b.origin.y + b.size.height - r.origin.y - r.size.height;
+    NSEdgeInsets {
+        top: if view.isFlipped() { low } else { high },
+        left: r.origin.x - b.origin.x,
+        bottom: if view.isFlipped() { high } else { low },
+        right: b.origin.x + b.size.width - r.origin.x - r.size.width,
+    }
+}
+
+fn refresh_safe_areas(view: &NSView) {
+    let constraints = read_auto(views::imp(view), |a| a.safe_area.as_ref().map(|(_, c)| c.clone())).flatten();
+    if let Some(c) = constraints {
+        let inset = safe_area_insets(view);
+        // The solver represents vertical positions downwards, independently of isFlipped.
+        for (constraint, value) in c.iter().zip([inset.left, -inset.right, inset.top, -inset.bottom]) {
+            if constraint.constant() != value {
+                constraint.setConstant(value);
+            }
+        }
+    }
+    for sub in view.subviews() {
+        refresh_safe_areas(&sub);
+    }
+}
+
+fn safe_area_guide(view: &NSView) -> Retained<NSLayoutGuide> {
+    if let Some(guide) = read_auto(views::imp(view), |a| a.safe_area.as_ref().map(|(g, _)| g.clone())).flatten() {
+        return guide;
+    }
+    let guide = NSLayoutGuide::new();
+    add_guide(view, &guide);
+    let constraints = [
+        guide.leftAnchor().constraintEqualToAnchor(&view.leftAnchor()),
+        guide.rightAnchor().constraintEqualToAnchor(&view.rightAnchor()),
+        guide.topAnchor().constraintEqualToAnchor(&view.topAnchor()),
+        guide.bottomAnchor().constraintEqualToAnchor(&view.bottomAnchor()),
+    ];
+    with_auto(views::imp(view), |a| a.safe_area = Some((guide.clone(), constraints.clone())));
+    for constraint in &constraints {
+        constraint.setActive(true);
+    }
+    refresh_safe_areas(view);
+    guide
+}
 
 pub(crate) fn add_guide(view: &NSView, guide: &NSLayoutGuide) {
     if let Some(old) = guide::owner(guide) {
@@ -1116,6 +1193,27 @@ define_class!(
         fn layout_guides(&self) -> Retained<NSArray<NSLayoutGuide>> {
             let guides = read_auto(me(self), |a| a.guides.clone()).unwrap_or_default();
             NSArray::from_retained_slice(&guides)
+        }
+
+        #[unsafe(method_id(safeAreaLayoutGuide))]
+        fn safe_area_guide(&self) -> Retained<NSLayoutGuide> { safe_area_guide(views::as_view(me(self))) }
+
+        #[unsafe(method(safeAreaInsets))]
+        fn safe_area_insets(&self) -> NSEdgeInsets { safe_area_insets(views::as_view(me(self))) }
+
+        #[unsafe(method(safeAreaRect))]
+        fn safe_area_rect(&self) -> NSRect { safe_area_rect(views::as_view(me(self))) }
+
+        #[unsafe(method(additionalSafeAreaInsets))]
+        fn additional_safe_area(&self) -> NSEdgeInsets {
+            with_auto(me(self), |a| a.additional_safe_area)
+        }
+
+        #[unsafe(method(setAdditionalSafeAreaInsets:))]
+        fn set_additional_safe_area(&self, insets: NSEdgeInsets) {
+            with_auto(me(self), |a| a.additional_safe_area = insets);
+            refresh_safe_areas(views::as_view(me(self)));
+            ask_for_pass(root_of(me(self)));
         }
 
         #[unsafe(method(hasAmbiguousLayout))]

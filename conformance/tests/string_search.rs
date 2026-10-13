@@ -888,7 +888,7 @@ fn trimming() {
     };
     assert_eq!(trim("🎉hello🎉", &others), "hello".encode_utf16().collect::<Vec<_>>());
     assert_eq!(trim("hi!👋", &others), [0x68, 0x69]);
-    assert_eq!(trim("👋", &others), []);
+    assert!(trim("👋", &others).is_empty());
     let high = NSCharacterSet::characterSetWithRange(NSRange::new(0xD83C, 1));
     assert_eq!(trim("🎉", &high), [0xDF89]);
     assert_eq!(trim("a🎉", &high), [0x61, 0xD83C, 0xDF89]);
