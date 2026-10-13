@@ -58,12 +58,15 @@ pub(crate) mod code {
     pub(crate) const FILE_READ_INVALID_FILE_NAME: isize = 258;
     pub(crate) const FILE_READ_CORRUPT_FILE: isize = 259;
     pub(crate) const FILE_READ_NO_SUCH_FILE: isize = 260;
+    pub(crate) const FILE_READ_INAPPLICABLE_STRING_ENCODING: isize = 261;
     pub(crate) const FILE_READ_UNSUPPORTED_SCHEME: isize = 262;
     pub(crate) const FILE_READ_TOO_LARGE: isize = 263;
+    pub(crate) const FILE_READ_UNKNOWN_STRING_ENCODING: isize = 264;
     pub(crate) const FILE_WRITE_UNKNOWN: isize = 512;
     pub(crate) const FILE_WRITE_NO_PERMISSION: isize = 513;
     pub(crate) const FILE_WRITE_INVALID_FILE_NAME: isize = 514;
     pub(crate) const FILE_WRITE_FILE_EXISTS: isize = 516;
+    pub(crate) const FILE_WRITE_INAPPLICABLE_STRING_ENCODING: isize = 517;
     pub(crate) const FILE_WRITE_UNSUPPORTED_SCHEME: isize = 518;
     pub(crate) const FILE_WRITE_OUT_OF_SPACE: isize = 640;
     pub(crate) const FILE_WRITE_VOLUME_READ_ONLY: isize = 642;
@@ -281,7 +284,50 @@ impl Cocoa {
             None => without.to_string(),
         };
         let unsupported = "The specified URL type isn\u{2019}t supported.";
+        // The text encoding a string was read or written in, by name.
+        let encoding = error.info(&STRING_ENCODING).and_then(|n| {
+            // SAFETY: an NSNumber's unsignedLongLongValue takes nothing.
+            let ns: u64 = unsafe { objc2::msg_send![&*n, unsignedLongLongValue] };
+            crate::cf::string_encoding::ns_name(ns)
+        });
+        let inapplicable = "The specified text encoding isn\u{2019}t applicable.";
         let (description, reason, suggestion): (String, Option<&str>, Option<String>) = match error.ivars().code {
+            code::FILE_READ_INAPPLICABLE_STRING_ENCODING => (
+                match encoding {
+                    Some(e) => file(
+                        &format!("The file {{}} couldn\u{2019}t be opened using text encoding {e}."),
+                        &format!("The file couldn\u{2019}t be opened using text encoding {e}."),
+                    ),
+                    None => file(
+                        "The file {} couldn\u{2019}t be opened because the text encoding isn\u{2019}t applicable.",
+                        "The file couldn\u{2019}t be opened because the text encoding isn\u{2019}t applicable.",
+                    ),
+                },
+                Some(inapplicable),
+                None,
+            ),
+            code::FILE_READ_UNKNOWN_STRING_ENCODING => (
+                file(
+                    "The file {} couldn\u{2019}t be opened because the text encoding of its contents can\u{2019}t be determined.",
+                    "The file couldn\u{2019}t be opened because the text encoding of its contents can\u{2019}t be determined.",
+                ),
+                Some("The text encoding of the contents couldn\u{2019}t be determined."),
+                None,
+            ),
+            code::FILE_WRITE_INAPPLICABLE_STRING_ENCODING => (
+                match encoding {
+                    Some(e) => file(
+                        &format!("The file {{}} couldn\u{2019}t be saved using text encoding {e}."),
+                        &format!("The file couldn\u{2019}t be saved using text encoding {e}."),
+                    ),
+                    None => file(
+                        "The file {} couldn\u{2019}t be saved because the text encoding isn\u{2019}t applicable.",
+                        "The file couldn\u{2019}t be saved because the text encoding isn\u{2019}t applicable.",
+                    ),
+                },
+                Some(inapplicable),
+                None,
+            ),
             code::FILE_NO_SUCH_FILE => (
                 file("The file {} doesn\u{2019}t exist.", "The file doesn\u{2019}t exist."),
                 Some("The file doesn\u{2019}t exist."),
@@ -641,6 +687,25 @@ pub(crate) fn file_with_code(code: isize, errno: Option<i32>, path: &str) -> Ret
     if let Some(errno) = errno {
         info.push((&UNDERLYING, posix(errno).into()));
     }
+    cocoa(code, &info)
+}
+
+/// A string's file error about its text encoding: `code`, the file by its
+/// path and URL, and the encoding (`NSStringEncodingErrorKey`).
+pub(crate) fn encoding_error(code: isize, path: Option<&str>, url: Option<&NSURL>, encoding: u64) -> Retained<NSError> {
+    let path = path
+        .map(str::to_owned)
+        .or_else(|| url.and_then(crate::url::file_path).map(|p| p.to_string_lossy().into_owned()));
+    let mut info: Vec<(&'static crate::ConstantString, Retained<AnyObject>)> = Vec::new();
+    if let Some(p) = &path {
+        info.push((&FILE_PATH, NSString::from_str(p).into()));
+    }
+    let url =
+        url.map(|u| u.retain()).or_else(|| path.as_deref().and_then(|p| crate::url::file_url(std::path::Path::new(p))));
+    if let Some(u) = url {
+        info.push((&URL, u.into()));
+    }
+    info.push((&STRING_ENCODING, objc2_foundation::NSNumber::new_u64(encoding).into()));
     cocoa(code, &info)
 }
 

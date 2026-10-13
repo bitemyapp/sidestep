@@ -552,7 +552,7 @@ fn describe(bytes: &[u8]) -> String {
 }
 
 /// `NSDataWritingAtomic`.
-const WRITE_ATOMIC: NSUInteger = 1;
+pub(crate) const WRITE_ATOMIC: NSUInteger = 1;
 /// `NSDataWritingWithoutOverwriting`.
 const WRITE_WITHOUT_OVERWRITING: NSUInteger = 2;
 
@@ -571,7 +571,7 @@ fn init_read(this: Allocated<NSDataImpl>, bytes: Option<Vec<u8>>) -> Option<Reta
 /// # Safety
 ///
 /// `error` is null or points to room for an error.
-unsafe fn read_path(path: &str, error: *mut *mut NSError) -> Option<Vec<u8>> {
+pub(crate) unsafe fn read_path(path: &str, error: *mut *mut NSError) -> Option<Vec<u8>> {
     match std::fs::read(path) {
         Ok(bytes) => Some(bytes),
         Err(e) => {
@@ -587,7 +587,7 @@ unsafe fn read_path(path: &str, error: *mut *mut NSError) -> Option<Vec<u8>> {
 /// # Safety
 ///
 /// As [`read_path`].
-unsafe fn read_url(url: &NSURL, error: *mut *mut NSError) -> Option<Vec<u8>> {
+pub(crate) unsafe fn read_url(url: &NSURL, error: *mut *mut NSError) -> Option<Vec<u8>> {
     match crate::url::file_path(url) {
         // SAFETY: per this function's contract.
         Some(path) => unsafe { read_path(&path.to_string_lossy(), error) },
@@ -608,7 +608,7 @@ unsafe fn read_url(url: &NSURL, error: *mut *mut NSError) -> Option<Vec<u8>> {
 /// # Safety
 ///
 /// As [`read_path`].
-unsafe fn write_path(bytes: &[u8], path: &str, options: NSUInteger, error: *mut *mut NSError) -> bool {
+pub(crate) unsafe fn write_path(bytes: &[u8], path: &str, options: NSUInteger, error: *mut *mut NSError) -> bool {
     match write(path, bytes, options) {
         Ok(()) => true,
         Err(e) => {
@@ -624,7 +624,7 @@ unsafe fn write_path(bytes: &[u8], path: &str, options: NSUInteger, error: *mut 
 /// # Safety
 ///
 /// As [`read_path`].
-unsafe fn write_url(bytes: &[u8], url: &NSURL, options: NSUInteger, error: *mut *mut NSError) -> bool {
+pub(crate) unsafe fn write_url(bytes: &[u8], url: &NSURL, options: NSUInteger, error: *mut *mut NSError) -> bool {
     match crate::url::file_path(url) {
         // SAFETY: per this function's contract.
         Some(path) => unsafe { write_path(bytes, &path.to_string_lossy(), options, error) },

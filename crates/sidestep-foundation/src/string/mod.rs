@@ -38,6 +38,7 @@ mod compare;
 mod components;
 mod create;
 pub(crate) mod encoding;
+mod files;
 pub(crate) mod fold;
 pub(crate) mod index;
 pub(crate) mod inline;
@@ -548,6 +549,7 @@ pub(crate) fn load() {
         components::install(target);
         numeric::install(target);
         paths::install(target);
+        files::install(target);
         objc2::ffi::objc_registerClassPair(cls);
     }
 }

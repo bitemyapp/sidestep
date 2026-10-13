@@ -480,6 +480,12 @@ pub extern "C-unwind" fn CFStringGetHyphenationLocationBeforeIndex(
     -1
 }
 
+/// The name of an `NSStringEncoding` (`+localizedNameOfStringEncoding:`),
+/// for one Sidestep has.
+pub(crate) fn ns_name(ns: u64) -> Option<&'static str> {
+    known(CFStringConvertNSStringEncodingToEncoding(ns)).map(|k| k.name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

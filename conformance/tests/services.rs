@@ -1156,6 +1156,63 @@ fn underlying(error: &NSError) -> Option<(String, isize)> {
     Some((under.domain().to_string(), under.code()))
 }
 
+/// A string's text read from a file and written to one: in an encoding,
+/// or in the one its bytes show; and the errors, the file's own or about
+/// the encoding.
+#[test]
+fn string_files() {
+    use objc2_foundation::{
+        NSASCIIStringEncoding, NSMutableString, NSStringEncodingErrorKey, NSUTF8StringEncoding, NSUnicodeStringEncoding,
+    };
+    let dir = scratch("string-files");
+    let path = |name: &str| ns(dir.join(name).to_str().unwrap());
+    let encoding_of = |e: &NSError| {
+        info_value(e, unsafe { NSStringEncodingErrorKey })
+            .and_then(|n| n.downcast::<objc2_foundation::NSNumber>().ok())
+            .map(|n| n.unsignedIntegerValue() as u64)
+    };
+
+    let text = ns("h\u{e9}llo, \u{65e5}\u{672c}\n");
+    text.writeToFile_atomically_encoding_error(&path("a.txt"), true, NSUTF8StringEncoding).unwrap();
+    assert_eq!(std::fs::read(dir.join("a.txt")).unwrap(), "h\u{e9}llo, \u{65e5}\u{672c}\n".as_bytes());
+    let read = NSString::stringWithContentsOfFile_encoding_error(&path("a.txt"), NSUTF8StringEncoding).unwrap();
+    assert_eq!(read.to_string(), text.to_string());
+    let url = NSURL::fileURLWithPath(&path("b.txt"));
+    text.writeToURL_atomically_encoding_error(&url, false, NSUTF8StringEncoding).unwrap();
+    let read = NSString::stringWithContentsOfURL_encoding_error(&url, NSUTF8StringEncoding).unwrap();
+    assert_eq!(read.to_string(), text.to_string());
+    let mutable =
+        NSMutableString::stringWithContentsOfFile_encoding_error(&path("a.txt"), NSUTF8StringEncoding).unwrap();
+    mutable.appendString(&ns("!"));
+    assert!(mutable.to_string().ends_with("\n!"));
+
+    // The encoding the bytes show: a byte order mark's, or UTF-8.
+    let mut used = 0;
+    let read = unsafe { NSString::stringWithContentsOfFile_usedEncoding_error(&path("a.txt"), &mut used) }.unwrap();
+    assert_eq!((read.to_string(), used), (text.to_string(), NSUTF8StringEncoding));
+    std::fs::write(dir.join("utf16.txt"), [0xFF, 0xFE, b'h', 0, b'i', 0]).unwrap();
+    let read = unsafe { NSString::stringWithContentsOfFile_usedEncoding_error(&path("utf16.txt"), &mut used) }.unwrap();
+    assert_eq!((read.to_string(), used), ("hi".to_string(), NSUnicodeStringEncoding));
+
+    // Errors: no file, a folder, bytes the encoding doesn't apply to, text
+    // it can't hold.
+    let e = NSString::stringWithContentsOfFile_encoding_error(&path("missing.txt"), NSUTF8StringEncoding).unwrap_err();
+    assert_eq!((e.domain().to_string(), e.code()), ("NSCocoaErrorDomain".into(), 260));
+    let folder = NSURL::fileURLWithPath(&ns(dir.to_str().unwrap()));
+    let e = NSString::stringWithContentsOfURL_encoding_error(&folder, NSUTF8StringEncoding).unwrap_err();
+    assert_eq!(e.code(), 256);
+    std::fs::write(dir.join("bad.txt"), [0x61, 0xFF, 0x62]).unwrap();
+    let e = NSString::stringWithContentsOfFile_encoding_error(&path("bad.txt"), NSUTF8StringEncoding).unwrap_err();
+    assert_eq!((e.code(), encoding_of(&e)), (261, Some(NSUTF8StringEncoding as u64)));
+    assert!(e.localizedDescription().to_string().contains("bad.txt"), "{}", e.localizedDescription());
+    let e = text.writeToFile_atomically_encoding_error(&path("ascii.txt"), true, NSASCIIStringEncoding).unwrap_err();
+    assert_eq!((e.code(), encoding_of(&e)), (517, Some(NSASCIIStringEncoding as u64)));
+    assert!(!dir.join("ascii.txt").exists());
+
+    assert_eq!(NSString::localizedNameOfStringEncoding(NSUTF8StringEncoding).to_string(), "Unicode (UTF-8)");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 #[test]
 fn error_constants_and_texts() {
     use objc2_foundation::*;
