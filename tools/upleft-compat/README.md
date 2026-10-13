@@ -72,10 +72,29 @@ On Upleft `6d465855c9c9121594dcd02b5e193b5765485fe5`:
   pixels, PDF saving, toolbars, safe areas, gestures, sharing and window KVO.
   See [the implementation limits](../../docs/abi.md#framework-classes-used-by-upleft).
 
-The headless check still emits required-layout-constraint warnings. It does
-not establish visual correctness or complete interactive GUI compatibility.
-An unbundled archive has no welcome resources or bundle identifier, and
-Sparkle is unavailable on Linux; the smoke result reports those absences.
-The broader Upleft library failures recorded during native-branch testing are
-unchanged baseline failures, not covered by this targeted runner. New
-conformance tests have been run on Linux; their macOS runs remain unverified.
+Upleft's own tests, run through this runner on NixOS against this branch
+(`test -p upleft-app -p upleft`, and the library crates `upleft-core`,
+`-render`, `-markup`, `-swift-text`, `-mermaid`, `-elk`, `-math`,
+`-foundation`, `-cli` and `-spotlight-metadata`):
+
+- The app: 568 of 570 pass. The two failures are platform differences: a file
+  URL's path comes back decomposed (NFD) on macOS, and App Intents need
+  Apple's SDK.
+- The libraries: 1244 of 1256 pass. Failing: URL normalization (the same
+  platform difference, in four tests), sentence tokenization that splits
+  after "Dr." (two), four math typesetting positions, rendered-link hit
+  testing, and the streamed-message comparison, which now differs only in
+  Upleft's own path token value, described by address.
+
+The app also runs under a headless compositor, opening a document from the
+command line and rendering Markdown, with the text past a narrow text view's
+edge and the toolbar's document title as on macOS. Known visual difference:
+callouts show a darker band where their slices meet, since Sidestep doesn't
+clip TextKit 2 fragments to their rendering surfaces as AppKit does.
+
+The headless check still emits required-layout-constraint warnings, which now
+name the views involved. It does not establish complete interactive GUI
+compatibility. An unbundled archive has no welcome resources or bundle
+identifier, and Sparkle is unavailable on Linux; the smoke result reports
+those absences. New conformance tests have been run on Linux; their macOS
+runs remain unverified.
