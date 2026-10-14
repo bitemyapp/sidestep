@@ -51,11 +51,14 @@ impl Xf {
 }
 
 /// What the current context records into, as string drawing sees it: the
-/// ops so far, the CTM as the nearest translate-and-flip, and the clip's
-/// bounds.
+/// ops so far, the CTM as the nearest translate-and-flip and uniform
+/// scale, and the clip's bounds.
 pub(crate) struct Recorder {
     pub ops: Vec<Op>,
     pub xf: Xf,
+    /// The CTM's scale, which string drawing applies before `xf`: 1 in a
+    /// view, the scale of a bitmap context drawn at 2x, say.
+    pub k: f64,
     pub clip: Rect,
     /// Text drawn before being laid out, to lay out together at the end.
     pub pending: crate::string_drawing::Pending,
@@ -66,7 +69,14 @@ pub(crate) struct Recorder {
 
 impl Recorder {
     pub fn new(immediate: bool) -> Recorder {
-        Recorder { ops: Vec::new(), xf: Xf::IDENTITY, clip: Rect::default(), pending: Default::default(), immediate }
+        Recorder {
+            ops: Vec::new(),
+            xf: Xf::IDENTITY,
+            k: 1.0,
+            clip: Rect::default(),
+            pending: Default::default(),
+            immediate,
+        }
     }
 }
 

@@ -50,7 +50,7 @@ use objc2_foundation::{NSAttributedString, NSDictionary, NSPoint, NSRect, NSSize
 use crate::font::{number, text_font};
 use crate::graphics::{self, Xf, with_recorder};
 use crate::paragraph::paragraph_of;
-use crate::protocol::{GlyphRun, Op, Rect};
+use crate::protocol::{Glyph, GlyphRun, Op, Rect};
 use crate::text::fonts::{self, Design, FontSpec};
 use crate::text::layout::{self, Attrs, FxBuild, Options, PlacedFill, PlacedRun, Run, Shadow, TextFont, TextLayout};
 use crate::text::lines::{Frame, Line, Span};
@@ -107,13 +107,15 @@ pub(crate) fn draw_with(text: &str, attrs: &[Attrs], runs: &[Run], place: Place,
         let mut boxes = Vec::new();
         let mut shown = NSRect::ZERO;
         with_recorder(|rec| {
-            let (left, top, clip) = placement(rec.xf, rec.clip, place, &laid);
-            emit(&mut rec.ops, &laid, left, top, clip);
-            shown = rec.xf.inverse_rect(clip);
+            let k = rec.k;
+            let (left, top, clip) = placement(rec.xf, k, rec.clip, place, &laid);
+            emit(&mut rec.ops, &laid, left, top, k, clip);
+            shown = unscaled(rec.xf.inverse_rect(clip), k);
             for a in &laid.attachments {
-                let r = Rect::new(left + a.rect[0], top + a.rect[1], left + a.rect[2], top + a.rect[3]);
+                let [x0, y0, x1, y1] = a.rect.map(|v| v * k as f32);
+                let r = Rect::new(left + x0, top + y0, left + x1, top + y1);
                 if !clip.intersect(&r).is_empty() {
-                    boxes.push((rec.xf.inverse_rect(r), a.byte, a.attrs));
+                    boxes.push((unscaled(rec.xf.inverse_rect(r), k), a.byte, a.attrs));
                 }
             }
         });
@@ -122,8 +124,8 @@ pub(crate) fn draw_with(text: &str, attrs: &[Attrs], runs: &[Run], place: Place,
     }
     let recorded = layout::with_cached(text, attrs, runs, &opts, |laid| {
         with_recorder(|rec| {
-            let (left, top, clip) = placement(rec.xf, rec.clip, place, laid);
-            emit(&mut rec.ops, laid, left, top, clip);
+            let (left, top, clip) = placement(rec.xf, rec.k, rec.clip, place, laid);
+            emit(&mut rec.ops, laid, left, top, rec.k, clip);
         })
     });
     match recorded {
@@ -132,12 +134,12 @@ pub(crate) fn draw_with(text: &str, attrs: &[Attrs], runs: &[Run], place: Place,
             // A bitmap context draws as it goes: lay the text out now.
             if rec.immediate {
                 let laid = layout::lay_out(text, attrs, runs, &opts);
-                let (left, top, clip) = placement(rec.xf, rec.clip, place, &laid);
-                emit(&mut rec.ops, &laid, left, top, clip);
+                let (left, top, clip) = placement(rec.xf, rec.k, rec.clip, place, &laid);
+                emit(&mut rec.ops, &laid, left, top, rec.k, clip);
                 return;
             }
             let job = rec.pending.job_for(text, attrs, runs, opts, hash);
-            rec.pending.places.push(Deferred { at: rec.ops.len(), job, xf: rec.xf, clip: rec.clip, place });
+            rec.pending.places.push(Deferred { at: rec.ops.len(), job, xf: rec.xf, k: rec.k, clip: rec.clip, place });
         }),
     }
 }
@@ -212,6 +214,7 @@ struct Deferred {
     at: usize,
     job: usize,
     xf: Xf,
+    k: f64,
     clip: Rect,
     place: Place,
 }
@@ -230,21 +233,28 @@ pub(crate) fn finish(ops: Vec<Op>, pending: Pending) -> Vec<Op> {
         out.extend(ops.by_ref().take(d.at - next));
         next = d.at;
         let laid = &laid[d.job];
-        let (left, top, clip) = placement(d.xf, d.clip, d.place, laid);
-        emit(&mut out, laid, left, top, clip);
+        let (left, top, clip) = placement(d.xf, d.k, d.clip, d.place, laid);
+        emit(&mut out, laid, left, top, d.k, clip);
     }
     out.extend(ops);
     out
 }
 
 /// Where laid-out text goes in the layer, and what it's clipped to, given
-/// the view's transform and clip.
-fn placement(xf: Xf, clip: Rect, place: Place, laid: &TextLayout) -> (f32, f32, Rect) {
+/// the view's transform (`xf` after the scale `k`) and clip.
+fn placement(xf: Xf, k: f64, clip: Rect, place: Place, laid: &TextLayout) -> (f32, f32, Rect) {
+    let point = |x: f64, y: f64| xf.point(k * x, k * y);
+    let rect = |r: NSRect| {
+        xf.rect(NSRect::new(
+            NSPoint::new(r.origin.x * k, r.origin.y * k),
+            NSSize::new(r.size.width * k, r.size.height * k),
+        ))
+    };
     // The corner of the text's box nearest the view's origin: its top in a
     // flipped view, its bottom otherwise.
     let at_point = |p: NSPoint| {
-        let (x, ya) = xf.point(p.x, p.y);
-        let (_, yb) = xf.point(p.x, p.y + f64::from(laid.height));
+        let (x, ya) = point(p.x, p.y);
+        let (_, yb) = point(p.x, p.y + f64::from(laid.height));
         (x as f32, ya.min(yb) as f32, clip)
     };
     let lines = NSStringDrawingOptions::UsesLineFragmentOrigin;
@@ -254,7 +264,7 @@ fn placement(xf: Xf, clip: Rect, place: Place, laid: &TextLayout) -> (f32, f32, 
         // as for drawAtPoint:.
         Place::WithRect(r, o) if o.contains(lines) && r.size.height <= 0.0 => at_point(r.origin),
         Place::Rect(r) | Place::WithRect(r, _) if matches!(place, Place::Rect(_)) || laid_in_lines(place) => {
-            let area = xf.rect(r);
+            let area = rect(r);
             let clip = if r.size.width > 0.0 {
                 clip.intersect(&area)
             } else {
@@ -264,8 +274,8 @@ fn placement(xf: Xf, clip: Rect, place: Place, laid: &TextLayout) -> (f32, f32, 
         }
         // One line on a baseline at the origin.
         Place::Rect(r) | Place::WithRect(r, _) => {
-            let (x, baseline) = xf.point(r.origin.x, r.origin.y);
-            (x as f32, baseline as f32 - (laid.height - laid.first_descent), clip)
+            let (x, baseline) = point(r.origin.x, r.origin.y);
+            (x as f32, baseline as f32 - (laid.height - laid.first_descent) * k as f32, clip)
         }
     }
 }
@@ -305,9 +315,33 @@ fn options(size: NSSize, o: NSStringDrawingOptions) -> Options {
     }
 }
 
-/// Record `laid` with its top left corner at (`left`, `top`) in the layer.
-fn emit(ops: &mut Vec<Op>, laid: &TextLayout, left: f32, top: f32, clip: Rect) {
-    emit_parts(ops, &laid.runs, &laid.fills, left, top, clip);
+/// Record `laid` with its top left corner at (`left`, `top`) in the layer,
+/// scaled by `k`.
+fn emit(ops: &mut Vec<Op>, laid: &TextLayout, left: f32, top: f32, k: f64, clip: Rect) {
+    if k == 1.0 {
+        emit_parts(ops, &laid.runs, &laid.fills, left, top, clip);
+        return;
+    }
+    let k = k as f32;
+    let runs: Vec<PlacedRun> = laid
+        .runs
+        .iter()
+        .map(|r| PlacedRun {
+            x: r.x * k,
+            y: r.y * k,
+            size: r.size * k,
+            glyphs: r.glyphs.iter().map(|g| Glyph { id: g.id, x: g.x * k, y: g.y * k }).collect(),
+            ..r.clone()
+        })
+        .collect();
+    let fills: Vec<PlacedFill> =
+        laid.fills.iter().map(|f| PlacedFill { rect: f.rect.map(|v| v * k), ..*f }).collect();
+    emit_parts(ops, &runs, &fills, left, top, clip);
+}
+
+/// A rectangle in the CTM's scaled space back in user space.
+fn unscaled(r: NSRect, k: f64) -> NSRect {
+    NSRect::new(NSPoint::new(r.origin.x / k, r.origin.y / k), NSSize::new(r.size.width / k, r.size.height / k))
 }
 
 /// Record glyph runs and fills placed from (`left`, `top`) in the layer:
@@ -913,6 +947,28 @@ mod tests {
             let Some(Op::Glyphs(run)) = ops.first() else { panic!("glyphs") };
             assert_eq!(run.y, xf.point(0.0, 10.0).1 as f32);
         }
+    }
+
+    #[test]
+    fn a_scaled_transform_scales_text_with_it() {
+        // A diagram drawn into a bitmap at 2x: its labels land where its
+        // shapes do, twice as far out and twice as big.
+        let text = "Label";
+        let at = |scale: f64| {
+            graphics::begin_recording();
+            graphics::set_view(Xf::IDENTITY, Rect::new(0.0, 0.0, 800.0, 800.0));
+            crate::context::with_state(|st| st.set_ctm(st.gs.ctm * kurbo::Affine::scale(scale)));
+            draw(text, &[attrs_of(None)], &whole(text), Place::Point(NSPoint::new(40.0, 10.0)));
+            let ops = graphics::end_recording();
+            let Some(Op::Glyphs(run)) = ops.first() else { panic!("glyphs") };
+            (run.x, run.y, run.size, run.glyphs.iter().map(|g| (g.x, g.y)).collect::<Vec<_>>())
+        };
+        let (x1, y1, size1, glyphs1) = at(1.0);
+        let (x2, y2, size2, glyphs2) = at(2.0);
+        assert_eq!((x2, y2, size2), (x1 * 2.0, y1 * 2.0, size1 * 2.0));
+        // Its letters are spaced for the size they're drawn at.
+        assert!(glyphs1.len() > 1 && glyphs1.iter().any(|&(x, _)| x > 0.0));
+        assert_eq!(glyphs2, glyphs1.iter().map(|&(x, y)| (x * 2.0, y * 2.0)).collect::<Vec<_>>());
     }
 
     #[test]
