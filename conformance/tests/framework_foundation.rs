@@ -81,7 +81,7 @@ fn calendar_identifiers_and_session_constants() {
     assert_eq!(unsafe { NSURLSessionTransferSizeUnknown }, -1);
     let priorities =
         unsafe { (NSURLSessionTaskPriorityLow, NSURLSessionTaskPriorityDefault, NSURLSessionTaskPriorityHigh) };
-    assert_eq!(priorities, (0.0, 0.5, 1.0));
+    assert_eq!(priorities, (0.25, 0.5, 0.75));
 }
 
 #[test]

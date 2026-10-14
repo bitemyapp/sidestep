@@ -216,13 +216,13 @@ crate::constant_string!(
 /// A size not known, as a task's expected byte counts give it.
 #[unsafe(no_mangle)]
 pub static NSURLSessionTransferSizeUnknown: i64 = -1;
-/// A task's priorities, from 0 to 1.
+/// A task's priorities, within 0 to 1.
 #[unsafe(no_mangle)]
 pub static NSURLSessionTaskPriorityDefault: f32 = 0.5;
 #[unsafe(no_mangle)]
-pub static NSURLSessionTaskPriorityLow: f32 = 0.0;
+pub static NSURLSessionTaskPriorityLow: f32 = 0.25;
 #[unsafe(no_mangle)]
-pub static NSURLSessionTaskPriorityHigh: f32 = 1.0;
+pub static NSURLSessionTaskPriorityHigh: f32 = 0.75;
 #[derive(Clone)]
 struct ConfigState {
     protocols: Vec<usize>,
