@@ -491,14 +491,24 @@ fn draw_field_frame(cell: &NSTextFieldCellImpl, frame: NSRect, _view: &NSView) {
 /// while other colors and the placeholder stay, as on macOS
 /// (`conformance/tests/cell_backgrounds.rs`, `emphasized_text`).
 fn draw_field_text(cell: &NSTextFieldCellImpl, title: NSRect, view: &NSView) {
+    if !theme::paint::recording() {
+        return;
+    }
     // The field editor draws the live text over this view. The cell still
-    // draws its frame, but neither its old value nor its placeholder.
-    if !theme::paint::recording() || crate::textkit::field_editor::current_editor(view).is_some() {
+    // draws its frame, never its old value, and its placeholder while the
+    // editor is empty, as on macOS.
+    let editing = crate::textkit::field_editor::current_editor(view).map(|editor| {
+        // SAFETY: a field editor is a text view, whose string is an NSString.
+        let text: Retained<NSString> = unsafe { msg_send![&*editor, string] };
+        text.length() == 0
+    });
+    let has_placeholder = cell.ivars().placeholder.borrow().is_some();
+    if editing.is_some_and(|empty| !empty || !has_placeholder) {
         return;
     }
     let p = theme::palette();
     let base = cell.base();
-    let placeholder = shows_placeholder(cell);
+    let placeholder = editing.is_some() || shows_placeholder(cell);
     let emphasized = !placeholder && cell::draws_on_emphasis(base);
     let text_color = cell.ivars().text_color.borrow().clone();
     let mut color = match text_color.as_deref() {
@@ -511,7 +521,14 @@ fn draw_field_text(cell: &NSTextFieldCellImpl, title: NSRect, view: &NSView) {
     if !base.has(Flags::ENABLED) {
         color = theme::palette::dimmed(color);
     }
-    let styled = crate::color::with_emphasis(emphasized, || field_styled(cell, color));
+    let styled = if editing.is_some() {
+        // The cell's value may still hold text the editor no longer has.
+        let font = cell::font_of(base);
+        let text = cell.ivars().placeholder.borrow().clone().unwrap_or_default();
+        Styled::of(&text, cell::attrs(base, &font, color))
+    } else {
+        crate::color::with_emphasis(emphasized, || field_styled(cell, color))
+    };
     let r = NSRect::new(
         NSPoint::new(title.origin.x + metrics::TEXT_PADDING, title.origin.y),
         NSSize::new(title.size.width - 2.0 * metrics::TEXT_PADDING, title.size.height),
@@ -1014,6 +1031,9 @@ define_class!(
 
         #[unsafe(method(textDidChange:))]
         fn text_did_change(&self, notification: &NSNotification) {
+            // The placeholder under the editor comes and goes with its text.
+            let view: &NSView = self.as_control();
+            view.setNeedsDisplay(true);
             relay(self, notification, "NSControlTextDidChangeNotification", sel!(controlTextDidChange:), false);
         }
 

@@ -353,12 +353,17 @@ define_class!(
 
         #[unsafe(method(setStringValue:))]
         fn set_string_value(&self, string: &NSString) {
-            // A programmatic replacement ends editing, discarding the
-            // unvalidated editor text before changing the cell's value.
-            self.as_control().abortEditing();
             match self.the_cell() {
                 Some(c) => c.setStringValue(string),
                 None => self.set_loose(Value::String(string.copy())),
+            }
+            // Editing goes on, as in AppKit: the field editor takes the new
+            // value, caret at its end (quietly: no text-did-change), so the
+            // unvalidated text it held can't come back, and the keyboard
+            // stays where the user left it.
+            if let Some(editor) = self.as_control().currentEditor() {
+                editor.setString(string);
+                self.as_view().setNeedsDisplay(true);
             }
         }
 
