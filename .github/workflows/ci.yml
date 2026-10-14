@@ -23,7 +23,8 @@ jobs:
       # objc2's crates with the fork's fixes, for [patch.crates-io].
       - run: cargo run --release --manifest-path tools/objc2-overlay/Cargo.toml
       - run: cargo test --workspace --no-fail-fast
-      - run: cargo test --workspace --release --no-fail-fast
+      - if: ${{ !cancelled() }}
+        run: cargo test --workspace --release --no-fail-fast
 
   lint:
     runs-on: ubuntu-latest
