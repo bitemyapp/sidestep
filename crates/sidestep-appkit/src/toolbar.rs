@@ -14,6 +14,24 @@ sidestep_foundation::constant_string!(
     NSToolbarCustomizeToolbarItemIdentifier = "NSToolbarCustomizeToolbarItemIdentifier"
 );
 sidestep_foundation::constant_string!(NSToolbarPrintItemIdentifier = "NSToolbarPrintItemIdentifier");
+sidestep_foundation::constant_string!(NSToolbarShowColorsItemIdentifier = "NSToolbarShowColorsItemIdentifier");
+sidestep_foundation::constant_string!(NSToolbarShowFontsItemIdentifier = "NSToolbarShowFontsItemIdentifier");
+sidestep_foundation::constant_string!(NSToolbarCloudSharingItemIdentifier = "NSToolbarCloudSharingItemIdentifier");
+sidestep_foundation::constant_string!(NSToolbarToggleSidebarItemIdentifier = "NSToolbarToggleSidebarItemIdentifier");
+sidestep_foundation::constant_string!(
+    NSToolbarToggleInspectorItemIdentifier = "NSToolbarToggleInspectorItemIdentifier"
+);
+sidestep_foundation::constant_string!(
+    NSToolbarSidebarTrackingSeparatorItemIdentifier = "NSToolbarSidebarTrackingSeparatorItemIdentifier"
+);
+sidestep_foundation::constant_string!(
+    NSToolbarInspectorTrackingSeparatorItemIdentifier = "NSToolbarInspectorTrackingSeparatorItemIdentifier"
+);
+sidestep_foundation::constant_string!(NSToolbarWritingToolsItemIdentifier = "NSToolbarWritingToolsItemIdentifier");
+sidestep_foundation::constant_string!(NSToolbarWillAddItemNotification = "NSToolbarWillAddItemNotification");
+sidestep_foundation::constant_string!(NSToolbarDidRemoveItemNotification = "NSToolbarDidRemoveItemNotification");
+sidestep_foundation::constant_string!(NSToolbarItemKey = "NSToolbarItemKey");
+sidestep_foundation::constant_string!(NSToolbarNewIndexKey = "NSToolbarNewIndexKey");
 struct ItemState {
     id: Retained<NSString>,
     label: RefCell<Retained<NSString>>,

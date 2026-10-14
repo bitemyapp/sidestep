@@ -968,3 +968,31 @@ fn add(s: &Settings, unit: usize, value: i64, time: f64, options: usize) -> Opti
 }
 crate::constant_string!(NSCalendarIdentifierGregorian = "gregorian");
 crate::constant_string!(NSCalendarIdentifierISO8601 = "iso8601");
+identifiers! {
+    NSCalendarIdentifierBuddhist = "buddhist",
+    NSCalendarIdentifierChinese = "chinese",
+    NSCalendarIdentifierCoptic = "coptic",
+    NSCalendarIdentifierEthiopicAmeteMihret = "ethiopic",
+    NSCalendarIdentifierEthiopicAmeteAlem = "ethiopic-amete-alem",
+    NSCalendarIdentifierHebrew = "hebrew",
+    NSCalendarIdentifierIndian = "indian",
+    NSCalendarIdentifierIslamic = "islamic",
+    NSCalendarIdentifierIslamicCivil = "islamic-civil",
+    NSCalendarIdentifierIslamicTabular = "islamic-tbla",
+    NSCalendarIdentifierIslamicUmmAlQura = "islamic-umalqura",
+    NSCalendarIdentifierJapanese = "japanese",
+    NSCalendarIdentifierPersian = "persian",
+    NSCalendarIdentifierRepublicOfChina = "roc",
+    NSCalendarIdentifierBangla = "bangla",
+    NSCalendarIdentifierGujarati = "gujarati",
+    NSCalendarIdentifierKannada = "kannada",
+    NSCalendarIdentifierMalayalam = "malayalam",
+    NSCalendarIdentifierMarathi = "marathi",
+    NSCalendarIdentifierOdia = "odia",
+    NSCalendarIdentifierTamil = "tamil",
+    NSCalendarIdentifierTelugu = "telugu",
+    NSCalendarIdentifierVikram = "vikram",
+    NSCalendarIdentifierDangi = "dangi",
+    NSCalendarIdentifierVietnamese = "vietnamese",
+    NSCalendarDayChangedNotification = "NSCalendarDayChangedNotification",
+}

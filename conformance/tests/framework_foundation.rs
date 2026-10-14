@@ -51,6 +51,39 @@ fn calendar_addition_preserves_wall_clock_across_dst() {
     });
 }
 
+/// Calendars by their identifiers' values, and a URL session's sizes and
+/// priorities.
+#[test]
+fn calendar_identifiers_and_session_constants() {
+    let identifiers = unsafe {
+        [
+            (NSCalendarIdentifierGregorian, "gregorian"),
+            (NSCalendarIdentifierBuddhist, "buddhist"),
+            (NSCalendarIdentifierChinese, "chinese"),
+            (NSCalendarIdentifierCoptic, "coptic"),
+            (NSCalendarIdentifierEthiopicAmeteMihret, "ethiopic"),
+            (NSCalendarIdentifierEthiopicAmeteAlem, "ethiopic-amete-alem"),
+            (NSCalendarIdentifierHebrew, "hebrew"),
+            (NSCalendarIdentifierISO8601, "iso8601"),
+            (NSCalendarIdentifierIndian, "indian"),
+            (NSCalendarIdentifierIslamic, "islamic"),
+            (NSCalendarIdentifierIslamicCivil, "islamic-civil"),
+            (NSCalendarIdentifierJapanese, "japanese"),
+            (NSCalendarIdentifierPersian, "persian"),
+            (NSCalendarIdentifierRepublicOfChina, "roc"),
+            (NSCalendarIdentifierIslamicTabular, "islamic-tbla"),
+            (NSCalendarIdentifierIslamicUmmAlQura, "islamic-umalqura"),
+        ]
+    };
+    for (identifier, value) in identifiers {
+        assert_eq!(identifier.to_string(), value);
+    }
+    assert_eq!(unsafe { NSURLSessionTransferSizeUnknown }, -1);
+    let priorities =
+        unsafe { (NSURLSessionTaskPriorityLow, NSURLSessionTaskPriorityDefault, NSURLSessionTaskPriorityHigh) };
+    assert_eq!(priorities, (0.0, 0.5, 1.0));
+}
+
 #[test]
 fn number_formatter_localized_roundtrip_and_range() {
     autoreleasepool(|_| {

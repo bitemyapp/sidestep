@@ -13,6 +13,12 @@ sidestep_runtime::static_class!(pub(crate) SPLIT, SPLIT_META = "NSSplitViewContr
 sidestep_runtime::static_class!(pub(crate) ITEM, ITEM_META = "NSSplitViewItem", || { let _ = Item::class(); });
 sidestep_runtime::static_class!(pub(crate) TABS, TABS_META = "NSTabViewController", || { let _ = Tabs::class(); });
 sidestep_runtime::static_class!(pub(crate) ACCESSORY, ACCESSORY_META = "NSTitlebarAccessoryViewController", || { let _ = Accessory::class(); });
+/// A split view controller's dimension left to it.
+#[unsafe(no_mangle)]
+pub static NSSplitViewControllerAutomaticDimension: f64 = -1.0;
+/// A split view item's dimension not given.
+#[unsafe(no_mangle)]
+pub static NSSplitViewItemUnspecifiedDimension: f64 = -1.0;
 
 struct ItemState {
     controller: Retained<NSViewController>,

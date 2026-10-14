@@ -10,6 +10,16 @@ use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::sync::Mutex;
 
 sidestep_runtime::static_class!(pub(crate) NSFILEHANDLE, NSFILEHANDLE_META = "NSFileHandle", || { let _ = Handle::class(); });
+crate::constant_string!(NSFileHandleOperationException = "NSFileHandleOperationException");
+crate::constant_string!(NSFileHandleReadCompletionNotification = "NSFileHandleReadCompletionNotification");
+crate::constant_string!(
+    NSFileHandleReadToEndOfFileCompletionNotification = "NSFileHandleReadToEndOfFileCompletionNotification"
+);
+crate::constant_string!(NSFileHandleConnectionAcceptedNotification = "NSFileHandleConnectionAcceptedNotification");
+crate::constant_string!(NSFileHandleDataAvailableNotification = "NSFileHandleDataAvailableNotification");
+crate::constant_string!(NSFileHandleNotificationDataItem = "NSFileHandleNotificationDataItem");
+crate::constant_string!(NSFileHandleNotificationFileHandleItem = "NSFileHandleNotificationFileHandleItem");
+crate::constant_string!(NSFileHandleNotificationMonitorModes = "NSFileHandleNotificationMonitorModes");
 
 struct State {
     file: Option<File>,

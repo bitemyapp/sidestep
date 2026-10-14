@@ -179,6 +179,7 @@ fn containers(mtm: MainThreadMarker) {
     split.removeSplitViewItem(&item);
     assert!(child.parentViewController().is_none());
     assert_eq!(split.splitView().arrangedSubviews().count(), 0);
+    assert_eq!(unsafe { (NSSplitViewControllerAutomaticDimension, NSSplitViewItemUnspecifiedDimension) }, (-1.0, -1.0));
 
     let tabs = NSTabViewController::new(mtm);
     let a = NSViewController::new(mtm);

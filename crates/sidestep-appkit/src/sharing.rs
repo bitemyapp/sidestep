@@ -9,6 +9,38 @@ use objc2_foundation::{NSArray, NSRect, NSString, NSURL};
 use std::cell::RefCell;
 sidestep_runtime::static_class!(pub(crate) PICKER, PICKER_META = "NSSharingServicePicker", || { let _ = Picker::class(); });
 sidestep_runtime::static_class!(pub(crate) SERVICE, SERVICE_META = "NSSharingService", || { let _ = Service::class(); });
+sidestep_foundation::constant_string!(NSSharingServiceNameComposeEmail = "NSSharingServiceNameComposeEmail");
+sidestep_foundation::constant_string!(NSSharingServiceNameComposeMessage = "NSSharingServiceNameComposeMessage");
+sidestep_foundation::constant_string!(NSSharingServiceNameSendViaAirDrop = "NSSharingServiceNameSendViaAirDrop");
+sidestep_foundation::constant_string!(
+    NSSharingServiceNameAddToSafariReadingList = "NSSharingServiceNameAddToSafariReadingList"
+);
+sidestep_foundation::constant_string!(NSSharingServiceNameAddToIPhoto = "NSSharingServiceNameAddToIPhoto");
+sidestep_foundation::constant_string!(NSSharingServiceNameAddToAperture = "NSSharingServiceNameAddToAperture");
+sidestep_foundation::constant_string!(
+    NSSharingServiceNameUseAsDesktopPicture = "NSSharingServiceNameUseAsDesktopPicture"
+);
+sidestep_foundation::constant_string!(NSSharingServiceNameCloudSharing = "NSSharingServiceNameCloudSharing");
+sidestep_foundation::constant_string!(NSSharingServiceNamePostOnFacebook = "NSSharingServiceNamePostOnFacebook");
+sidestep_foundation::constant_string!(NSSharingServiceNamePostOnTwitter = "NSSharingServiceNamePostOnTwitter");
+sidestep_foundation::constant_string!(NSSharingServiceNamePostOnSinaWeibo = "NSSharingServiceNamePostOnSinaWeibo");
+sidestep_foundation::constant_string!(
+    NSSharingServiceNamePostOnTencentWeibo = "NSSharingServiceNamePostOnTencentWeibo"
+);
+sidestep_foundation::constant_string!(NSSharingServiceNamePostOnLinkedIn = "NSSharingServiceNamePostOnLinkedIn");
+sidestep_foundation::constant_string!(
+    NSSharingServiceNameUseAsTwitterProfileImage = "NSSharingServiceNameUseAsTwitterProfileImage"
+);
+sidestep_foundation::constant_string!(
+    NSSharingServiceNameUseAsFacebookProfileImage = "NSSharingServiceNameUseAsFacebookProfileImage"
+);
+sidestep_foundation::constant_string!(
+    NSSharingServiceNameUseAsLinkedInProfileImage = "NSSharingServiceNameUseAsLinkedInProfileImage"
+);
+sidestep_foundation::constant_string!(NSSharingServiceNamePostImageOnFlickr = "NSSharingServiceNamePostImageOnFlickr");
+sidestep_foundation::constant_string!(NSSharingServiceNamePostVideoOnVimeo = "NSSharingServiceNamePostVideoOnVimeo");
+sidestep_foundation::constant_string!(NSSharingServiceNamePostVideoOnYouku = "NSSharingServiceNamePostVideoOnYouku");
+sidestep_foundation::constant_string!(NSSharingServiceNamePostVideoOnTudou = "NSSharingServiceNamePostVideoOnTudou");
 struct ServiceState {
     title: Retained<NSString>,
     image: Option<Retained<AnyObject>>,

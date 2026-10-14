@@ -205,6 +205,24 @@ define_class!(
 );
 
 crate::constant_string!(NSURLErrorDomain = "NSURLErrorDomain");
+crate::constant_string!(NSURLSessionDownloadTaskResumeData = "NSURLSessionDownloadTaskResumeData");
+crate::constant_string!(NSURLSessionUploadTaskResumeData = "NSURLSessionUploadTaskResumeData");
+crate::constant_string!(
+    NSHTTPCookieManagerAcceptPolicyChangedNotification = "NSHTTPCookieManagerAcceptPolicyChangedNotification"
+);
+crate::constant_string!(
+    NSHTTPCookieManagerCookiesChangedNotification = "NSHTTPCookieManagerCookiesChangedNotification"
+);
+/// A size not known, as a task's expected byte counts give it.
+#[unsafe(no_mangle)]
+pub static NSURLSessionTransferSizeUnknown: i64 = -1;
+/// A task's priorities, from 0 to 1.
+#[unsafe(no_mangle)]
+pub static NSURLSessionTaskPriorityDefault: f32 = 0.5;
+#[unsafe(no_mangle)]
+pub static NSURLSessionTaskPriorityLow: f32 = 0.0;
+#[unsafe(no_mangle)]
+pub static NSURLSessionTaskPriorityHigh: f32 = 1.0;
 #[derive(Clone)]
 struct ConfigState {
     protocols: Vec<usize>,

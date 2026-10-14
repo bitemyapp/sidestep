@@ -25,6 +25,36 @@ sidestep_foundation::constant_string!(NSPrintLeftMargin = "NSPrintLeftMargin");
 sidestep_foundation::constant_string!(NSPrintRightMargin = "NSPrintRightMargin");
 sidestep_foundation::constant_string!(NSPrintHorizontalPagination = "NSPrintHorizontalPagination");
 sidestep_foundation::constant_string!(NSPrintVerticalPagination = "NSPrintVerticalPagination");
+sidestep_foundation::constant_string!(NSPrintPreviewJob = "NSPrintPreviewJob");
+sidestep_foundation::constant_string!(
+    NSPrintJobSavingFileNameExtensionHidden = "NSPrintJobSavingFileNameExtensionHidden"
+);
+sidestep_foundation::constant_string!(NSPrintPaperName = "NSPrintPaperName");
+sidestep_foundation::constant_string!(NSPrintScalingFactor = "NSPrintScalingFactor");
+sidestep_foundation::constant_string!(NSPrintHorizontallyCentered = "NSPrintHorizontallyCentered");
+sidestep_foundation::constant_string!(NSPrintVerticallyCentered = "NSPrintVerticallyCentered");
+sidestep_foundation::constant_string!(NSPrintPrinter = "NSPrintPrinter");
+sidestep_foundation::constant_string!(NSPrintCopies = "NSPrintCopies");
+sidestep_foundation::constant_string!(NSPrintAllPages = "NSPrintAllPages");
+sidestep_foundation::constant_string!(NSPrintFirstPage = "NSPrintFirstPage");
+sidestep_foundation::constant_string!(NSPrintLastPage = "NSPrintLastPage");
+sidestep_foundation::constant_string!(NSPrintMustCollate = "NSPrintMustCollate");
+sidestep_foundation::constant_string!(NSPrintReversePageOrder = "NSPrintReversePageOrder");
+sidestep_foundation::constant_string!(NSPrintSavePath = "NSPrintSavePath");
+sidestep_foundation::constant_string!(NSPrintPagesAcross = "NSPrintPagesAcross");
+sidestep_foundation::constant_string!(NSPrintPagesDown = "NSPrintPagesDown");
+sidestep_foundation::constant_string!(NSPrintTime = "NSPrintTime");
+sidestep_foundation::constant_string!(NSPrintDetailedErrorReporting = "NSPrintDetailedErrorReporting");
+sidestep_foundation::constant_string!(NSPrintFaxNumber = "NSPrintFaxNumber");
+sidestep_foundation::constant_string!(NSPrintPrinterName = "NSPrintPrinterName");
+sidestep_foundation::constant_string!(NSPrintSelectionOnly = "NSPrintSelectionOnly");
+sidestep_foundation::constant_string!(NSPrintHeaderAndFooter = "NSPrintHeaderAndFooter");
+sidestep_foundation::constant_string!(NSPrintPagesPerSheet = "NSPrintPagesPerSheet");
+sidestep_foundation::constant_string!(NSPrintJobFeatures = "NSPrintJobFeatures");
+sidestep_foundation::constant_string!(NSPrintManualFeed = "NSPrintManualFeed");
+sidestep_foundation::constant_string!(NSPrintPaperFeed = "NSPrintPaperFeed");
+sidestep_foundation::constant_string!(NSPrintFormName = "NSPrintFormName");
+sidestep_foundation::constant_string!(NSPrintOperationExistsException = "NSPrintOperationExistsException");
 type Dict = NSMutableDictionary<NSString, AnyObject>;
 fn set(dict: &Dict, key: &str, value: &AnyObject) {
     let _: () = unsafe { msg_send![dict, setObject: value, forKey: &*NSString::from_str(key)] };
