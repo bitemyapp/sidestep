@@ -1659,17 +1659,18 @@ fn cg_scroll_events_become_ns_events(_mtm: MainThreadMarker) {
     CGEvent::set_integer_value_field(event, F::ScrollWheelEventScrollPhase, 2);
     CGEvent::set_timestamp(event, 1_500_000_000);
     CGEvent::set_flags(event, CGEventFlags::MaskShift | CGEventFlags::MaskCommand);
-    assert_eq!(CGEvent::double_value_field(event, F::ScrollWheelEventPointDeltaAxis1), -12.5);
+    // Point deltas hold whole points: the half goes.
+    assert_eq!(CGEvent::double_value_field(event, F::ScrollWheelEventPointDeltaAxis1), -12.0);
     assert_eq!(CGEvent::integer_value_field(event, F::ScrollWheelEventScrollPhase), 2);
     let ns = NSEvent::eventWithCGEvent(&made).expect("an NSEvent");
     assert_eq!(ns.r#type(), NSEventType::ScrollWheel);
     assert!(ns.hasPreciseScrollingDeltas());
-    assert_eq!((ns.scrollingDeltaX(), ns.scrollingDeltaY()), (3.0, -12.5));
+    assert_eq!((ns.scrollingDeltaX(), ns.scrollingDeltaY()), (3.0, -12.0));
     assert_eq!((ns.phase(), ns.momentumPhase()), (NSEventPhase::Changed, NSEventPhase::None));
     assert!((ns.timestamp() - 1.5).abs() < 1e-6, "{}", ns.timestamp());
     assert!(ns.modifierFlags().contains(NSEventModifierFlags::Shift | NSEventModifierFlags::Command));
     let back = ns.CGEvent().expect("its CGEvent");
-    assert_eq!(CGEvent::double_value_field(Some(&back), F::ScrollWheelEventPointDeltaAxis1), -12.5);
+    assert_eq!(CGEvent::double_value_field(Some(&back), F::ScrollWheelEventPointDeltaAxis1), -12.0);
     assert_eq!(CGEvent::integer_value_field(Some(&back), F::ScrollWheelEventScrollPhase), 2);
 
     // A gesture's phases, and the coasting after it.

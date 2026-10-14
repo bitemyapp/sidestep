@@ -297,13 +297,19 @@ pub extern "C-unwind" fn CGEventSetIntegerValueField(event: Option<&CGEvent>, fi
 
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn CGEventGetDoubleValueField(event: Option<&CGEvent>, field: CGEventField) -> f64 {
-    get(event).map_or(0.0, |e| e.fields().double(field))
+    let Some(e) = get(event) else { return 0.0 };
+    let f = e.fields();
+    if POINT_FIELDS.contains(&field) { f.integer(field) as f64 } else { f.double(field) }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C-unwind" fn CGEventSetDoubleValueField(event: Option<&CGEvent>, field: CGEventField, value: f64) {
     if let Some(e) = get(event) {
         e.update(|f| {
+            if POINT_FIELDS.contains(&field) {
+                f.set_integer(field, value as i64);
+                return;
+            }
             f.set_double(field, value);
             if let Some(lines) = whole_lines_of(field) {
                 f.set_integer(lines, value.round() as i64);
@@ -311,6 +317,15 @@ pub extern "C-unwind" fn CGEventSetDoubleValueField(event: Option<&CGEvent>, fie
         });
     }
 }
+
+/// A scroll's point deltas, which hold whole points: a fraction set goes
+/// (toward zero), as on macOS. Sidestep's own events keep their fractions
+/// for the `NSEvent` made back from them, which reads `Fields` directly.
+const POINT_FIELDS: [CGEventField; 3] = [
+    CGEventField::ScrollWheelEventPointDeltaAxis1,
+    CGEventField::ScrollWheelEventPointDeltaAxis2,
+    CGEventField::ScrollWheelEventPointDeltaAxis3,
+];
 
 /// A scroll axis's whole lines field and its fixed-point twin.
 const LINE_FIELDS: [(CGEventField, CGEventField); 3] = [
