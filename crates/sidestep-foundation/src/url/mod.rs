@@ -417,10 +417,12 @@ define_class!(
 );
 
 impl NSURLImpl {
+    /// The host as written: none when the authority is empty, but an empty
+    /// one after a user (`https://user@/x`, as macOS has it).
     fn host_text(&self) -> Option<&str> {
         let (s, p) = self.absolute();
         let host = &s[p.host.clone()?];
-        (!host.is_empty()).then_some(host)
+        (!host.is_empty() || p.user.is_some()).then_some(host)
     }
 
     fn port_value(&self) -> Option<i64> {
@@ -786,11 +788,11 @@ fn init_file(
 }
 
 /// The string a URL keeps: encoded, or `None` if it needed encoding and
-/// mustn't be.
+/// mustn't be, or can't be (a host with a space).
 pub(crate) fn prepare(string: &str, encode: bool) -> Option<String> {
     if parse::is_valid(string) {
         Some(string.to_string())
-    } else if encode {
+    } else if encode && !parse::host_needs_encoding(string) {
         Some(parse::encode_invalid(string))
     } else {
         None

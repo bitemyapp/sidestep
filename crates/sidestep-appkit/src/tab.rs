@@ -23,7 +23,9 @@ use std::cell::{Cell, RefCell};
 
 use objc2::rc::{Allocated, Retained, Weak};
 use objc2::runtime::{AnyObject, NSObject, ProtocolObject, Sel};
-use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
+use objc2::{
+    AnyThread, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel,
+};
 use objc2_app_kit::{
     NSBezierPath, NSColor, NSControlSize, NSEvent, NSFont, NSFontAttributeName, NSForegroundColorAttributeName,
     NSResponder, NSStringDrawing, NSTabPosition, NSTabState, NSTabView, NSTabViewBorderType, NSTabViewDelegate,
@@ -137,6 +139,14 @@ define_class!(
     pub(crate) struct NSTabViewItemImpl;
 
     impl NSTabViewItemImpl {
+        #[unsafe(method_id(tabViewItemWithViewController:))]
+        fn with_controller(controller: &objc2_app_kit::NSViewController) -> Retained<Self> {
+            let this = Self::alloc().set_ivars(ItemIvars::default());
+            let this: Retained<Self> = unsafe { msg_send![super(this), init] };
+            this.ivars().view_controller.replace(Some(controller.retain().into()));
+            if let Some(title) = controller.title() { this.ivars().label.replace(title); }
+            this
+        }
         #[unsafe(method_id(init))]
         fn init(this: Allocated<Self>) -> Retained<Self> {
             let this = this.set_ivars(ItemIvars::default());
@@ -225,6 +235,7 @@ define_class!(
         #[unsafe(method(setViewController:))]
         fn set_view_controller(&self, controller: Option<&AnyObject>) {
             let old = self.ivars().view_controller.replace(controller.map(|c| c.retain()));
+            self.as_item().setView(None);
             drop(old);
         }
 
@@ -314,6 +325,12 @@ impl NSTabViewItemImpl {
     /// The item's view, made empty when it has none yet.
     fn content_view(&self) -> Retained<NSView> {
         if let Some(view) = self.ivars().view.borrow().clone() {
+            return view;
+        }
+        let controller = self.ivars().view_controller.borrow().clone();
+        if let Some(controller) = controller.and_then(|c| c.downcast::<objc2_app_kit::NSViewController>().ok()) {
+            let view = controller.view();
+            self.ivars().view.replace(Some(view.clone()));
             return view;
         }
         let mtm = MainThreadMarker::new().expect("a tab view item's view on the main thread");

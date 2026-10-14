@@ -416,9 +416,12 @@ pub fn capture_pixels(on: bool) {
     *null::PIXELS.lock().unwrap_or_else(|e| e.into_inner()) = on.then(Default::default);
 }
 
-/// A shown window's captured pixels: width, height and premultiplied RGBA
-/// bytes, as canvases hold them, row by row from the top left.
-pub fn window_pixels(window: &NSWindow) -> Option<(u32, u32, Vec<[u8; 4]>)> {
+/// Captured pixels: width, height and premultiplied RGBA bytes, as
+/// canvases hold them, row by row from the top left.
+pub type Pixels = (u32, u32, Vec<[u8; 4]>);
+
+/// A shown window's captured pixels.
+pub fn window_pixels(window: &NSWindow) -> Option<Pixels> {
     let id = showing_id(window);
     let pixels = null::PIXELS.lock().unwrap_or_else(|e| e.into_inner());
     let (w, h, px) = pixels.as_ref()?.get(&id)?;
@@ -433,11 +436,7 @@ pub fn window_pixels(window: &NSWindow) -> Option<(u32, u32, Vec<[u8; 4]>)> {
 /// null backend. Move the receiver to a worker for encoding or file I/O;
 /// never wait for its reply on the GUI thread. Enable `capture_pixels`
 /// before showing the window, and bound the number of requests in flight.
-pub fn request_window_pixels(
-    window: &NSWindow,
-    t: f64,
-    crop: [u32; 4],
-) -> std::sync::mpsc::Receiver<Option<(u32, u32, Vec<[u8; 4]>)>> {
+pub fn request_window_pixels(window: &NSWindow, t: f64, crop: [u32; 4]) -> std::sync::mpsc::Receiver<Option<Pixels>> {
     let (reply, receiver) = std::sync::mpsc::channel();
     crate::app::send(crate::protocol::ToRender::CaptureWindow { window: showing_id(window), at: t, crop, reply });
     receiver

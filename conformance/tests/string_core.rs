@@ -510,6 +510,47 @@ fn get_bytes_converts_until_it_must_stop() {
     assert_eq!((ok, used, rest), (true, 8, NSRange::new(5, 0)));
 }
 
+/// A character followed by combining marks is written precomposed in
+/// Latin 1 when the encoding has the composition; a character alone is
+/// never remapped. (Cases recorded with `String.data(using:)` on macOS 26,
+/// by Upleft's `encoding_matches_foundation`.)
+#[test]
+fn precomposition_into_latin_1() {
+    let latin1 =
+        |text: &str| NSString::from_str(text).dataUsingEncoding_allowLossyConversion(LATIN1, false).map(|d| d.to_vec());
+    let cases: [(&str, &[u8]); 7] = [
+        ("e\u{301}", &[0xE9]),
+        ("A\u{30A}", &[0xC5]),
+        ("a\u{308}", &[0xE4]),
+        ("c\u{327}", &[0xE7]),
+        ("y\u{308}", &[0xFF]),
+        ("e\u{301}e\u{301}", &[0xE9, 0xE9]),
+        ("e\u{301}\u{0}", &[0xE9, 0x00]),
+    ];
+    for (text, bytes) in cases {
+        assert_eq!(latin1(text).as_deref(), Some(bytes), "{text:?}");
+    }
+    for text in [
+        "a\u{FEFF}b",
+        "\u{212B}",
+        "\u{2126}",
+        "\u{212A}",
+        "x\u{308}",
+        "é\u{301}",
+        "\u{FB01}",
+        "\u{FF21}",
+        "a\u{308}\u{301}",
+        "\u{301}",
+        "Y\u{308}",
+        "a\u{323}\u{301}",
+        "i\u{307}",
+        "\u{C0}\u{300}",
+        "a\u{30A}\u{30A}",
+    ] {
+        assert_eq!(latin1(text), None, "{text:?}");
+    }
+}
+
 #[test]
 fn data_conversions() {
     let data =

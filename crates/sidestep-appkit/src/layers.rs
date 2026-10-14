@@ -601,7 +601,9 @@ fn plan(window: &NSWindowImpl) -> Vec<Plan> {
         for sub in views::subviews(c).iter() {
             let s = views::imp(sub);
             if !views::is_hidden(s) {
-                let r = views::step(s, flipped, views::frame(s)).then(&lxf).rect(views::bounds(s));
+                // As far as the document draws: past its bounds where it
+                // doesn't clip (a text view's text, wider than it).
+                let r = views::step(s, flipped, views::frame(s)).then(&lxf).rect(views::reach(s));
                 extent = Some(extent.map_or(r, |e| e.union(&r)));
             }
         }
@@ -867,22 +869,24 @@ pub(crate) fn record(view: &NSViewImpl, xf: Xf, clip: Rect, area: Rect, ring: Op
     if !draw_clip.is_empty() {
         // Its opacity, over its subviews too: nothing at 0, a group below 1.
         let Some(_opacity) = crate::context::opacity(view, draw_clip) else { return };
+        let region = if clips { target } else { clip.intersect(&area) };
         if !target.is_empty() {
             // A fresh graphics state and the view's appearance for its
             // drawRect:, which may draw outside its bounds if it doesn't
             // clip.
-            let region = if clips { target } else { clip.intersect(&area) };
             let mark = crate::context::begin_view(view, xf, region);
             // SAFETY: drawRect: takes an NSRect.
             unsafe { msg_send![view, drawRect: xf.inverse_rect(target)] }
             crate::context::end_view(mark);
-            // A TextKit 2 text view's fragments go above what it draws, as
-            // AppKit draws them in views of their own.
-            if crate::textkit::text_view::draws_text_kit_2(views::as_view(view)) {
-                let mark = crate::context::begin_view(view, xf, region);
-                crate::textkit::text_view::draw_content(views::as_view(view), xf.inverse_rect(target));
-                crate::context::end_view(mark);
-            }
+        }
+        // A TextKit 2 text view's fragments go above what it draws, as
+        // AppKit draws them in views of their own: wherever they reach
+        // (past its bounds, when it doesn't clip), not only where it draws.
+        let fragments = if clips { target } else { draw_clip };
+        if !fragments.is_empty() && crate::textkit::text_view::draws_text_kit_2(views::as_view(view)) {
+            let mark = crate::context::begin_view(view, xf, region);
+            crate::textkit::text_view::draw_content(views::as_view(view), xf.inverse_rect(fragments));
+            crate::context::end_view(mark);
         }
         // A promoted clip view's document is in its layer.
         if mode == Mode::Inline || !(views::is_clip(view) && promoted(view)) {

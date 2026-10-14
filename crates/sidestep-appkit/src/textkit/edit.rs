@@ -246,9 +246,9 @@ fn extend(t: &mut Typing, storage: &NSTextStorage, range: NSRange, added: usize)
     true
 }
 
-/// Register the undo of a composition committed as `len` units at
-/// `location`, which replaced `original`: it joins the run of typing it
-/// follows, or starts one.
+/// Register the undo of a composition that began as `len` units of marked
+/// text at `location`, replacing `original`: it joins the run of typing it
+/// follows, or starts one, which `grow_composition` keeps covering it.
 pub(crate) fn register_composition(
     view: &NSTextViewImpl,
     location: usize,
@@ -278,6 +278,17 @@ pub(crate) fn register_composition(
     }));
     register(&um, view, run.clone());
     view.set_coalescing(Some(run));
+}
+
+/// The text being composed changed length by `delta` units: the undo
+/// registered when composing began (the view's run of typing) covers it.
+pub(crate) fn grow_composition(view: &NSTextViewImpl, delta: isize) {
+    if let Some(run) = view.coalescing()
+        && run.borrow().alive.get()
+    {
+        let mut t = run.borrow_mut();
+        t.range.length = t.range.length.saturating_add_signed(delta);
+    }
 }
 
 /// Register `run`'s undo with `um`, named for its kind.

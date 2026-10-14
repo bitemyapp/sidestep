@@ -48,7 +48,8 @@ use objc2_app_kit::{
     NSTextAlignment, NSTextField, NSTextFieldBezelStyle, NSTextFieldCell, NSView,
 };
 use objc2_foundation::{
-    NSAttributedString, NSCopying, NSDictionary, NSNotification, NSPoint, NSRect, NSSize, NSString, NSZone,
+    NSAttributedString, NSCopying, NSDictionary, NSEdgeInsets, NSNotification, NSPoint, NSRect, NSSize, NSString,
+    NSZone,
 };
 
 use super::cell::{self, Flags, NSCellImpl, Styled, imp as cell_imp};
@@ -927,6 +928,20 @@ define_class!(
                 let s = c.cellSize();
                 let view: &NSView = control;
                 view.setFrameSize(NSSize::new(s.width.ceil(), s.height.ceil()));
+            }
+        }
+
+        /// A label's text is its alignment rectangle, its padding outside
+        /// it: Auto Layout makes its frame the intrinsic size (the text's
+        /// width) and two points each side, as `fittingSize` and sizing
+        /// to fit do (`labels`). A bezel or border is the field's edge.
+        #[unsafe(method(alignmentRectInsets))]
+        fn alignment_rect_insets(&self) -> NSEdgeInsets {
+            if self.cell_flag(Flags::BEZELED) || self.cell_flag(Flags::BORDERED) {
+                NSEdgeInsets { top: 0.0, left: 0.0, bottom: 0.0, right: 0.0 }
+            } else {
+                let pad = metrics::TEXT_PADDING;
+                NSEdgeInsets { top: 0.0, left: pad, bottom: 0.0, right: pad }
             }
         }
 

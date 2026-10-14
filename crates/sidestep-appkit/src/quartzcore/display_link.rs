@@ -283,12 +283,17 @@ fn stop(link: &CADisplayLinkImpl) {
         timer.invalidate();
     }
     // Taken out before it's dropped: its release may run program code.
-    let gone: Vec<Retained<CADisplayLinkImpl>> = LINKS.with(|l| {
+    // While the thread ends (its autorelease pool drains after this
+    // module's storage is gone), there's nothing left to stop.
+    let Ok(gone) = LINKS.try_with(|l| {
         let mut l = l.borrow_mut();
-        let (gone, kept) = std::mem::take(&mut *l).into_iter().partition(|x| std::ptr::eq(&**x, link));
+        let (gone, kept): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut *l).into_iter().partition(|x| std::ptr::eq(&**x, link));
         *l = kept;
         gone
-    });
+    }) else {
+        return;
+    };
     update_ticks();
     drop(gone);
 }
@@ -296,14 +301,18 @@ fn stop(link: &CADisplayLinkImpl) {
 /// Ask for frame ticks for the windows with active links, and stop them
 /// for the others.
 pub(crate) fn update_ticks() {
-    let wanted: Vec<WindowId> = LINKS.with(|l| {
+    let Ok(wanted) = LINKS.try_with(|l| {
         let l = l.borrow();
         let mut ids: Vec<WindowId> = l.iter().filter_map(|x| window_id(x)).collect();
         ids.sort_unstable();
         ids.dedup();
         ids
-    });
-    let old = TICKING.with(|t| std::mem::replace(&mut *t.borrow_mut(), wanted.clone()));
+    }) else {
+        return;
+    };
+    let Ok(old) = TICKING.try_with(|t| std::mem::replace(&mut *t.borrow_mut(), wanted.clone())) else {
+        return;
+    };
     for id in &wanted {
         if !old.contains(id) {
             crate::app::send(ToRender::FrameTicks { window: *id, on: true });

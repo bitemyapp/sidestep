@@ -406,6 +406,22 @@ fn priorities(mtm: MainThreadMarker) {
     w.setContentView(None);
 }
 
+/// A stack held larger than its views: in gravity areas too, a view with
+/// no intrinsic width (an editable field's) takes the room, as the stack
+/// draws its edge in to its views. (Upleft's find field.)
+fn stretching(mtm: MainThreadMarker) {
+    let (w, cv) = window(mtm);
+    let s = NSStackView::new(mtm);
+    let (a, field) = (item(mtm, 40.0, 20.0), item(mtm, -1.0, 20.0));
+    s.addArrangedSubview(&a);
+    s.addArrangedSubview(&field);
+    cv.addSubview(&s);
+    s.setFrame(rect(0.0, 0.0, 300.0, 50.0));
+    w.layoutIfNeeded();
+    assert_eq!(frames(&[a, field]), [rect(0.0, 15.0, 40.0, 20.0), rect(48.0, 15.0, 252.0, 20.0)]);
+    w.setContentView(None);
+}
+
 fn sized_by_content(mtm: MainThreadMarker) {
     let (w, cv) = window(mtm);
     let g = NSStackView::stackViewWithViews(
@@ -450,6 +466,7 @@ fn main() {
         ("hidden_views", hidden_views),
         ("gravities", gravities),
         ("priorities", priorities),
+        ("stretching", stretching),
         ("sized_by_content", sized_by_content),
     ];
     for (name, test) in tests {

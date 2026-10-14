@@ -37,6 +37,10 @@ use crate::window::NSWindowImpl;
 /// What a window keeps for this area.
 #[derive(Default)]
 pub(crate) struct WindowEvents {
+    pub(crate) toolbar: RefCell<Option<Retained<objc2_app_kit::NSToolbar>>>,
+    pub(crate) toolbar_style: Cell<isize>,
+    pub(crate) titlebar_separator: Cell<isize>,
+    pub(crate) accessories: RefCell<Vec<Retained<objc2_app_kit::NSTitlebarAccessoryViewController>>>,
     /// The notifications the delegate is registered for.
     registered: Registered,
     /// The window's address, to remove its delegate's registrations when it

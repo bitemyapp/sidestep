@@ -356,7 +356,12 @@ object_property!(subrole, set_subrole, subrole: NSString, |this| default_subrole
 object_property!(role_description, set_role_description, role_description: NSString, none);
 object_property!(label, set_label, label: NSString, default_label);
 object_property!(title, set_title, title: NSString, title_of);
-object_property!(help, set_help, help: NSString, none);
+object_property!(help, set_help, help: NSString, default_help);
+
+/// A view's help, until set, is its tool tip, as AppKit's is.
+fn default_help(this: &AnyObject) -> Option<Retained<NSString>> {
+    this.downcast_ref::<NSView>().and_then(NSView::toolTip)
+}
 
 /// `setAccessibilityHelp:`: a control's help is its cell's too.
 extern "C-unwind" fn set_help_through(this: &AnyObject, cmd: Sel, value: Option<&NSString>) {

@@ -111,7 +111,7 @@ fn composite(window: WindowId, at: Option<f64>, glyphs: &mut crate::raster::Glyp
 
 /// Copy only the requested device pixels, on the render thread. An empty
 /// or out-of-bounds crop has no image; arithmetic overflow is out of bounds.
-fn cropped(window: WindowId, [x, y, width, height]: [u32; 4]) -> Option<(u32, u32, Vec<[u8; 4]>)> {
+fn cropped(window: WindowId, [x, y, width, height]: [u32; 4]) -> Option<crate::testing::Pixels> {
     let all = PIXELS.lock().unwrap_or_else(|e| e.into_inner());
     let (w, h, pixels) = all.as_ref()?.get(&window)?;
     let right = x.checked_add(width)?;

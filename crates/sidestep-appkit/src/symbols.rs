@@ -97,6 +97,14 @@ static SYMBOLS: &[(&str, &[(Ink, &str)])] = &[
         "exclamationmark.triangle",
         &[(Stroke, "M12 3.5L21.5 20h-19Z"), (Stroke, "M12 9.5v4.5"), (Fill, "M13 17a1 1 0 1 1-2 0a1 1 0 1 1 2 0Z")],
     ),
+    (
+        "exclamationmark.octagon",
+        &[
+            (Stroke, "M8.3 3h7.4L21 8.3v7.4L15.7 21H8.3L3 15.7V8.3Z"),
+            (Stroke, "M12 7.5v5.5"),
+            (Fill, "M13 16.5a1 1 0 1 1-2 0a1 1 0 1 1 2 0Z"),
+        ],
+    ),
     ("checkmark.circle", &[(Stroke, CIRCLE), (Stroke, "M8 12.5l3 3 5-6")]),
     ("checkmark.circle.fill", &[(Fill, CIRCLE), (Erase, "M8 12.5l3 3 5-6")]),
     ("xmark.circle", &[(Stroke, CIRCLE), (Stroke, "M9 9l6 6M15 9l-6 6")]),
@@ -127,6 +135,41 @@ static SYMBOLS: &[(&str, &[(Ink, &str)])] = &[
     ("folder.fill", &[(Fill, FOLDER)]),
     ("doc", &[(Stroke, "M6 3h8l4 4v14H6ZM14 3v4h4")]),
     ("doc.fill", &[(Fill, "M6 3h8l4 4v14H6Z")]),
+    ("doc.text", &[(Stroke, "M6 3h8l4 4v14H6ZM14 3v4h4M9 11.5h6M9 14.5h6M9 17.5h4")]),
+    (
+        "quote.opening",
+        &[(
+            Fill,
+            "M10.5 6.5C7 7.5 4.5 10 4.5 14v3.5H10V12H7.3c.3-1.9 1.5-3.2 3.2-3.8ZM19.5 6.5c-3.5 1-6 3.5-6 7.5v3.5H19V12h-2.7c.3-1.9 1.5-3.2 3.2-3.8Z",
+        )],
+    ),
+    (
+        "lightbulb",
+        &[(
+            Stroke,
+            "M9.5 18.5h5M10 21h4M12 3a6 6 0 0 0-3.6 10.8c.7.6 1.1 1.4 1.1 2.2v.5h5V16c0-.8.4-1.6 1.1-2.2A6 6 0 0 0 12 3Z",
+        )],
+    ),
+    (
+        "hand.raised",
+        &[(
+            Stroke,
+            "M8 12.5V6.5a1.5 1.5 0 0 1 3 0v5M11 11.5V4.5a1.5 1.5 0 0 1 3 0v7M14 11.5V6a1.5 1.5 0 0 1 3 0v8.5a6.5 6.5 0 0 1-6.5 6.5h-.6a6 6 0 0 1-4.7-2.3l-2.6-3.4a1.6 1.6 0 0 1 2.5-2L8 15.5V12.5",
+        )],
+    ),
+    (
+        "ladybug",
+        &[
+            (
+                Stroke,
+                "M18 14.5a6 6.5 0 1 1-12 0a6 6.5 0 1 1 12 0ZM9.5 8.3a2.5 2.5 0 0 1 5 0M12 8v13M6.3 12L3.5 10.5M6 15.5H3M6.8 19l-2.3 1.5M17.7 12l2.8-1.5M18 15.5h3M17.2 19l2.3 1.5",
+            ),
+            (
+                Fill,
+                "M10 12.5a1 1 0 1 1-2 0a1 1 0 1 1 2 0ZM16 12.5a1 1 0 1 1-2 0a1 1 0 1 1 2 0ZM10 17a1 1 0 1 1-2 0a1 1 0 1 1 2 0ZM16 17a1 1 0 1 1-2 0a1 1 0 1 1 2 0Z",
+            ),
+        ],
+    ),
     ("doc.on.doc", &[(Stroke, "M9 3h7l4 4v11h-3M4 7h8l4 4v10H4Z")]),
     ("square.and.arrow.up", &[(Stroke, "M12 3v12M8 7l4-4 4 4M8 10H5v10h14V10h-3")]),
     ("square.and.pencil", &[(Stroke, "M11 4H5v15h15v-6M18 3l3 3-9 9H9v-3Z")]),
@@ -157,6 +200,27 @@ static SYMBOLS: &[(&str, &[(Ink, &str)])] = &[
             (Stroke, "M9 7h11M9 12h11M9 17h11"),
         ],
     ),
+    (
+        "list.bullet.rectangle",
+        &[
+            (
+                Stroke,
+                "M5 4h14a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2ZM10.5 9h6.5M10.5 12h6.5M10.5 15h6.5",
+            ),
+            (
+                Fill,
+                "M8.6 9a1 1 0 1 1-2 0a1 1 0 1 1 2 0ZM8.6 12a1 1 0 1 1-2 0a1 1 0 1 1 2 0ZM8.6 15a1 1 0 1 1-2 0a1 1 0 1 1 2 0Z",
+            ),
+        ],
+    ),
+    (
+        "checklist",
+        &[(
+            Stroke,
+            "M3.5 6.5l1.5 1.5 3-3.5M3.5 13l1.5 1.5 3-3.5M3.5 19.5l1.5 1.5 3-3.5M11 7h9.5M11 13.5h9.5M11 20h9.5",
+        )],
+    ),
+    ("text.alignleft", &[(Stroke, "M4 6h16M4 10h11M4 14h16M4 18h11")]),
     ("line.3.horizontal", &[(Stroke, "M4 7h16M4 12h16M4 17h16")]),
     ("ellipsis", &[(Fill, DOTS)]),
     ("sidebar.left", &[(Stroke, SIDEBAR), (Stroke, "M9.5 4.5v15")]),

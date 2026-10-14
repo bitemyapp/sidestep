@@ -39,7 +39,7 @@ use objc2_app_kit::{
     NSApplication, NSBackingStoreType, NSModalResponse, NSModalResponseAbort, NSModalResponseCancel, NSModalResponseOK,
     NSOpenPanel, NSPanel, NSResponder, NSSavePanel, NSView, NSWindow, NSWindowOrderingMode, NSWindowStyleMask,
 };
-use objc2_foundation::{NSArray, NSCopying, NSPoint, NSRect, NSSize, NSString, NSURL};
+use objc2_foundation::{NSArray, NSCopying, NSDictionary, NSPoint, NSRect, NSSize, NSString, NSURL};
 
 use crate::portal::{self, Choose, Chosen};
 
@@ -567,6 +567,20 @@ fn question(panel: &NSSavePanel) -> Choose {
             patterns.extend(patterns_of(&t.to_string()));
         }
     }
+    if let Some(types) = p.ivars().content_types.borrow().as_ref().and_then(|o| o.downcast_ref::<NSArray>()) {
+        for ty in types {
+            // SAFETY: allowedContentTypes contains UTType objects.
+            let tags: Retained<NSDictionary<NSString, NSArray<NSString>>> = unsafe { msg_send![&*ty, tags] };
+            if let Some(extensions) = tags.objectForKey(&NSString::from_str("public.filename-extension")) {
+                patterns.extend(extensions.iter().map(|ext| format!("*.{ext}")));
+            } else {
+                let id: Retained<NSString> = unsafe { msg_send![&*ty, identifier] };
+                patterns.extend(patterns_of(&id.to_string()));
+            }
+        }
+    }
+    patterns.sort();
+    patterns.dedup();
     let filters = if patterns.is_empty() { Vec::new() } else { vec![("Supported files".to_owned(), patterns)] };
     let (multiple, directory) = match open {
         Some(o) => (o.multiple.get(), o.directories.get() && !o.files.get()),
