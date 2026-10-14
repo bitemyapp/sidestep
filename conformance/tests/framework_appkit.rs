@@ -224,7 +224,9 @@ fn glass(mtm: MainThreadMarker) {
     let content = NSView::new(mtm);
     glass.setContentView(Some(&content));
     assert!(unsafe { content.superview() }.is_some());
+    // The content fills it by constraints, in a layout pass.
     glass.setFrameSize(NSSize::new(200.0, 90.0));
+    glass.layoutSubtreeIfNeeded();
     assert_eq!(content.frame().size, NSSize::new(200.0, 90.0));
     glass.setStyle(NSGlassEffectViewStyle::Clear);
     glass.setTintColor(Some(&NSColor::redColor()));
@@ -463,6 +465,7 @@ fn labels_in_stacks(mtm: MainThreadMarker) {
 
 fn main() {
     let mtm = MainThreadMarker::new().unwrap();
+    let mut failed = Vec::new();
     for (name, test) in [
         ("container controllers", containers as fn(MainThreadMarker)),
         ("glass content", glass),
@@ -476,7 +479,14 @@ fn main() {
         ("pinned inside a split pane", pinned_inside_a_split_pane),
         ("labels in stacks", labels_in_stacks),
     ] {
-        autoreleasepool(|_| test(mtm));
-        println!("test {name} ... ok");
+        // Each runs whichever failed before it, so one failure shows the rest.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| autoreleasepool(|_| test(mtm)))) {
+            Ok(()) => println!("test {name} ... ok"),
+            Err(_) => {
+                println!("test {name} ... FAILED");
+                failed.push(name);
+            }
+        }
     }
+    assert!(failed.is_empty(), "failed: {failed:?}");
 }
