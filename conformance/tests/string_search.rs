@@ -439,15 +439,15 @@ fn composed_character_sequences() {
     assert_eq!(for_range("a🎉", 1, 2), (1, 2));
 }
 
-/// A joiner after an ordinary character isn't part of its composed
-/// character sequence, so a match may end before one; a mark after it
-/// still holds the match back. (Emoji joined by U+200D stay one sequence,
-/// above.)
+/// A zero width joiner after an ordinary character isn't part of its
+/// composed character sequence, so a match may end before one; a
+/// non-joiner (U+200C) or a mark after it extends it, and holds the match
+/// back. (Emoji joined by U+200D stay one sequence, above.)
 #[test]
 fn matches_end_before_joiners() {
     let removed = |h: &str, t: &str| s(h).stringByReplacingOccurrencesOfString_withString(&s(t), &s("")).to_string();
     assert_eq!(removed("a*\u{200D}b", "*"), "a\u{200D}b");
-    assert_eq!(removed("a*\u{200C}b", "*"), "a\u{200C}b");
+    assert_eq!(removed("a*\u{200C}b", "*"), "a*\u{200C}b");
     assert_eq!(removed("a*\u{301}b", "*"), "a*\u{301}b");
     assert!(s("a:\u{200D}b").containsString(&s(":")));
     let r = s("# H {#\u{200D}x}").rangeOfString(&s("{#"));

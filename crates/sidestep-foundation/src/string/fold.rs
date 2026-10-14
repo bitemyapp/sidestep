@@ -171,15 +171,16 @@ pub(crate) fn cluster_bounds(s: &str) -> Vec<usize> {
         {
             out.push(at + 1);
         }
-        // A joiner (U+200C, U+200D) joins only an emoji sequence: after
-        // anything else it is a sequence of its own, as only marks join a
-        // character in Foundation's sequences.
+        // A zero width joiner (U+200D) joins only an emoji sequence: after
+        // anything else it is a sequence of its own, as in Foundation's
+        // sequences, which join a character only what extends it (marks,
+        // and U+200C, the non-joiner, which stays).
         if let Some(&next) = icu.get(k + 1)
             && let Some(first) = s[at..next].chars().next()
             && !CodePointSetData::new::<ExtendedPictographic>().contains(first)
         {
             for (offset, c) in s[at..next].char_indices().skip(1) {
-                if matches!(c, '\u{200C}' | '\u{200D}') && out.last() != Some(&(at + offset)) {
+                if c == '\u{200D}' && out.last() != Some(&(at + offset)) {
                     out.push(at + offset);
                 }
             }
