@@ -52,6 +52,9 @@ fn unknown_extension_preserves_tag_and_requested_parent() {
     assert!(ty.copy().isEqual(Some(&ty)));
 }
 
+const LSREGISTER: &str =
+    "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
+
 #[test]
 fn main_bundle_type_declarations() {
     let root = std::env::temp_dir().join(format!("sidestep-uti-bundle-{}.app", std::process::id()));
@@ -76,11 +79,22 @@ fn main_bundle_type_declarations() {
 </dict></dict></array></dict></plist>"#,
     )
     .unwrap();
+    // macOS knows a bundle's types once Launch Services has registered it,
+    // which running it from where it was made doesn't do; Sidestep reads
+    // the main bundle's Info.plist.
+    let register = |flag: &str| {
+        if cfg!(target_vendor = "apple") {
+            let status = std::process::Command::new(LSREGISTER).arg(flag).arg(&root).status().unwrap();
+            assert!(status.success(), "lsregister {flag}");
+        }
+    };
+    register("-f");
     let result = std::process::Command::new(binary)
         .args(["--exact", "declared_type_child", "--nocapture"])
         .env("SIDESTEP_UTI_CHILD", "1")
         .output()
         .unwrap();
+    register("-u");
     std::fs::remove_dir_all(root).unwrap();
     assert!(
         result.status.success(),

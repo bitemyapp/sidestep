@@ -164,6 +164,7 @@ fn sharing(_mtm: MainThreadMarker) {
 }
 
 fn containers(mtm: MainThreadMarker) {
+    assert_eq!(unsafe { (NSSplitViewControllerAutomaticDimension, NSSplitViewItemUnspecifiedDimension) }, (-1.0, -1.0));
     let split = NSSplitViewController::new(mtm);
     let child = NSViewController::new(mtm);
     child.setView(&NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, 200.0, 100.0)));
@@ -171,15 +172,16 @@ fn containers(mtm: MainThreadMarker) {
     split.addSplitViewItem(&item);
     assert_eq!(split.childViewControllers().count(), 1);
     assert!(child.parentViewController().is_some());
+    // The controller lays its items out with constraints, in a layout pass.
     split.view().setFrame(rect(0.0, 0.0, 300.0, 120.0));
     split.splitView().adjustSubviews();
+    split.view().layoutSubtreeIfNeeded();
     assert_eq!(split.splitViewItems().count(), 1);
     assert_eq!(split.splitView().arrangedSubviews().count(), 1);
     assert_eq!(child.view().frame().size, NSSize::new(300.0, 120.0));
     split.removeSplitViewItem(&item);
     assert!(child.parentViewController().is_none());
     assert_eq!(split.splitView().arrangedSubviews().count(), 0);
-    assert_eq!(unsafe { (NSSplitViewControllerAutomaticDimension, NSSplitViewItemUnspecifiedDimension) }, (-1.0, -1.0));
 
     let tabs = NSTabViewController::new(mtm);
     let a = NSViewController::new(mtm);
