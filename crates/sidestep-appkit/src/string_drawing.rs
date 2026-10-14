@@ -334,8 +334,7 @@ fn emit(ops: &mut Vec<Op>, laid: &TextLayout, left: f32, top: f32, k: f64, clip:
             ..r.clone()
         })
         .collect();
-    let fills: Vec<PlacedFill> =
-        laid.fills.iter().map(|f| PlacedFill { rect: f.rect.map(|v| v * k), ..*f }).collect();
+    let fills: Vec<PlacedFill> = laid.fills.iter().map(|f| PlacedFill { rect: f.rect.map(|v| v * k), ..*f }).collect();
     emit_parts(ops, &runs, &fills, left, top, clip);
 }
 

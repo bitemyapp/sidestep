@@ -72,7 +72,10 @@ mod linux {
             field.currentEditor().expect("setting a value keeps editing").downcast().expect("text view");
         assert!(std::ptr::eq(&*still, &*editor), "the same editor");
         let responder = window.firstResponder().expect("a first responder");
-        assert!(std::ptr::eq(Retained::as_ptr(&responder).cast::<u8>(), Retained::as_ptr(&editor).cast::<u8>()), "the editor keeps the keyboard");
+        assert!(
+            std::ptr::eq(Retained::as_ptr(&responder).cast::<u8>(), Retained::as_ptr(&editor).cast::<u8>()),
+            "the editor keeps the keyboard"
+        );
         assert_eq!(editor.string().to_string(), "Replacement", "the editor shows the new value");
         assert_eq!(editor.selectedRange(), NSRange::new(11, 0), "the caret at its end");
         assert_eq!(field.stringValue().to_string(), "Replacement", "the old text doesn't come back");
