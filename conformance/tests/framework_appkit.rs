@@ -164,11 +164,13 @@ fn sharing(_mtm: MainThreadMarker) {
 }
 
 fn containers(mtm: MainThreadMarker) {
-    assert_eq!(unsafe { (NSSplitViewControllerAutomaticDimension, NSSplitViewItemUnspecifiedDimension) }, (-1.0, -1.0));
+    let dimensions = unsafe { (NSSplitViewControllerAutomaticDimension, NSSplitViewItemUnspecifiedDimension) };
+    assert_eq!(dimensions, (-(f32::MAX as f64), -1.0));
     let split = NSSplitViewController::new(mtm);
     let child = NSViewController::new(mtm);
     child.setView(&NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, 200.0, 100.0)));
     let item = NSSplitViewItem::splitViewItemWithViewController(&child);
+    assert_eq!(item.maximumThickness(), dimensions.1, "no maximum until one is set");
     split.addSplitViewItem(&item);
     assert_eq!(split.childViewControllers().count(), 1);
     assert!(child.parentViewController().is_some());

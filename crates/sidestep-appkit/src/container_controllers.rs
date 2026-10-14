@@ -13,12 +13,14 @@ sidestep_runtime::static_class!(pub(crate) SPLIT, SPLIT_META = "NSSplitViewContr
 sidestep_runtime::static_class!(pub(crate) ITEM, ITEM_META = "NSSplitViewItem", || { let _ = Item::class(); });
 sidestep_runtime::static_class!(pub(crate) TABS, TABS_META = "NSTabViewController", || { let _ = Tabs::class(); });
 sidestep_runtime::static_class!(pub(crate) ACCESSORY, ACCESSORY_META = "NSTitlebarAccessoryViewController", || { let _ = Accessory::class(); });
-/// A split view controller's dimension left to it.
+/// A split view controller's dimension left to it: -FLT_MAX, as on macOS.
 #[unsafe(no_mangle)]
-pub static NSSplitViewControllerAutomaticDimension: f64 = -1.0;
-/// A split view item's dimension not given.
+pub static NSSplitViewControllerAutomaticDimension: f64 = -(f32::MAX as f64);
+/// A split view item's dimension not given, as its maximum thickness is
+/// until set.
 #[unsafe(no_mangle)]
-pub static NSSplitViewItemUnspecifiedDimension: f64 = -1.0;
+pub static NSSplitViewItemUnspecifiedDimension: f64 = UNSPECIFIED;
+const UNSPECIFIED: f64 = -1.0;
 
 struct ItemState {
     controller: Retained<NSViewController>,
@@ -78,7 +80,7 @@ fn split_item(controller: &NSViewController, behavior: isize) -> Retained<Item> 
         collapsed: Cell::new(false),
         can_collapse: Cell::new(behavior == 1 || behavior == 3),
         min: Cell::new(0.0),
-        max: Cell::new(f64::MAX),
+        max: Cell::new(UNSPECIFIED),
         priority: Cell::new(250.0),
         behavior,
     });
