@@ -545,6 +545,8 @@ mod linux {
             configured: bool,
             seat: Option<WlSeat>,
             pointer: Option<WlPointer>,
+            /// The pointer is over the source's window.
+            over: bool,
             press: Option<u32>,
             device: Option<DataDevice>,
             done: Option<Outcome>,
@@ -576,6 +578,7 @@ mod linux {
                 configured: false,
                 seat: None,
                 pointer: None,
+                over: false,
                 press: None,
                 device: None,
                 done: None,
@@ -609,8 +612,22 @@ mod linux {
                 pointer.motion_absolute(time(), x, y, 1280, 800);
                 pointer.frame();
             };
-            // Press on the source's window, on the right half.
-            move_to(960, 400);
+            // Press on the source's window, on the right half, once the
+            // pointer is over it: until sway has mapped and tiled it, that
+            // point is still over our window (alone on the output once the
+            // last drag's source has gone). Moving again has sway look again.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            for x in [960, 961].into_iter().cycle() {
+                move_to(x, 400);
+                queue.roundtrip(&mut s).expect("a round trip");
+                if s.over {
+                    break;
+                }
+                if Instant::now() > deadline {
+                    return Outcome::TimedOut("the pointer over the source's window");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
             pointer.button(time(), BTN_LEFT, ButtonState::Pressed);
             pointer.frame();
             if let Err(e) = wait(&mut s, &mut queue, "the press", &|s| s.press.is_some()) {
@@ -692,10 +709,12 @@ mod linux {
         impl PointerHandler for Source {
             fn pointer_frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlPointer, events: &[PointerEvent]) {
                 for event in events {
-                    if let PointerEventKind::Press { serial, .. } = event.kind
-                        && event.surface == *self.window.wl_surface()
-                    {
-                        self.press = Some(serial);
+                    let ours = event.surface == *self.window.wl_surface();
+                    match event.kind {
+                        PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => self.over = ours,
+                        PointerEventKind::Leave { .. } if ours => self.over = false,
+                        PointerEventKind::Press { serial, .. } if ours => self.press = Some(serial),
+                        _ => {}
                     }
                 }
             }
