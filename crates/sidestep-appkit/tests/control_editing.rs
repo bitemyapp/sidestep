@@ -57,9 +57,10 @@ mod linux {
         };
     }
 
-    /// The getter validates the active editor; the setter aborts it.
+    /// The getter validates the active editor; the setter replaces its
+    /// text, and editing goes on, as in AppKit.
     fn live_values(mtm: MainThreadMarker) {
-        let (_window, field) = field(mtm);
+        let (window, field) = field(mtm);
         let editor = start(&field);
         type_text(&editor, "Typed prompt");
         assert_eq!(editor.string().to_string(), "Typed prompt");
@@ -67,10 +68,17 @@ mod linux {
         assert_eq!(field.cell().unwrap().stringValue().to_string(), "Typed prompt", "validate the cell");
         type_text(&editor, " uncommitted");
         field.setStringValue(&NSString::from_str("Replacement"));
-        assert!(field.currentEditor().is_none(), "setting a value ends editing");
-        assert_eq!(field.stringValue().to_string(), "Replacement");
-        let editor = start(&field);
-        assert_eq!(editor.string().to_string(), "Replacement");
+        let still: Retained<NSTextView> =
+            field.currentEditor().expect("setting a value keeps editing").downcast().expect("text view");
+        assert!(std::ptr::eq(&*still, &*editor), "the same editor");
+        let responder = window.firstResponder().expect("a first responder");
+        assert!(
+            std::ptr::eq(Retained::as_ptr(&responder).cast::<u8>(), Retained::as_ptr(&editor).cast::<u8>()),
+            "the editor keeps the keyboard"
+        );
+        assert_eq!(editor.string().to_string(), "Replacement", "the editor shows the new value");
+        assert_eq!(editor.selectedRange(), NSRange::new(11, 0), "the caret at its end");
+        assert_eq!(field.stringValue().to_string(), "Replacement", "the old text doesn't come back");
         type_text(&editor, "Discard this");
         assert!(field.abortEditing());
         assert_eq!(field.stringValue().to_string(), "Replacement", "abort keeps the last validated value");
@@ -107,6 +115,9 @@ mod linux {
             let cell = field.cell().unwrap();
             assert!(ink(&cell, &field, true) > 0, "idle field draws its value or placeholder");
             let editor = start(&field);
+            if initial.is_empty() {
+                assert!(ink(&cell, &field, true) > 0, "an empty editor shows the placeholder, as on macOS");
+            }
             type_text(&editor, "New text");
             assert_eq!(ink(&cell, &field, true), 0, "the active editor owns text drawing");
             field.setBezeled(true);

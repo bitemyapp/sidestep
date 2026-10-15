@@ -25,7 +25,7 @@ mod set;
 mod stream;
 pub(crate) mod string;
 mod string_edit;
-mod string_encoding;
+pub(crate) mod string_encoding;
 mod string_transform;
 pub(crate) mod types;
 mod url;

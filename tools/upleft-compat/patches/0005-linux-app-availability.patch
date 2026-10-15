@@ -1,0 +1,243 @@
+--- a/crates/app/Cargo.toml
++++ b/crates/app/Cargo.toml
+@@ -122,7 +122,6 @@
+ ] }
+ objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std", "CAAnimation", "CABase", "CADisplayLink", "CAFrameRateRange", "CAGradientLayer", "CALayer", "CAMediaTiming", "CAMediaTimingFunction", "CAReplicatorLayer", "CAScrollLayer", "CAShapeLayer", "CATextLayer", "CATransaction", "CATransform3D", "CATransformLayer", "CAValueFunction", "objc2-core-foundation", "objc2-core-graphics", "block2"] }
+ objc2-core-text = { workspace = true, features = ["CTFont", "CTFontDescriptor", "objc2-core-graphics"] }
+-objc2-avf-audio = { version = "0.3.2", default-features = false, features = ["std", "AVSpeechSynthesis"] }
+ objc2-uniform-type-identifiers = { version = "0.3.2", default-features = false, features = ["std", "UTType", "UTCoreTypes"] }
+ objc2-core-foundation = { workspace = true, features = [
+     "CFArray", "CFAttributedString", "CFBase", "CFBundle", "CFCGTypes", "CFData", "CFDate", "CFDictionary", "CFError",
+@@ -363,3 +362,7 @@
+ [[test]]
+ name = "command_palette_navigation_regression_tests"
+ harness = false
++
++
++[target.'cfg(target_os = "macos")'.dependencies]
++objc2-avf-audio = { version = "0.3.2", default-features = false, features = ["std", "AVSpeechSynthesis"] }
+--- a/crates/app/src/ai/file_watcher.rs
++++ b/crates/app/src/ai/file_watcher.rs
+@@ -974,7 +974,7 @@
+ const K_FS_EVENT_STREAM_CREATE_FLAG_FILE_EVENTS: u32 = 0x0000_0010;
+ const K_FS_EVENT_STREAM_EVENT_ID_SINCE_NOW: u64 = 0xFFFF_FFFF_FFFF_FFFF;
+ 
+-#[link(name = "CoreServices", kind = "framework")]
++#[cfg_attr(target_vendor = "apple", link(name = "CoreServices", kind = "framework"))]
+ unsafe extern "C" {
+     fn FSEventStreamCreate(
+         allocator: *const c_void,
+--- a/crates/app/src/ai/local_ai.rs
++++ b/crates/app/src/ai/local_ai.rs
+@@ -539,6 +539,7 @@
+ pub mod shim {
+     use super::*;
+ 
++    #[cfg(target_os = "macos")]
+     unsafe extern "C" {
+         fn upleft_local_ai_availability() -> i32;
+         fn upleft_local_ai_respond(
+@@ -552,6 +553,19 @@
+         fn upleft_local_ai_cancel(handle: *mut c_void);
+         fn upleft_local_ai_release(handle: *mut c_void);
+     }
++
++    #[cfg(not(target_os = "macos"))]
++    unsafe fn upleft_local_ai_availability() -> i32 { 3 }
++    #[cfg(not(target_os = "macos"))]
++    unsafe fn upleft_local_ai_respond(_: *const u8, _: isize, _: *const u8, _: isize,
++        context: *mut c_void, completion: extern "C" fn(*mut c_void, i32, *const u8, isize)) -> *mut c_void {
++        completion(context, 3, std::ptr::null(), 0);
++        std::ptr::null_mut()
++    }
++    #[cfg(not(target_os = "macos"))]
++    unsafe fn upleft_local_ai_cancel(_: *mut c_void) {}
++    #[cfg(not(target_os = "macos"))]
++    unsafe fn upleft_local_ai_release(_: *mut c_void) {}
+ 
+     /// What `SystemLanguageModel.default.availability` and the surrounding
+     /// guards report.
+--- a/crates/app/src/app/document_window_controller_support.rs
++++ b/crates/app/src/app/document_window_controller_support.rs
+@@ -692,7 +692,7 @@
+ impl PrintRenderer {
+     fn attributed_string(html: &str) -> Option<Retained<objc2_foundation::NSAttributedString>> {
+         let data = NSData::with_bytes(html.as_bytes());
+-        let encoding = NSNumber::new_usize(NSUTF8StringEncoding);
++        let encoding = NSNumber::new_usize(NSUTF8StringEncoding as usize);
+         let options: Retained<NSDictionary<NSAttributedStringDocumentReadingOptionKey, AnyObject>> = unsafe {
+             NSDictionary::from_slices(
+                 &[NSDocumentTypeDocumentOption, NSCharacterEncodingDocumentOption],
+--- a/crates/app/src/integrations/app_intents.rs
++++ b/crates/app/src/integrations/app_intents.rs
+@@ -77,6 +77,7 @@
+ 
+ // MARK: - Swift shim
+ 
++#[cfg(target_os = "macos")]
+ unsafe extern "C" {
+     fn upleft_app_intents_register_open_markdown(handler: Option<OpenMarkdownHandler>);
+     fn upleft_app_intents_available() -> bool;
+@@ -123,3 +124,8 @@
+     // SAFETY: a plain query.
+     unsafe { upleft_app_intents_available() }
+ }
++
++#[cfg(not(target_os = "macos"))]
++unsafe fn upleft_app_intents_register_open_markdown(_: Option<OpenMarkdownHandler>) {}
++#[cfg(not(target_os = "macos"))]
++unsafe fn upleft_app_intents_available() -> bool { false }
+--- a/crates/app/src/integrations/spotlight_metadata.rs
++++ b/crates/app/src/integrations/spotlight_metadata.rs
+@@ -24,7 +24,7 @@
+     AttributeValue, SpotlightMetadata, SpotlightMetadataImporter, SpotlightMetadataKey,
+ };
+ 
+-#[link(name = "CoreSpotlight", kind = "framework")]
++#[cfg_attr(target_vendor = "apple", link(name = "CoreSpotlight", kind = "framework"))]
+ unsafe extern "C" {}
+ 
+ /// What `indexOpenedDocument(at:)` hands to Core Spotlight.
+--- a/crates/app/src/panels/document_quick_look.rs
++++ b/crates/app/src/panels/document_quick_look.rs
+@@ -56,7 +56,7 @@
+ use crate::ai::path_resolver::Resolution;
+ use crate::assets::asset_resolver::url_with_string;
+ 
+-#[link(name = "Quartz", kind = "framework")]
++#[cfg_attr(target_vendor = "apple", link(name = "Quartz", kind = "framework"))]
+ unsafe extern "C" {}
+ 
+ // MARK: - QuickLookRequest
+--- a/crates/app/src/support/find_engine.rs
++++ b/crates/app/src/support/find_engine.rs
+@@ -194,7 +194,10 @@
+ fn replace_edit(range: NSRange, replacement: String) -> TextEdit {
+     let mut bytes = [0u8; 16];
+     // SAFETY: fills exactly the 16 bytes of `bytes`.
++    #[cfg(target_os = "macos")]
+     unsafe { libc::arc4random_buf(bytes.as_mut_ptr().cast(), bytes.len()) };
++    #[cfg(not(target_os = "macos"))]
++    { bytes.copy_from_slice(upleft_core::Uuid::new_v4().as_bytes()); }
+     bytes[6] = (bytes[6] & 0x0F) | 0x40;
+     bytes[8] = (bytes[8] & 0x3F) | 0x80;
+     TextEdit { id: upleft_core::Uuid::from_bytes(bytes), range, replacement, summary: "Replace".into(), rule: None }
+--- a/crates/app/src/support/mod.rs
++++ b/crates/app/src/support/mod.rs
+@@ -9,6 +9,7 @@
+ pub mod preferences;
+ pub mod quick_open_providers;
+ pub mod reader_profiles;
++#[cfg_attr(not(target_os = "macos"), path = "speech_unavailable.rs")]
+ pub mod speech_coordinator;
+ pub mod system_integration;
+ pub mod welcome_tour;
+--- /dev/null
++++ b/crates/app/src/support/speech_unavailable.rs
+@@ -0,0 +1,23 @@
++//! Speech synthesis is unavailable without AVFAudio.
++use std::rc::Weak;
++use objc2::{AnyThread, MainThreadMarker, define_class, msg_send};
++use objc2::rc::Retained;
++use objc2::runtime::{NSObject, NSObjectProtocol};
++use upleft_swift_text::NSRange;
++pub trait SpeechCoordinatorDelegate {
++    fn speech_coordinator_will_speak(&self, coordinator: &SpeechCoordinator, range: NSRange);
++    fn speech_coordinator_did_finish(&self, coordinator: &SpeechCoordinator);
++}
++define_class!(
++    #[unsafe(super(NSObject))]
++    #[name = "SpeechCoordinator"]
++    pub struct SpeechCoordinator;
++    unsafe impl NSObjectProtocol for SpeechCoordinator {}
++);
++impl SpeechCoordinator {
++    pub fn new(_: MainThreadMarker) -> Retained<Self> { unsafe { msg_send![Self::alloc(), init] } }
++    pub fn set_delegate(&self, _: Option<Weak<dyn SpeechCoordinatorDelegate>>, _: MainThreadMarker) {}
++    pub fn is_speaking(&self, _: MainThreadMarker) -> bool { false }
++    pub fn speak(&self, _: &str, _: MainThreadMarker) -> bool { false }
++    pub fn stop(&self, _: MainThreadMarker) {}
++}
+--- a/crates/app/src/updater/mod.rs
++++ b/crates/app/src/updater/mod.rs
+@@ -26,7 +26,7 @@
+     /// Whether the caller is on the main thread (`pthread_main_np`).
+     pub fn is_main_thread() -> bool {
+         // SAFETY: `pthread_main_np` has no preconditions.
+-        unsafe { libc::pthread_main_np() != 0 }
++        objc2::MainThreadMarker::new().is_some()
+     }
+ 
+     /// A value created on the main thread and only ever opened there. The
+--- a/crates/app/src/updater/release_watch.rs
++++ b/crates/app/src/updater/release_watch.rs
+@@ -10,6 +10,7 @@
+ //! `docs/KNOWN-DIFFERENCES.md`).
+ 
+ use std::cell::{Cell, RefCell};
++#[cfg(target_os = "macos")]
+ use std::ffi::c_void;
+ use std::ptr::NonNull;
+ use std::rc::{Rc, Weak};
+@@ -476,6 +477,7 @@
+ 
+ // MARK: - NWPathMonitor
+ 
++#[cfg(target_os = "macos")]
+ #[link(name = "Network", kind = "framework")]
+ unsafe extern "C" {
+     fn nw_path_monitor_create() -> *mut c_void;
+@@ -488,11 +490,14 @@
+ }
+ 
+ /// `nw_path_status_satisfied`.
++#[cfg(target_os = "macos")]
+ const NW_PATH_STATUS_SATISFIED: i32 = 1;
+ 
+ /// Swift's `NWPathMonitor`, over Network.framework's C API.
++#[cfg(target_os = "macos")]
+ struct PathMonitor(*mut c_void);
+ 
++#[cfg(target_os = "macos")]
+ impl PathMonitor {
+     /// `monitor.pathUpdateHandler = { path in … path.status == .satisfied … }`
+     /// then `monitor.start(queue: .main)`.
+@@ -522,6 +527,7 @@
+     }
+ }
+ 
++#[cfg(target_os = "macos")]
+ impl Drop for PathMonitor {
+     fn drop(&mut self) {
+         // SAFETY: balances `nw_path_monitor_create`.
+@@ -673,3 +679,13 @@
+         task.resume();
+     }
+ }
++
++// Network.framework only drives opportunistic updater wake-ups. The normal
++// update timer and explicit checks remain available without it.
++#[cfg(not(target_os = "macos"))]
++struct PathMonitor;
++#[cfg(not(target_os = "macos"))]
++impl PathMonitor {
++    fn start_on_main_queue(_: impl Fn(bool) + 'static) -> Self { Self }
++    fn cancel(&self) {}
++}
+--- a/crates/render/tests/view_tests/main.rs
++++ b/crates/render/tests/view_tests/main.rs
+@@ -46,11 +46,14 @@
+     // An app's main thread runs at user-interactive QoS; a test binary's
+     // starts lower, and its main-queue timers then fire hundreds of
+     // milliseconds late on a loaded machine.
++    #[cfg(target_os = "macos")]
+     unsafe extern "C" {
+         fn pthread_set_qos_class_self_np(class: u32, relative_priority: i32) -> i32;
+     }
++    #[cfg(target_os = "macos")]
+     const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
+     // SAFETY: sets the calling thread's own QoS class.
++    #[cfg(target_os = "macos")]
+     unsafe { pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) };
+     let reason = objc2_foundation::NSString::from_str("upleft view tests");
+     let _activity = objc2_foundation::NSProcessInfo::processInfo().beginActivityWithOptions_reason(

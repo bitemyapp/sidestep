@@ -466,7 +466,8 @@ fn write_value(out: &mut String, value: &Json, options: NSUInteger, depth: usize
             out.push('{');
             let mut members: Vec<&(String, Json)> = members.iter().collect();
             if options & SORTED_KEYS != 0 {
-                members.sort_by(|a, b| a.0.cmp(&b.0));
+                // In NSString order: localized, numeric, case and width last.
+                members.sort_by(|a, b| crate::string::standard_order(&a.0, &b.0));
             }
             if pretty && members.is_empty() {
                 out.push('\n');
@@ -652,5 +653,24 @@ mod tests {
             "{\"z\":1,\"a\":2}",
             "unsorted keeps order"
         );
+    }
+
+    /// Sorted keys in the order macOS 26 writes them (Upleft's probe):
+    /// collation, digit runs by value, then case and width.
+    #[test]
+    fn sorted_keys_in_nsstring_order() {
+        let keys = [
+            "b", "B", "a", "A", "a10", "a2", "a_b", "aB", "Ab", "\u{e9}", "e", "f", "z", "_x", "-y", "1", "10", "2",
+            "\u{e4}", "\u{ff41}", "ab", "a b", "Z", "\u{df}", "ss", "st",
+        ];
+        let members: Vec<(&str, Json)> = keys.iter().enumerate().map(|(i, k)| (*k, Json::Int(i as i64))).collect();
+        let order = [
+            "_x", "-y", "1", "2", "10", "a", "\u{ff41}", "A", "\u{e4}", "a b", "a_b", "a2", "a10", "ab", "aB", "Ab",
+            "b", "B", "e", "\u{e9}", "f", "ss", "\u{df}", "st", "z", "Z",
+        ];
+        let written = write(&object(&members), SORTED_KEYS);
+        let expected: Vec<String> =
+            order.iter().map(|k| format!("\"{k}\":{}", keys.iter().position(|x| x == k).expect("a key"))).collect();
+        assert_eq!(written, format!("{{{}}}", expected.join(",")));
     }
 }

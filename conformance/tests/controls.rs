@@ -2302,6 +2302,10 @@ fn accessibility(mtm: MainThreadMarker) {
     assert_eq!(ax!(&*fresh, accessibilityLabel).as_deref(), Some("CellLabel"));
     ax_set!(&*fresh.cell().expect("a cell"), setAccessibilityHelp, &*s("CellHelp"));
     assert_eq!(ax!(&*fresh, accessibilityHelp), None);
+    // Until set, it is the tool tip (Upleft's dismiss buttons).
+    let tipped = unsafe { NSButton::buttonWithTitle_target_action(&s("X"), None, None, mtm) };
+    tipped.setToolTip(Some(&s("Dismiss")));
+    assert_eq!(ax!(&*tipped, accessibilityHelp).as_deref(), Some("Dismiss"));
     let field_label = NSTextField::labelWithString(&s("Lab"), mtm);
     ax_set!(&*field_label, setAccessibilityLabel, &*s("LL"));
     ax_set!(&*field_label, setAccessibilityHelp, &*s("LH"));

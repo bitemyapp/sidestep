@@ -507,6 +507,30 @@ fn visual_effect_views(mtm: MainThreadMarker) {
 
 type Test = (&'static str, fn(MainThreadMarker));
 
+/// Colors, and paragraph styles, describe what they are: equal ones alike,
+/// whichever object (Upleft compares text attributes by description).
+fn descriptions(_: MainThreadMarker) {
+    let description = |o: &AnyObject| -> String {
+        let d: Retained<NSString> = unsafe { msg_send![o, description] };
+        d.to_string()
+    };
+    let color = || NSColor::colorWithSRGBRed_green_blue_alpha(0.2, 0.3, 0.4, 1.0);
+    let (a, b) = (color(), color());
+    assert_eq!(description(&a), description(&b));
+    assert_ne!(description(&a), description(&NSColor::colorWithSRGBRed_green_blue_alpha(0.2, 0.3, 0.5, 1.0)));
+    let style = || {
+        let s = objc2_app_kit::NSMutableParagraphStyle::new();
+        s.setHeadIndent(12.0);
+        s.setLineHeightMultiple(1.25);
+        s
+    };
+    let (a, b) = (style(), style());
+    assert_eq!(description(&a), description(&b));
+    let other = style();
+    other.setHeadIndent(14.0);
+    assert_ne!(description(&a), description(&other));
+}
+
 fn main() {
     let mtm = MainThreadMarker::new().expect("runs on the main thread");
     let tests: &[Test] = &[
@@ -521,6 +545,7 @@ fn main() {
         ("drawing_appearance", drawing_appearance),
         ("inheritance", inheritance),
         ("visual_effect_views", visual_effect_views),
+        ("descriptions", descriptions),
     ];
     for (name, test) in tests {
         objc2::rc::autoreleasepool(|_| test(mtm));

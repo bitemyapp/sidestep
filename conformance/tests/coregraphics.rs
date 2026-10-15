@@ -1612,9 +1612,10 @@ fn data_providers() {
 }
 
 /// A font file this system has: Arial or Geneva on macOS, DejaVu Sans on
-/// Linux.
-fn font_file() -> Option<&'static str> {
-    [
+/// Linux (where fontconfig says it is on systems that keep fonts
+/// elsewhere, such as NixOS).
+fn font_file() -> Option<String> {
+    let usual = [
         "/System/Library/Fonts/Supplemental/Arial.ttf",
         "/System/Library/Fonts/Geneva.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -1622,7 +1623,12 @@ fn font_file() -> Option<&'static str> {
         "/usr/share/fonts/dejavu/DejaVuSans.ttf",
     ]
     .into_iter()
-    .find(|p| std::fs::metadata(p).is_ok())
+    .find(|p| std::fs::metadata(p).is_ok());
+    usual.map(String::from).or_else(|| {
+        let found = std::process::Command::new("fc-match").args(["-f", "%{file}", "DejaVu Sans:style=Book"]).output();
+        let path = String::from_utf8(found.ok()?.stdout).ok()?;
+        path.ends_with("/DejaVuSans.ttf").then_some(path)
+    })
 }
 
 #[test]

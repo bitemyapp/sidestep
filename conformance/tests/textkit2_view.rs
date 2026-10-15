@@ -14,13 +14,13 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSBackingStoreType, NSClipView, NSFont, NSResponder, NSScrollView, NSSecureTextField, NSText, NSTextContainer,
-    NSTextContentManager, NSTextContentStorage, NSTextElement, NSTextElementProvider, NSTextField, NSTextInputClient,
-    NSTextLayoutFragment, NSTextLayoutManager, NSTextLayoutManagerDelegate, NSTextLocation, NSTextStorageObserving,
-    NSTextView, NSTextViewportLayoutController, NSView, NSWindow, NSWindowStyleMask,
+    NSBackingStoreType, NSClipView, NSFont, NSResponder, NSScrollView, NSSecureTextField, NSSelectionAffinity, NSText,
+    NSTextContainer, NSTextContentManager, NSTextContentStorage, NSTextElement, NSTextElementProvider, NSTextField,
+    NSTextInputClient, NSTextLayoutFragment, NSTextLayoutManager, NSTextLayoutManagerDelegate, NSTextLocation,
+    NSTextStorageObserving, NSTextView, NSTextViewportLayoutController, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_graphics::CGContext;
-use objc2_foundation::{NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString};
+use objc2_foundation::{NSArray, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString, NSValue};
 
 use sidestep as _;
 
@@ -436,6 +436,39 @@ fn drawing(mtm: MainThreadMarker) {
     assert!(dark > 5, "text drawn: {dark} dark pixels");
 }
 
+/// Views don't clip to their bounds, so the text a container wider than
+/// its text view lays out shows past the view's edge, in its superview.
+fn drawing_past_the_view(mtm: MainThreadMarker) {
+    let (cs, _tlm, c) = network(280.0);
+    cs.textStorage().expect("a storage").setAttributedString(&objc2_foundation::NSAttributedString::from_nsstring(
+        &NSString::from_str("MMMM MMMM MMMM MMMM MMMM MMMM MMMM MMMM"),
+    ));
+    let tv = NSTextView::initWithFrame_textContainer(NSTextView::alloc(mtm), rect(0.0, 0.0, 100.0, 40.0), Some(&c));
+    tv.setDrawsBackground(false);
+    tv.setTextColor(Some(&objc2_app_kit::NSColor::blackColor()));
+    tv.setFont(Some(&NSFont::systemFontOfSize(14.0)));
+    let host = NSView::initWithFrame(NSView::alloc(mtm), rect(0.0, 0.0, 300.0, 40.0));
+    host.addSubview(&tv);
+    let rep = common::snapshot(&host, 1.0);
+    // Dark pixels well right of the view's edge, where the first line goes on.
+    let dark = (120..260)
+        .flat_map(|x| (0..40).map(move |y| (x, y)))
+        .filter(|&(x, y)| {
+            let p = common::pixel(&rep, x, y);
+            p[3] > 0 && p[0] < 128 && p[1] < 128 && p[2] < 128
+        })
+        .count();
+    // AppKit draws each fragment in a view of its own (see `drawing`), and
+    // macOS's run of this, with no window, shows none of them past the
+    // view. Sidestep's text view reaches its container's width, as
+    // Upleft's text shows past its narrow text view on macOS.
+    if cfg!(target_vendor = "apple") {
+        println!("    text drawn past the view: {dark} dark pixels");
+    } else {
+        assert!(dark > 20, "text drawn past the view: {dark} dark pixels");
+    }
+}
+
 /// A fragment whose rendering surface reaches below its frame draws for
 /// a rect that meets only that part of it.
 fn rendering_surface(mtm: MainThreadMarker) {
@@ -575,6 +608,45 @@ fn selections(mtm: MainThreadMarker) {
     assert_eq!(ranges, [(5, 8)]);
 }
 
+define_class!(
+    /// Records, each time its selection setter runs, whether its storage
+    /// was in the middle of an edit.
+    #[unsafe(super(NSTextView, NSText, NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "TextKit2ViewSelectionSetter"]
+    #[ivars = RefCell<Vec<bool>>]
+    struct SelectionSetter;
+
+    impl SelectionSetter {
+        #[unsafe(method(setSelectedRanges:affinity:stillSelecting:))]
+        fn set(&self, ranges: &NSArray<NSValue>, affinity: NSSelectionAffinity, still: bool) {
+            let storage = unsafe { self.textStorage() }.expect("a storage");
+            self.ivars().borrow_mut().push(storage.editedMask().0 != 0);
+            let _: () =
+                unsafe { msg_send![super(self), setSelectedRanges: ranges, affinity: affinity, stillSelecting: still] };
+        }
+    }
+);
+
+/// A program editing a TextKit 2 view's storage moves the selection with
+/// the text, but not through the view's setter while the storage is
+/// mid-edit (Upleft's override reads its own state, updated after the
+/// edit).
+fn program_edits(mtm: MainThreadMarker) {
+    let this = SelectionSetter::alloc(mtm).set_ivars(RefCell::new(Vec::new()));
+    let tv: Retained<SelectionSetter> = unsafe { msg_send![super(this), initWithFrame: rect(0.0, 0.0, 200.0, 100.0)] };
+    assert!(tlm_of(&tv).is_some(), "TextKit 2");
+    tv.setString(&NSString::from_str("hello world, again"));
+    tv.setSelectedRange(NSRange::new(18, 0));
+    tv.ivars().borrow_mut().clear();
+    let storage = unsafe { tv.textStorage() }.expect("a storage");
+    storage.replaceCharactersInRange_withString(NSRange::new(0, 5), &NSString::from_str("HI"));
+    let view: &NSTextView = &tv;
+    assert_eq!(NSTextInputClient::selectedRange(view), NSRange::new(15, 0));
+    let log = tv.ivars().borrow().clone();
+    assert!(log.iter().all(|&mid| !mid), "{log:?}");
+}
+
 /// Editing a TextKit 2 view: the content storage hears of it through the
 /// storage, the edited paragraph gets a new fragment, and the one after it
 /// moves along.
@@ -619,12 +691,14 @@ fn main() {
         ("viewport_bounds", viewport_bounds),
         ("viewport_layout", viewport_layout),
         ("drawing", drawing),
+        ("drawing_past_the_view", drawing_past_the_view),
         ("rendering_surface", rendering_surface),
         ("viewport_past_the_view", viewport_past_the_view),
         ("size_to_fit", size_to_fit),
         ("switch_notifications", switch_notifications),
         ("empty_field_editor", empty_field_editor),
         ("selections", selections),
+        ("program_edits", program_edits),
         ("editing", editing),
     ];
     for (name, test) in tests {

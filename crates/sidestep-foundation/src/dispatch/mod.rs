@@ -21,6 +21,7 @@
 //! done and the queue wedged.
 
 mod after;
+mod block;
 mod group;
 mod object;
 mod pool;

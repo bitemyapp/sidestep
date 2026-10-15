@@ -12,6 +12,7 @@
 
 use objc2::ClassType;
 
+mod apple_script;
 mod attributed;
 mod base64;
 mod bidi;
@@ -25,10 +26,14 @@ mod date;
 mod date_format;
 mod date_formatter;
 mod dictionary;
+mod directory_enumerator;
 mod dispatch;
+mod distributed_notifications;
 mod error;
+mod file_handle;
 mod file_manager;
 mod file_wrapper;
+mod formatters;
 mod functions;
 mod geometry;
 mod invocation;
@@ -38,6 +43,7 @@ mod lock;
 mod notification;
 pub mod notification_center;
 mod objc_runtime;
+pub mod observing;
 mod operation;
 mod path;
 mod perform;
@@ -53,6 +59,7 @@ mod time_zone;
 mod timer;
 mod undo;
 mod url;
+mod url_loading;
 mod user_defaults;
 mod uuid;
 mod xdg;
@@ -85,6 +92,9 @@ mod affine;
 
 pub use const_string::{ConstStr, ConstantString};
 pub use notification::notification;
+// What the desktop says, from AppKit.
+pub use distributed_notifications::post_from_desktop;
+pub use user_defaults::set_desktop_defaults;
 
 #[doc(hidden)]
 pub use attributed::{RunRef, clip_to_limit, with_runs};
@@ -116,10 +126,10 @@ pub mod __private {
 #[doc(hidden)]
 pub mod cf_type_ids {
     pub use crate::cf::types::id::{
-        CG_COLOR, CG_COLOR_SPACE, CG_CONTEXT, CG_DATA_CONSUMER, CG_DATA_PROVIDER, CG_FONT, CG_FUNCTION, CG_GRADIENT,
-        CG_IMAGE, CG_IMAGE_DESTINATION, CG_IMAGE_SOURCE, CG_PATH, CG_PATTERN, CG_SHADING, CT_FONT, CT_FONT_COLLECTION,
-        CT_FONT_DESCRIPTOR, CT_FRAME, CT_FRAMESETTER, CT_GLYPH_INFO, CT_LINE, CT_PARAGRAPH_STYLE, CT_RUBY_ANNOTATION,
-        CT_RUN, CT_RUN_DELEGATE, CT_TEXT_TAB, CT_TYPESETTER,
+        CG_COLOR, CG_COLOR_SPACE, CG_CONTEXT, CG_DATA_CONSUMER, CG_DATA_PROVIDER, CG_EVENT, CG_FONT, CG_FUNCTION,
+        CG_GRADIENT, CG_IMAGE, CG_IMAGE_DESTINATION, CG_IMAGE_SOURCE, CG_PATH, CG_PATTERN, CG_SHADING, CT_FONT,
+        CT_FONT_COLLECTION, CT_FONT_DESCRIPTOR, CT_FRAME, CT_FRAMESETTER, CT_GLYPH_INFO, CT_LINE, CT_PARAGRAPH_STYLE,
+        CT_RUBY_ANNOTATION, CT_RUN, CT_RUN_DELEGATE, CT_TEXT_TAB, CT_TYPESETTER,
     };
 }
 

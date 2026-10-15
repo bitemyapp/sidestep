@@ -13,11 +13,21 @@ objc2, block2                     from crates.io (objc2 with the fork's fixes);
           class symbols ._OBJC_CLASS_<Name>, _Block_copy, _NSConcreteStackBlock
 sidestep-runtime                  the Objective-C runtime, in Rust
 sidestep-foundation, -appkit      framework classes, in Rust, via define_class!
+sidestep-engine                   the render thread, rasterizer and text
+                                  engine under AppKit; no Objective-C
 ```
+
+A program written for Linux alone can use the engine through a native Rust
+toolkit instead, `sidestep-ui`, and link no Objective-C at all (see
+[The native toolkit](#the-native-toolkit)).
 
 The objc2 fork's fixes are pending upstream; `tools/objc2-overlay` applies
 them to the published crates at build time (see
 [abi.md](abi.md#fixed-in-the-objc2-fork-pending-upstream)).
+
+AppKit's half that never touches the Objective-C runtime is a crate of its
+own, `sidestep-engine` (see [The engine](#the-engine)), so other toolkits
+can draw and take input through it too.
 
 [objc2]: https://github.com/madsmtm/objc2
 
@@ -665,6 +675,155 @@ This design keeps GPU wake-ups and uploads proportional to what changed,
 which is what dominates power on a mostly idle desktop. A GPU rasterizer can
 replace the CPU one behind the same operations later.
 
+### The engine
+
+Everything below the line the two threads talk across lives in
+`crates/sidestep-engine`, which links no Objective-C: the messages
+(`protocol`), the render thread and its Wayland backends, the real one
+and the null one tests use (`backend`), the rasterizer (`raster`), Core
+Animation's layer trees as plain data and their compositing (`ca`), the
+text engine (`text`), the clipboard's shared state (`clipboard`), the
+compositor's outputs (`outputs`), the desktop's settings and the system
+colors they choose (`settings`, `desktop`, `palette`), image files
+(`codec`), CoreGraphics-style paths (`path`), touchpad coasting's physics
+(`momentum`) and `SIDESTEP_TRACE_FRAMES` (`trace`). `sidestep-appkit`
+re-exports those modules at its crate root,
+so its code names them as it always has (`crate::protocol`,
+`crate::backend`, …); the main-thread halves of mixed modules stay in
+AppKit and re-export the engine's halves (`quartzcore::tree` builds
+commits, `quartzcore::render` draws layers into a CGContext, `screen`
+makes `NSScreen`s of the published outputs, `settings` turns a change
+into a run-loop perform and a redraw).
+
+Three seams keep the engine free of AppKit:
+
+- **Waking the main thread.** `backend::start` takes a `Waker`, a
+  closure the render thread calls after every message it sends and once
+  more when it stops. AppKit's signals its run-loop source; another
+  toolkit can signal a condition variable.
+- **Hearing of the desktop's settings.** The engine keeps the desktop's
+  light or dark preference and accent itself and calls the hook a toolkit
+  gives `settings::on_change` (AppKit's performs `apply_changes` on the
+  main run loop, which refreshes every view's appearance).
+- **AppKit's values.** Key events carry `NSEventModifierFlags` bits and
+  AppKit's function-key characters, which `NSEvent` passes on as they
+  are; the engine defines them itself (`keys`), and a test in AppKit holds
+  each to objc2-app-kit's.
+
+A process has one render thread at a time, started by whichever toolkit
+runs it: the render thread ends when its `Backend` is dropped (its
+channel closes), and the next `backend::start` replaces what other
+threads send through (`send_if_running`), as a toolkit's next
+`settings::on_change` replaces its hook, so one application can run after
+another.
+
+### The native toolkit
+
+`crates/sidestep-ui` is the engine's other toolkit: a Rust API for
+programs written for Linux alone, with no Objective-C runtime in them
+(its dependency tree has no objc2 crate). It drives the render thread
+through the same protocol AppKit does, and keeps AppKit's rhythm:
+
+- **The loop** (`app.rs`) runs on the thread that calls `App::run`. The
+  render thread's waker and the settings hook signal a condition variable
+  (and so do `Proxy`s from other threads); each turn handles the render
+  thread's messages, oldest first (a move followed by another move of the
+  same window, and a key repeat followed by a newer key, are dropped, as
+  AppKit drops them), a proxy's wake, a change of the desktop's look or
+  accent (every window redraws), timers that came due (kept in a
+  `BTreeMap` by due time; a repeating timer keeps its phase and skips what
+  it missed) and coasting that no frame moved on, then runs the display
+  pass and sleeps until woken or the next deadline. An idle program sleeps
+  with nothing armed. One application runs at a time; when `run` returns,
+  its windows close and its render thread stops, and another may run.
+- **Windows and showings.** A window keeps its `WindowId` for its life;
+  each time it's shown (`show_window`, after `hide_window`) it is a new
+  window to the render thread, a *showing* with an id of its own: a
+  window's first showing has the window's number, later ones count from
+  2³¹. Messages name showings and are mapped back to windows, so what the
+  render thread still says of a showing that went finds nothing (drags
+  over one are still answered). Hiding a window closes its popups and
+  tells the handler it lost the keyboard and the pointer if it had them;
+  showing it sends its title, style, size, size limits, cursor and parent
+  anew. Closing a window closes its popups first, as Wayland needs. A
+  popup opens below its anchor unless a `PopupPosition` says otherwise
+  (the positioner's anchor corner, gravity, offset, and flip, slide and
+  resize adjustments, `ResizeX` added to the protocol for it).
+- **The display pass** gives each window that needs it a `Canvas`: a
+  window draws once configured, only when the render thread showed its
+  last frame (so drawing keeps pace with the compositor's frame
+  callbacks, and a window the compositor isn't showing stops drawing),
+  and only if it has damage or a new title. The canvas starts by clearing
+  the damage to the window's background (`FillWith` with `Copy`), records
+  the handler's drawing as ops in window points, and the pass sends one
+  `Paint` of the root target and a `Present`, then drops the images the
+  pass made for itself, so the message that forgets them follows the
+  paint. First frames wait, as AppKit's do, for the desktop's light or
+  dark (`settings::ready`).
+- **The canvas** (`canvas.rs`) keeps a transform (a kurbo `Affine`), a clip
+  (bounds, and clip paths where it isn't a rectangle) and a blend mode and
+  shadow, and turns calls into ops: a rectangle through an axis-aligned
+  transform with nothing else set is a `Fill` of whole pixels; shapes are
+  `FillPath`s and `StrokePath`s of their kurbo paths; images are `Image`
+  ops of the engine's `ImageData` (a file is decoded on the render thread
+  the first time it's drawn, and its cache entry goes when the last
+  `Image` does); groups are `BeginGroup`/`EndGroup`. Text is the glyph
+  runs the text engine placed, as `Glyphs` ops from the render thread's
+  glyph cache while the transform keeps glyphs upright and scales both
+  ways alike (the size scaled with it). Turned, mirrored or stretched, or
+  drawn with a shadow, a clip path or a blend mode, which a glyph run
+  can't carry, text is drawn through the drawing state another way: its
+  outlines, filled (and for a synthesized bold face stroked too, as thick
+  as the glyph cache emboldens, a 24th of the size in pixels between a
+  quarter pixel and two; a synthesized oblique leans them); or, for a
+  color font's glyphs (COLR, CBDT, sbix or SVG, which have no outlines),
+  a picture: the run drawn upright into an image at the scale it shows at
+  (`ca::render::rasterize`), drawn through the transform.
+- **Text** (`text.rs`): a `TextLayout` is the engine's `text::lines::Frame`
+  (TextKit's line layout), so it has what editing needs (the character at
+  a point, carets with their secondary caret where directions meet,
+  selection rectangles) as well as lines and size; its API takes byte
+  offsets of UTF-8 and converts to the frame's UTF-16 indexes.
+  `Canvas::draw_label` and `measure` go through string drawing's layout
+  cache instead, for labels drawn pass after pass. Font files a program
+  brings are installed in the shared font collection under their own
+  families (`fonts::install`, after which names like `Family-Bold` are
+  looked up again), so weights and styles are matched among a family's
+  faces as among the system's, or loaded as one face exactly as the file
+  has it (`Font::from_data`, through the private families CoreText's
+  data fonts use).
+- **Input** (`event.rs`) is translated from AppKit's values: modifier
+  flags to `Modifiers`; a key's characters to a `Key` (AppKit's control
+  characters and function-key characters to `NamedKey`s) and the text it
+  types (none for keys that type nothing, for releases, and while Control
+  or Super is held); input methods' changes to `Ime` commits and preedits.
+  A touchpad gesture that ends fast coasts, with AppKit's physics (the
+  engine's `momentum`, which AppKit's coasting now uses too): scroll
+  events with a `momentum` phase, a step per frame of the window or every
+  50 ms without frames, stopped by another scroll or a press (programs may
+  turn it off, `App::momentum_scrolling`).
+- **The rest**: the clipboard is the engine's shared state (text offered
+  under the text MIME types, this program's own text answered without a
+  round trip while its change is current); outputs are its published
+  snapshot, read without waiting (the render thread describes them by
+  itself once it connects, and the handler hears `outputs_changed`); and
+  drags are answered position by position, as the render thread needs,
+  from the handler's `drag_moved`: a `DropResponse` with the action, the
+  MIME type to take (one the drag offers, else the toolkit's choice: the
+  URL list, read before the drag is announced, else text, else the first
+  type offered) and whether to be asked again while the drag waits.
+
+Its tests run through the null render thread (`tests/headless.rs`): an
+application's handler plays every step, each waiting for its condition
+with a deadline, and a second application runs after the first;
+`testing` queues input as if the render thread had sent it. Under a real
+compositor (`tests/wayland_system.rs`, run under the headless sway, and
+in CI's `wayland` job in the container `scripts/linux-run` uses), a
+virtual pointer of the test's own clicks, double-clicks and turns the
+wheel over the window and dismisses a popup by clicking outside it,
+`wtype` types, `wl-copy` and `wl-paste` trade the clipboard with it, and
+the window is hidden, shown again and clicked.
+
 ### Scale
 
 Operations stay in points. Each window renders at its output's scale: the
@@ -705,7 +864,8 @@ Wayland shows a client no other program's input.
 - **Keys.** Keymaps are compiled with [kbvm], a pure Rust XKB
   implementation, so neither building nor running needs libxkbcommon.
   `characters` apply every modifier (Control-A types U+0001, as on macOS)
-  and the locale's compose sequences and dead keys;
+  and the locale's compose sequences and dead keys (X11's compose tables,
+  found as [NixOS](#nixos) needs);
   `charactersIgnoringModifiers` apply Shift only. Keys that type nothing
   get AppKit's function-key characters (`NSUpArrowFunctionKey`, …) and
   control characters (Return is `\r`, Backspace `NSDeleteCharacter`).
@@ -1917,6 +2077,12 @@ answered or 150 ms have passed, so a dark desktop doesn't flash a light
 window; without a bus or a portal the answer is light at once.
 `SIDESTEP_APPEARANCE=light` or `dark` (else `SIDESTEP_THEME`) and
 `SIDESTEP_ACCENT=#rrggbb` override the desktop.
+Programs hear of its light or dark as macOS tells them: `NSGlobalDomain`'s
+`AppleInterfaceStyle` is "Dark" while it is dark (asked of the engine at
+each lookup, never stored), a switch posts
+`AppleInterfaceThemeChangedNotification` to the program's own distributed
+observers (every program hears the desktop itself), and the application's
+`effectiveAppearance`, unless it set its own, changes observably.
 
 
 ### Views, layout and containers
@@ -2525,11 +2691,12 @@ AppKit measures text synchronously (`sizeWithAttributes:`,
 `boundingRectWithSize:options:attributes:context:`), so text is shaped and
 laid out on the thread that asks, and the render thread only ever sees
 glyphs: a glyph-run op names a registered face, a size, and glyph ids with
-positions in points. `crates/sidestep-appkit/src/text/` holds the stack.
+positions in points. `crates/sidestep-engine/src/text/` holds the stack.
 
 - **Fonts.** fontique finds the system's fonts through fontconfig, loaded
   at run time with `dlopen` (every Linux desktop has `libfontconfig.so.1`;
-  nothing is linked at build time). So the desktop's configuration decides
+  nothing is linked at build time; on NixOS it's found as
+  [below](#nixos)). So the desktop's configuration decides
   what `system-ui`, `sans-serif` and `monospace` are and which families
   fill in for missing glyphs, as it does for GTK and Qt programs. The system
   font is `system-ui` (else `sans-serif`), the monospaced one `monospace`.
@@ -2992,8 +3159,9 @@ the workspace against stand-ins for the desktop's programs.
   bar in the window, and Wayland has nowhere else for it. Every titled
   window that isn't a panel or a sheet shows the main menu as a bar under
   the title bar (or at the top, when the compositor draws the
-  decorations), drawn on the main thread as ops and rasterized on the
-  render thread onto a subsurface. The window grows by the bar and its
+  decorations), drawn on the main thread as ops in its window's
+  appearance, like the rest of the chrome, and rasterized on the render
+  thread onto a subsurface. The window grows by the bar and its
   content keeps its size: to the frame arithmetic the bar is part of the
   title bar (`frameRectForContentRect:` includes it, `contentLayoutRect`
   leaves it out). A click on a title opens its menu; moving across titles
@@ -3071,3 +3239,38 @@ has no display and passes without checking:
 ```sh
 scripts/linux-run scripts/headless-wayland cargo test -p sidestep-appkit --test wayland_system
 ```
+
+### NixOS
+
+A distribution laid out as most are keeps what the engine loads at run time
+where every program looks: `libfontconfig.so.1` on the library path, X11's
+compose tables in `/usr/share/X11/locale` (and XKB's keymap data, which
+only tests use, in `/usr/share/X11/xkb`). NixOS keeps each package under
+its own prefix in the store, so a program built there with plain Cargo
+finds none of them by name. `sidestep-engine`'s `system` module looks for
+each in turn, so the same source runs on both without wrappers:
+
+1. where the environment says (`LD_LIBRARY_PATH`, `XLOCALEDIR`,
+   `XKB_CONFIG_ROOT`);
+2. where the build said: `SIDESTEP_FONTCONFIG` (the library file),
+   `SIDESTEP_XLOCALEDIR` and `SIDESTEP_XKB_CONFIG_ROOT`, read when the
+   engine compiles. A Nix package or shell sets them to store paths, as
+   nixpkgs builds libxkbcommon, and the program's closure then keeps them;
+3. the usual places;
+4. the data directories (`$XDG_DATA_DIRS`, which on NixOS lists the
+   system's and the user's profiles); for fontconfig, the `lib` directory
+   beside each, and the library the system's own `fc-match` runs with, read
+   from its ELF run path. NixOS's font configuration installs `fc-match`,
+   so a plain `cargo build` there loads the system's fontconfig.
+
+Only the compose tables have no place on a NixOS system unless a profile
+links `share/X11/locale` (libX11's) or the build names it; without them
+dead keys type nothing, as on any system without compose data. Foundation's
+time zones are read where jiff reads them: `$TZDIR`, `/usr/share/zoneinfo`,
+then NixOS's `/etc/zoneinfo`.
+
+On a NixOS host, `cargo test` runs the Linux tests natively, with the
+system's fonts rather than the container's DejaVu, which a few text tests
+expect. The keyboard tests build keymaps by layout name, which needs XKB's
+data: they say they were skipped without it (set `XKB_CONFIG_ROOT` to
+xkeyboard-config's `share/X11/xkb` to run them).

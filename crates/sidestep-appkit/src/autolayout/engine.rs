@@ -328,7 +328,7 @@ impl Engine {
             Err(AddConstraintError::UnsatisfiableConstraint) if breakable => {
                 eprintln!(
                     "sidestep: unable to satisfy all required layout constraints; breaking one ({} {} 0)",
-                    describe(constraint.expr()),
+                    describe(constraint.expr(), &self.owners, &self.items),
                     constraint.op()
                 );
                 let spec =
@@ -624,10 +624,24 @@ fn key_of(c: &NSLayoutConstraint) -> usize {
     (c as *const NSLayoutConstraint).addr()
 }
 
-fn describe(e: &Expression) -> String {
+/// `e`, each variable named by its item (its class, and where it is) and
+/// which of x, y, width and height it is, as AppKit's log names a broken
+/// constraint's views; variables of no item (a stack's) by number.
+fn describe(e: &Expression, owners: &HashMap<Variable, usize>, items: &HashMap<usize, Item>) -> String {
+    let name = |var: &Variable| -> Option<String> {
+        let item = items.get(owners.get(var)?)?;
+        let which = item.vars.iter().position(|v| v == var)?;
+        // SAFETY: items are alive.
+        let class = match unsafe { item.item.as_view() } {
+            Some(view) => views::as_view(view).class().name().to_string_lossy().into_owned(),
+            None => "NSLayoutGuide".to_owned(),
+        };
+        Some(format!("{class}@{:#x}.{}", item.item.key(), ["x", "y", "width", "height"][which]))
+    };
     let mut s = String::new();
     for t in &e.terms {
-        s.push_str(&format!("{:+}·v{:?} ", t.coefficient, t.variable));
+        let var = name(&t.variable).unwrap_or_else(|| format!("v{:?}", t.variable));
+        s.push_str(&format!("{:+}·{var} ", t.coefficient));
     }
     s.push_str(&format!("{:+}", e.constant));
     s

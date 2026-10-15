@@ -473,12 +473,34 @@ pub(crate) fn take_holds() -> Vec<WindowId> {
     holds
 }
 
+/// Where a view draws in its layer's space: its bounds, and for a TextKit
+/// 2 text view that doesn't clip, across as far as its text container
+/// reaches (AppKit draws the fragments in views of their own, which stick
+/// out of it).
+fn drawn_extent(view: &NSViewImpl, props: &Props) -> [f64; 4] {
+    let [bx, by, w, h] = props.bounds;
+    if views::clips_to_bounds(view) {
+        return props.bounds;
+    }
+    let Some(r) = crate::textkit::text_view::content_reach(views::as_view(view)) else { return props.bounds };
+    let (x0, x1) = (bx.min(r.origin.x), (bx + w).max(r.origin.x + r.size.width));
+    [x0, by, x1 - x0, h]
+}
+
+/// Where `view` draws changed (`drawn_extent`): its canvas is worked out
+/// again at the next commit.
+pub(crate) fn extent_changed(view: &NSViewImpl) {
+    if let Some(l) = layer_of(view).filter(|_| composited(view)) {
+        super::transaction::mark_dirty(imp(&l));
+    }
+}
+
 /// The canvas of a view's layer: the part of its bounds it covers (the
 /// whole of them, unless they're too big, then a part around what shows,
 /// on a coarse grid, kept while it covers what shows), and its size in
 /// pixels.
 fn canvas_rect(view: &NSViewImpl, props: &Props, scale: f64) -> Option<([f64; 4], u32, u32)> {
-    let [bx, by, w, h] = props.bounds;
+    let [bx, by, w, h] = drawn_extent(view, props);
     if w <= 0.0 || h <= 0.0 {
         return None;
     }
@@ -579,7 +601,7 @@ pub(crate) fn canvas_update(view: &NSView, props: &Props) -> ContentUpdate {
             if state(v).canvas.replace(Some(rect)) != Some(rect) {
                 // A new canvas: drawn whole at the next display pass, which
                 // the render thread waits for before showing it.
-                set_needs_display(v, crate::view_layout::bounds(v));
+                set_needs_display(v, NSRect::new(NSPoint::new(rect[0], rect[1]), NSSize::new(rect[2], rect[3])));
                 if let Some(w) = views::window_of(v) {
                     let id = w.id();
                     HOLDS.with(|h| {
@@ -646,11 +668,17 @@ fn record_view(view: &NSViewImpl, xf: crate::graphics::Xf, area: Rect, scale: f6
     if clear {
         crate::graphics::push(Op::FillWith { rect: area, color: [0.0; 4], blend: crate::protocol::Blend::Clear });
     }
-    let mark = crate::context::begin_view(view, xf, area);
-    // SAFETY: drawRect: takes an NSRect.
-    let _: () = unsafe { msg_send![views::as_view(view), drawRect: xf.inverse_rect(area)] };
-    crate::context::end_view(mark);
-    if crate::textkit::text_view::draws_text_kit_2(views::as_view(view)) {
+    let text_kit_2 = crate::textkit::text_view::draws_text_kit_2(views::as_view(view));
+    // A text view's canvas may reach past its bounds for its fragments
+    // (`drawn_extent`); its drawRect: gets only its bounds.
+    let inside = if text_kit_2 { area.intersect(&xf.rect(crate::view_layout::bounds(view))) } else { area };
+    if !inside.is_empty() {
+        let mark = crate::context::begin_view(view, xf, inside);
+        // SAFETY: drawRect: takes an NSRect.
+        let _: () = unsafe { msg_send![views::as_view(view), drawRect: xf.inverse_rect(inside)] };
+        crate::context::end_view(mark);
+    }
+    if text_kit_2 {
         let mark = crate::context::begin_view(view, xf, area);
         crate::textkit::text_view::draw_content(views::as_view(view), xf.inverse_rect(area));
         crate::context::end_view(mark);

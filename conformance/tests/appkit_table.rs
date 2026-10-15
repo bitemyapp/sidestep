@@ -17,8 +17,8 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSBackgroundStyle, NSBackingStoreType, NSControlTextEditingDelegate, NSLayoutConstraint, NSResponder, NSScrollView,
-    NSTableCellView, NSTableColumn, NSTableColumnResizingOptions, NSTableRowView, NSTableView,
+    NSBackgroundStyle, NSBackingStoreType, NSCell, NSControlTextEditingDelegate, NSLayoutConstraint, NSResponder,
+    NSScrollView, NSTableCellView, NSTableColumn, NSTableColumnResizingOptions, NSTableRowView, NSTableView,
     NSTableViewAnimationOptions, NSTableViewColumnAutoresizingStyle, NSTableViewDataSource, NSTableViewDelegate,
     NSTableViewGridLineStyle, NSTableViewRowSizeStyle, NSTableViewSelectionHighlightStyle, NSTableViewStyle,
     NSUserInterfaceItemIdentification, NSView, NSWindow, NSWindowStyleMask,
@@ -310,6 +310,16 @@ fn defaults(mtm: MainThreadMarker) {
     let c = column(mtm, "a", 100.0);
     assert_eq!((c.minWidth(), c.maxWidth()), (10.0, f32::MAX as f64));
     assert_eq!(c.title().to_string(), "Field");
+    // The title is the text of the header cell, an NSTableHeaderCell.
+    let header: Retained<NSCell> = unsafe { msg_send![&*c, headerCell] };
+    let header_class = objc2::runtime::AnyClass::get(c"NSTableHeaderCell").expect("NSTableHeaderCell");
+    assert!(header.isKindOfClass(header_class));
+    assert_eq!(header.stringValue().to_string(), "Field");
+    c.setTitle(&NSString::from_str("Name"));
+    assert_eq!(header.stringValue().to_string(), "Name");
+    header.setStringValue(&NSString::from_str("Other"));
+    assert_eq!(c.title().to_string(), "Other");
+    c.setTitle(&NSString::from_str("Field"));
     assert_eq!(
         c.resizingMask(),
         NSTableColumnResizingOptions::AutoresizingMask | NSTableColumnResizingOptions::UserResizingMask

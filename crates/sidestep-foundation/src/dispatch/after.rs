@@ -17,7 +17,7 @@ use crate::thread::lock;
 /// What happens at a deadline.
 pub(crate) enum Due {
     /// Queue this work on the queue.
-    Work(Obj, Work),
+    Work(Obj, Work, bool),
     /// Fire a timer source.
     Source(Obj, u64),
 }
@@ -88,7 +88,7 @@ fn run() {
             drop(heap);
             for entry in ready {
                 match entry.due {
-                    Due::Work(queue, work) => enqueue(queue.ptr(), work, false),
+                    Due::Work(queue, work, barrier) => enqueue(queue.ptr(), work, barrier),
                     Due::Source(source, generation) => super::source::timer_fired(source, generation),
                 }
             }
@@ -102,12 +102,12 @@ fn run() {
     }
 }
 
-fn after(when: u64, queue: *mut c_void, work: Work) {
+fn after(when: u64, queue: *mut c_void, work: Work, barrier: bool) {
     match super::time::deadline(when) {
         // Never: the work stays unrun, as with libdispatch.
         None => {}
-        Some(deadline) if deadline <= Instant::now() => enqueue(queue, work, false),
-        Some(deadline) => at(deadline, Due::Work(Obj::retain(queue), work)),
+        Some(deadline) if deadline <= Instant::now() => enqueue(queue, work, barrier),
+        Some(deadline) => at(deadline, Due::Work(Obj::retain(queue), work, barrier)),
     }
 }
 
@@ -118,11 +118,11 @@ pub unsafe extern "C-unwind" fn dispatch_after_f(
     ctx: *mut c_void,
     f: unsafe extern "C" fn(*mut c_void),
 ) {
-    after(when, queue, Work { f: function(f), ctx });
+    after(when, queue, Work { f: function(f), ctx }, false);
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn dispatch_after(when: u64, queue: *mut c_void, block: *const DynBlock<dyn Fn()>) {
     // SAFETY: the caller passes a block.
-    after(when, queue, block_work(unsafe { &*block }));
+    after(when, queue, block_work(unsafe { &*block }), super::block::is_barrier(block));
 }
