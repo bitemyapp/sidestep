@@ -31,6 +31,7 @@ impl std::fmt::Debug for Font {
             .field("family", &&*self.face.family_name)
             .field("size", &self.spec.size)
             .field("weight", &self.spec.weight)
+            .field("width", &self.spec.stretch)
             .field("italic", &self.spec.italic)
             .finish()
     }
@@ -124,6 +125,21 @@ impl Font {
 
     pub fn bold(&self) -> Font {
         self.with_weight(700.0)
+    }
+
+    /// This font in another width, relative to normal (CSS's
+    /// `font-stretch`, 0.5 to 2): 0.875 is semi-condensed, 0.75 condensed,
+    /// 1.125 semi-expanded. A variable font with a width axis (`wdth`) is
+    /// set at it, and a family with faces of several widths gives the
+    /// nearest; a family of one width keeps it (widths aren't
+    /// synthesized).
+    pub fn with_width(&self, width: f32) -> Font {
+        Font::of(FontSpec { stretch: width.clamp(0.5, 2.0), ..self.spec.clone() })
+    }
+
+    /// Its width relative to normal, as asked for.
+    pub fn width(&self) -> f32 {
+        self.spec.stretch
     }
 
     pub fn italic(&self) -> Font {
@@ -666,6 +682,37 @@ mod tests {
         assert_eq!(named.family_name(), "DejaVu Sans");
         // By its full name too, as names go.
         assert!(Font::named("DejaVu Sans Bold", 14.0).is_some());
+    }
+
+    /// Archivo's variable font (`Archivo[wdth,wght].ttf`, from Google
+    /// Fonts or Omnibus-Type's repository: SIL OFL, so not kept here),
+    /// named by `SIDESTEP_TEST_ARCHIVO`.
+    #[test]
+    fn widths_set_a_variable_fonts_width_axis() {
+        let Some(path) = std::env::var_os("SIDESTEP_TEST_ARCHIVO") else {
+            eprintln!("skipped: SIDESTEP_TEST_ARCHIVO names no Archivo variable font");
+            return;
+        };
+        assert_eq!(Font::install_file(path).expect("the font file"), ["Archivo"]);
+        let normal = Font::named("Archivo", 12.0).expect("Archivo, installed");
+        let narrow = normal.with_width(0.875);
+        assert_eq!((normal.width(), narrow.width(), narrow.family_name()), (1.0, 0.875, "Archivo"));
+        let width = |font: &Font| measure("Soroban — Untitled", &TextStyle::new(font.clone(), Color::BLACK)).width;
+        let (w, n) = (width(&normal), width(&narrow));
+        assert!(n < w * 0.95, "{n} at 87.5% against {w}");
+        // Its weight, too, on the weight axis: Aizome's tab titles.
+        let tab = normal.with_weight(650.0).with_width(0.875);
+        assert!(width(&tab) > n && width(&tab) < width(&normal.with_weight(650.0)), "{}", width(&tab));
+        // Drawn narrower, glyph by glyph: an M's ink.
+        let inked = |font: &Font| {
+            let image = crate::offscreen::render(Size::new(40.0, 20.0), 2.0, crate::Appearance::LIGHT, |c| {
+                c.draw_label("M", &TextStyle::new(font.clone(), Color::BLACK), Point::new(2.0, 2.0));
+            });
+            let px = image.to_rgba8().expect("pixels");
+            (0..80).filter(|x| (0..40).any(|y| px[(y * 80 + x) * 4 + 3] > 64)).count()
+        };
+        let (m, condensed) = (inked(&normal), inked(&narrow));
+        assert!(condensed < m, "an M {condensed} pixels wide at 87.5%, {m} at 100%");
     }
 
     #[test]

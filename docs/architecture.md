@@ -842,7 +842,11 @@ through the same protocol AppKit does, and keeps AppKit's rhythm:
   looked up again), so weights and styles are matched among a family's
   faces as among the system's, or loaded as one face exactly as the file
   has it (`Font::from_data`, through the private families CoreText's
-  data fonts use).
+  data fonts use). A font's width (`Font::with_width`, CSS's
+  `font-stretch`) is the spec's stretch, which fontique matches faces
+  by and sets a variable font's `wdth` axis to, as it sets `wght`:
+  Archivo at 87.5% sets `Soroban — Untitled` at 12 points 11% narrower
+  (a test, given the font's file in `SIDESTEP_TEST_ARCHIVO`).
 - **Input** (`event.rs`) is translated from AppKit's values: modifier
   flags to `Modifiers`; a key's characters to a `Key` (AppKit's control
   characters and function-key characters to `NamedKey`s) and the text it
