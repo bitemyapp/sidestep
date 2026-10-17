@@ -5,7 +5,10 @@
 //! new window is configured at the size asked for, at scale 1, and a new
 //! toplevel gets the keyboard; an activation request gives the window the
 //! keyboard; a resize, maximize or full-screen request is configured; each
-//! present is shown at once (a frame). Drawing is dropped, but for the
+//! present is shown at once (a frame). A layer surface is on an output
+//! [`OUTPUT`] big: a side it leaves to the compositor is the output's,
+//! less its margins, and it gets the keyboard if it takes it
+//! exclusively. Drawing is dropped, but for the
 //! colors and places of the text painted while a test asks for them
 //! (`testing::note_painted_text`). Everything else the main thread asks is
 //! written down for tests to read (`testing::take_render_log`), and input
@@ -20,7 +23,7 @@ use std::sync::{Mutex, mpsc};
 use smithay_client_toolkit::reexports::calloop::channel::{self, Channel};
 
 use super::{Backend, MainSender, Waker};
-use crate::protocol::{FromRender, Op, ToRender, WindowId, WindowRequest, WindowState};
+use crate::protocol::{FromRender, LayerKeyboard, LayerPlacement, Op, ToRender, WindowId, WindowRequest, WindowState};
 
 /// What the main thread asked the null render thread for, besides drawing.
 #[derive(Clone, Debug, PartialEq)]
@@ -59,6 +62,11 @@ pub enum Seen {
     FrameTicks {
         window: u32,
         on: bool,
+    },
+    /// The window shown (`Created`) is a layer surface, placed so.
+    Layer {
+        window: u32,
+        placement: LayerPlacement,
     },
 }
 
@@ -207,6 +215,33 @@ struct Win {
     state: WindowState,
     /// The menu bar's height, part of the title bar.
     bar: u32,
+    /// A layer surface's placement, and the size it asked for.
+    layer: Option<(LayerPlacement, (u32, u32))>,
+}
+
+impl Win {
+    /// Size a layer surface as its placement and the size it asked for
+    /// have it: whether its size changed.
+    fn place(&mut self) -> bool {
+        let Some((placement, asked)) = &self.layer else { return false };
+        let size = layer_size(*asked, placement);
+        let changed = size != (self.width, self.height);
+        (self.width, self.height) = size;
+        changed
+    }
+}
+
+/// The output layer surfaces are on, in points.
+pub const OUTPUT: (u32, u32) = (1280, 800);
+
+/// A layer surface's size: what it asked for, a side of 0 being the
+/// output's less its margins that way.
+fn layer_size((width, height): (u32, u32), placement: &LayerPlacement) -> (u32, u32) {
+    let [top, right, bottom, left] = placement.margins;
+    let side = |asked: u32, output: u32, margins: i32| {
+        if asked == 0 { (i64::from(output) - i64::from(margins)).max(1) as u32 } else { asked }
+    };
+    (side(width, OUTPUT.0, left + right), side(height, OUTPUT.1, top + bottom))
 }
 
 fn run(channel: Channel<ToRender>, to_main: MainSender) {
@@ -238,17 +273,36 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
     };
     while let Ok(msg) = channel.recv() {
         match msg {
-            ToRender::CreateWindow { window, width, height, popup, sheet_of, .. } => {
-                if let Some(all) = PIXELS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-                    all.insert(window, captured(width, height));
+            ToRender::CreateWindow { window, width, height, popup, sheet_of, layer, .. } => {
+                let keyboard = layer.as_ref().map(|p| p.keyboard);
+                if let Some(placement) = &layer {
+                    note(Seen::Layer { window, placement: placement.clone() });
                 }
-                let win = Win { width, height, state: WindowState::default(), bar: 0 };
+                let mut win = Win {
+                    width,
+                    height,
+                    state: WindowState::default(),
+                    bar: 0,
+                    layer: layer.map(|p| (p, (width, height))),
+                };
+                win.place();
+                if let Some(all) = PIXELS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                    all.insert(window, captured(win.width, win.height));
+                }
                 send(configure(window, &win));
+                note(Seen::Created {
+                    window,
+                    width: win.width,
+                    height: win.height,
+                    popup_of: popup.map(|p| p.parent),
+                    sheet_of,
+                });
                 windows.insert(window, win);
-                note(Seen::Created { window, width, height, popup_of: popup.map(|p| p.parent), sheet_of });
                 // Popups and sheets are parts of other windows: the
-                // keyboard stays where it is.
-                if popup.is_none() && sheet_of.is_none() {
+                // keyboard stays where it is; a layer surface takes it only
+                // if it takes it exclusively.
+                let takes = keyboard.is_none_or(|k| k == LayerKeyboard::Exclusive);
+                if popup.is_none() && sheet_of.is_none() && takes {
                     focus(&mut focused, Some(window));
                 }
             }
@@ -284,8 +338,27 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
             ToRender::Request { window, request } => {
                 note(Seen::Request { window, request: format!("{request:?}") });
                 let Some(win) = windows.get_mut(&window) else { continue };
+                // A layer surface placed anew is configured if its size
+                // changed.
+                let placed = |win: &mut Win, change: &dyn Fn(&mut LayerPlacement)| {
+                    if let Some((placement, _)) = &mut win.layer {
+                        change(placement);
+                    }
+                    if win.place() {
+                        if let Some(all) = PIXELS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                            all.insert(window, captured(win.width, win.height));
+                        }
+                        send(configure(window, win));
+                    }
+                };
                 match request {
                     WindowRequest::Activate => focus(&mut focused, Some(window)),
+                    WindowRequest::Resize(w, h) if win.layer.is_some() => {
+                        if let Some((_, asked)) = &mut win.layer {
+                            *asked = (w, h);
+                        }
+                        placed(win, &|_| {});
+                    }
                     WindowRequest::Resize(w, h) => {
                         (win.width, win.height) = (w.max(1), h.max(1));
                         if let Some(all) = PIXELS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
@@ -300,6 +373,18 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
                     WindowRequest::Fullscreen(on) => {
                         win.state.fullscreen = on;
                         send(configure(window, win));
+                    }
+                    WindowRequest::Layer(layer) => placed(win, &|p| p.layer = layer),
+                    WindowRequest::LayerAnchors(anchors) => placed(win, &|p| p.anchors = anchors),
+                    WindowRequest::LayerExclusiveZone(zone) => placed(win, &|p| p.exclusive_zone = zone),
+                    WindowRequest::LayerMargins(margins) => placed(win, &|p| p.margins = margins),
+                    WindowRequest::LayerKeyboard(keyboard) => {
+                        placed(win, &|p| p.keyboard = keyboard);
+                        match keyboard {
+                            LayerKeyboard::Exclusive => focus(&mut focused, Some(window)),
+                            LayerKeyboard::None if focused == Some(window) => focus(&mut focused, None),
+                            _ => {}
+                        }
                     }
                     WindowRequest::Minimize | WindowRequest::Move => {}
                 }

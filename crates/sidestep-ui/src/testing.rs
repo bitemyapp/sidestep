@@ -16,6 +16,9 @@ use sidestep_engine::keys::modifier;
 use sidestep_engine::protocol::{self, Button, FromRender, ScrollPhase};
 
 pub use sidestep_engine::backend::null::{PaintedText, Seen};
+/// A layer surface's placement as the render thread was given it (in
+/// [`Seen::Layer`]).
+pub use sidestep_engine::protocol::LayerPlacement;
 
 use crate::app::Cx;
 use crate::event::{Modifiers, PointerButton};

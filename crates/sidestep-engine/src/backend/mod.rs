@@ -3,8 +3,8 @@
 //!
 //! - the root layer is the content's surface, rasterized into a canvas and
 //!   presented through a few shared-memory buffers, copying and damaging only
-//!   what changed. A popup's or a sheet's is its own surface; a toplevel's
-//!   is a subsurface of its frame ([`Frame`]);
+//!   what changed. A popup's, a sheet's or a layer surface's ([`layer`]) is
+//!   its own surface; a toplevel's is a subsurface of its frame ([`Frame`]);
 //! - a scroll layer is a grid of tiles, each on its own subsurface, cropped
 //!   to the scroll view with the viewporter, with an overlay above for the
 //!   views drawn over it ([`tiles`]). Scrolling moves tiles; a tile uploads
@@ -33,6 +33,7 @@
 mod decor;
 mod dnd;
 mod keyboard;
+mod layer;
 mod menubar;
 pub mod null;
 mod outputs;
@@ -90,6 +91,7 @@ use smithay_client_toolkit::reexports::protocols::xdg::shell::client::xdg_positi
 };
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState, SimpleGlobal};
 use smithay_client_toolkit::shell::WaylandSurface;
+use smithay_client_toolkit::shell::wlr_layer::{LayerShell, LayerSurface};
 use smithay_client_toolkit::shell::xdg::popup::{Popup, PopupConfigure, PopupHandler};
 use smithay_client_toolkit::shell::xdg::window::{
     DecorationMode, Window, WindowConfigure, WindowDecorations, WindowHandler,
@@ -99,13 +101,14 @@ use smithay_client_toolkit::shm::slot::{Buffer, SlotPool};
 use smithay_client_toolkit::shm::{Shm, ShmHandler};
 use smithay_client_toolkit::subcompositor::SubcompositorState;
 use smithay_client_toolkit::{
-    delegate_activation, delegate_compositor, delegate_output, delegate_registry, delegate_shm, delegate_simple,
-    delegate_subcompositor, delegate_xdg_popup, delegate_xdg_shell, delegate_xdg_window, registry_handlers,
+    delegate_activation, delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_shm,
+    delegate_simple, delegate_subcompositor, delegate_xdg_popup, delegate_xdg_shell, delegate_xdg_window,
+    registry_handlers,
 };
 
 use crate::protocol::{
-    Cursor, FromRender, Op, PopupPlacement, Rect, SizeLimits, Style, Target, TitleText, ToRender, WindowId,
-    WindowRequest, WindowState,
+    Cursor, FromRender, LayerPlacement, Op, PopupPlacement, Rect, SizeLimits, Style, Target, TitleText, ToRender,
+    WindowId, WindowRequest, WindowState,
 };
 use crate::raster::{self, Canvas, Glyphs};
 
@@ -267,6 +270,7 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
         selection: selection::Selection::new(&globals, &qh),
         text_inputs: textinput::TextInputs::new(&globals, &qh),
         activation: ActivationState::bind(&globals, &qh).ok(),
+        layer_shell: LayerShell::bind(&globals, &qh).ok(),
         compositor,
         subcompositor,
         viewporter,
@@ -321,6 +325,8 @@ pub struct State {
     selection: selection::Selection,
     text_inputs: textinput::TextInputs,
     activation: Option<ActivationState>,
+    /// wlr-layer-shell, where the compositor offers it (see `layer`).
+    layer_shell: Option<LayerShell>,
     compositor: CompositorState,
     subcompositor: SubcompositorState,
     viewporter: SimpleGlobal<WpViewporter, 1>,
@@ -377,6 +383,8 @@ enum Shell {
     Popup(Popup),
     /// Part of another window (see `sheet`).
     Sheet(sheet::Sheet),
+    /// A desktop surface (see `layer`).
+    Layer(LayerSurface),
 }
 
 /// A toplevel's own surface, its frame: exactly the window geometry, the
@@ -506,6 +514,7 @@ impl Win {
             Shell::Toplevel(f) => &f.content,
             Shell::Popup(p) => p.wl_surface(),
             Shell::Sheet(s) => s.surface(),
+            Shell::Layer(l) => l.wl_surface(),
         }
     }
 
@@ -514,14 +523,14 @@ impl Win {
     fn main_surface(&self) -> &WlSurface {
         match &self.shell {
             Shell::Toplevel(f) => f.window.wl_surface(),
-            Shell::Popup(_) | Shell::Sheet(_) => self.surface(),
+            Shell::Popup(_) | Shell::Sheet(_) | Shell::Layer(_) => self.surface(),
         }
     }
 
     fn toplevel(&self) -> Option<&Window> {
         match &self.shell {
             Shell::Toplevel(f) => Some(&f.window),
-            Shell::Popup(_) | Shell::Sheet(_) => None,
+            Shell::Popup(_) | Shell::Sheet(_) | Shell::Layer(_) => None,
         }
     }
 
@@ -640,8 +649,8 @@ impl State {
 
     fn handle(&mut self, msg: ToRender) {
         match msg {
-            ToRender::CreateWindow { window, width, height, title, style, limits, popup, sheet_of } => {
-                self.create_window(window, width, height, title, style, limits, popup, sheet_of)
+            ToRender::CreateWindow { window, width, height, title, style, limits, popup, sheet_of, layer } => {
+                self.create_window(window, width, height, title, style, limits, popup, sheet_of, layer)
             }
             ToRender::SetTitle { window, title, text } => {
                 let Some(win) = self.windows.get_mut(&window) else { return };
@@ -782,6 +791,7 @@ impl State {
         limits: SizeLimits,
         popup: Option<PopupPlacement>,
         sheet_of: Option<WindowId>,
+        layer: Option<LayerPlacement>,
     ) {
         let mut scale = self.initial_scale();
         let sheet = match sheet_of {
@@ -792,12 +802,12 @@ impl State {
             }
             None => None,
         };
-        let (shell, surface) = match (popup, sheet) {
-            (_, Some(sheet)) => {
+        let (shell, surface) = match (popup, sheet, layer) {
+            (_, Some(sheet), _) => {
                 let surface = sheet.surface().clone();
                 (Shell::Sheet(sheet), surface)
             }
-            (Some(placement), None) => {
+            (Some(placement), None, _) => {
                 let surface = self.compositor.create_surface(&self.qh);
                 let Some(popup) = self.create_popup(&surface, width, height, placement) else {
                     surface.destroy();
@@ -805,7 +815,19 @@ impl State {
                 };
                 (Shell::Popup(popup), surface)
             }
-            (None, None) => {
+            (None, None, Some(placement)) => {
+                let surface = self.compositor.create_surface(&self.qh);
+                let Some(l) = layer::create(self, &surface, width, height, &placement) else {
+                    // Without a layer shell it can't show: it is closed at once.
+                    eprintln!("sidestep: the compositor has no wlr-layer-shell for layer surface {window}");
+                    surface.destroy();
+                    self.send(FromRender::CloseRequested { window });
+                    return;
+                };
+                scale = layer::initial_scale(self, placement.output).unwrap_or(scale);
+                (Shell::Layer(l), surface)
+            }
+            (None, None, None) => {
                 let decorations = if !style.titled || force_client_decorations() {
                     WindowDecorations::ClientOnly
                 } else {
@@ -911,12 +933,18 @@ impl State {
             }
         }
         let parent_xdg = match &parent.shell {
-            Shell::Toplevel(f) => f.window.xdg_surface().clone(),
-            Shell::Popup(p) => p.xdg_surface().clone(),
+            Shell::Toplevel(f) => Some(f.window.xdg_surface().clone()),
+            Shell::Popup(p) => Some(p.xdg_surface().clone()),
+            // A layer surface's popup has no xdg parent: it is given to
+            // the layer surface before its first commit.
+            Shell::Layer(_) => None,
             // Popups of sheets aren't placed yet.
             Shell::Sheet(_) => return None,
         };
-        let popup = Popup::from_surface(Some(&parent_xdg), &positioner, &self.qh, surface.clone(), &self.xdg).ok()?;
+        let popup = Popup::from_surface(parent_xdg.as_ref(), &positioner, &self.qh, surface.clone(), &self.xdg).ok()?;
+        if let Shell::Layer(l) = &parent.shell {
+            l.get_popup(popup.xdg_popup());
+        }
         if placement.grab
             && let Some((seat, serial)) = self.seats.latest_serial()
         {
@@ -972,6 +1000,9 @@ impl State {
     }
 
     fn request(&mut self, window: WindowId, request: WindowRequest) {
+        if layer::request(self, window, request) {
+            return;
+        }
         if let WindowRequest::Activate = request {
             self.activate(window);
             return;
@@ -1008,7 +1039,13 @@ impl State {
                 }
                 self.apply_limits(window);
             }
-            WindowRequest::Activate => {}
+            // Activation is asked above; the rest, of layer surfaces only.
+            WindowRequest::Activate
+            | WindowRequest::Layer(_)
+            | WindowRequest::LayerAnchors(_)
+            | WindowRequest::LayerExclusiveZone(_)
+            | WindowRequest::LayerMargins(_)
+            | WindowRequest::LayerKeyboard(_) => {}
         }
     }
 
@@ -1321,13 +1358,13 @@ impl State {
                     f.window.xdg_surface().set_window_geometry(geometry.0, geometry.1, geometry.2, geometry.3)
                 }
                 Shell::Popup(p) => p.xdg_surface().set_window_geometry(0, 0, geometry.2, geometry.3),
-                Shell::Sheet(_) => {}
+                Shell::Sheet(_) | Shell::Layer(_) => {}
             }
         }
         let (width, height, top) = (win.width, win.height, win.titlebar());
         let moved = match &mut win.shell {
             Shell::Toplevel(f) => f.place(width, height, top, &mut self.pool),
-            Shell::Popup(_) | Shell::Sheet(_) => false,
+            Shell::Popup(_) | Shell::Sheet(_) | Shell::Layer(_) => false,
         };
         let bar = win.bar_height();
         if let Some(menubar) = &mut win.menubar {
@@ -1768,6 +1805,7 @@ delegate_shm!(State);
 delegate_xdg_shell!(State);
 delegate_xdg_window!(State);
 delegate_xdg_popup!(State);
+delegate_layer!(State);
 delegate_activation!(State, Activation);
 delegate_simple!(State, WpViewporter, 1);
 delegate_registry!(State);

@@ -70,6 +70,7 @@ mod canvas;
 mod color;
 mod event;
 mod image;
+pub mod layer_shell;
 pub mod offscreen;
 mod text;
 mod window;

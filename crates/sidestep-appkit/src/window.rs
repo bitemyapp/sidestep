@@ -2504,6 +2504,7 @@ fn order_front(window: &NSWindowImpl) {
         limits: window.limits(),
         popup: if sheet_of.is_some() { None } else { ivars.popup.get() },
         sheet_of,
+        layer: None,
     });
     let cursor = app::cursor();
     if cursor != Cursor::Default {

@@ -1,9 +1,19 @@
 //! A desktop environment's surfaces under a real compositor, the headless
-//! sway: a toplevel names its program (its app id, as sway lists it) and
-//! is decorated by the compositor, which sway prefers, drawing nothing of
-//! its own (a screenshot with `grim` shows its content from its top
-//! left). Linux only, and only under the headless sway, with `grim` and
-//! `swaymsg`:
+//! sway, with screenshots (`grim`) and a virtual pointer and keyboard of
+//! other clients:
+//!
+//! - a toplevel names its program (its app id, as sway lists it) and is
+//!   decorated by the compositor, which sway prefers, drawing nothing of
+//!   its own (it shows its content from its top left);
+//! - layer surfaces: a panel along the top that windows keep clear of
+//!   (sway tiles a window under it), a wallpaper sway sizes to the
+//!   output, both showing where they should; a click on the panel opening
+//!   a menu from it, which closes; the panel taking the
+//!   keyboard when asked, typed into, then growing, and windows making
+//!   room.
+//!
+//! Linux only, and only under the headless sway, with `grim` and
+//! `swaymsg` (`wtype` for typing, left out without it):
 //!
 //! ```sh
 //! scripts/linux-run scripts/headless-wayland cargo test -p sidestep-ui --test wayland_desktop
@@ -18,14 +28,24 @@ fn main() {
 
 #[cfg(not(target_vendor = "apple"))]
 mod linux {
+    use std::collections::HashMap;
     use std::process::{Command, Stdio};
+    use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
-    use sidestep_ui::kurbo::{Point, Rect};
+    use sidestep_ui::kurbo::{Point, Rect, Size};
+    use sidestep_ui::layer_shell::{Anchors, KeyboardInteractivity, Layer, LayerOptions};
     use sidestep_ui::*;
+
+    use crate::pointer;
 
     const DEADLINE: Duration = Duration::from_secs(60);
     const GREEN: Color = Color::rgb8(0x26, 0xa2, 0x69);
+    const BAR: Color = Color::rgb8(0x1d, 0x2b, 0x53);
+    const WALL: Color = Color::rgb8(0x7e, 0x25, 0x53);
+    const MENU: Color = Color::rgb8(0xff, 0xa3, 0x00);
+    /// The headless sway's output, in points.
+    const OUTPUT: Size = Size::new(1280.0, 800.0);
 
     fn has(tool: &str) -> bool {
         Command::new("sh").arg("-c").arg(format!("command -v {tool}")).output().is_ok_and(|o| o.status.success())
@@ -41,7 +61,7 @@ mod linux {
         sh(&format!("swaymsg -s \"$(ls \"$XDG_RUNTIME_DIR\"/sway-ipc.*.sock | head -n1)\" {args}"))
     }
 
-    /// The output as it shows now: width, height and straight RGBA.
+    /// The output as it shows now: its width and straight RGBA.
     struct Shot {
         width: u32,
         pixels: Vec<u8>,
@@ -62,6 +82,11 @@ mod linux {
             let p = &self.pixels[i..i + 4];
             Color::rgba8(p[0], p[1], p[2], p[3])
         }
+
+        /// Whether each point shows its color.
+        fn shows(&self, points: &[((u32, u32), Color)]) -> bool {
+            points.iter().all(|&((x, y), c)| near(self.at(x, y), c))
+        }
     }
 
     fn near(a: Color, b: Color) -> bool {
@@ -73,14 +98,13 @@ mod linux {
     /// output, with no border), and sway knows it by its app id.
     struct Toplevel {
         started: Instant,
-        window: Option<WindowId>,
         drawn: bool,
         checked: bool,
     }
 
     impl Handler for Toplevel {
         fn launched(&mut self, cx: &mut Cx) {
-            self.window = Some(cx.open_window(WindowOptions::new("Desktop toplevel").size(400.0, 300.0)));
+            cx.open_window(WindowOptions::new("Desktop toplevel").size(400.0, 300.0));
             cx.set_repeating_timer(Duration::from_millis(20));
         }
 
@@ -91,12 +115,8 @@ mod linux {
 
         fn timer(&mut self, cx: &mut Cx, _timer: TimerId) {
             assert!(self.started.elapsed() < DEADLINE, "the toplevel never showed its content at the top left");
-            if !self.drawn {
-                return;
-            }
-            let shot = Shot::take();
             // No title bar of its own above the content.
-            if !near(shot.at(4, 4), GREEN) || !near(shot.at(640, 400), GREEN) {
+            if !self.drawn || !Shot::take().shows(&[((4, 4), GREEN), ((640, 400), GREEN)]) {
                 return;
             }
             let tree = swaymsg("-t get_tree");
@@ -104,6 +124,205 @@ mod linux {
             println!("  decorated by sway, known as org.sidestep.DesktopTest");
             self.checked = true;
             cx.quit();
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Step {
+        Showing,
+        Pressed,
+        Menu,
+        Closed,
+        Keyboard,
+        Typed,
+        Grown,
+        Done,
+    }
+
+    /// A panel, a wallpaper and a window, then the panel's menu, keyboard
+    /// and growth.
+    struct Layers {
+        started: Instant,
+        step: Step,
+        bar: Option<WindowId>,
+        wallpaper: Option<WindowId>,
+        window: Option<WindowId>,
+        menu: Option<WindowId>,
+        events: HashMap<WindowId, Vec<WindowEvent>>,
+        /// Where each window's events stood when the step began.
+        marks: HashMap<WindowId, usize>,
+        pointer: mpsc::Sender<pointer::Do>,
+        typing: bool,
+    }
+
+    impl Layers {
+        fn next(&mut self, step: Step) {
+            self.step = step;
+            self.marks = self.events.iter().map(|(w, e)| (*w, e.len())).collect();
+        }
+
+        /// `window`'s events since the step began.
+        fn since(&self, window: Option<WindowId>) -> &[WindowEvent] {
+            let Some(w) = window else { return &[] };
+            let events = self.events.get(&w).map_or(&[][..], Vec::as_slice);
+            &events[self.marks.get(&w).copied().unwrap_or(0).min(events.len())..]
+        }
+
+        fn size(&self, cx: &mut Cx, window: Option<WindowId>) -> Option<Size> {
+            cx.window(window?).map(|w| w.size())
+        }
+
+        fn point(&self, to: pointer::Do) {
+            self.pointer.send(to).expect("the virtual pointer");
+        }
+
+        fn advance(&mut self, cx: &mut Cx) {
+            let bar = self.bar.expect("the bar");
+            match self.step {
+                // The panel as wide as the output and as tall as it asked,
+                // over the window, which sway tiles under it; the wallpaper
+                // the output's size.
+                Step::Showing => {
+                    let below = Size::new(OUTPUT.width, OUTPUT.height - 24.0);
+                    if self.size(cx, self.bar) != Some(Size::new(OUTPUT.width, 24.0))
+                        || self.size(cx, self.wallpaper) != Some(OUTPUT)
+                        || self.size(cx, self.window) != Some(below)
+                        || !Shot::take().shows(&[((5, 5), BAR), ((1275, 20), BAR), ((640, 30), GREEN)])
+                    {
+                        return;
+                    }
+                    println!("  a panel along the top, a window tiled under it");
+                    self.point(pointer::Do::MoveTo(40, 12));
+                    self.point(pointer::Do::Click);
+                    self.next(Step::Pressed);
+                }
+                // The press reaches the panel where it was.
+                Step::Pressed => {
+                    let Some(at) = self.since(self.bar).iter().find_map(|e| match e {
+                        WindowEvent::PointerButton { position, pressed: true, .. } => Some(*position),
+                        _ => None,
+                    }) else {
+                        return;
+                    };
+                    assert!(at.distance(Point::new(40.0, 12.0)) < 1.0, "{at:?}");
+                    self.next(Step::Menu);
+                }
+                // The menu below the press, over the window.
+                Step::Menu => {
+                    if self.size(cx, self.menu) != Some(Size::new(160.0, 120.0))
+                        || !Shot::take().shows(&[((40, 30), MENU), ((180, 140), MENU), ((200, 30), GREEN)])
+                    {
+                        return;
+                    }
+                    println!("  a menu from the panel");
+                    // (Every surface on the output is the program's, so a click
+                    // elsewhere would go to one of them rather than dismiss it.)
+                    cx.close_window(self.menu.expect("the menu"));
+                    self.next(Step::Closed);
+                }
+                Step::Closed => {
+                    if !Shot::take().shows(&[((40, 30), GREEN)]) {
+                        return;
+                    }
+                    println!("  closed");
+                    cx.window(bar).expect("the bar").set_layer_keyboard(KeyboardInteractivity::Exclusive);
+                    self.next(Step::Keyboard);
+                }
+                // Asked to, the panel takes the keyboard from the window.
+                // The headless sway has no keyboard of its own, so the window
+                // heard of focus from its activation, which it loses.
+                Step::Keyboard => {
+                    if !self.since(self.window).contains(&WindowEvent::Focused(false)) {
+                        return;
+                    }
+                    if self.typing {
+                        // wtype's keyboard enters the panel.
+                        let _ = std::thread::spawn(|| sh("wtype -k Shift_L 'k'"));
+                        self.next(Step::Typed);
+                    } else {
+                        println!("  the window lost the keyboard (no wtype: no typing)");
+                        self.grow(cx);
+                    }
+                }
+                Step::Typed => {
+                    let typed: String = self
+                        .since(self.bar)
+                        .iter()
+                        .filter_map(|e| if let WindowEvent::Key(k) = e { k.text.clone() } else { None })
+                        .collect();
+                    if typed != "k" {
+                        return;
+                    }
+                    assert!(self.since(self.bar).contains(&WindowEvent::Focused(true)));
+                    println!("  the panel has the keyboard, and was typed into");
+                    self.grow(cx);
+                }
+                // Taller, with a zone as tall: the window makes room.
+                Step::Grown => {
+                    let below = Size::new(OUTPUT.width, OUTPUT.height - 32.0);
+                    if self.size(cx, self.bar) != Some(Size::new(OUTPUT.width, 32.0))
+                        || self.size(cx, self.window) != Some(below)
+                        || !Shot::take().shows(&[((5, 30), BAR), ((640, 34), GREEN)])
+                    {
+                        return;
+                    }
+                    println!("  grown, and the window made room");
+                    self.point(pointer::Do::Done);
+                    self.next(Step::Done);
+                    cx.quit();
+                }
+                Step::Done => {}
+            }
+        }
+
+        fn grow(&mut self, cx: &mut Cx) {
+            let mut bar = cx.window(self.bar.expect("the bar")).expect("the bar");
+            bar.set_layer_keyboard(KeyboardInteractivity::None);
+            bar.set_layer_size(Size::new(0.0, 32.0));
+            bar.set_layer_exclusive_zone(32);
+            self.next(Step::Grown);
+        }
+    }
+
+    impl Handler for Layers {
+        fn launched(&mut self, cx: &mut Cx) {
+            let wallpaper = LayerOptions::new(Layer::Background, "wallpaper").anchors(Anchors::ALL).exclusive_zone(-1);
+            self.wallpaper = Some(cx.open_window(WindowOptions::layer(wallpaper)));
+            let panel = LayerOptions::new(Layer::Top, "panel")
+                .anchors(Anchors::TOP | Anchors::LEFT | Anchors::RIGHT)
+                .exclusive_zone(24);
+            self.bar = Some(cx.open_window(WindowOptions::layer(panel).size(0.0, 24.0)));
+            self.window = Some(cx.open_window(WindowOptions::new("Desktop window")));
+            cx.set_repeating_timer(Duration::from_millis(20));
+        }
+
+        fn window_event(&mut self, cx: &mut Cx, window: WindowId, event: WindowEvent) {
+            // The press on the panel opens its menu, at once (a grab
+            // needs the press's serial).
+            if Some(window) == self.bar
+                && self.step == Step::Pressed
+                && self.menu.is_none()
+                && matches!(event, WindowEvent::PointerButton { pressed: true, .. })
+            {
+                let anchor = Rect::new(30.0, 0.0, 90.0, 24.0);
+                self.menu = Some(cx.open_window(WindowOptions::popup(window, anchor, Size::new(160.0, 120.0), true)));
+            }
+            self.events.entry(window).or_default().push(event);
+        }
+
+        fn draw(&mut self, _cx: &mut Cx, window: WindowId, canvas: &mut Canvas) {
+            let color = match Some(window) {
+                w if w == self.bar => BAR,
+                w if w == self.wallpaper => WALL,
+                w if w == self.menu => MENU,
+                _ => GREEN,
+            };
+            canvas.fill_rect(Rect::from_origin_size(Point::ZERO, canvas.size()), color);
+        }
+
+        fn timer(&mut self, cx: &mut Cx, _timer: TimerId) {
+            assert!(self.started.elapsed() < DEADLINE, "stuck at {:?}: {:?}", self.step, self.events);
+            self.advance(cx);
         }
     }
 
@@ -118,9 +337,34 @@ mod linux {
         }
         // SAFETY: nothing else runs yet.
         unsafe { std::env::set_var("SIDESTEP_APPEARANCE", "light") };
-        let toplevel = Toplevel { started: Instant::now(), window: None, drawn: false, checked: false };
+        let toplevel = Toplevel { started: Instant::now(), drawn: false, checked: false };
         let toplevel = App::new().app_id("org.sidestep.DesktopTest").run(toplevel).expect("a compositor");
         assert!(toplevel.checked);
+
+        let (tx, rx) = mpsc::channel();
+        let pointing = std::thread::spawn(move || pointer::run(rx));
+        let layers = Layers {
+            started: Instant::now(),
+            step: Step::Showing,
+            bar: None,
+            wallpaper: None,
+            window: None,
+            menu: None,
+            events: HashMap::new(),
+            marks: HashMap::new(),
+            pointer: tx,
+            typing: has("wtype"),
+        };
+        let layers = App::new().run(layers).expect("a compositor");
+        assert_eq!(layers.step, Step::Done, "every step ran");
+        drop(layers);
+        pointing.join().expect("the virtual pointer");
         println!("wayland_desktop: ok");
     }
 }
+
+/// A virtual pointer (see the file); this test turns no wheel.
+#[cfg(not(target_vendor = "apple"))]
+#[allow(dead_code)]
+#[path = "support/pointer.rs"]
+mod pointer;

@@ -495,11 +495,75 @@ pub enum WindowRequest {
     Fullscreen(bool),
     /// Ask for keyboard focus (xdg-activation).
     Activate,
-    /// A new content size in points.
+    /// A new content size in points. A layer surface's side may be 0,
+    /// for the compositor to decide, where it's anchored at both ends.
     Resize(u32, u32),
     /// Move the window with the pointer, from the button press that's
     /// down.
     Move,
+    /// A layer surface's layer, the edges it's anchored to (`edge` bits),
+    /// its exclusive zone, margins and keyboard interactivity (see
+    /// [`LayerPlacement`]).
+    Layer(Layer),
+    LayerAnchors(u8),
+    LayerExclusiveZone(i32),
+    LayerMargins([i32; 4]),
+    LayerKeyboard(LayerKeyboard),
+}
+
+/// The layers of a desktop's own surfaces (wlr-layer-shell), bottom to
+/// top: under windows (wallpapers, desktop icons), then over them
+/// (panels, docks, notifications), then over everything, full-screen
+/// windows included.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Layer {
+    Background,
+    Bottom,
+    Top,
+    Overlay,
+}
+
+/// When a layer surface has the keyboard: never; whenever it's on the
+/// top or overlay layer, from every other surface; or when the
+/// compositor gives it, as it gives windows the keyboard (a click).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LayerKeyboard {
+    None,
+    Exclusive,
+    OnDemand,
+}
+
+/// The edges of an output a layer surface is anchored to, as
+/// wlr-layer-shell's bits.
+pub mod edge {
+    pub const TOP: u8 = 1;
+    pub const BOTTOM: u8 = 2;
+    pub const LEFT: u8 = 4;
+    pub const RIGHT: u8 = 8;
+}
+
+/// A layer surface (wlr-layer-shell): a desktop's own surface on an
+/// output, placed by the compositor against the output's edges rather
+/// than as a window. Anchored to an edge, it sits there (`margins` from
+/// it, in points: top, right, bottom, left); anchored to two opposite
+/// edges, it is centred between them, and a size of 0 that way has the
+/// compositor make it as long as the space between them. The exclusive
+/// zone is how many points from its anchored edge other surfaces keep
+/// clear of (a panel's height); 0 to keep out of nobody's way but stay
+/// clear of others' zones, -1 to ignore them too (a wallpaper).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayerPlacement {
+    pub layer: Layer,
+    /// `edge` bits.
+    pub anchors: u8,
+    pub exclusive_zone: i32,
+    pub margins: [i32; 4],
+    pub keyboard: LayerKeyboard,
+    /// What it is, for the compositor's rules (`panel`, `wallpaper`).
+    pub namespace: String,
+    /// The output it's on, by its id (the wl_output global's name, as
+    /// `outputs` names them); `None` for the compositor's choice.
+    pub output: Option<u32>,
 }
 
 /// The xdg_toplevel states the main thread cares about.
@@ -602,6 +666,9 @@ pub enum ToRender {
         /// Open as a sheet of this window: part of it, a subsurface placed
         /// top-centre under its title bar (see `backend::sheet`).
         sheet_of: Option<WindowId>,
+        /// Open as a layer surface (see `backend::layer`), `width` or
+        /// `height` 0 for the compositor to decide.
+        layer: Option<LayerPlacement>,
     },
     /// A new title, with its text set in the title bar's font as drawing
     /// ops (top-left origin, `width` by `height` points) for client-side

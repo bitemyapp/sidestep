@@ -38,3 +38,9 @@ harness = false
 [[test]]
 name = "wayland_desktop"
 harness = false
+
+# A desktop environment's surfaces through the null render thread (see
+# the file).
+[[test]]
+name = "desktop"
+harness = false

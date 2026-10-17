@@ -23,6 +23,7 @@ use smithay_client_toolkit::reexports::calloop::channel::Sender;
 
 use crate::color::Color;
 use crate::event::WindowState;
+use crate::layer_shell::{Anchors, KeyboardInteractivity, Layer, LayerOptions, Margins};
 
 /// A pointer's appearance, named as cursor themes (and
 /// wp_cursor_shape_v1) name them.
@@ -138,6 +139,7 @@ impl Default for PopupPosition {
 pub(crate) enum Kind {
     Toplevel { parent: Option<WindowId> },
     Popup { parent: WindowId, anchor: Rect, grab: bool, position: PopupPosition },
+    Layer(LayerOptions),
 }
 
 /// What a window is asked to be when it opens.
@@ -192,6 +194,21 @@ impl WindowOptions {
             resizable: false,
             close_on_request: true,
             kind: Kind::Popup { parent, anchor, grab, position: PopupPosition::BELOW },
+            ..WindowOptions::new("")
+        }
+    }
+
+    /// A desktop surface (wlr-layer-shell: see [`layer_shell`](crate::layer_shell)),
+    /// placed as `options` say: borderless, and 0 by 0 points until
+    /// [`size`](WindowOptions::size) says otherwise; a side of 0 where it's
+    /// anchored to both edges that way is the compositor's to decide.
+    pub fn layer(options: LayerOptions) -> WindowOptions {
+        WindowOptions {
+            size: Size::ZERO,
+            decorated: false,
+            resizable: false,
+            minimizable: false,
+            kind: Kind::Layer(options),
             ..WindowOptions::new("")
         }
     }
@@ -368,7 +385,7 @@ impl WindowData {
     pub fn popup_of(&self) -> Option<WindowId> {
         match self.kind {
             Kind::Popup { parent, .. } => Some(parent),
-            Kind::Toplevel { .. } => None,
+            Kind::Toplevel { .. } | Kind::Layer(_) => None,
         }
     }
 
@@ -376,7 +393,15 @@ impl WindowData {
     pub fn transient_for(&self) -> Option<WindowId> {
         match self.kind {
             Kind::Toplevel { parent } => parent,
-            Kind::Popup { .. } => None,
+            Kind::Popup { .. } | Kind::Layer(_) => None,
+        }
+    }
+
+    /// A layer surface's placement.
+    pub fn layer(&self) -> Option<&LayerOptions> {
+        match &self.kind {
+            Kind::Layer(options) => Some(options),
+            Kind::Toplevel { .. } | Kind::Popup { .. } => None,
         }
     }
 
@@ -392,19 +417,22 @@ impl WindowData {
                 grab,
                 layout: (position != PopupPosition::BELOW).then(|| position.layout()),
             }),
-            Kind::Toplevel { .. } => None,
+            Kind::Toplevel { .. } | Kind::Layer(_) => None,
         };
+        // A layer surface's side may be 0, the compositor's to decide.
+        let least = if self.layer().is_some() { 0.0 } else { 1.0 };
         send(
             tx,
             ToRender::CreateWindow {
                 window: showing,
-                width: self.size.width.round().max(1.0) as u32,
-                height: self.size.height.round().max(1.0) as u32,
+                width: self.size.width.round().max(least) as u32,
+                height: self.size.height.round().max(least) as u32,
                 title: self.title.clone(),
                 style: self.style,
                 limits: self.limits,
                 popup,
                 sheet_of: None,
+                layer: self.layer().map(LayerOptions::placement),
             },
         );
         if let (Kind::Toplevel { parent: Some(_) }, Some(parent)) = (&self.kind, parent) {
@@ -577,12 +605,76 @@ impl Window<'_> {
     }
 
     /// Ask the compositor for a new content size, in points. A hidden
-    /// window shows at it next time.
+    /// window shows at it next time. (A layer surface's side may be 0:
+    /// see [`set_layer_size`](Window::set_layer_size).)
     pub fn request_size(&mut self, size: Size) {
+        let least = if self.data.layer().is_some() { 0.0 } else { 1.0 };
+        let size = Size::new(size.width.round().max(least), size.height.round().max(least));
         if self.data.showing.is_none() {
-            self.data.size = Size::new(size.width.round().max(1.0), size.height.round().max(1.0));
+            self.data.size = size;
         }
-        self.request(WindowRequest::Resize(size.width.round().max(1.0) as u32, size.height.round().max(1.0) as u32));
+        self.request(WindowRequest::Resize(size.width as u32, size.height as u32));
+    }
+
+    // Layer surfaces (see `layer_shell`); asked of other windows, these do
+    // nothing.
+
+    /// A layer surface's placement, as last set.
+    pub fn layer(&self) -> Option<&LayerOptions> {
+        self.data.layer()
+    }
+
+    /// Change a layer surface's placement, and ask the compositor for it.
+    fn relayer(&mut self, change: impl FnOnce(&mut LayerOptions) -> WindowRequest) {
+        if let Kind::Layer(options) = &mut self.data.kind {
+            let request = change(options);
+            self.request(request);
+        }
+    }
+
+    /// Ask for a new size for a layer surface, in points: a side of 0
+    /// where it's anchored to both edges that way is the compositor's to
+    /// decide. The compositor configures it.
+    pub fn set_layer_size(&mut self, size: Size) {
+        if self.data.layer().is_some() {
+            self.request_size(size);
+        }
+    }
+
+    /// Move a layer surface to another layer.
+    pub fn set_layer(&mut self, layer: Layer) {
+        self.relayer(|o| {
+            o.layer = layer;
+            WindowRequest::Layer(layer.protocol())
+        });
+    }
+
+    pub fn set_layer_anchors(&mut self, anchors: Anchors) {
+        self.relayer(|o| {
+            o.anchors = anchors;
+            WindowRequest::LayerAnchors(anchors.bits())
+        });
+    }
+
+    pub fn set_layer_exclusive_zone(&mut self, points: i32) {
+        self.relayer(|o| {
+            o.exclusive_zone = points;
+            WindowRequest::LayerExclusiveZone(points)
+        });
+    }
+
+    pub fn set_layer_margins(&mut self, margins: Margins) {
+        self.relayer(|o| {
+            o.margins = margins;
+            WindowRequest::LayerMargins(margins.protocol())
+        });
+    }
+
+    pub fn set_layer_keyboard(&mut self, keyboard: KeyboardInteractivity) {
+        self.relayer(|o| {
+            o.keyboard = keyboard;
+            WindowRequest::LayerKeyboard(keyboard.protocol())
+        });
     }
 
     pub fn minimize(&mut self) {

@@ -749,6 +749,27 @@ through the same protocol AppKit does, and keeps AppKit's rhythm:
   popup opens below its anchor unless a `PopupPosition` says otherwise
   (the positioner's anchor corner, gravity, offset, and flip, slide and
   resize adjustments, `ResizeX` added to the protocol for it).
+- **Layer surfaces** (`layer_shell.rs`; the engine's `backend::layer`): a
+  desktop's own panels, wallpapers and notifications, through
+  wlr-layer-shell, are windows opened with `WindowOptions::layer`, whose
+  `CreateWindow` carries a `LayerPlacement` (layer, anchored edges,
+  exclusive zone, margins, keyboard interactivity, namespace, output by
+  id). The render thread makes the content's surface a layer surface (no
+  frame, no decorations, no window geometry), and its role is the
+  root's, so input reaches it as any window's content. A configure's
+  side of 0 is the size asked for; a size asked with a side of 0 (where
+  the surface is anchored to both edges that way) is the compositor's to
+  decide. `closed` is a close request. Popups of a layer surface are
+  xdg_popups made with no xdg parent and given to it before their first
+  commit (`get_popup`), as a panel's menus are. Its size, layer, anchors,
+  zone, margins and keyboard change while it shows (`WindowRequest`'s
+  layer requests, `Window::set_layer_…`), and a showing after a hide is
+  placed as it was left. Without wlr-layer-shell the window is closed at
+  once. The null render thread places them on a 1280 × 800 point output
+  and gives the keyboard to those that take it exclusively; under sway,
+  `tests/wayland_desktop.rs` checks a panel's exclusive zone tiles a
+  window under it, a wallpaper fills the output, a menu opens from the
+  panel's press, and the panel takes the keyboard and grows.
 - **The display pass** gives each window that needs it a `Canvas`: a
   window draws once configured, only when the render thread showed its
   last frame (so drawing keeps pace with the compositor's frame
