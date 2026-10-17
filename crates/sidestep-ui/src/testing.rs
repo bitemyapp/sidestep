@@ -119,11 +119,30 @@ pub fn inject_key(
 
 /// The pointer moving to `at`.
 pub fn inject_motion(cx: &mut Cx, window: WindowId, at: Point) {
-    cx.inject(FromRender::Motion { window: showing(cx, window), x: at.x, y: at.y, modifiers: 0 });
+    inject_motion_with(cx, window, at, Modifiers::NONE);
+}
+
+/// The pointer moving to `at` with `modifiers` held.
+pub fn inject_motion_with(cx: &mut Cx, window: WindowId, at: Point, modifiers: Modifiers) {
+    cx.inject(FromRender::Motion { window: showing(cx, window), x: at.x, y: at.y, modifiers: flags(modifiers) });
 }
 
 /// A button pressed or released at `at`, as click `clicks` of a series.
 pub fn inject_button(cx: &mut Cx, window: WindowId, at: Point, button: PointerButton, pressed: bool, clicks: u32) {
+    inject_button_with(cx, window, at, button, pressed, clicks, Modifiers::NONE);
+}
+
+/// A button pressed or released at `at` with `modifiers` held (a
+/// shift-click, a control-click), as click `clicks` of a series.
+pub fn inject_button_with(
+    cx: &mut Cx,
+    window: WindowId,
+    at: Point,
+    button: PointerButton,
+    pressed: bool,
+    clicks: u32,
+    modifiers: Modifiers,
+) {
     let button = match button {
         PointerButton::Left => Button::Left,
         PointerButton::Right => Button::Right,
@@ -139,13 +158,19 @@ pub fn inject_button(cx: &mut Cx, window: WindowId, at: Point, button: PointerBu
         button,
         pressed,
         clicks,
-        modifiers: 0,
+        modifiers: flags(modifiers),
         activating: false,
     });
 }
 
 /// A wheel turned by `lines` at `at`.
 pub fn inject_wheel(cx: &mut Cx, window: WindowId, at: Point, lines: Vec2) {
+    inject_wheel_with(cx, window, at, lines, Modifiers::NONE);
+}
+
+/// A wheel turned by `lines` at `at` with `modifiers` held (a
+/// control-wheel zooms).
+pub fn inject_wheel_with(cx: &mut Cx, window: WindowId, at: Point, lines: Vec2, modifiers: Modifiers) {
     cx.inject(FromRender::Scroll {
         window: showing(cx, window),
         x: at.x,
@@ -153,7 +178,7 @@ pub fn inject_wheel(cx: &mut Cx, window: WindowId, at: Point, lines: Vec2) {
         dx: lines.x,
         dy: lines.y,
         wheel: true,
-        modifiers: 0,
+        modifiers: flags(modifiers),
         phase: ScrollPhase::None,
         velocity: (0.0, 0.0),
         inverted: false,

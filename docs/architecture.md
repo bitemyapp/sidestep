@@ -879,6 +879,10 @@ through the same protocol AppKit does, and keeps AppKit's rhythm:
   characters and function-key characters to `NamedKey`s) and the text it
   types (none for keys that type nothing, for releases, and while Control
   or Super is held); input methods' changes to `Ime` commits and preedits.
+  Pointer moves, presses, releases and scrolls carry the modifiers held
+  (the keyboard's, as the seat last told them), and the testing helpers
+  inject them too (`inject_button_with`, `inject_motion_with`,
+  `inject_wheel_with`); under sway a shift-click's press carries shift.
   A touchpad gesture that ends fast coasts, with AppKit's physics (the
   engine's `momentum`, which AppKit's coasting now uses too): scroll
   events with a `momentum` phase, a step per frame of the window or every

@@ -20,6 +20,7 @@
 //! - a list scrolled by moving its pixels, frame after frame, each frame
 //!   drawing only the strip uncovered: the screen is then exactly the
 //!   list drawn whole;
+//! - a shift-click, the press carrying the modifier;
 //! - a drag out of one window into another, its icon under the pointer,
 //!   the text it carries read where it's dropped, its source told;
 //! - outputs as sway names and places them; one plugged in (heard of), a
@@ -327,6 +328,7 @@ mod linux {
     #[derive(Clone, Copy, Debug, PartialEq)]
     enum Drop {
         Showing,
+        Shifted,
         Pressed,
         Over,
         Dropped,
@@ -347,6 +349,11 @@ mod linux {
         text: Option<String>,
         ended: Option<DropAction>,
         pointer: mpsc::Sender<pointer::Do>,
+        /// Shift was seen held, and the target's presses (with what was held).
+        shift: bool,
+        presses: Vec<Modifiers>,
+        typing: bool,
+        asked: bool,
     }
 
     impl Handler for Dragged {
@@ -357,6 +364,13 @@ mod linux {
         }
 
         fn window_event(&mut self, cx: &mut Cx, window: WindowId, event: WindowEvent) {
+            match event {
+                WindowEvent::ModifiersChanged(m) if m.shift() => self.shift = true,
+                WindowEvent::PointerButton { pressed: true, modifiers, .. } if Some(window) == self.target => {
+                    self.presses.push(modifiers);
+                }
+                _ => {}
+            }
             if Some(window) == self.source && matches!(event, WindowEvent::PointerButton { pressed: true, .. }) {
                 let icon = offscreen::render(Size::new(32.0, 32.0), 1.0, Appearance::LIGHT, |c| {
                     c.fill_rect(Rect::new(0.0, 0.0, 32.0, 32.0), MENU);
@@ -403,6 +417,28 @@ mod linux {
                     if !Shot::take().shows(&[((320, 400), GREEN), ((960, 400), BAR)]) {
                         return;
                     }
+                    if !self.typing {
+                        println!("  (no wtype: no shift-click)");
+                        point(pointer::Do::MoveTo(320, 400));
+                        point(pointer::Do::Press);
+                        self.step = Drop::Pressed;
+                        return;
+                    }
+                    // Shift held (wtype's keyboard) while the target is clicked.
+                    let _ = std::thread::spawn(|| sh("wtype -M shift -s 1500 -m shift"));
+                    self.step = Drop::Shifted;
+                }
+                Drop::Shifted => {
+                    if !self.shift {
+                        return;
+                    }
+                    if !std::mem::replace(&mut self.asked, true) {
+                        point(pointer::Do::MoveTo(960, 400));
+                        point(pointer::Do::Click);
+                    }
+                    let Some(held) = self.presses.first() else { return };
+                    assert!(held.shift(), "the click came with shift held: {held:?}");
+                    println!("  a shift-click: the press carries the modifier");
                     point(pointer::Do::MoveTo(320, 400));
                     point(pointer::Do::Press);
                     self.step = Drop::Pressed;
@@ -787,6 +823,10 @@ mod linux {
             text: None,
             ended: None,
             pointer: tx,
+            shift: false,
+            presses: Vec::new(),
+            typing: has("wtype"),
+            asked: false,
         };
         assert_eq!(App::new().run(dragged).expect("a compositor").step, Drop::Done);
         pointing.join().expect("the virtual pointer");

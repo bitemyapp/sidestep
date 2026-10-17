@@ -136,9 +136,11 @@ mod linux {
                     testing::inject_key(cx, w, 30, "\u{1}", "a", Modifiers::CONTROL, true);
                     testing::inject_key(cx, w, 103, "\u{F700}", "\u{F700}", Modifiers::NONE, true);
                     testing::inject_button(cx, w, Point::new(20.0, 20.0), PointerButton::Left, true, 2);
+                    let held = Modifiers::SHIFT | Modifiers::ALT;
+                    testing::inject_button_with(cx, w, Point::new(22.0, 20.0), PointerButton::Right, true, 1, held);
                     testing::inject_motion(cx, w, Point::new(30.0, 25.0));
-                    testing::inject_motion(cx, w, Point::new(31.0, 26.0));
-                    testing::inject_wheel(cx, w, Point::new(31.0, 26.0), Vec2::new(0.0, 1.0));
+                    testing::inject_motion_with(cx, w, Point::new(31.0, 26.0), Modifiers::SHIFT);
+                    testing::inject_wheel_with(cx, w, Point::new(31.0, 26.0), Vec2::new(0.0, 1.0), Modifiers::CONTROL);
                     testing::inject_ime(cx, w, Some("é"), "");
                     self.next(2);
                 }
@@ -164,6 +166,17 @@ mod linux {
                         e,
                         WindowEvent::PointerButton { button: PointerButton::Left, pressed: true, clicks: 2, .. }
                     )));
+                    // With the modifiers held: a shift-alt-right-click, a
+                    // shift-move, a control-wheel.
+                    assert!(self.has(|e| matches!(
+                        e,
+                        WindowEvent::PointerButton { button: PointerButton::Right, modifiers, .. }
+                            if modifiers.shift() && modifiers.alt() && !modifiers.control()
+                    )));
+                    assert!(
+                        self.has(|e| matches!(e, WindowEvent::PointerMoved { modifiers, .. } if modifiers.shift()))
+                    );
+                    assert!(self.has(|e| matches!(e, WindowEvent::Scroll { modifiers, .. } if modifiers.control())));
                     // Moves one after another come as the last of them.
                     let moves: Vec<Point> = self
                         .events
