@@ -622,10 +622,18 @@ pictures); text layout with styles, wrapping, alignment, truncation, hit
 testing, carets and selections; fonts from the system and from the
 program's own files, installed or loaded as one face; the clipboard's
 text; drops, the type taken as the program asks, with periodic updates;
-outputs, read without waiting; the desktop's appearance and system
-colors. Tested headless through the null render thread and under a real
-compositor (`tests/wayland_system.rs`: a virtual pointer, `wtype`,
-`wl-clipboard`), which CI's `wayland` job runs with AppKit's.
+outputs, read without waiting, named by connector, make and model; the
+desktop's appearance and system colors; for a desktop environment's own
+programs (Aizome's, on the `aizome` branch): wlr-layer-shell surfaces
+and their popups, the session lock, input and opaque regions,
+activation tokens for launched programs, the program's app id,
+font widths for variable fonts, drawing offscreen into images, and
+frame statistics (`SIDESTEP_FRAME_STATS`). Tested headless through the
+null render thread and under a real compositor
+(`tests/wayland_system.rs`: a virtual pointer, `wtype`, `wl-clipboard`;
+`tests/wayland_desktop.rs`: layer surfaces, outputs plugged in and out,
+the session lock, screenshots with `grim`), which CI's `wayland` job
+runs with AppKit's.
 
 Next, roughly in order:
 
@@ -644,9 +652,9 @@ Next, roughly in order:
   `theme` paints from data, and could move into the engine as AppKit's
   controls' look), then controls: buttons, text fields and text views on
   `TextLayout`, lists, scroll views, menus.
-- **Desktop surfaces**, for a desktop environment's own programs:
-  wlr-layer-shell panels, docks, wallpapers and overlays; session lock;
-  output management; foreign toplevel lists for task switchers.
+- **Desktop surfaces**, for a desktop environment's own programs, beyond
+  layer surfaces and the session lock: output management; foreign
+  toplevel lists for task switchers.
 - **Services**: the portals AppKit's panels and workspace use (file
   choosers, opening URIs), notifications, drags out of the program, the
   clipboard's other types, rich text.

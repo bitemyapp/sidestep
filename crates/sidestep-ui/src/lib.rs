@@ -50,6 +50,14 @@
 //! Geometry is [`kurbo`]'s, re-exported: anything that is a
 //! [`kurbo::Shape`] can be filled, stroked or clipped to.
 //!
+//! **Desktop surfaces.** A desktop environment's own programs open layer
+//! surfaces ([`layer_shell`]: panels, wallpapers, notifications) and lock
+//! the session with a lock screen on each output ([`Cx::lock_session`],
+//! [`WindowOptions::lock`]); [`Cx::outputs`] names the outputs to put
+//! them on, [`Cx::request_activation_token`] lets the programs they
+//! launch come up with the keyboard, and [`Cx::frame_stats`] (or
+//! `SIDESTEP_FRAME_STATS=1`) measures what frames take.
+//!
 //! **Offscreen.** [`offscreen::render`] draws on a canvas into an
 //! [`Image`] on any thread, with no application running and no display,
 //! through the same rasterizer and text engine as windows: for a
