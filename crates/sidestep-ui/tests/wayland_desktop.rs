@@ -20,6 +20,8 @@
 //! - a list scrolled by moving its pixels, frame after frame, each frame
 //!   drawing only the strip uncovered: the screen is then exactly the
 //!   list drawn whole;
+//! - a drag out of one window into another, its icon under the pointer,
+//!   the text it carries read where it's dropped, its source told;
 //! - outputs as sway names and places them; one plugged in (heard of), a
 //!   panel put on it, and the output unplugged, which closes the panel;
 //! - the session locked (ext-session-lock) with a lock screen on the
@@ -319,6 +321,124 @@ mod linux {
             println!("  a list scrolled by moving pixels: the screen is the list drawn whole, exactly");
             self.done = true;
             cx.quit();
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Drop {
+        Showing,
+        Pressed,
+        Over,
+        Dropped,
+        Done,
+    }
+
+    /// A drag out of one window into another of the program's: started
+    /// from a press on the first, its icon under the pointer over the
+    /// second, which takes it, reads its text, and the first hears it was
+    /// copied.
+    struct Dragged {
+        started: Instant,
+        step: Drop,
+        source: Option<WindowId>,
+        target: Option<WindowId>,
+        drag: Option<DragId>,
+        moved: usize,
+        text: Option<String>,
+        ended: Option<DropAction>,
+        pointer: mpsc::Sender<pointer::Do>,
+    }
+
+    impl Handler for Dragged {
+        fn launched(&mut self, cx: &mut Cx) {
+            self.source = Some(cx.open_window(WindowOptions::new("Drag source")));
+            self.target = Some(cx.open_window(WindowOptions::new("Drop target")));
+            cx.set_repeating_timer(Duration::from_millis(20));
+        }
+
+        fn window_event(&mut self, cx: &mut Cx, window: WindowId, event: WindowEvent) {
+            if Some(window) == self.source && matches!(event, WindowEvent::PointerButton { pressed: true, .. }) {
+                let icon = offscreen::render(Size::new(32.0, 32.0), 1.0, Appearance::LIGHT, |c| {
+                    c.fill_rect(Rect::new(0.0, 0.0, 32.0, 32.0), MENU);
+                });
+                let source = DragSource::new().text("dragged across").icon(icon, Point::new(16.0, 16.0));
+                self.drag = cx.start_drag(window, source);
+            }
+        }
+
+        fn drag_moved(&mut self, _cx: &mut Cx, window: WindowId, _drag: &sidestep_ui::Drag) -> DropResponse {
+            if Some(window) != self.target {
+                return DropResponse::REFUSE;
+            }
+            self.moved += 1;
+            DropResponse::copy()
+        }
+
+        fn dropped(&mut self, cx: &mut Cx, _window: WindowId, _drag: &sidestep_ui::Drag, _: &DropResponse) -> bool {
+            self.text = cx.drag_data("text/plain;charset=utf-8").map(|d| String::from_utf8_lossy(&d).into_owned());
+            true
+        }
+
+        fn drag_ended(&mut self, _cx: &mut Cx, drag: DragId, action: DropAction) {
+            assert_eq!(Some(drag), self.drag);
+            self.ended = Some(action);
+        }
+
+        fn draw(&mut self, _cx: &mut Cx, window: WindowId, canvas: &mut Canvas) {
+            let color = if Some(window) == self.source { GREEN } else { BAR };
+            canvas.fill_rect(Rect::from_origin_size(Point::ZERO, canvas.size()), color);
+        }
+
+        fn timer(&mut self, cx: &mut Cx, _timer: TimerId) {
+            assert!(self.started.elapsed() < DEADLINE, "stuck at {:?}", self.step);
+            let point = |to| self.pointer.send(to).expect("the virtual pointer");
+            match self.step {
+                // Side by side, each half the output.
+                Drop::Showing => {
+                    let half = Size::new(OUTPUT.width / 2.0, OUTPUT.height);
+                    let mut size = |w: Option<WindowId>| w.and_then(|w| cx.window(w).map(|w| w.size()));
+                    if size(self.source) != Some(half) || size(self.target) != Some(half) {
+                        return;
+                    }
+                    if !Shot::take().shows(&[((320, 400), GREEN), ((960, 400), BAR)]) {
+                        return;
+                    }
+                    point(pointer::Do::MoveTo(320, 400));
+                    point(pointer::Do::Press);
+                    self.step = Drop::Pressed;
+                }
+                Drop::Pressed => {
+                    if self.drag.is_none() {
+                        return;
+                    }
+                    for x in [400, 600, 800, 960] {
+                        point(pointer::Do::MoveTo(x, 400));
+                    }
+                    self.step = Drop::Over;
+                }
+                // Over the target, which would take it, the icon under the
+                // pointer.
+                Drop::Over => {
+                    if self.moved == 0 || !Shot::take().shows(&[((960, 400), MENU), ((990, 430), BAR)]) {
+                        return;
+                    }
+                    println!("  dragged over the other window, its icon under the pointer");
+                    point(pointer::Do::Release);
+                    self.step = Drop::Dropped;
+                }
+                Drop::Dropped => {
+                    if self.ended.is_none() {
+                        return;
+                    }
+                    assert_eq!(self.text.as_deref(), Some("dragged across"));
+                    assert_eq!(self.ended, Some(DropAction::Copy));
+                    println!("  dropped: the text read, the source told it was copied");
+                    point(pointer::Do::Done);
+                    self.step = Drop::Done;
+                    cx.quit();
+                }
+                Drop::Done => {}
+            }
         }
     }
 
@@ -653,6 +773,22 @@ mod linux {
         let layers = App::new().run(layers).expect("a compositor");
         assert_eq!(layers.step, Step::Done, "every step ran");
         drop(layers);
+        pointing.join().expect("the virtual pointer");
+
+        let (tx, rx) = mpsc::channel();
+        let pointing = std::thread::spawn(move || pointer::run(rx));
+        let dragged = Dragged {
+            started: Instant::now(),
+            step: Drop::Showing,
+            source: None,
+            target: None,
+            drag: None,
+            moved: 0,
+            text: None,
+            ended: None,
+            pointer: tx,
+        };
+        assert_eq!(App::new().run(dragged).expect("a compositor").step, Drop::Done);
         pointing.join().expect("the virtual pointer");
 
         let outputs = Outputs { started: Instant::now(), step: Plug::Waiting, changed: 0, panel: None, closing: false };

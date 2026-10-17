@@ -898,6 +898,19 @@ through the same protocol AppKit does, and keeps AppKit's rhythm:
   MIME type to take (one the drag offers, else the toolkit's choice: the
   URL list, read before the drag is announced, else text, else the first
   type offered) and whether to be asked again while the drag waits.
+  Drags go out too: `Cx::start_drag` sends a `DragSource` (data by MIME
+  type, given or promised, the actions allowed, an icon image) as
+  `StartDrag` (the icon as ops), and the render thread's `drag_out` makes
+  a wl_data_source and starts the drag from the latest press, on the
+  window's content, with an icon surface drawn at the window's scale
+  (rounded up, a buffer scale) and offset to its hotspot. A destination's
+  request for promised data asks the handler (`ProvideDragData`, answered
+  as the clipboard's promises are); the drop's finish, or a cancel, is
+  `DragEnded` with the action chosen. A drop on the program's own window
+  reads only data given up front: the main thread can't keep a promise
+  while it waits for the data itself. Under sway a drag from one window
+  into another shows its icon under the pointer, and the text it carries
+  is read where it's dropped.
 
 Its tests run through the null render thread (`tests/headless.rs`): an
 application's handler plays every step, each waiting for its condition

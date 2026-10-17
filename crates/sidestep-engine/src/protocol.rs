@@ -859,6 +859,18 @@ pub enum ToRender {
     LockSession,
     /// Unlock the session (or stop asking for a lock).
     UnlockSession,
+    /// Start dragging `contents` out of the window, from the button press
+    /// under way: offering its MIME types (data promised is asked of the
+    /// main thread when a destination wants it, `FromRender::ProvideDragData`),
+    /// allowing Wayland `actions`, `icon` under the pointer. The main thread
+    /// hears how it ended (`FromRender::DragEnded`) under `drag`.
+    StartDrag {
+        window: WindowId,
+        drag: u64,
+        contents: std::sync::Arc<crate::clipboard::Contents>,
+        actions: u32,
+        icon: Option<DragIcon>,
+    },
     /// Ask for an activation token (xdg-activation) for another program
     /// to show its window with the keyboard, as the result of the latest
     /// input, for the program with app id `app_id` if known: answered with
@@ -875,6 +887,16 @@ pub enum ToRender {
         crop: [u32; 4],
         reply: std::sync::mpsc::Sender<Option<Capture>>,
     },
+}
+
+/// What a drag shows under the pointer: `ops` drawn `width` × `height`
+/// points (top-left origin), its point `hotspot` at the pointer.
+#[derive(Clone, Debug)]
+pub struct DragIcon {
+    pub width: u32,
+    pub height: u32,
+    pub hotspot: (i32, i32),
+    pub ops: Vec<Op>,
 }
 
 /// Pixels a `CaptureWindow` copied: width, height and premultiplied RGBA
@@ -1067,6 +1089,19 @@ pub enum FromRender {
     },
     /// The compositor locked the session, as `ToRender::LockSession` asked.
     SessionLocked,
+    /// A destination wants the data drag `drag` promised as `mime`: answer
+    /// `ToRender::SelectionData` under `token`.
+    ProvideDragData {
+        drag: u64,
+        mime: String,
+        token: u64,
+    },
+    /// Drag `drag`, from one of our windows, is over: dropped where the
+    /// destination took it with Wayland `action`, or cancelled (0).
+    DragEnded {
+        drag: u64,
+        action: u32,
+    },
     /// The activation token `ToRender::RequestActivationToken` asked for
     /// under `request`: none without xdg-activation.
     ActivationToken {

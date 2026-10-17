@@ -357,7 +357,8 @@ mod linux {
     }
 }
 
-/// A virtual pointer (see the file).
+/// A virtual pointer (see the file); this test drags nothing.
 #[cfg(not(target_vendor = "apple"))]
+#[allow(dead_code)]
 #[path = "support/pointer.rs"]
 mod pointer;

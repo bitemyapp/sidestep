@@ -88,6 +88,20 @@ pub enum Seen {
         window: u32,
         rects: Option<Vec<crate::protocol::Rect>>,
     },
+    /// A drag out of a window started, offering `mimes`, allowing Wayland
+    /// `actions`, with an icon so big (points), if any.
+    DragStarted {
+        window: u32,
+        drag: u64,
+        mimes: Vec<String>,
+        actions: u32,
+        icon: Option<(u32, u32)>,
+    },
+    /// The main thread answered for data under `token`.
+    Provided {
+        token: u64,
+        data: Option<Vec<u8>>,
+    },
     OpaqueRegion {
         window: u32,
         rects: Option<Vec<crate::protocol::Rect>>,
@@ -451,6 +465,14 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
             ToRender::HideCursor { hidden, until_moved } => note(Seen::CursorHidden { hidden, until_moved }),
             ToRender::SetParent { window, parent } => note(Seen::Parent { window, parent }),
             ToRender::SetInputRegion { window, rects } => note(Seen::InputRegion { window, rects }),
+            ToRender::StartDrag { window, drag, contents, actions, icon } => note(Seen::DragStarted {
+                window,
+                drag,
+                mimes: contents.items.iter().map(|(m, _)| m.clone()).collect(),
+                actions,
+                icon: icon.map(|i| (i.width, i.height)),
+            }),
+            ToRender::SelectionData { token, data } => note(Seen::Provided { token, data: data.map(|d| d.to_vec()) }),
             ToRender::SetOpaqueRegion { window, rects } => note(Seen::OpaqueRegion { window, rects }),
             ToRender::Paint { window: _, target: crate::protocol::Target::Content(layer), rects, ops } => {
                 with_ca(|ca| ca.paint_content(layer, &rects, &ops, &mut glyphs));

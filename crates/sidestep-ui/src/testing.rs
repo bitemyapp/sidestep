@@ -270,3 +270,21 @@ pub fn inject_outputs(cx: &mut Cx, outputs: &[crate::Output]) {
 pub fn inject_session_lock_finished(cx: &mut Cx) {
     cx.inject(FromRender::SessionLockFinished);
 }
+
+/// A destination asking for the data drag `drag` (out of one of the
+/// windows) promised as `mime`: the handler is asked, and its answer goes
+/// to the render thread under `token` ([`Seen::Provided`]).
+pub fn inject_drag_data_request(cx: &mut Cx, drag: crate::DragId, mime: &str, token: u64) {
+    cx.inject(FromRender::ProvideDragData { drag: drag.0, mime: mime.to_owned(), token });
+}
+
+/// Drag `drag` out of one of the windows ending: dropped to copy or move
+/// it, or cancelled.
+pub fn inject_drag_ended(cx: &mut Cx, drag: crate::DragId, action: crate::DropAction) {
+    let action = match action {
+        crate::DropAction::None => 0,
+        crate::DropAction::Copy => 1,
+        crate::DropAction::Move => 2,
+    };
+    cx.inject(FromRender::DragEnded { drag: drag.0, action });
+}

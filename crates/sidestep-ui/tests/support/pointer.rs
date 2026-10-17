@@ -16,6 +16,9 @@ use smithay_client_toolkit::reexports::protocols_wlr::virtual_pointer::v1::clien
 pub enum Do {
     MoveTo(u32, u32),
     Click,
+    /// The button pressed and left down (a drag), or let go.
+    Press,
+    Release,
     /// Detents down (up if negative).
     Wheel(i32),
     Done,
@@ -48,6 +51,11 @@ pub fn run(commands: Receiver<Do>) {
                 pointer.button(time(), BTN_LEFT, ButtonState::Pressed);
                 pointer.frame();
                 pointer.button(time(), BTN_LEFT, ButtonState::Released);
+                pointer.frame();
+            }
+            Do::Press | Do::Release => {
+                let state = if matches!(command, Do::Press) { ButtonState::Pressed } else { ButtonState::Released };
+                pointer.button(time(), BTN_LEFT, state);
                 pointer.frame();
             }
             Do::Wheel(detents) => {

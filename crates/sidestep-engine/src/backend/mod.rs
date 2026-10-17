@@ -35,6 +35,7 @@
 
 mod decor;
 mod dnd;
+mod drag_out;
 mod keyboard;
 mod layer;
 mod lock;
@@ -879,6 +880,9 @@ impl State {
             ToRender::LockSession => lock::lock(self),
             ToRender::UnlockSession => lock::unlock(self),
             ToRender::RequestActivationToken { request, app_id } => self.request_token(request, app_id),
+            ToRender::StartDrag { window, drag, contents, actions, icon } => {
+                drag_out::start(self, window, drag, contents, actions, icon)
+            }
             ToRender::SetTitle { window, title, text } => {
                 let Some(win) = self.windows.get_mut(&window) else { return };
                 if let Some(w) = win.toplevel() {

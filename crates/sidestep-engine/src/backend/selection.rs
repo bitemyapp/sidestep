@@ -42,7 +42,7 @@ use smithay_client_toolkit::reexports::client::protocol::wl_seat::WlSeat;
 use smithay_client_toolkit::reexports::client::protocol::wl_surface::WlSurface;
 use smithay_client_toolkit::reexports::client::{Connection, Dispatch, Proxy, QueueHandle, delegate_dispatch};
 
-use super::{State, dnd};
+use super::{State, dnd, drag_out};
 use crate::clipboard::{
     Contents, READ_AHEAD_LIMIT, READ_LIMIT, READ_TIMEOUT, ReadAhead, Source, owner_mime, shared, shared_for, text_mime,
 };
@@ -54,8 +54,8 @@ use crate::protocol::FromRender;
 const READ_AHEAD_GIVE_UP: Duration = Duration::from_secs(5);
 
 pub struct Selection {
-    manager: Option<DataDeviceManagerState>,
-    devices: Vec<(WlSeat, DataDevice)>,
+    pub(super) manager: Option<DataDeviceManagerState>,
+    pub(super) devices: Vec<(WlSeat, DataDevice)>,
     /// Our offer and what it holds.
     source: Option<(CopyPasteSource, Arc<Contents>)>,
     /// Contents to offer once there is an input serial to offer them with.
@@ -68,6 +68,8 @@ pub struct Selection {
     next_token: u64,
     /// Drag and drop under way.
     pub(super) dnd: dnd::Dnd,
+    /// A drag out of one of our windows, under way.
+    pub(super) out: Option<drag_out::Out>,
 }
 
 impl Selection {
@@ -81,6 +83,7 @@ impl Selection {
             promised: std::collections::HashMap::new(),
             next_token: 1,
             dnd: dnd::Dnd::default(),
+            out: None,
         }
     }
 }
@@ -351,7 +354,14 @@ impl DataSourceHandler for State {
         mime: String,
         fd: WritePipe,
     ) {
-        let data = self.selection.source.as_ref().filter(|(s, _)| s.inner() == source).and_then(|(_, c)| c.data(&mime));
+        // The drag out's, or the clipboard's.
+        let (drag, data) = match drag_out::data(self, source, &mime) {
+            Some((drag, data)) => (Some(drag), data),
+            None => (
+                None,
+                self.selection.source.as_ref().filter(|(s, _)| s.inner() == source).and_then(|(_, c)| c.data(&mime)),
+            ),
+        };
         match data {
             // Without data the pipe closes here, and the reader gets nothing.
             None => {}
@@ -361,20 +371,32 @@ impl DataSourceHandler for State {
                 let token = self.selection.next_token;
                 self.selection.next_token += 1;
                 self.selection.promised.insert(token, fd);
-                self.send(FromRender::ProvideSelection { mime, token });
+                match drag {
+                    Some(drag) => self.send(FromRender::ProvideDragData { drag, mime, token }),
+                    None => self.send(FromRender::ProvideSelection { mime, token }),
+                }
             }
         }
     }
 
     fn cancelled(&mut self, _: &Connection, _: &QueueHandle<Self>, source: &WlDataSource) {
+        if drag_out::end(self, Some(source), 0) {
+            return;
+        }
         if self.selection.source.as_ref().is_some_and(|(s, _)| s.inner() == source) {
             self.selection.source = None;
         }
     }
 
     fn dnd_dropped(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource) {}
-    fn dnd_finished(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource) {}
-    fn action(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource, _: DndAction) {}
+
+    fn dnd_finished(&mut self, _: &Connection, _: &QueueHandle<Self>, source: &WlDataSource) {
+        drag_out::end(self, Some(source), 1);
+    }
+
+    fn action(&mut self, _: &Connection, _: &QueueHandle<Self>, source: &WlDataSource, action: DndAction) {
+        drag_out::action(self, source, action);
+    }
 }
 
 /// The data device's events go through smithay-client-toolkit, which

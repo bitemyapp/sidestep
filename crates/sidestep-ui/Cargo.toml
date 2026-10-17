@@ -56,3 +56,8 @@ harness = false
 [[test]]
 name = "scrolling"
 harness = false
+
+# Dragging out of a window, through the null render thread (see the file).
+[[test]]
+name = "drag_out"
+harness = false

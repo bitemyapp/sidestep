@@ -344,9 +344,13 @@ fn handle(msg: FromRender) {
         }
         // Core Animation (quartzcore).
         FromRender::Tick { window, time } => crate::quartzcore::display_link::tick(window, time),
-        // AppKit never locks the session nor asks for tokens for other
-        // programs (sidestep-ui's `Cx` does).
-        FromRender::SessionLocked | FromRender::SessionLockFinished | FromRender::ActivationToken { .. } => {}
+        // AppKit never locks the session, asks for tokens for other
+        // programs or drags out through the engine (sidestep-ui's `Cx` does).
+        FromRender::SessionLocked
+        | FromRender::SessionLockFinished
+        | FromRender::ActivationToken { .. }
+        | FromRender::ProvideDragData { .. }
+        | FromRender::DragEnded { .. } => {}
         FromRender::Repaint { window, target, rects } => {
             if let Some(w) = app::find_window(window) {
                 let key = match target {

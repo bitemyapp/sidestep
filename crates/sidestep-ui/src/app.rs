@@ -19,12 +19,13 @@ use std::time::{Duration, Instant};
 use kurbo::{Point, Rect, Size, Vec2};
 use sidestep_engine::backend::{self, Backend};
 use sidestep_engine::clipboard::{self, Contents, Source};
-use sidestep_engine::protocol::{FromRender, Target, TitleText, ToRender};
+use sidestep_engine::protocol::{DragIcon, FromRender, Target, TitleText, ToRender};
 use sidestep_engine::{momentum, outputs, settings, stats};
 
 use crate::canvas::Canvas;
 use crate::color::{Appearance, Color, SystemColor};
 use crate::event::{Ime, KeyEvent, Modifiers, PointerButton, ScrollDelta, ScrollPhase, WindowEvent, WindowState};
+use crate::image::Image;
 use crate::text::{Font, TextStyle};
 use crate::window::{Background, Window, WindowData, WindowId, WindowOptions, send};
 
@@ -112,6 +113,21 @@ pub trait Handler {
         let _ = (cx, window, drag, response);
         false
     }
+
+    /// A destination wants the data drag `drag` out of one of the windows
+    /// promised as `mime` ([`DragSource::promise`]): it, or `None` for
+    /// nothing (the default).
+    fn provide_drag_data(&mut self, cx: &mut Cx, drag: DragId, mime: &str) -> Option<Vec<u8>> {
+        let _ = (cx, drag, mime);
+        None
+    }
+
+    /// Drag `drag` out of one of the windows is over: dropped where it was
+    /// taken, to copy or move it (a move is the source's to finish, by
+    /// removing what it moved), or cancelled ([`DropAction::None`]).
+    fn drag_ended(&mut self, cx: &mut Cx, drag: DragId, action: DropAction) {
+        let _ = (cx, drag, action);
+    }
 }
 
 /// A drag over a window.
@@ -179,6 +195,76 @@ impl DropResponse {
 impl From<DropAction> for DropResponse {
     fn from(action: DropAction) -> DropResponse {
         DropResponse { action, mime: None, periodic: false }
+    }
+}
+
+/// A drag out of one of the windows, as [`Cx::start_drag`] returns it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DragId(pub(crate) u64);
+
+/// What a drag out of a window carries ([`Cx::start_drag`]): data by MIME
+/// type, given now or promised (the handler's
+/// [`provide_drag_data`](Handler::provide_drag_data) makes it when a
+/// destination asks), what dropping it may do, and what shows under the
+/// pointer.
+#[derive(Clone, Debug)]
+pub struct DragSource {
+    items: Vec<(String, Option<Arc<[u8]>>)>,
+    copy: bool,
+    moving: bool,
+    icon: Option<(Image, Point)>,
+}
+
+impl Default for DragSource {
+    fn default() -> DragSource {
+        DragSource::new()
+    }
+}
+
+impl DragSource {
+    /// A drag that offers nothing yet, which a destination may copy.
+    pub fn new() -> DragSource {
+        DragSource { items: Vec::new(), copy: true, moving: false, icon: None }
+    }
+
+    /// Offer `data` as `mime`.
+    pub fn data(mut self, mime: impl Into<String>, data: impl Into<Vec<u8>>) -> DragSource {
+        self.items.push((mime.into(), Some(Arc::from(data.into()))));
+        self
+    }
+
+    /// Offer `mime`, made when a destination asks for it. (A drop on one
+    /// of this program's own windows reads only what's given now.)
+    pub fn promise(mut self, mime: impl Into<String>) -> DragSource {
+        self.items.push((mime.into(), None));
+        self
+    }
+
+    /// Offer `text`, as the text MIME types programs ask for.
+    pub fn text(mut self, text: &str) -> DragSource {
+        let bytes: Arc<[u8]> = Arc::from(text.as_bytes());
+        self.items.extend(clipboard::TEXT_MIMES.iter().map(|m| ((*m).to_owned(), Some(bytes.clone()))));
+        self
+    }
+
+    /// Offer `urls` (files as `file://` URLs, links) as a URL list
+    /// (`text/uri-list`), as file managers take them.
+    pub fn urls<S: AsRef<str>>(self, urls: impl IntoIterator<Item = S>) -> DragSource {
+        let list: String = urls.into_iter().map(|u| format!("{}\r\n", u.as_ref())).collect();
+        self.data("text/uri-list", list)
+    }
+
+    /// Whether a destination may copy it (the default), and move it.
+    pub fn actions(mut self, copy: bool, moving: bool) -> DragSource {
+        (self.copy, self.moving) = (copy, moving);
+        self
+    }
+
+    /// Show `image` under the pointer, its point `hotspot` (in points from
+    /// its top left) at the pointer.
+    pub fn icon(mut self, image: Image, hotspot: Point) -> DragSource {
+        self.icon = Some((image, hotspot));
+        self
     }
 }
 
@@ -372,6 +458,7 @@ impl App {
             looks: (Appearance::system(), Appearance::system().color(SystemColor::Accent)),
             locking: Locking::Unlocked,
             next_activation: 1,
+            next_drag: 1,
         };
         handler.launched(&mut cx);
         let result = cx.run(&mut handler);
@@ -436,6 +523,7 @@ pub struct Cx {
     looks: (Appearance, Color),
     locking: Locking,
     next_activation: u64,
+    next_drag: u64,
 }
 
 impl Cx {
@@ -736,6 +824,36 @@ impl Cx {
     /// handler hears of it (most useful in [`Handler::dropped`]).
     pub fn drag_data(&self, mime: &str) -> Option<Vec<u8>> {
         clipboard::shared_for(Source::Drag).read_offer(mime, None).map(|d| d.to_vec())
+    }
+
+    /// Start dragging `source` out of `window`, from the button press
+    /// being handled (a drag starts from a press, which the compositor then
+    /// follows): to another program, the desktop, another of this program's
+    /// windows. The handler hears how it ended in
+    /// [`drag_ended`](Handler::drag_ended), and is asked for promised data
+    /// meanwhile. `None` if `window` isn't shown.
+    pub fn start_drag(&mut self, window: WindowId, source: DragSource) -> Option<DragId> {
+        let showing = self.windows.get(&window)?.showing?;
+        let drag = self.next_drag;
+        self.next_drag += 1;
+        let icon = source.icon.map(|(image, hotspot)| {
+            let size = image.size();
+            let bounds = sidestep_engine::protocol::Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
+            let mut canvas = Canvas::blank(size, 1.0, vec![bounds], Appearance::system());
+            canvas.draw_image(&image, Rect::from_origin_size(Point::ZERO, size));
+            let (ops, _) = canvas.finish();
+            let side = |v: f64| v.ceil().max(1.0) as u32;
+            DragIcon {
+                width: side(size.width),
+                height: side(size.height),
+                hotspot: (hotspot.x.round() as i32, hotspot.y.round() as i32),
+                ops,
+            }
+        });
+        let actions = if source.copy { DND_COPY } else { 0 } | if source.moving { DND_MOVE } else { 0 };
+        let contents = Arc::new(Contents { items: source.items });
+        send(&self.backend.tx, ToRender::StartDrag { window: showing, drag, contents, actions, icon });
+        Some(DragId(drag))
     }
 
     // The loop.
@@ -1090,6 +1208,18 @@ impl Cx {
             FromRender::ScreensChanged => handler.outputs_changed(self),
             // What's said of a lock the program gave up meanwhile finds
             // nothing.
+            FromRender::ProvideDragData { drag, mime, token } => {
+                let data = handler.provide_drag_data(self, DragId(drag), &mime).map(Arc::from);
+                send(&self.backend.tx, ToRender::SelectionData { token, data });
+            }
+            FromRender::DragEnded { drag, action } => {
+                let action = match action {
+                    0 => DropAction::None,
+                    a if a & DND_COPY != 0 => DropAction::Copy,
+                    _ => DropAction::Move,
+                };
+                handler.drag_ended(self, DragId(drag), action);
+            }
             FromRender::ActivationToken { request, token } => {
                 handler.activation_token(self, ActivationRequest(request), token);
             }
