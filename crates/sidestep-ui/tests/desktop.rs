@@ -2,7 +2,8 @@
 //! layer surfaces (a panel along the top, a wallpaper the compositor
 //! sizes, one that takes the keyboard), sized, drawn and taking input as
 //! windows do, placed anew while they show and shown again as they were
-//! left, and a popup opened from the panel. Each step waits for its
+//! left, and a popup opened from the panel; outputs coming and going,
+//! and a panel put on one. Each step waits for its
 //! condition, polled by a timer, with a deadline.
 
 fn main() {
@@ -25,6 +26,38 @@ mod linux {
     /// The null render thread's output.
     const OUTPUT: Size = Size::new(1280.0, 800.0);
 
+    fn laptop() -> Output {
+        Output {
+            id: 61,
+            name: "Built-in display".into(),
+            connector: Some("eDP-1".into()),
+            description: Some("Built-in display".into()),
+            make: "BOE".into(),
+            model: "0x0BCA".into(),
+            frame: Rect::new(0.0, 0.0, 1440.0, 900.0),
+            scale: 1.75,
+            integer_scale: 2,
+            physical_size: Some(Size::new(286.0, 179.0)),
+            refresh_hz: 60.0,
+            work_area: None,
+        }
+    }
+
+    fn external() -> Output {
+        Output {
+            id: 62,
+            name: "Dell U2723QE".into(),
+            connector: Some("DP-2".into()),
+            description: Some("Dell Inc. DELL U2723QE (DP-2)".into()),
+            make: "Dell Inc.".into(),
+            model: "DELL U2723QE".into(),
+            frame: Rect::new(1440.0, 0.0, 1440.0 + 1920.0, 1080.0),
+            scale: 2.0,
+            integer_scale: 2,
+            ..laptop()
+        }
+    }
+
     #[derive(Default)]
     struct Test {
         step: usize,
@@ -33,6 +66,9 @@ mod linux {
         wallpaper: Option<WindowId>,
         search: Option<WindowId>,
         menu: Option<WindowId>,
+        /// A panel on the second output.
+        other: Option<WindowId>,
+        outputs_changed: usize,
         events: HashMap<WindowId, Vec<WindowEvent>>,
         draws: HashMap<WindowId, usize>,
         log: Vec<Seen>,
@@ -176,7 +212,34 @@ mod linux {
                     {
                         return;
                     }
+                    // Outputs come: the handler hears, and a panel goes on one.
+                    testing::inject_outputs(cx, &[laptop(), external()]);
                     self.step = 6;
+                }
+                6 => {
+                    if self.outputs_changed == 0 {
+                        return;
+                    }
+                    let outputs = cx.outputs();
+                    assert_eq!(outputs, [laptop(), external()]);
+                    let options = LayerOptions::new(Layer::Top, "panel").anchors(Anchors::TOP).output(outputs[1].id);
+                    self.other = Some(cx.open_window(WindowOptions::layer(options).size(300.0, 24.0)));
+                    self.step = 7;
+                }
+                7 => {
+                    let Some(other) = self.other.and_then(|w| testing::showing_id(cx, w)) else { return };
+                    let Some(placement) = self.placed(other) else { return };
+                    assert_eq!(placement.output, Some(62));
+                    // And one goes.
+                    testing::inject_outputs(cx, &[laptop()]);
+                    self.step = 8;
+                }
+                8 => {
+                    if self.outputs_changed < 2 {
+                        return;
+                    }
+                    assert_eq!(cx.outputs(), [laptop()]);
+                    self.step = 9;
                     cx.quit();
                 }
                 _ => {}
@@ -205,6 +268,10 @@ mod linux {
             *self.draws.entry(window).or_default() += 1;
         }
 
+        fn outputs_changed(&mut self, _cx: &mut Cx) {
+            self.outputs_changed += 1;
+        }
+
         fn timer(&mut self, cx: &mut Cx, _timer: TimerId) {
             let started = self.started.expect("launched");
             assert!(started.elapsed() < DEADLINE, "step {} didn't finish in {DEADLINE:?}", self.step);
@@ -221,7 +288,7 @@ mod linux {
         testing::use_null_backend();
         testing::capture_pixels(true);
         let test = App::new().run(Test::default()).expect("the null render thread runs");
-        assert_eq!(test.step, 6, "every step ran");
+        assert_eq!(test.step, 9, "every step ran");
         println!("desktop: ok");
     }
 }

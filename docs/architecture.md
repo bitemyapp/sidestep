@@ -837,7 +837,11 @@ through the same protocol AppKit does, and keeps AppKit's rhythm:
   under the text MIME types, this program's own text answered without a
   round trip while its change is current); outputs are its published
   snapshot, read without waiting (the render thread describes them by
-  itself once it connects, and the handler hears `outputs_changed`); and
+  itself once it connects, and the handler hears `outputs_changed`),
+  each with its id (the wl_output global's name, which layer surfaces
+  are put on it by), connector name, description, make and model,
+  logical frame, and integer and fractional scales (`testing::inject_outputs`
+  describes some to a test); and
   drags are answered position by position, as the render thread needs,
   from the handler's `drag_moved`: a `DropResponse` with the action, the
   MIME type to take (one the drag offers, else the toolkit's choice: the

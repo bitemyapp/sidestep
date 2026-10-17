@@ -251,3 +251,13 @@ pub fn inject_frame(cx: &mut Cx, window: WindowId) {
 fn showing(cx: &Cx, window: WindowId) -> u32 {
     cx.showing_of(window).unwrap_or(window.0)
 }
+
+/// The compositor describing its outputs as `outputs` (none for none):
+/// what [`Cx::outputs`](crate::Cx::outputs) answers from now on, in this
+/// process, and the handler hears
+/// [`outputs_changed`](crate::Handler::outputs_changed) at the loop's next
+/// turn.
+pub fn inject_outputs(cx: &mut Cx, outputs: &[crate::Output]) {
+    sidestep_engine::outputs::publish(outputs.iter().map(crate::Output::engine).collect(), true);
+    cx.inject(FromRender::ScreensChanged);
+}

@@ -105,6 +105,12 @@ fn snapshot(state: &State) -> Vec<Output> {
                     scale: learned.map_or_else(|| scale_of(&info), |(_, s)| *s),
                     refresh_mhz: mode.map_or(0, |m| m.refresh_rate),
                     work_area: work_area.map(|(_, b)| *b),
+                    connector: info.name.clone(),
+                    description: info.description.clone(),
+                    make: info.make.clone(),
+                    model: info.model.clone(),
+                    integer_scale: info.scale_factor,
+                    physical_size: info.physical_size,
                 }
             })
             .collect()

@@ -1128,15 +1128,33 @@ fn title_text(title: &str) -> TitleText {
 }
 
 /// An output (a screen), as the compositor describes it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Output {
-    /// Stays the same while the output is there.
+    /// Stays the same while the output is there: what a layer surface
+    /// is put on it by ([`LayerOptions::output`](crate::layer_shell::LayerOptions::output)).
     pub id: u32,
+    /// A name to show: its description, else its connector's name, else
+    /// its model.
     pub name: String,
-    /// Where it is in the compositor's space, in points.
+    /// Its connector's name (`eDP-1`, `HDMI-A-1`), which stays the same
+    /// from one session to the next, where the compositor says it.
+    pub connector: Option<String>,
+    /// The compositor's description of it (as a rule its make, model and
+    /// connector), where it gives one.
+    pub description: Option<String>,
+    pub make: String,
+    pub model: String,
+    /// Where it is in the compositor's space, in points: its logical
+    /// position and size.
     pub frame: Rect,
-    /// Device pixels per point.
+    /// Device pixels per point: its fractional scale where that's known
+    /// (from xdg-output's logical size, or a window alone on it), else
+    /// [`integer_scale`](Output::integer_scale).
     pub scale: f64,
+    /// wl_output's scale: a whole number, a fractional scale rounded up.
+    pub integer_scale: u32,
+    /// Its size in millimetres, where it's known.
+    pub physical_size: Option<Size>,
     pub refresh_hz: f64,
     /// The largest window size there that leaves the desktop's panels
     /// uncovered, once the compositor has told a window.
@@ -1146,13 +1164,39 @@ pub struct Output {
 impl Output {
     fn of(o: &outputs::Output) -> Output {
         let (x, y, w, h) = o.rect;
+        let (mm_w, mm_h) = o.physical_size;
         Output {
             id: o.id,
             name: o.name.clone(),
+            connector: o.connector.clone(),
+            description: o.description.clone(),
+            make: o.make.clone(),
+            model: o.model.clone(),
             frame: Rect::new(f64::from(x), f64::from(y), f64::from(x + w), f64::from(y + h)),
             scale: o.scale,
+            integer_scale: o.integer_scale.max(1) as u32,
+            physical_size: (mm_w > 0 && mm_h > 0).then(|| Size::new(f64::from(mm_w), f64::from(mm_h))),
             refresh_hz: f64::from(o.refresh_mhz) / 1000.0,
             work_area: o.work_area.map(|(w, h)| Size::new(f64::from(w), f64::from(h))),
+        }
+    }
+
+    /// The output as the engine publishes it (`testing`).
+    pub(crate) fn engine(&self) -> outputs::Output {
+        let round = |v: f64| v.round() as i32;
+        outputs::Output {
+            id: self.id,
+            name: self.name.clone(),
+            rect: (round(self.frame.x0), round(self.frame.y0), round(self.frame.width()), round(self.frame.height())),
+            scale: self.scale,
+            refresh_mhz: round(self.refresh_hz * 1000.0),
+            work_area: self.work_area.map(|s| (s.width.round() as u32, s.height.round() as u32)),
+            connector: self.connector.clone(),
+            description: self.description.clone(),
+            make: self.make.clone(),
+            model: self.model.clone(),
+            integer_scale: self.integer_scale as i32,
+            physical_size: self.physical_size.map_or((0, 0), |s| (round(s.width), round(s.height))),
         }
     }
 }

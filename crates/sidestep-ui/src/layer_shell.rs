@@ -13,7 +13,8 @@
 //! the handler hears as for any window
 //! ([`WindowEvent::Resized`](crate::WindowEvent::Resized)). A compositor
 //! that takes a layer surface away (its output went) asks it to close
-//! ([`WindowEvent::CloseRequested`](crate::WindowEvent::CloseRequested));
+//! ([`WindowEvent::CloseRequested`](crate::WindowEvent::CloseRequested)),
+//! and it shows nothing more (hidden and shown again, it is placed anew);
 //! one without wlr-layer-shell (GNOME's) closes it at once.
 
 use sidestep_engine::protocol::{self, LayerPlacement, edge};

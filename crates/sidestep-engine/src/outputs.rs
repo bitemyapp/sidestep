@@ -16,18 +16,32 @@ use std::time::{Duration, Instant};
 pub const FIRST_SNAPSHOT: Duration = Duration::from_secs(1);
 
 /// An output, as the render thread publishes it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Output {
     /// The wl_output global's name, which stays the same while it's there.
     pub id: u32,
+    /// A name to show: its description, else its connector's, else its
+    /// model.
     pub name: String,
     /// Where it is in the compositor's space, in logical points (y down).
     pub rect: (i32, i32, i32, i32),
+    /// Its scale, fractional where that's known (see `backend::outputs`).
     pub scale: f64,
     pub refresh_mhz: i32,
     /// The largest window size there that leaves the desktop's panels
     /// uncovered, once a window was told it.
     pub work_area: Option<(u32, u32)>,
+    /// Its connector's name (wl_output's `name`: `eDP-1`, `HDMI-A-1`),
+    /// which stays the same from one session to the next, and the
+    /// compositor's description of it, where the compositor says them.
+    pub connector: Option<String>,
+    pub description: Option<String>,
+    pub make: String,
+    pub model: String,
+    /// wl_output's scale: a whole number, a fractional scale rounded up.
+    pub integer_scale: i32,
+    /// Its size in millimetres; 0 where it isn't known (a projector).
+    pub physical_size: (i32, i32),
 }
 
 #[derive(Default)]

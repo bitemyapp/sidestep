@@ -10,7 +10,9 @@
 //!   output, both showing where they should; a click on the panel opening
 //!   a menu from it, which closes; the panel taking the
 //!   keyboard when asked, typed into, then growing, and windows making
-//!   room.
+//!   room;
+//! - outputs as sway names and places them; one plugged in (heard of), a
+//!   panel put on it, and the output unplugged, which closes the panel.
 //!
 //! Linux only, and only under the headless sway, with `grim` and
 //! `swaymsg` (`wtype` for typing, left out without it):
@@ -69,9 +71,15 @@ mod linux {
 
     impl Shot {
         fn take() -> Shot {
+            Shot::of("")
+        }
+
+        /// Output `connector` alone (all of them for "").
+        fn of(connector: &str) -> Shot {
             let path = format!("{}/shot.png", std::env::var("XDG_RUNTIME_DIR").expect("a runtime directory"));
             let _ = std::fs::remove_file(&path);
-            sh(&format!("grim '{path}'"));
+            let only = if connector.is_empty() { String::new() } else { format!("-o '{connector}' ") };
+            sh(&format!("grim {only}'{path}'"));
             let image = Image::open(&path).expect("grim's screenshot");
             let (width, _) = image.pixel_size();
             Shot { width, pixels: image.to_rgba8().expect("its pixels") }
@@ -122,6 +130,14 @@ mod linux {
             let tree = swaymsg("-t get_tree");
             assert!(tree.contains("\"app_id\": \"org.sidestep.DesktopTest\""), "sway's tree: {tree}");
             println!("  decorated by sway, known as org.sidestep.DesktopTest");
+            // The output, as sway names and places it.
+            let outputs = cx.outputs();
+            println!("  outputs: {outputs:?}");
+            let [output] = &outputs[..] else { panic!("one output: {outputs:?}") };
+            assert_eq!(output.connector.as_deref(), Some("HEADLESS-1"));
+            assert_eq!(output.frame, Rect::from_origin_size(Point::ZERO, OUTPUT));
+            assert_eq!((output.scale, output.integer_scale), (1.0, 1));
+            assert!(output.description.is_some() && !output.make.is_empty() && !output.model.is_empty());
             self.checked = true;
             cx.quit();
         }
@@ -359,7 +375,110 @@ mod linux {
         assert_eq!(layers.step, Step::Done, "every step ran");
         drop(layers);
         pointing.join().expect("the virtual pointer");
+
+        let outputs = Outputs { started: Instant::now(), step: Plug::Waiting, changed: 0, panel: None, closing: false };
+        let outputs = App::new().quit_when_last_window_closes(false).run(outputs).expect("a compositor");
+        assert_eq!(outputs.step, Plug::Done);
         println!("wayland_desktop: ok");
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Plug {
+        Waiting,
+        Plugged,
+        Panel,
+        Unplugged,
+        Done,
+    }
+
+    /// An output plugged in (sway's `create_output`, put to the right of
+    /// the first), a panel put on it, and the output unplugged, which
+    /// takes the panel away.
+    struct Outputs {
+        started: Instant,
+        step: Plug,
+        changed: usize,
+        panel: Option<WindowId>,
+        closing: bool,
+    }
+
+    impl Outputs {
+        fn second(cx: &Cx) -> Option<Output> {
+            cx.outputs().into_iter().find(|o| o.connector.as_deref() == Some("HEADLESS-2"))
+        }
+    }
+
+    impl Handler for Outputs {
+        fn launched(&mut self, cx: &mut Cx) {
+            cx.set_repeating_timer(Duration::from_millis(20));
+        }
+
+        fn outputs_changed(&mut self, _cx: &mut Cx) {
+            self.changed += 1;
+        }
+
+        fn window_event(&mut self, _cx: &mut Cx, _window: WindowId, event: WindowEvent) {
+            self.closing |= event == WindowEvent::CloseRequested;
+        }
+
+        fn draw(&mut self, _cx: &mut Cx, _window: WindowId, canvas: &mut Canvas) {
+            canvas.fill_rect(Rect::from_origin_size(Point::ZERO, canvas.size()), BAR);
+        }
+
+        fn timer(&mut self, cx: &mut Cx, _timer: TimerId) {
+            assert!(self.started.elapsed() < DEADLINE, "stuck at {:?}: {:?}", self.step, cx.outputs());
+            match self.step {
+                Plug::Waiting => {
+                    if cx.outputs().len() != 1 {
+                        return;
+                    }
+                    swaymsg("create_output >/dev/null");
+                    swaymsg("output HEADLESS-2 mode 800x600 position 1280 0 >/dev/null");
+                    self.changed = 0;
+                    self.step = Plug::Plugged;
+                }
+                // Heard of, where it was put.
+                Plug::Plugged => {
+                    let Some(second) = Outputs::second(cx) else { return };
+                    if second.frame != Rect::new(1280.0, 0.0, 2080.0, 600.0) || self.changed == 0 {
+                        return;
+                    }
+                    println!("  plugged in: {second:?}");
+                    let panel = LayerOptions::new(Layer::Top, "panel")
+                        .anchors(Anchors::TOP | Anchors::LEFT | Anchors::RIGHT)
+                        .exclusive_zone(24)
+                        .output(second.id);
+                    self.panel = Some(cx.open_window(WindowOptions::layer(panel).size(0.0, 24.0)));
+                    self.step = Plug::Panel;
+                }
+                // The panel on it, as wide as it is.
+                Plug::Panel => {
+                    let panel = self.panel.expect("the panel");
+                    let second = Outputs::second(cx).expect("the second output");
+                    let Some(w) = cx.window(panel) else { return };
+                    if w.size() != Size::new(800.0, 24.0) || w.outputs() != [second.id] {
+                        return;
+                    }
+                    if !Shot::of("HEADLESS-2").shows(&[((5, 5), BAR), ((795, 20), BAR)]) {
+                        return;
+                    }
+                    println!("  a panel on it");
+                    swaymsg("output HEADLESS-2 unplug >/dev/null");
+                    self.step = Plug::Unplugged;
+                }
+                // Gone, and the panel with it: the compositor closed it.
+                Plug::Unplugged => {
+                    if Outputs::second(cx).is_some() || self.panel.is_some_and(|p| cx.window(p).is_some()) {
+                        return;
+                    }
+                    assert!(self.closing, "the panel was asked to close");
+                    println!("  unplugged, and the panel closed");
+                    self.step = Plug::Done;
+                    cx.quit();
+                }
+                Plug::Done => {}
+            }
+        }
     }
 }
 

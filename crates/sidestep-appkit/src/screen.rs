@@ -430,7 +430,7 @@ mod tests {
     use super::*;
 
     fn output(id: u32, rect: (i32, i32, i32, i32)) -> Output {
-        Output { id, name: String::new(), rect, scale: 1.0, refresh_mhz: 0, work_area: None }
+        Output { id, rect, scale: 1.0, ..Output::default() }
     }
 
     fn r(x: f64, y: f64, w: f64, h: f64) -> NSRect {
