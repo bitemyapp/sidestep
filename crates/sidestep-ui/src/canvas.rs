@@ -1,7 +1,8 @@
 //! Drawing: a [`Canvas`] records what a window draws as the render thread's
 //! drawing ops (fills, paths, strokes, images, glyph runs), which the
 //! render thread rasterizes at the window's scale into the parts of the
-//! window that changed. Nothing here touches pixels.
+//! window that changed (or [`offscreen::render`](crate::offscreen::render)
+//! into an image). Nothing here touches pixels.
 //!
 //! Coordinates are points from the window content's top left, y down,
 //! through the canvas's current transform. Each pass starts with the
@@ -294,7 +295,20 @@ impl Canvas {
         appearance: Appearance,
     ) -> Canvas {
         let bounds = protocol::Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
-        let mut canvas = Canvas {
+        let mut canvas = Canvas::blank(size, scale, damage, appearance);
+        // Damaged pixels start over: as the background, or transparent.
+        let ground = background.map_or([0.0; 4], Color::raw);
+        for r in canvas.damage.clone() {
+            canvas.ops.push(Op::FillWith { rect: r.intersect(&bounds), color: ground, blend: Blend::Copy });
+        }
+        canvas
+    }
+
+    /// A canvas redrawing `damage` over what's there: nothing is cleared
+    /// first (an offscreen canvas's pixels start transparent).
+    pub(crate) fn blank(size: kurbo::Size, scale: f64, damage: Vec<protocol::Rect>, appearance: Appearance) -> Canvas {
+        let bounds = protocol::Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
+        Canvas {
             ops: Vec::new(),
             state: State {
                 xf: Affine::IDENTITY,
@@ -311,13 +325,7 @@ impl Canvas {
             damage,
             appearance,
             temporaries: Vec::new(),
-        };
-        // Damaged pixels start over: as the background, or transparent.
-        let ground = background.map_or([0.0; 4], Color::raw);
-        for r in canvas.damage.clone() {
-            canvas.ops.push(Op::FillWith { rect: r.intersect(&bounds), color: ground, blend: Blend::Copy });
         }
-        canvas
     }
 
     /// The ops recorded, groups closed, and the images made for them, to

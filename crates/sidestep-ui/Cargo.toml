@@ -27,3 +27,8 @@ harness = false
 [[test]]
 name = "wayland_system"
 harness = false
+
+# Drawing offscreen, pixel for pixel as windows draw (see the file).
+[[test]]
+name = "offscreen"
+harness = false

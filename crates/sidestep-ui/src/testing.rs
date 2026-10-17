@@ -26,8 +26,14 @@ pub fn use_null_backend() {
     null::request();
 }
 
+/// Have the null render thread tell windows they show at `scale` (1
+/// unless asked), which captured pixels are drawn at too.
+pub fn use_null_backend_scale(scale: u32) {
+    null::SCALE.store(scale.max(1), std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Keep (or stop keeping) every window's pixels: what its paints drew,
-/// at scale 1. Call before the windows open.
+/// at the null render thread's scale. Call before the windows open.
 pub fn capture_pixels(on: bool) {
     *null::PIXELS.lock().unwrap_or_else(|e| e.into_inner()) = on.then(Default::default);
 }

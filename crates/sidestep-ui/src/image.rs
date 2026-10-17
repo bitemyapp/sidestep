@@ -1,14 +1,16 @@
-//! Images: pixels a program made, or a file the render thread decodes the
-//! first time the image is drawn, so decoding happens off the main thread.
-//! The render thread keeps what it decoded (and smaller copies it made for
-//! drawing small) until the last clone of the image is dropped.
+//! Images: pixels a program made or drew ([`offscreen`](crate::offscreen)),
+//! or a file the render thread decodes the first time the image is drawn,
+//! so decoding happens off the main thread. The render thread keeps what
+//! it decoded (and smaller copies it made for drawing small) until the
+//! last clone of the image is dropped. A program reads an image's pixels
+//! with [`Image::to_rgba8`].
 
 use std::sync::Arc;
 
 use kurbo::Size;
 use sidestep_engine::codec;
 use sidestep_engine::protocol::ToRender;
-use sidestep_engine::raster::images::{ImageData, Pixels, next_key};
+use sidestep_engine::raster::images::{self, ImageData, Pixels, next_key};
 
 /// An image: cheap to clone, and shareable between threads.
 #[derive(Clone)]
@@ -25,6 +27,8 @@ struct Shared(Arc<ImageData>);
 impl Drop for Shared {
     fn drop(&mut self) {
         sidestep_engine::backend::send_if_running(ToRender::ForgetImages { keys: vec![self.0.key] });
+        // And what this thread cached of it, drawing offscreen.
+        images::forget(&[self.0.key]);
     }
 }
 
@@ -105,8 +109,56 @@ impl Image {
         Size::new(f64::from(w) * self.scale, f64::from(h) * self.scale)
     }
 
+    /// Points per pixel.
+    pub fn scale(&self) -> f64 {
+        self.scale
+    }
+
+    /// Its pixels, straight (not premultiplied) RGBA: four bytes a pixel,
+    /// red, green, blue and alpha in that order, rows `width × 4` bytes
+    /// apart, top row first (OpenGL's `RGBA` of `UNSIGNED_BYTE`s, and
+    /// DRM's `ABGR8888` on little-endian machines). A file is decoded for
+    /// it; `None` if its pixels don't decode.
+    pub fn to_rgba8(&self) -> Option<Vec<u8>> {
+        let mut px = self.to_premultiplied_rgba8()?;
+        for p in px.as_chunks_mut::<4>().0 {
+            let a = u32::from(p[3]);
+            if a != 255 && a != 0 {
+                for c in &mut p[..3] {
+                    *c = ((u32::from(*c) * 255 + a / 2) / a).min(255) as u8;
+                }
+            }
+        }
+        Some(px)
+    }
+
+    /// Its pixels as [`to_rgba8`](Image::to_rgba8) lays them out, but
+    /// premultiplied: each color times the alpha, as canvases and
+    /// compositors blend them.
+    pub fn to_premultiplied_rgba8(&self) -> Option<Vec<u8>> {
+        premultiplied(self.data())
+    }
+
     pub(crate) fn data(&self) -> &Arc<ImageData> {
         &self.pixels.0
+    }
+}
+
+/// An image's pixels, premultiplied RGBA rows.
+fn premultiplied(data: &ImageData) -> Option<Vec<u8>> {
+    match &data.pixels {
+        Pixels::Rgba(px) => Some(px.to_vec()),
+        Pixels::Encoded(bytes, upright) => Some(codec::decode(bytes, *upright)?.rgba),
+        Pixels::Part(whole, x, y) => {
+            let all = premultiplied(whole)?;
+            let (x, y, w) = (*x as usize, *y as usize, whole.width as usize);
+            let row = data.width as usize * 4;
+            let mut px = Vec::with_capacity(row * data.height as usize);
+            for r in y..y + data.height as usize {
+                px.extend_from_slice(all.get((r * w + x) * 4..)?.get(..row)?);
+            }
+            Some(px)
+        }
     }
 }
 
@@ -131,5 +183,14 @@ mod tests {
         let image = Image::decode(png).expect("decoded");
         assert_eq!(image.pixel_size(), (3, 2));
         assert_eq!(image.with_scale(0.5).size(), Size::new(1.5, 1.0));
+        assert_eq!(image.to_rgba8(), Some(vec![255; 24]), "decoded to be read");
+    }
+
+    #[test]
+    fn pixels_read_back_straight_or_premultiplied() {
+        let image = Image::from_rgba(2, 1, &[200, 100, 50, 128, 1, 2, 3, 0]).expect("an image");
+        assert_eq!(image.to_premultiplied_rgba8(), Some(vec![100, 50, 25, 128, 0, 0, 0, 0]));
+        // Straight again, as near as 8 bits keep it.
+        assert_eq!(image.to_rgba8(), Some(vec![199, 100, 50, 128, 0, 0, 0, 0]));
     }
 }

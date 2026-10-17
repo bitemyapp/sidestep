@@ -50,6 +50,11 @@
 //! Geometry is [`kurbo`]'s, re-exported: anything that is a
 //! [`kurbo::Shape`] can be filled, stroked or clipped to.
 //!
+//! **Offscreen.** [`offscreen::render`] draws on a canvas into an
+//! [`Image`] on any thread, with no application running and no display,
+//! through the same rasterizer and text engine as windows: for a
+//! compositor's own labels, and golden-image tests.
+//!
 //! **Testing.** `SIDESTEP_BACKEND=null` runs a render thread without a
 //! display, which configures windows at once at the size they asked for,
 //! shows every frame at once and draws nothing (see `tests/headless.rs`);
@@ -65,6 +70,7 @@ mod canvas;
 mod color;
 mod event;
 mod image;
+pub mod offscreen;
 mod text;
 mod window;
 

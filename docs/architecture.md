@@ -779,6 +779,16 @@ through the same protocol AppKit does, and keeps AppKit's rhythm:
   color font's glyphs (COLR, CBDT, sbix or SVG, which have no outlines),
   a picture: the run drawn upright into an image at the scale it shows at
   (`ca::render::rasterize`), drawn through the transform.
+- **Offscreen** (`offscreen.rs`): `offscreen::render` gives a canvas for
+  an image of a size and scale, with no application running and no
+  display, on any thread, and rasterizes its ops with `raster::paint` into
+  pixels of its own, through a glyph cache kept by the thread (as the
+  render thread keeps its own), so text drawn offscreen is what a window
+  at the same scale shows, pixel for pixel (`tests/offscreen.rs` holds a
+  window's captured pixels to it). A compositor draws its own labels with
+  it; `Image::to_rgba8` reads the pixels back, straight or premultiplied.
+  An image dropped on a thread that drew it offscreen goes from that
+  thread's image cache too.
 - **Text** (`text.rs`): a `TextLayout` is the engine's `text::lines::Frame`
   (TextKit's line layout), so it has what editing needs (the character at
   a point, carets with their secondary caret where directions meet,
