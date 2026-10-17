@@ -850,7 +850,11 @@ through the same protocol AppKit does, and keeps AppKit's rhythm:
   (TextKit's line layout), so it has what editing needs (the character at
   a point, carets with their secondary caret where directions meet,
   selection rectangles) as well as lines and size; its API takes byte
-  offsets of UTF-8 and converts to the frame's UTF-16 indexes.
+  offsets of UTF-8 and converts to the frame's UTF-16 indexes. A layout
+  limited to a number of lines can end the last with an ellipsis while
+  the lines before it wrap (`TextLayoutBuilder::ellipsis`: the frame's
+  container truncates its last line, as TextKit's does under
+  `maximumNumberOfLines`), for a list row's two-line description.
   `Canvas::draw_label` and `measure` go through string drawing's layout
   cache instead, for labels drawn pass after pass. Font files a program
   brings are installed in the shared font collection under their own

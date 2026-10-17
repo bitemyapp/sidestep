@@ -342,6 +342,7 @@ pub struct TextLayoutBuilder {
     alignment: Alignment,
     wrap: Wrap,
     max_lines: usize,
+    ellipsis: bool,
     line_spacing: f64,
     paragraph_spacing: f64,
     line_height_multiple: f64,
@@ -372,10 +373,20 @@ impl TextLayoutBuilder {
     }
 
     /// Lay out at most `lines` lines (0 for no limit); with
-    /// [`Wrap::Truncate`], the last one ends in an ellipsis if text is left
-    /// out.
+    /// [`Wrap::Truncate`] or an [`ellipsis`](Self::ellipsis), the last one
+    /// ends in an ellipsis if text is left out.
     pub fn max_lines(mut self, lines: usize) -> Self {
         self.max_lines = lines;
+        self
+    }
+
+    /// End the last line [`max_lines`](Self::max_lines) allows with an
+    /// ellipsis when the limit leaves text out, the lines before it
+    /// wrapping as [`wrap`](Self::wrap) says (between words, by default): a
+    /// list row's two lines of description, a notification's body. (With
+    /// [`Wrap::Truncate`] lines don't wrap, and each ends in one.)
+    pub fn ellipsis(mut self, on: bool) -> Self {
+        self.ellipsis = on;
         self
     }
 
@@ -456,7 +467,7 @@ impl TextLayoutBuilder {
         let container = Container {
             width: self.width.map_or(f32::INFINITY, |w| w as f32),
             max_lines: self.max_lines,
-            truncation: (self.wrap == Wrap::Truncate).then_some(LineBreak::TruncateTail),
+            truncation: (self.wrap == Wrap::Truncate || self.ellipsis).then_some(LineBreak::TruncateTail),
             ..Container::UNBOUNDED
         };
         let frame = Frame::new(Styled { text: &self.text, attrs: &attrs, spans: &spans }, container);
@@ -486,6 +497,7 @@ impl TextLayout {
             alignment: Alignment::Start,
             wrap: Wrap::Words,
             max_lines: 0,
+            ellipsis: false,
             line_spacing: 0.0,
             paragraph_spacing: 0.0,
             line_height_multiple: 0.0,
@@ -651,6 +663,36 @@ mod tests {
         let rects = layout.selection_rects(0..5);
         assert_eq!(rects.len(), 1);
         assert!((rects[0].x1 - caret.x).abs() < 0.5);
+    }
+
+    #[test]
+    fn wrapped_lines_end_in_an_ellipsis() {
+        let text = "A notification's body, long enough to need several lines at this width, cut at two.";
+        let cut = TextLayout::builder(text, &style()).width(120.0).max_lines(2).build();
+        let ellipsized = TextLayout::builder(text, &style()).width(120.0).max_lines(2).ellipsis(true).build();
+        let whole = TextLayout::wrapped(text, &style(), 120.0);
+        assert!(whole.lines().len() > 2);
+        let (cut, ellipsized) = (cut.lines(), ellipsized.lines());
+        assert_eq!((cut.len(), ellipsized.len()), (2, 2));
+        assert_eq!(cut[0], ellipsized[0], "the lines before the last wrap as without");
+        // The last line holds the rest of the text, cut short with an
+        // ellipsis within the width; without, it ends at a word.
+        assert!(cut[1].range.end < text.len() && ellipsized[1].range.end == text.len(), "{ellipsized:?}");
+        assert!(ellipsized[1].width <= 120.5, "{ellipsized:?}");
+        // Text that fits gets none.
+        let short = TextLayout::builder("Fits.", &style()).width(120.0).max_lines(2).ellipsis(true).build();
+        assert_eq!(short.lines().len(), 1);
+        assert_eq!(short.lines()[0].range, 0..5);
+        // Drawn, the ellipsis shows where the cut text's next word would.
+        let draw = |layout: &TextLayout| {
+            let image = crate::offscreen::render(Size::new(130.0, 40.0), 1.0, crate::Appearance::LIGHT, |c| {
+                c.draw_text(layout, Point::ZERO)
+            });
+            image.to_rgba8().expect("pixels")
+        };
+        let with = TextLayout::builder(text, &style()).width(120.0).max_lines(2).ellipsis(true).build();
+        let without = TextLayout::builder(text, &style()).width(120.0).max_lines(2).build();
+        assert!(draw(&with) != draw(&without));
     }
 
     #[test]
