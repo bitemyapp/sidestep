@@ -8,11 +8,11 @@
 //! - layer surfaces: a panel along the top that windows keep clear of
 //!   (sway tiles a window under it), a wallpaper sway sizes to the
 //!   output, both showing where they should; a click on the panel opening
-//!   a menu from it, which closes, and getting an activation token for a
-//!   program it would launch; the panel taking the keyboard when asked,
-//!   typed into, then growing, and windows making room; a window's
-//!   frames measured; the panel taking clicks only in its input region,
-//!   the wallpaper under it the others;
+//!   a menu from it, which shrinks and moves while open, then closes, and
+//!   getting an activation token for a program it would launch; the
+//!   panel taking the keyboard when asked, typed into, then growing, and
+//!   windows making room; a window's frames measured; the panel taking
+//!   clicks only in its input region, the wallpaper under it the others;
 //! - frame after frame of small damage all over a window, which with
 //!   sway holding the buffer shown has each buffer catch up with the
 //!   others: the screen is then exactly the last state drawn whole
@@ -327,6 +327,7 @@ mod linux {
         Showing,
         Pressed,
         Menu,
+        Moved,
         Closed,
         Keyboard,
         Typed,
@@ -419,6 +420,24 @@ mod linux {
                         return;
                     }
                     println!("  a menu from the panel, and an activation token");
+                    // Filtered as the user types, it shrinks; and it moves.
+                    let mut menu = cx.window(self.menu.expect("the menu")).expect("open");
+                    menu.request_size(Size::new(160.0, 48.0));
+                    menu.set_popup_anchor(Rect::new(300.0, 0.0, 360.0, 24.0));
+                    self.next(Step::Moved);
+                }
+                Step::Moved => {
+                    if self.size(cx, self.menu) != Some(Size::new(160.0, 48.0))
+                        || !Shot::take().shows(&[
+                            ((40, 30), GREEN),
+                            ((310, 30), MENU),
+                            ((450, 66), MENU),
+                            ((310, 100), GREEN),
+                        ])
+                    {
+                        return;
+                    }
+                    println!("  shrunk and moved while open");
                     // (Every surface on the output is the program's, so a click
                     // elsewhere would go to one of them rather than dismiss it.)
                     cx.close_window(self.menu.expect("the menu"));

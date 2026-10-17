@@ -529,6 +529,8 @@ pub struct Win {
     caret: Option<Rect>,
     /// Where the content takes pointer input, if not everywhere.
     input_region: Option<Vec<Rect>>,
+    /// The window a popup is placed against (0 for none).
+    popup_parent: WindowId,
     /// For `stats`: the time the frame's paints took to rasterize, and
     /// the device pixels they redrew.
     raster_time: std::time::Duration,
@@ -1158,6 +1160,7 @@ impl State {
                 raster_time: std::time::Duration::ZERO,
                 raster_pixels: 0.0,
                 input_region: None,
+                popup_parent: popup.map_or(0, |p| p.parent),
             },
         );
         self.apply_limits(window);
@@ -1172,8 +1175,9 @@ impl State {
 
     /// An xdg_popup below `placement.anchor` in its parent, grabbing input
     /// if asked (as menus do).
-    fn create_popup(&self, surface: &WlSurface, width: u32, height: u32, placement: PopupPlacement) -> Option<Popup> {
-        let parent = self.windows.get(&placement.parent)?;
+    /// Where a popup `width` × `height` points goes against `parent`, as
+    /// `placement` says.
+    fn positioner(&self, parent: &Win, width: u32, height: u32, placement: PopupPlacement) -> Option<XdgPositioner> {
         let positioner = XdgPositioner::new(&self.xdg).ok()?;
         let a = placement.anchor;
         // Positioners count from the parent's window geometry, which starts
@@ -1196,6 +1200,12 @@ impl State {
                 );
             }
         }
+        Some(positioner)
+    }
+
+    fn create_popup(&self, surface: &WlSurface, width: u32, height: u32, placement: PopupPlacement) -> Option<Popup> {
+        let parent = self.windows.get(&placement.parent)?;
+        let positioner = self.positioner(parent, width, height, placement)?;
         let parent_xdg = match &parent.shell {
             Shell::Toplevel(f) => Some(f.window.xdg_surface().clone()),
             Shell::Popup(p) => Some(p.xdg_surface().clone()),
@@ -1268,6 +1278,10 @@ impl State {
         if layer::request(self, window, request) {
             return;
         }
+        if let WindowRequest::Reposition(placement, width, height) = request {
+            self.reposition(window, placement, width, height);
+            return;
+        }
         if let WindowRequest::Activate = request {
             self.activate(window);
             return;
@@ -1310,8 +1324,25 @@ impl State {
             | WindowRequest::LayerAnchors(_)
             | WindowRequest::LayerExclusiveZone(_)
             | WindowRequest::LayerMargins(_)
-            | WindowRequest::LayerKeyboard(_) => {}
+            | WindowRequest::LayerKeyboard(_)
+            | WindowRequest::Reposition(..) => {}
         }
+    }
+
+    /// Place popup `window` anew, `width` × `height` points, as `placement`
+    /// says: the compositor configures it where it goes. Only with
+    /// xdg-shell 3 or later (xdg_popup.reposition); otherwise it stays.
+    fn reposition(&mut self, window: WindowId, placement: PopupPlacement, width: u32, height: u32) {
+        let Some(win) = self.windows.get(&window) else { return };
+        let Shell::Popup(popup) = &win.shell else { return };
+        let Some(parent) = self.windows.get(&win.popup_parent) else { return };
+        if popup.xdg_popup().version() < 3 {
+            return;
+        }
+        let Some(positioner) = self.positioner(parent, width, height, placement) else { return };
+        static TOKEN: AtomicU32 = AtomicU32::new(1);
+        popup.reposition(&positioner, TOKEN.fetch_add(1, Ordering::Relaxed));
+        positioner.destroy();
     }
 
     /// Ask for keyboard focus with xdg-activation, as the result of the

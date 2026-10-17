@@ -375,6 +375,9 @@ pub(crate) struct WindowData {
     /// The size a layer surface asked for, a side of 0 the compositor's
     /// to decide: what it's shown at again, whatever it was configured to.
     pub layer_size: Size,
+    /// The size last asked of an open popup, which a placement made
+    /// before the compositor answers asks for too.
+    pub popup_size: Option<Size>,
     /// Rectangles of the content to move at the next pass (points), and by
     /// how much, in order.
     pub scrolls: Vec<(Rect, Vec2)>,
@@ -413,6 +416,7 @@ impl WindowData {
             input_region: None,
             opaque_region: None,
             layer_size: options.size,
+            popup_size: None,
             scrolls: Vec::new(),
         }
     }
@@ -452,21 +456,26 @@ impl WindowData {
     /// Show the window on the render thread as showing `showing`; `parent`
     /// is the showing of the window it's a popup of or kept over, if that
     /// is shown.
-    pub fn show(&mut self, showing: u32, parent: Option<u32>, tx: &Sender<ToRender>) {
-        let popup = match self.kind {
+    /// A popup's placement against showing `parent`.
+    pub fn popup_placement(&self, parent: u32) -> Option<PopupPlacement> {
+        match self.kind {
             Kind::Popup { anchor, grab, position, .. } => Some(PopupPlacement {
-                parent: parent.unwrap_or(0),
+                parent,
                 anchor: protocol::Rect::new(anchor.x0 as f32, anchor.y0 as f32, anchor.x1 as f32, anchor.y1 as f32),
                 below: true,
                 grab,
                 layout: (position != PopupPosition::BELOW).then(|| position.layout()),
             }),
             Kind::Toplevel { .. } | Kind::Layer(_) | Kind::Lock { .. } => None,
-        };
+        }
+    }
+
+    pub fn show(&mut self, showing: u32, parent: Option<u32>, tx: &Sender<ToRender>) {
+        let popup = self.popup_placement(parent.unwrap_or(0));
         // A layer surface's side may be 0, the compositor's to decide (as
         // a lock surface's size is); it asks for what it asked for before.
         let least = if self.layer().is_some() || self.lock_output().is_some() { 0.0 } else { 1.0 };
-        let size = if self.layer().is_some() { self.layer_size } else { self.size };
+        let size = if self.layer().is_some() { self.layer_size } else { self.popup_size.unwrap_or(self.size) };
         send(
             tx,
             ToRender::CreateWindow {
@@ -759,7 +768,42 @@ impl Window<'_> {
         } else if self.data.showing.is_none() {
             self.data.size = size;
         }
+        // A popup is placed anew at its new size.
+        if let Some(placement) = self.data.popup_placement(0) {
+            self.data.popup_size = Some(size);
+            self.request(WindowRequest::Reposition(placement, size.width as u32, size.height as u32));
+            return;
+        }
         self.request(WindowRequest::Resize(size.width as u32, size.height as u32));
+    }
+
+    /// Place a popup anew against its anchor, as `position` says: the
+    /// compositor moves it (and configures it if it must resize it), as a
+    /// menu filtered as the user types shrinks. (xdg-shell 3: compositors
+    /// before it leave it where it is.) Nothing for other windows.
+    pub fn set_popup_position(&mut self, position: PopupPosition) {
+        if let Kind::Popup { position: p, .. } = &mut self.data.kind {
+            *p = position;
+            self.replace_popup();
+        }
+    }
+
+    /// Place a popup anew against another rectangle of its parent's
+    /// content (points), as [`set_popup_position`](Window::set_popup_position)
+    /// does.
+    pub fn set_popup_anchor(&mut self, anchor: Rect) {
+        if let Kind::Popup { anchor: a, .. } = &mut self.data.kind {
+            *a = anchor;
+            self.replace_popup();
+        }
+    }
+
+    fn replace_popup(&mut self) {
+        let size = self.data.popup_size.unwrap_or(self.data.size);
+        if let Some(placement) = self.data.popup_placement(0) {
+            let (w, h) = (size.width.round().max(1.0) as u32, size.height.round().max(1.0) as u32);
+            self.request(WindowRequest::Reposition(placement, w, h));
+        }
     }
 
     // Layer surfaces (see `layer_shell`); asked of other windows, these do

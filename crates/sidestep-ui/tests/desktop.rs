@@ -175,6 +175,19 @@ mod linux {
                     if !opened || !self.drawn(self.menu) {
                         return;
                     }
+                    // Filtered, it shrinks, and moves beside its anchor.
+                    let mut m = cx.window(self.menu.expect("the menu")).expect("open");
+                    m.request_size(Size::new(160.0, 48.0));
+                    m.set_popup_position(PopupPosition::BESIDE);
+                    self.step = 20;
+                }
+                20 => {
+                    if !self.saw(self.menu, &WindowEvent::Resized(Size::new(160.0, 48.0))) {
+                        return;
+                    }
+                    let menu = self.menu.and_then(|m| testing::showing_id(cx, m)).expect("shown");
+                    let placed = self.requests(menu);
+                    assert!(placed.iter().any(|r| r.starts_with("Reposition") && r.contains("TopRight")), "{placed:?}");
                     cx.close_window(self.menu.take().expect("the menu"));
                     // Placed anew while it shows: taller, kept off the
                     // output's sides, on the overlay layer, with a new zone,

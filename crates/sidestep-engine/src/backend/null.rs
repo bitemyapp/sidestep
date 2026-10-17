@@ -4,19 +4,19 @@
 //! It answers as a compositor would, at once and always the same way: a
 //! new window is configured at the size asked for, at scale 1, and a new
 //! toplevel gets the keyboard; an activation request gives the window the
-//! keyboard; a resize, maximize or full-screen request is configured; each
-//! present is shown at once (a frame). A layer surface is on an output
-//! [`OUTPUT`] big: a side it leaves to the compositor is the output's,
-//! less its margins, and it gets the keyboard if it takes it
-//! exclusively. A session lock is locked at once, and its surfaces are
-//! the output's size and take the keyboard. An activation token asked
-//! for another program is made up. Drawing is dropped, but for the colors
-//! and places of the text painted while a test asks for them
-//! (`testing::note_painted_text`). Everything else the main thread asks is
-//! written down for tests to read (`testing::take_render_log`), and input
-//! comes only from tests, which add messages to the main thread's inbox
-//! directly (`testing`), so a test decides exactly what the program sees
-//! and when.
+//! keyboard; a resize, maximize or full-screen request, or a popup placed
+//! anew, is configured; each present is shown at once (a frame). A layer
+//! surface is on an output [`OUTPUT`] big: a side it leaves to the
+//! compositor is the output's, less its margins, and it gets the keyboard
+//! if it takes it exclusively. A session lock is locked at once, and its
+//! surfaces are the output's size and take the keyboard. An activation
+//! token asked for another program is made up. Drawing is dropped, but
+//! for the colors and places of the text painted while a test asks for
+//! them (`testing::note_painted_text`). Everything else the main thread
+//! asks is written down for tests to read (`testing::take_render_log`),
+//! and input comes only from tests, which add messages to the main
+//! thread's inbox directly (`testing`), so a test decides exactly what the
+//! program sees and when.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -417,7 +417,7 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
                         }
                         placed(win, &|_| {});
                     }
-                    WindowRequest::Resize(w, h) => {
+                    WindowRequest::Resize(w, h) | WindowRequest::Reposition(_, w, h) => {
                         (win.width, win.height) = (w.max(1), h.max(1));
                         if let Some(all) = PIXELS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
                             all.insert(window, captured(win.width, win.height));

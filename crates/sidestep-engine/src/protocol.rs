@@ -509,6 +509,10 @@ pub enum WindowRequest {
     LayerExclusiveZone(i32),
     LayerMargins([i32; 4]),
     LayerKeyboard(LayerKeyboard),
+    /// Place a popup anew, `width` × `height` points (xdg_popup.reposition,
+    /// xdg-shell 3): against another anchor, another way, at another size.
+    /// The placement's parent and grab don't change.
+    Reposition(PopupPlacement, u32, u32),
 }
 
 /// The layers of a desktop's own surfaces (wlr-layer-shell), bottom to

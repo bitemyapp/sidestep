@@ -749,7 +749,14 @@ through the same protocol AppKit does, and keeps AppKit's rhythm:
   anew. Closing a window closes its popups first, as Wayland needs. A
   popup opens below its anchor unless a `PopupPosition` says otherwise
   (the positioner's anchor corner, gravity, offset, and flip, slide and
-  resize adjustments, `ResizeX` added to the protocol for it).
+  resize adjustments, `ResizeX` added to the protocol for it). An open
+  popup is placed anew (`Window::set_popup_position`, `set_popup_anchor`,
+  and `request_size`, which a popup takes as a placement at the new
+  size): `WindowRequest::Reposition` carries its placement and size, and
+  the render thread hands a new positioner to xdg_popup.reposition
+  (xdg-shell 3; before it the popup stays), whose configure resizes it.
+  A placement asked before the compositor answers the last keeps the
+  size last asked.
 - **Layer surfaces** (`layer_shell.rs`; the engine's `backend::layer`): a
   desktop's own panels, wallpapers and notifications, through
   wlr-layer-shell, are windows opened with `WindowOptions::layer`, whose
