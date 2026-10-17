@@ -246,6 +246,7 @@ impl std::fmt::Debug for Proxy {
 pub struct App {
     quit_when_last_window_closes: bool,
     momentum_scrolling: bool,
+    app_id: Option<String>,
 }
 
 impl Default for App {
@@ -268,7 +269,17 @@ impl Drop for Running {
 
 impl App {
     pub fn new() -> App {
-        App { quit_when_last_window_closes: true, momentum_scrolling: true }
+        App { quit_when_last_window_closes: true, momentum_scrolling: true, app_id: None }
+    }
+
+    /// The application's id to the compositor (xdg_toplevel's app id):
+    /// what desktops match its windows to its desktop entry, icon and
+    /// settings by, conventionally the entry's name without `.desktop`,
+    /// a reversed domain name (`org.example.Editor`). By default, the
+    /// program's file name.
+    pub fn app_id(mut self, id: impl Into<String>) -> App {
+        self.app_id = Some(id.into());
+        self
     }
 
     /// Stop running when the last open window closes (the default), or
@@ -301,6 +312,7 @@ impl App {
         let changed = wake.clone();
         settings::on_change(move || changed.wake());
         settings::start();
+        backend::set_app_id(self.app_id.clone());
         let render = wake.clone();
         let backend = backend::start(Arc::new(move || render.wake()));
         let mut cx = Cx {
@@ -327,6 +339,8 @@ impl App {
         handler.launched(&mut cx);
         let result = cx.run(&mut handler);
         cx.close_all();
+        // The next application in the process names itself.
+        backend::set_app_id(None);
         result.map(|()| handler)
     }
 }

@@ -1245,7 +1245,15 @@ sends it as operations), and nothing runs a subprocess to find a font.
 their own (sway). They're light or dark as the desktop prefers, as the
 views are (see [Colors and appearance](#colors-and-appearance)).
 `SIDESTEP_THEME=dark` or `light` (or a dark `GTK_THEME`) overrides the
-desktop for both.
+desktop for both. A titled toplevel asks for server-side decorations
+(zxdg_decoration_manager_v1) and draws none where they're granted;
+`tests/wayland_desktop.rs` checks under sway, which grants them, that the
+content shows from the window's top left.
+
+Toplevels are created with the program's name as their app id, which
+compositors match windows to desktop entries and icons by; a toolkit may
+name the application otherwise (`backend::set_app_id`, sidestep-ui's
+`App::app_id`), and activation tokens are asked for with the same id.
 
 A window keeps the settings programs give it (background color, level,
 shadow, alpha, collection behavior and the rest) and reads them back. The

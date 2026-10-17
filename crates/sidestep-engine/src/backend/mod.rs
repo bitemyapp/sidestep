@@ -1441,8 +1441,24 @@ impl State {
     }
 }
 
-/// The application id compositors group windows by: the program's name.
+/// The application id a toolkit set ([`set_app_id`]).
+static APP_ID: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// Name the application to the compositor from now on: the app id its
+/// toplevels are created with (xdg_toplevel's, which compositors match
+/// windows to their programs' icons and desktop entries by) and that its
+/// activation tokens are asked for with. `None`, the default, is the
+/// program's name.
+pub fn set_app_id(id: Option<String>) {
+    *APP_ID.write().unwrap_or_else(|e| e.into_inner()) = id.filter(|id| !id.is_empty());
+}
+
+/// The application id compositors group windows by: what was set, else
+/// the program's name.
 fn app_id() -> String {
+    if let Some(id) = APP_ID.read().unwrap_or_else(|e| e.into_inner()).clone() {
+        return id;
+    }
     std::env::current_exe()
         .ok()
         .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))

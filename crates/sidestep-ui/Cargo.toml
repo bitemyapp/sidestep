@@ -32,3 +32,9 @@ harness = false
 [[test]]
 name = "offscreen"
 harness = false
+
+# A desktop environment's surfaces under the headless sway: decorations,
+# app ids (see the file).
+[[test]]
+name = "wayland_desktop"
+harness = false
