@@ -8,10 +8,11 @@
 //! - layer surfaces: a panel along the top that windows keep clear of
 //!   (sway tiles a window under it), a wallpaper sway sizes to the
 //!   output, both showing where they should; a click on the panel opening
-//!   a menu from it, which closes; the panel taking the
-//!   keyboard when asked, typed into, then growing, and windows making
-//!   room; a window's frames measured; the panel taking clicks only in
-//!   its input region, the wallpaper under it the others;
+//!   a menu from it, which closes, and getting an activation token for a
+//!   program it would launch; the panel taking the keyboard when asked,
+//!   typed into, then growing, and windows making room; a window's
+//!   frames measured; the panel taking clicks only in its input region,
+//!   the wallpaper under it the others;
 //! - outputs as sway names and places them; one plugged in (heard of), a
 //!   panel put on it, and the output unplugged, which closes the panel;
 //! - the session locked (ext-session-lock) with a lock screen on the
@@ -177,6 +178,8 @@ mod linux {
         typing: bool,
         /// The step sent its input (it waits for what comes of it).
         asked: bool,
+        /// An activation token asked for, and what came.
+        token: Option<(ActivationRequest, Option<String>)>,
     }
 
     impl Layers {
@@ -234,12 +237,14 @@ mod linux {
                 }
                 // The menu below the press, over the window.
                 Step::Menu => {
+                    let Some((_, Some(token))) = &self.token else { return };
+                    assert!(!token.is_empty());
                     if self.size(cx, self.menu) != Some(Size::new(160.0, 120.0))
                         || !Shot::take().shows(&[((40, 30), MENU), ((180, 140), MENU), ((200, 30), GREEN)])
                     {
                         return;
                     }
-                    println!("  a menu from the panel");
+                    println!("  a menu from the panel, and an activation token");
                     // (Every surface on the output is the program's, so a click
                     // elsewhere would go to one of them rather than dismiss it.)
                     cx.close_window(self.menu.expect("the menu"));
@@ -357,6 +362,12 @@ mod linux {
     }
 
     impl Handler for Layers {
+        fn activation_token(&mut self, _cx: &mut Cx, request: ActivationRequest, token: Option<String>) {
+            assert_eq!(self.token.as_ref().map(|t| t.0), Some(request));
+            assert!(token.is_some(), "sway has xdg-activation");
+            self.token = Some((request, token));
+        }
+
         fn launched(&mut self, cx: &mut Cx) {
             let wallpaper = LayerOptions::new(Layer::Background, "wallpaper").anchors(Anchors::ALL).exclusive_zone(-1);
             self.wallpaper = Some(cx.open_window(WindowOptions::layer(wallpaper)));
@@ -378,6 +389,8 @@ mod linux {
             {
                 let anchor = Rect::new(30.0, 0.0, 90.0, 24.0);
                 self.menu = Some(cx.open_window(WindowOptions::popup(window, anchor, Size::new(160.0, 120.0), true)));
+                // And a token for a program it would launch.
+                self.token = Some((cx.request_activation_token(Some("org.example.Launched")), None));
             }
             self.events.entry(window).or_default().push(event);
         }
@@ -427,6 +440,7 @@ mod linux {
             pointer: tx,
             typing: has("wtype"),
             asked: false,
+            token: None,
         };
         let layers = App::new().run(layers).expect("a compositor");
         assert_eq!(layers.step, Step::Done, "every step ran");

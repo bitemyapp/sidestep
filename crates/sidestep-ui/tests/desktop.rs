@@ -5,8 +5,9 @@
 //! left, with their input and opaque regions, and a popup opened from
 //! the panel; outputs coming and going, and a panel put on one; the
 //! session locked with a lock screen, typed into and unlocked, and a lock
-//! the compositor ends; frames measured. Each step waits for its
-//! condition, polled by a timer, with a deadline.
+//! the compositor ends; frames measured; an activation token for another
+//! program. Each step waits for its condition, polled by a timer, with a
+//! deadline.
 
 fn main() {
     #[cfg(not(target_vendor = "apple"))]
@@ -71,6 +72,8 @@ mod linux {
         /// A panel on the second output.
         other: Option<WindowId>,
         outputs_changed: usize,
+        /// An activation token asked for, and what came.
+        token: Option<(ActivationRequest, Option<String>)>,
         /// The lock screen, and how often the session was locked and the
         /// lock finished.
         lock: Option<WindowId>,
@@ -308,14 +311,18 @@ mod linux {
                     }
                     assert!(self.lock.is_some_and(|l| cx.window(l).is_none()), "the lock screen closed");
                     assert!(!cx.is_session_locked());
-                    // Frames measured, the panel redrawn time after time.
+                    // Frames measured, the panel redrawn time after time; a
+                    // token asked for a program to launch.
                     cx.set_frame_stats(Some(Duration::from_millis(20)));
+                    self.token = Some((cx.request_activation_token(Some("org.example.Launched")), None));
                     self.step = 13;
                 }
                 13 => {
                     cx.window(bar).expect("the bar").redraw();
                     let stats = cx.frame_stats();
                     let Some(s) = stats.iter().find(|s| s.window == bar && s.frames >= 2) else { return };
+                    let Some((_, Some(token))) = &self.token else { return };
+                    assert!(token.starts_with("null-activation-"), "{token}");
                     println!("  {s:?}");
                     assert!(s.record.max > Duration::ZERO && s.rasterize.max > Duration::ZERO, "{s:?}");
                     assert!(s.total.max >= s.record.max.max(s.rasterize.max), "{s:?}");
@@ -356,6 +363,11 @@ mod linux {
 
         fn session_locked(&mut self, _cx: &mut Cx) {
             self.locked += 1;
+        }
+
+        fn activation_token(&mut self, _cx: &mut Cx, request: ActivationRequest, token: Option<String>) {
+            assert_eq!(self.token.as_ref().map(|t| t.0), Some(request));
+            self.token = Some((request, token));
         }
 
         fn session_lock_finished(&mut self, _cx: &mut Cx) {

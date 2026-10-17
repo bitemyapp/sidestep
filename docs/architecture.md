@@ -771,6 +771,13 @@ through the same protocol AppKit does, and keeps AppKit's rhythm:
   `tests/wayland_desktop.rs` checks a panel's exclusive zone tiles a
   window under it, a wallpaper fills the output, a menu opens from the
   panel's press, and the panel takes the keyboard and grows.
+- **Activation for others**: `Window::activate` asks for a token for
+  the program's own window and activates it; `Cx::request_activation_token`
+  asks for one (`RequestActivationToken`) for a program the program
+  launches (`app_id` the launched program's), with the latest input's
+  serial and the surface with the keyboard, and the handler hears it
+  (`activation_token`; none without xdg-activation) to hand on as
+  `XDG_ACTIVATION_TOKEN`. Under sway, a click on a panel gets one.
 - **Regions**: `Window::set_input_region` limits where a window's content
   takes pointer input (a panel's or a menu's shadow lets clicks through to
   what's behind), and `set_opaque_region` tells the compositor where it

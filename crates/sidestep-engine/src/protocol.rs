@@ -844,6 +844,14 @@ pub enum ToRender {
     LockSession,
     /// Unlock the session (or stop asking for a lock).
     UnlockSession,
+    /// Ask for an activation token (xdg-activation) for another program
+    /// to show its window with the keyboard, as the result of the latest
+    /// input, for the program with app id `app_id` if known: answered with
+    /// `FromRender::ActivationToken` under `request`.
+    RequestActivationToken {
+        request: u64,
+        app_id: Option<String>,
+    },
     /// Composite and copy a crop on the null render thread, then answer
     /// without involving the main thread. Other backends answer `None`.
     CaptureWindow {
@@ -1044,6 +1052,12 @@ pub enum FromRender {
     },
     /// The compositor locked the session, as `ToRender::LockSession` asked.
     SessionLocked,
+    /// The activation token `ToRender::RequestActivationToken` asked for
+    /// under `request`: none without xdg-activation.
+    ActivationToken {
+        request: u64,
+        token: Option<String>,
+    },
     /// The session lock is over without the program unlocking it: the
     /// compositor refused it (another program holds one, or it has no
     /// ext-session-lock) or ended it. Its surfaces show nothing more.

@@ -8,9 +8,10 @@
 //! present is shown at once (a frame). A layer surface is on an output
 //! [`OUTPUT`] big: a side it leaves to the compositor is the output's,
 //! less its margins, and it gets the keyboard if it takes it
-//! exclusively. A session lock is locked at once, and its surfaces are the
-//! output's size and take the keyboard. Drawing is dropped, but for the
-//! colors and places of the text painted while a test asks for them
+//! exclusively. A session lock is locked at once, and its surfaces are
+//! the output's size and take the keyboard. An activation token asked
+//! for another program is made up. Drawing is dropped, but for the colors
+//! and places of the text painted while a test asks for them
 //! (`testing::note_painted_text`). Everything else the main thread asks is
 //! written down for tests to read (`testing::take_render_log`), and input
 //! comes only from tests, which add messages to the main thread's inbox
@@ -378,6 +379,9 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
                 send(FromRender::SessionLocked);
             }
             ToRender::UnlockSession => note(Seen::SessionLock { locked: false }),
+            ToRender::RequestActivationToken { request, .. } => {
+                send(FromRender::ActivationToken { request, token: Some(format!("null-activation-{request}")) });
+            }
             ToRender::Request { window, request } => {
                 note(Seen::Request { window, request: format!("{request:?}") });
                 let Some(win) = windows.get_mut(&window) else { continue };

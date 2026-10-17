@@ -676,6 +676,7 @@ impl State {
             }
             ToRender::LockSession => lock::lock(self),
             ToRender::UnlockSession => lock::unlock(self),
+            ToRender::RequestActivationToken { request, app_id } => self.request_token(request, app_id),
             ToRender::SetTitle { window, title, text } => {
                 let Some(win) = self.windows.get_mut(&window) else { return };
                 if let Some(w) = win.toplevel() {
@@ -1123,10 +1124,33 @@ impl State {
         activation.request_token_with_data(
             &self.qh,
             Activation {
-                app_id: app_id(),
+                app_id: Some(app_id()),
                 seat_and_serial: self.seats.latest_serial(),
-                requester: focused.unwrap_or(win).main_surface().clone(),
-                target: win.main_surface().clone(),
+                requester: Some(focused.unwrap_or(win).main_surface().clone()),
+                target: Some(win.main_surface().clone()),
+                request: None,
+            },
+        );
+    }
+
+    /// Ask for an activation token for another program (`app_id`'s, if
+    /// known), as the result of the latest input, with the surface that has
+    /// the keyboard, if one of ours has it: the main thread hears it under
+    /// `request`, or that there's none.
+    fn request_token(&mut self, request: u64, app_id: Option<String>) {
+        let Some(activation) = &self.activation else {
+            self.send(FromRender::ActivationToken { request, token: None });
+            return;
+        };
+        let focused = self.seats.keyboard_window().and_then(|w| self.windows.get(&w));
+        activation.request_token_with_data(
+            &self.qh,
+            Activation {
+                app_id,
+                seat_and_serial: self.seats.latest_serial(),
+                requester: focused.map(|w| w.main_surface().clone()),
+                target: None,
+                request: Some(request),
             },
         );
     }
@@ -1785,17 +1809,18 @@ impl PopupHandler for State {
 }
 
 /// An activation token request: the surface that asks, and the one the
-/// token activates.
+/// token activates, or the main thread's request it answers.
 pub struct Activation {
-    app_id: String,
+    app_id: Option<String>,
     seat_and_serial: Option<(WlSeat, u32)>,
-    requester: WlSurface,
-    target: WlSurface,
+    requester: Option<WlSurface>,
+    target: Option<WlSurface>,
+    request: Option<u64>,
 }
 
 impl RequestDataExt for Activation {
     fn app_id(&self) -> Option<&str> {
-        Some(&self.app_id)
+        self.app_id.as_deref()
     }
 
     fn seat_and_serial(&self) -> Option<(&WlSeat, u32)> {
@@ -1803,7 +1828,7 @@ impl RequestDataExt for Activation {
     }
 
     fn surface(&self) -> Option<&WlSurface> {
-        Some(&self.requester)
+        self.requester.as_ref()
     }
 }
 
@@ -1811,8 +1836,10 @@ impl ActivationHandler for State {
     type RequestData = Activation;
 
     fn new_token(&mut self, token: String, data: &Activation) {
-        if let Some(activation) = &self.activation {
-            activation.activate::<State>(&data.target, token);
+        if let Some(request) = data.request {
+            self.send(FromRender::ActivationToken { request, token: Some(token) });
+        } else if let (Some(activation), Some(target)) = (&self.activation, &data.target) {
+            activation.activate::<State>(target, token);
         }
     }
 }

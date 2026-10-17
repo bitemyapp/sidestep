@@ -76,6 +76,13 @@ pub trait Handler {
         let _ = cx;
     }
 
+    /// The activation token asked for under `request`
+    /// ([`Cx::request_activation_token`]), or none: the compositor has no
+    /// xdg-activation.
+    fn activation_token(&mut self, cx: &mut Cx, request: ActivationRequest, token: Option<String>) {
+        let _ = (cx, request, token);
+    }
+
     /// The session lock ended without [`Cx::unlock_session`]: the
     /// compositor refused it (another program holds one, or it can't lock)
     /// or ended it. Its surfaces have closed.
@@ -174,6 +181,11 @@ impl From<DropAction> for DropResponse {
         DropResponse { action, mime: None, periodic: false }
     }
 }
+
+/// A request for an activation token, as [`Cx::request_activation_token`]
+/// returns it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ActivationRequest(u64);
 
 /// Where the program's session lock is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -359,6 +371,7 @@ impl App {
             drags: HashMap::new(),
             looks: (Appearance::system(), Appearance::system().color(SystemColor::Accent)),
             locking: Locking::Unlocked,
+            next_activation: 1,
         };
         handler.launched(&mut cx);
         let result = cx.run(&mut handler);
@@ -422,6 +435,7 @@ pub struct Cx {
     /// The appearance and accent windows last drew in.
     looks: (Appearance, Color),
     locking: Locking,
+    next_activation: u64,
 }
 
 impl Cx {
@@ -622,6 +636,24 @@ impl Cx {
     /// each part of a frame took.
     pub fn frame_stats(&self) -> Vec<FrameStats> {
         stats::latest().iter().filter_map(|s| Some(FrameStats::of(*self.showings.get(&s.window)?, s))).collect()
+    }
+
+    // Activation.
+
+    /// Ask the compositor for an activation token (xdg-activation) for a
+    /// program this one launches, to hand it as `XDG_ACTIVATION_TOKEN` in its
+    /// environment: its first window then comes up with the keyboard, as a
+    /// program launched from a launcher should. Ask while handling the input
+    /// that launches it (the click, the key), which the compositor grants the
+    /// token for; `app_id` is the launched program's, if known. The token
+    /// comes to the handler's [`activation_token`](Handler::activation_token).
+    /// (A window of this program asks for the keyboard itself:
+    /// [`Window::activate`].)
+    pub fn request_activation_token(&mut self, app_id: Option<&str>) -> ActivationRequest {
+        let request = self.next_activation;
+        self.next_activation += 1;
+        send(&self.backend.tx, ToRender::RequestActivationToken { request, app_id: app_id.map(str::to_owned) });
+        ActivationRequest(request)
     }
 
     // The session lock.
@@ -1057,6 +1089,9 @@ impl Cx {
             FromRender::ScreensChanged => handler.outputs_changed(self),
             // What's said of a lock the program gave up meanwhile finds
             // nothing.
+            FromRender::ActivationToken { request, token } => {
+                handler.activation_token(self, ActivationRequest(request), token);
+            }
             FromRender::SessionLocked => {
                 if self.locking == Locking::Asked {
                     self.locking = Locking::Locked;
