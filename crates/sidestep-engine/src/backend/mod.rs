@@ -1,10 +1,13 @@
 //! The render thread. It owns the Wayland connection and each window's
 //! surfaces:
 //!
-//! - the root layer is the content's surface, rasterized into a canvas and
-//!   presented through a few shared-memory buffers, copying and damaging only
-//!   what changed. A popup's, a sheet's or a layer surface's ([`layer`]) is
-//!   its own surface; a toplevel's is a subsurface of its frame ([`Frame`]);
+//! - the root layer is the content's surface, its paints rasterized at the
+//!   present straight into one of a few shared-memory buffers (a large one
+//!   in bands on several threads, `raster::bands`), which first catches up
+//!   with the one shown last where it missed frames, damaging only what
+//!   changed (see `State::draw_frame`). A popup's, a sheet's or a layer
+//!   surface's ([`layer`]) is its own surface; a toplevel's is a
+//!   subsurface of its frame ([`Frame`]);
 //! - a scroll layer is a grid of tiles, each on its own subsurface, cropped
 //!   to the scroll view with the viewporter, with an overlay above for the
 //!   views drawn over it ([`tiles`]). Scrolling moves tiles; a tile uploads
@@ -477,10 +480,14 @@ pub struct Win {
     px_width: u32,
     px_height: u32,
     configured: bool,
-    canvas: Vec<u32>,
-    /// Damage in device pixels.
+    /// The paints since the last present, drawn into a buffer when it
+    /// comes: their rectangles (points) and ops.
+    pending: Vec<(Vec<Rect>, Vec<Op>)>,
+    /// Their damage in device pixels.
     damage: Vec<Rect>,
     buffers: Vec<RootBuffer>,
+    /// The buffer presented last, which holds the window as it shows.
+    front: Option<usize>,
     layers: tiles::Layers,
     /// Counts presents; a frame callback names the present it belongs to.
     frame_seq: u64,
@@ -635,6 +642,80 @@ fn copy_rows(dst: &mut [u32], src: &[u32], width: u32, height: u32, r: &Rect, rg
         }
     }
     (x1 - x0) * (y1 - y0) * 4
+}
+
+/// A rectangle of device pixels, clamped to a `width` × `height` buffer:
+/// x0, y0, x1, y1.
+fn clamped(r: &Rect, width: u32, height: u32) -> (usize, usize, usize, usize) {
+    let r = r.round_out();
+    let x0 = r.x0.max(0.0) as usize;
+    let y0 = r.y0.max(0.0) as usize;
+    let x1 = (r.x1.min(width as f32).max(0.0) as usize).max(x0);
+    let y1 = (r.y1.min(height as f32).max(0.0) as usize).max(y0);
+    (x0, y0, x1, y1)
+}
+
+/// Fill a rectangle of device pixels with `pixel`.
+fn fill_rows(px: &mut [u32], width: u32, height: u32, r: &Rect, pixel: u32) {
+    let (x0, y0, x1, y1) = clamped(r, width, height);
+    let w = width as usize;
+    for y in y0..y1 {
+        px[y * w + x0..y * w + x1].fill(pixel);
+    }
+}
+
+/// Swap red and blue in rectangles of device pixels: canvas pixels to
+/// XRGB8888's, and back.
+fn swizzle(px: &mut [u32], width: u32, height: u32, rects: &[Rect]) {
+    let w = width as usize;
+    for r in rects {
+        let (x0, y0, x1, y1) = clamped(r, width, height);
+        for y in y0..y1 {
+            px[y * w + x0..y * w + x1].iter_mut().for_each(|p| *p = raster::to_xrgb(*p));
+        }
+    }
+}
+
+/// Copy rectangles of device pixels from buffer `from` (which the
+/// compositor may still be showing: it's only read) into buffer `to`, the
+/// same size, a row at a time through a row of scratch that stays in the
+/// cache.
+fn copy_between(pool: &mut SlotPool, from: &Buffer, to: &Buffer, width: u32, height: u32, rects: &[Rect]) {
+    let source = from.slot();
+    let w = width as usize;
+    let mut row = Vec::with_capacity(w);
+    for r in rects {
+        let (x0, y0, x1, y1) = clamped(r, width, height);
+        for y in y0..y1 {
+            row.clear();
+            row.extend_from_slice(&as_pixels(pool.raw_data_mut(&source))[y * w + x0..y * w + x1]);
+            let Some(bytes) = to.canvas(pool) else { return };
+            as_pixels(bytes)[y * w + x0..y * w + x1].copy_from_slice(&row);
+        }
+    }
+}
+
+/// The device pixels a frame's first paint replaces before it draws over
+/// what's there: those its leading ops fill replacing what's there, or
+/// with an opaque color. (Later paints may draw over pixels an earlier
+/// one blended with.)
+fn replaced(pending: &[(Vec<Rect>, Vec<Op>)], width: u32, height: u32, scale: f64) -> Vec<Rect> {
+    let Some((rects, ops)) = pending.first() else { return Vec::new() };
+    let probe = Canvas::new(&mut [], width, height, 0.0, scale as f32);
+    let mut replaced = Vec::new();
+    for op in ops {
+        let rect = match op {
+            Op::FillWith { rect, blend: crate::protocol::Blend::Copy | crate::protocol::Blend::Clear, .. } => rect,
+            Op::Fill { rect, color } if raster::opaque(*color) => rect,
+            _ => break,
+        };
+        for paint in rects {
+            if let Some((x0, y0, x1, y1)) = probe.pixels(&rect.intersect(paint)) {
+                replaced.push(Rect::new(x0 as f32, y0 as f32, x1 as f32, y1 as f32));
+            }
+        }
+    }
+    replaced
 }
 
 /// A shared-memory buffer's bytes as pixels. Pool slots are page-aligned.
@@ -928,9 +1009,10 @@ impl State {
                 px_width: 0,
                 px_height: 0,
                 configured: false,
-                canvas: Vec::new(),
+                pending: Vec::new(),
                 damage: Vec::new(),
                 buffers: Vec::new(),
+                front: None,
                 layers: tiles::Layers::default(),
                 frame_seq: 0,
                 frame_signalled: false,
@@ -1168,8 +1250,10 @@ impl State {
             win.height = height;
             win.px_width = pw;
             win.px_height = ph;
-            win.canvas = vec![BACKGROUND; (pw * ph) as usize];
+            // What was painted at the old size goes with its buffers.
+            win.pending.clear();
             win.buffers.clear();
+            win.front = None;
             win.damage.clear();
             // The main thread draws it all again; layer trees wait for that.
             win.held = true;
@@ -1244,27 +1328,16 @@ impl State {
         }
     }
 
-    /// Paint `rects` of the window's own canvas.
+    /// Paint `rects` of the window's own surface: drawn into a buffer at
+    /// the next present (see `present`).
     fn paint(&mut self, window: WindowId, rects: Vec<Rect>, ops: Vec<Op>) {
         let Some(win) = self.windows.get_mut(&window) else { return };
         if !win.configured {
             return;
         }
         let scale = win.scale;
-        let started = crate::stats::on().then(std::time::Instant::now);
-        let mut canvas = Canvas::new(&mut win.canvas, win.px_width, win.px_height, 0.0, scale as f32);
-        if crate::trace::tracing_tiles() {
-            raster::paint_timed(&mut canvas, &mut self.glyphs, &rects, &ops, window);
-        } else {
-            raster::paint(&mut canvas, &mut self.glyphs, &rects, &ops);
-        }
         win.damage.extend(rects.iter().map(|r| to_px(r, scale)));
-        if let Some(started) = started {
-            win.raster_time += started.elapsed();
-            let area = |r: Rect| f64::from((r.x1 - r.x0).max(0.0)) * f64::from((r.y1 - r.y0).max(0.0));
-            let bounds = Rect::new(0.0, 0.0, win.px_width as f32, win.px_height as f32);
-            win.raster_pixels += rects.iter().map(|r| area(to_px(r, scale).intersect(&bounds))).sum::<f64>();
-        }
+        win.pending.push((rects, ops));
     }
 
     /// A frame the main thread sent was presented, taking `took`, of
@@ -1393,10 +1466,14 @@ impl State {
     /// compositor takes it, else swizzled to XRGB8888. The formats arrive
     /// as events after wl_shm is bound, so this is decided when the first
     /// buffer is made (a window is configured by then, so they're in), and
-    /// kept: every buffer has the same format.
+    /// kept: every buffer has the same format. `SIDESTEP_SHM_FORMAT=xrgb8888`
+    /// takes XRGB8888 regardless, to try the swizzling.
     fn rgba(&mut self) -> bool {
         let shm = &self.shm;
-        *self.rgba.get_or_insert_with(|| shm.formats().contains(&wl_shm::Format::Xbgr8888))
+        *self.rgba.get_or_insert_with(|| {
+            let xrgb = std::env::var("SIDESTEP_SHM_FORMAT").is_ok_and(|f| f.eq_ignore_ascii_case("xrgb8888"));
+            !xrgb && shm.formats().contains(&wl_shm::Format::Xbgr8888)
+        })
     }
 
     fn present(&mut self, window: WindowId) {
@@ -1414,40 +1491,95 @@ impl State {
             tiles::trace(window, &layers, &win.damage);
         }
         if !win.damage.is_empty() {
-            let damage = std::mem::take(&mut win.damage);
-            let free = win.buffers.iter().position(|b| b.buffer.canvas(&mut self.pool).is_some());
-            let index = match free {
-                Some(i) => i,
-                None => {
-                    let (buffer, _) = self
-                        .pool
-                        .create_buffer(win.px_width as i32, win.px_height as i32, win.px_width as i32 * 4, format(rgba))
-                        .expect("sidestep: window buffer");
-                    let full = Rect::new(0.0, 0.0, win.px_width as f32, win.px_height as f32);
-                    win.buffers.push(RootBuffer { buffer, stale: vec![full] });
-                    win.buffers.len() - 1
-                }
-            };
-            // As tiles' buffers do (see `tiles`).
-            let mut stale: Vec<&mut Vec<Rect>> = win.buffers.iter_mut().map(|b| &mut b.stale).collect();
-            let stale = tiles::pass_on(&mut stale, index, &damage);
-            let surface = win.surface().clone();
-            let target = &mut win.buffers[index];
-            let pixels = as_pixels(target.buffer.canvas(&mut self.pool).expect("free buffer"));
-            for r in tiles::missed(&stale, &damage) {
-                copy_rows(pixels, &win.canvas, win.px_width, win.px_height, r, rgba);
-            }
-            target.buffer.attach_to(&surface).expect("sidestep: attach window buffer");
-            for r in &damage {
-                let r = r.round_out();
-                surface.damage_buffer(r.x0 as i32, r.y0 as i32, (r.x1 - r.x0) as i32, (r.y1 - r.y0) as i32);
-            }
-            win.viewport.set_destination(win.width as i32, win.height as i32);
+            self.draw_frame(window, rgba);
         }
         self.place_decorations(window);
         let Some(win) = self.windows.get(&window) else { return };
         win.surface().frame(&self.qh, FrameTag { window, seq });
         win.commit();
+    }
+
+    /// Draw the paints since the last present straight into a buffer, and
+    /// attach it with their damage. The buffer is the one presented last
+    /// if the compositor is done with it (as compositors that copy shared
+    /// memory into textures are at once), else another it's done with,
+    /// else a new one; one other than the last must first catch up with
+    /// it where it missed frames (each buffer keeps where it does), except
+    /// where the paints replace what's there outright before drawing over
+    /// it (a canvas clears what it redraws first). Without XBGR8888 the
+    /// buffers hold XRGB8888, and the damage is turned to canvas pixels for
+    /// drawing and back.
+    fn draw_frame(&mut self, window: WindowId, rgba: bool) {
+        let format = format(rgba);
+        let State { windows, pool, glyphs, .. } = self;
+        let Some(win) = windows.get_mut(&window) else { return };
+        let damage = std::mem::take(&mut win.damage);
+        let pending = std::mem::take(&mut win.pending);
+        let (width, height, scale) = (win.px_width, win.px_height, win.scale);
+        let free = |b: &RootBuffer, pool: &mut SlotPool| b.buffer.canvas(pool).is_some();
+        let front = win.front.filter(|&f| free(&win.buffers[f], pool));
+        let index = match front.or_else(|| win.buffers.iter().position(|b| free(b, pool))) {
+            Some(i) => i,
+            None => {
+                let (buffer, _) = pool
+                    .create_buffer(width as i32, height as i32, width as i32 * 4, format)
+                    .expect("sidestep: window buffer");
+                let full = Rect::new(0.0, 0.0, width as f32, height as f32);
+                win.buffers.push(RootBuffer { buffer, stale: vec![full] });
+                win.buffers.len() - 1
+            }
+        };
+        let mut stale: Vec<&mut Vec<Rect>> = win.buffers.iter_mut().map(|b| &mut b.stale).collect();
+        let stale = tiles::pass_on(&mut stale, index, &damage);
+        let replaced = replaced(&pending, width, height, scale);
+        let repair: Vec<Rect> = stale.into_iter().filter(|s| !replaced.iter().any(|r| r.intersect(s) == *s)).collect();
+        match win.front {
+            Some(last) if last != index => {
+                let (from, to) = (&win.buffers[last].buffer, &win.buffers[index].buffer);
+                copy_between(pool, from, to, width, height, &repair);
+            }
+            Some(_) => {}
+            // The first frame at this size: what it doesn't draw is the
+            // background.
+            None => {
+                let px = as_pixels(win.buffers[index].buffer.canvas(pool).expect("a free buffer"));
+                let ground = if rgba { BACKGROUND } else { raster::to_xrgb(BACKGROUND) };
+                for r in &repair {
+                    fill_rows(px, width, height, r, ground);
+                }
+            }
+        }
+        let started = crate::stats::on().then(std::time::Instant::now);
+        let px = as_pixels(win.buffers[index].buffer.canvas(pool).expect("a free buffer"));
+        if !rgba {
+            swizzle(px, width, height, &damage);
+        }
+        let mut canvas = Canvas::new(&mut px[..(width * height) as usize], width, height, 0.0, scale as f32);
+        for (rects, ops) in &pending {
+            if crate::trace::tracing_tiles() {
+                raster::paint_timed(&mut canvas, glyphs, rects, ops, window);
+            } else {
+                // A large paint on several threads.
+                raster::bands::paint_banded(&mut canvas, glyphs, rects, ops);
+            }
+        }
+        if !rgba {
+            swizzle(px, width, height, &damage);
+        }
+        if let Some(started) = started {
+            win.raster_time += started.elapsed();
+            let area = |r: &Rect| f64::from((r.x1 - r.x0).max(0.0)) * f64::from((r.y1 - r.y0).max(0.0));
+            let bounds = Rect::new(0.0, 0.0, width as f32, height as f32);
+            win.raster_pixels += damage.iter().map(|r| area(&r.intersect(&bounds))).sum::<f64>();
+        }
+        win.front = Some(index);
+        let surface = win.surface().clone();
+        win.buffers[index].buffer.attach_to(&surface).expect("sidestep: attach window buffer");
+        for r in &damage {
+            let r = r.round_out();
+            surface.damage_buffer(r.x0 as i32, r.y0 as i32, (r.x1 - r.x0) as i32, (r.y1 - r.y0) as i32);
+        }
+        win.viewport.set_destination(win.width as i32, win.height as i32);
     }
 
     /// Set the window geometry, size the frame and place the content in it,

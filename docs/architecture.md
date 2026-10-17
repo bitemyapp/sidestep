@@ -1563,8 +1563,11 @@ compositor.
 - **Rasterizing.** Canvases hold premultiplied RGBA, tiny-skia's format,
   which buffers show as they are where the compositor takes XBGR8888
   (wlroots, Mutter and KWin do; the formats are read once they've
-  arrived, at the first buffer), and swizzled to XRGB8888 in the same
-  copy otherwise. Each operation draws into a scratch copy of just the
+  arrived, at the first buffer), and otherwise as XRGB8888, swizzled in
+  place around drawing (`SIDESTEP_SHM_FORMAT=xrgb8888` asks for that
+  anyway). A fill painted over whole by the opaque fill after it (a pass
+  clears what it redraws, then a view fills its background) is left out.
+  Each operation draws into a scratch copy of just the
   pixels it can reach, so a clip rectangle needs no mask; a clip path's
   mask is kept while the next operations ask for the same one. The 29
   compositing operations map onto tiny-skia's blend modes, except
@@ -2526,16 +2529,69 @@ line for each window that showed frames: how many, and the median, 95th
 percentile and slowest, in microseconds, of recording it on the main
 thread (sidestep-ui notes how long its display pass drew and made ops
 before sending the present; AppKit notes nothing), rasterizing its paints
-of the window's surface, and presenting it (layer trees drawn for it,
-copying the changed pixels into a buffer, decorations, the commit), of
+of the window's surface into a buffer, and presenting it (catching the
+buffer up with the last, layer trees drawn for it, decorations, the
+commit), of
 the three together, and how much of the window it redrew. The render
 thread pairs each present with the recording the main thread noted for
 it, in order; frames it draws on its own aren't counted. sidestep-ui's
 `Cx::set_frame_stats` measures without printing, summarizing every period
 it asks for, and `Cx::frame_stats` reads the latest summaries. Off, each
-measuring point is one relaxed atomic load. In a release build under the
-headless sway, a 1280 × 776 point window redrawn whole at scale 1 takes
-about 4 µs to record, 0.2 ms to rasterize and 0.5 ms to present.
+measuring point is one relaxed atomic load.
+
+#### Frame time
+
+A desktop that holds frames to 4 ms (Aizome's budget) needs a whole
+window's repaint at scale 2 well inside it. `sidestep-ui`'s
+`tests/frame_budget.rs` measures one under the headless sway, in a
+release build: a window tiled over the output with plain content (a
+background, a sidebar, 93 labels, six rounded rectangles) drawn whole
+frame after frame for three seconds, then only a caret's rectangle for
+three more, with `SIDESTEP_FRAME_STATS`'s numbers printed. On an 8-core
+Core Ultra 7 365 laptop (a busy one: other builds held its load average
+between 13 and 18 throughout, so the 95th percentiles are generous):
+
+| 1440 × 900 points | before | after |
+|---|---|---|
+| at 2×, whole: rasterize p50 / p95 | 3.5–5.0 / 6.2–8.8 ms | 0.86 / 2.0–3.1 ms |
+| at 2×, whole: present p50 / p95 | 1.6–2.0 / 2.2–7.7 ms | 0.02 / 0.03 ms |
+| at 2×, whole: total p50 / p95 | 5.2–7.5 / 8.8–16.3 ms | 0.93 / 2.2–3.5 ms |
+| at 1×, whole: total p50 / p95 | 1.8 / 3.0 ms | 0.67–0.72 / 1.1–1.3 ms |
+| at 2×, a caret: total p50 / p95 | 0.08 / 0.09–0.14 ms | 0.08 / 0.09 ms |
+
+Three things made the difference, each measured on its own first
+(`sidestep-ui`'s `timing_whole_window_rasterizing` times rasterizing
+the same window by kind of op; with `SIDESTEP_TRACE_FRAMES=tiles` a slow
+paint names its slowest ops):
+
+- **Drawing straight into the buffer.** The window's paints were
+  rasterized into a canvas of its own as they came and copied into a
+  shared-memory buffer at the present, 20 MB read and written for a
+  whole window at 2×. They now wait for the present and are rasterized
+  into the buffer itself: the one presented last if the compositor is
+  done with it (as compositors that copy shared memory into textures are
+  at once), else one it's done with, which first catches up with the
+  last where it missed frames (each buffer keeps where, as tiles'
+  buffers do), except where the frame's first paint replaces what's
+  there before drawing over it (a pass clears what it redraws first).
+  So a frame after a whole repaint, on a compositor that keeps the last
+  buffer until the next comes (pixman's sway), still copies the rest of
+  the window once; one that doesn't (GL compositors) copies nothing.
+- **Not filling twice.** Every pass cleared what it redrew to the
+  window's background, and then the view filled its own background over
+  it: two full writes of 20 MB at 2×, 1.6 ms each. A fill painted over
+  whole by the opaque fill after it is now left out (`ops::overdrawn`):
+  the same pixels.
+- **Bands on several threads.** A paint covering 2¹⁸ pixels or more is
+  rasterized in bands of rows on the render thread and up to three
+  workers (`raster::bands`), each band drawing every op clipped to its
+  rows. Fills and glyphs come out the same however the rows are cut, but
+  tiny-skia's antialiased paths don't quite (a cut through one moves its
+  edge coverage by a few levels), so cuts are made where no path, clip
+  path or slow fill is drawn, at the nearer edge of what spans the ideal
+  place; ops that read pixels outside their own (shadows) or need an
+  image cache (images, image masks) keep a paint on one thread. Tests
+  hold banded paints to one thread's, pixel for pixel.
 
 ### Core Animation
 

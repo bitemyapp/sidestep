@@ -13,6 +13,10 @@
 //!   typed into, then growing, and windows making room; a window's
 //!   frames measured; the panel taking clicks only in its input region,
 //!   the wallpaper under it the others;
+//! - frame after frame of small damage all over a window, which with
+//!   sway holding the buffer shown has each buffer catch up with the
+//!   others: the screen is then exactly the last state drawn whole
+//!   offscreen;
 //! - outputs as sway names and places them; one plugged in (heard of), a
 //!   panel put on it, and the output unplugged, which closes the panel;
 //! - the session locked (ext-session-lock) with a lock screen on the
@@ -144,6 +148,78 @@ mod linux {
             assert_eq!((output.scale, output.integer_scale), (1.0, 1));
             assert!(output.description.is_some() && !output.make.is_empty() && !output.model.is_empty());
             self.checked = true;
+            cx.quit();
+        }
+    }
+
+    /// The cells of `Buffers`' grid, 8 by 4, each recolored by a frame.
+    const CELLS: usize = 32;
+
+    fn cell_color(n: usize) -> Color {
+        Color::rgb8((n * 37 % 256) as u8, (n * 91 % 256) as u8, (n * 53 % 256) as u8)
+    }
+
+    /// `Buffers`' grid with each cell last recolored in frame `colors[cell]`.
+    fn draw_cells(canvas: &mut Canvas, colors: &[usize]) {
+        let size = canvas.size();
+        let (w, h) = (size.width / 8.0, size.height / 4.0);
+        for (i, &n) in colors.iter().enumerate() {
+            let (x, y) = ((i % 8) as f64 * w, (i / 8) as f64 * h);
+            canvas.fill_rect(Rect::new(x, y, x + w, y + h), cell_color(n));
+            let style = TextStyle::new(Font::system(14.0), Color::WHITE);
+            canvas.draw_label(&format!("{n}"), &style, Point::new(x + 6.3, y + 5.5));
+        }
+    }
+
+    /// A window that recolors one cell of a grid a frame, in an order that
+    /// leaves each buffer behind by a different part (as a compositor that
+    /// holds the buffer shown keeps several in use), shows exactly what
+    /// drawing the last state whole draws offscreen.
+    struct Buffers {
+        started: Instant,
+        window: Option<WindowId>,
+        colors: Vec<usize>,
+        frame: usize,
+        done: bool,
+    }
+
+    impl Handler for Buffers {
+        fn launched(&mut self, cx: &mut Cx) {
+            self.window = Some(cx.open_window(WindowOptions::new("Buffers")));
+            cx.set_repeating_timer(Duration::from_millis(20));
+        }
+
+        fn draw(&mut self, cx: &mut Cx, window: WindowId, canvas: &mut Canvas) {
+            draw_cells(canvas, &self.colors);
+            if self.frame < 60 {
+                // Next frame, the next cell, as far from the last as can be.
+                self.frame += 1;
+                let cell = self.frame * 13 % CELLS;
+                self.colors[cell] = self.frame;
+                let size = canvas.size();
+                let (w, h) = (size.width / 8.0, size.height / 4.0);
+                let (x, y) = ((cell % 8) as f64 * w, (cell / 8) as f64 * h);
+                if let Some(mut win) = cx.window(window) {
+                    win.invalidate(Rect::new(x, y, x + w, y + h));
+                }
+            }
+        }
+
+        fn timer(&mut self, cx: &mut Cx, _timer: TimerId) {
+            assert!(self.started.elapsed() < DEADLINE, "the grid never settled");
+            if self.frame < 60 {
+                return;
+            }
+            let expected = offscreen::render(OUTPUT, 1.0, Appearance::LIGHT, |c| draw_cells(c, &self.colors));
+            let expected = expected.to_rgba8().expect("pixels");
+            let shot = Shot::take();
+            let differ = shot.pixels.chunks(4).zip(expected.chunks(4)).filter(|(a, b)| a[..3] != b[..3]).count();
+            if differ > 0 {
+                // The last frame may not have shown yet.
+                return;
+            }
+            println!("  60 frames of small damage, buffers caught up: the screen is the last state, exactly");
+            self.done = true;
             cx.quit();
         }
     }
@@ -425,6 +501,9 @@ mod linux {
         let toplevel = Toplevel { started: Instant::now(), drawn: false, checked: false };
         let toplevel = App::new().app_id("org.sidestep.DesktopTest").run(toplevel).expect("a compositor");
         assert!(toplevel.checked);
+
+        let buffers = Buffers { started: Instant::now(), window: None, colors: vec![0; CELLS], frame: 0, done: false };
+        assert!(App::new().run(buffers).expect("a compositor").done);
 
         let (tx, rx) = mpsc::channel();
         let pointing = std::thread::spawn(move || pointer::run(rx));

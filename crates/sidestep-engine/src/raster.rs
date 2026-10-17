@@ -15,6 +15,7 @@
 //! `text::raster`; everything else (paths, strokes, images, gradients,
 //! blend modes, groups, shadows) in [`ops`].
 
+pub mod bands;
 pub mod effects;
 pub mod images;
 pub mod ops;
@@ -94,6 +95,12 @@ pub fn premultiplied(c: Color) -> u32 {
     let a = c[3].clamp(0.0, 1.0);
     let ch = |v: f32| (v.clamp(0.0, 1.0) * a * 255.0 + 0.5) as u8;
     u32::from_ne_bytes([ch(c[0]), ch(c[1]), ch(c[2]), (a * 255.0 + 0.5) as u8])
+}
+
+/// Whether `fill` draws `c` opaque: replacing what's under it.
+#[inline]
+pub fn opaque(c: Color) -> bool {
+    (c[3].clamp(0.0, 1.0) * 255.0 + 0.5) as u32 >= 255
 }
 
 /// A canvas pixel's bytes: red, green, blue, alpha (premultiplied).
@@ -177,6 +184,11 @@ pub fn paint_timed(canvas: &mut Canvas, glyphs: &mut Glyphs, rects: &[Rect], ops
                         break;
                     }
                 }
+            }
+            // As `ops::run` leaves out a fill painted over whole.
+            if end == i + 1 && ops::overdrawn(canvas, rect, &ops[i], ops.get(end)) {
+                i = end;
+                continue;
             }
             let t = std::time::Instant::now();
             ops::run(canvas, glyphs, rect, &ops[i..end]);

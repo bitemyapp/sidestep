@@ -1293,9 +1293,10 @@ pub struct FrameStats {
     /// Drawing (the handler's [`draw`](Handler::draw), recording ops) on
     /// the application's thread.
     pub record: FrameTiming,
-    /// Rasterizing what was drawn, on the render thread.
+    /// Rasterizing what was drawn into a buffer for the compositor, on
+    /// the render thread.
     pub rasterize: FrameTiming,
-    /// Copying the changed pixels into a buffer for the compositor, and
+    /// Bringing the buffer up to date where it missed earlier frames, and
     /// committing it.
     pub present: FrameTiming,
     /// The three, frame by frame.

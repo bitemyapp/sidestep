@@ -148,4 +148,88 @@ mod tests {
         );
         assert!(warm < 1.0 && new < 1.0, "{warm} ms, {new} ms");
     }
+
+    /// A window's plain content, as `tests/frame_budget.rs` draws it, its
+    /// damage cleared first as a window's pass clears it.
+    pub(crate) fn plain_window(size: Size, scale: f64) -> Vec<protocol::Op> {
+        use kurbo::RoundedRect;
+        let bounds = protocol::Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
+        let mut c = Canvas::new(size, scale, vec![bounds], Some(Color::hex(0x202020)), Appearance::DARK);
+        c.fill_rect(Rect::from_origin_size(Point::ZERO, size), Color::hex(0x1b1d23));
+        c.fill_rect(Rect::new(0.0, 0.0, 220.0, size.height), Color::hex(0x23262e));
+        let label = TextStyle::new(Font::system(13.0), Color::hex(0xd8dce4));
+        let dim = TextStyle::new(Font::system(11.0), Color::hex(0x8a90a0));
+        let mut y = 12.0;
+        while y < size.height - 20.0 {
+            c.draw_label("Sidebar item", &label, Point::new(16.0, y));
+            c.draw_label("Soroban — a row of a list, with its details", &label, Point::new(240.0, y));
+            c.draw_label("12:41", &dim, Point::new(size.width - 60.0, y + 1.0));
+            y += 28.0;
+        }
+        for i in 0..6 {
+            let x = 260.0 + f64::from(i) * 140.0;
+            c.fill(&RoundedRect::new(x, 60.0, x + 120.0, 140.0, 8.0), Color::hex(0x3a6ea5));
+        }
+        c.finish().0
+    }
+
+    /// A window drawn in bands on several threads is the pixels one thread
+    /// draws: fills, glyphs and rounded rectangles, at whole and
+    /// fractional scales, whole and in part.
+    #[test]
+    fn bands_draw_windows_as_one_thread_does() {
+        let size = Size::new(1440.0, 900.0);
+        for scale in [1.0, 1.5, 2.0] {
+            let ops = plain_window(size, scale);
+            let (w, h) = ((size.width * scale).ceil() as u32, (size.height * scale).ceil() as u32);
+            for damage in [
+                protocol::Rect::new(0.0, 0.0, size.width as f32, size.height as f32),
+                protocol::Rect::new(100.0, 33.5, 1300.0, 870.25),
+            ] {
+                let (mut one, mut banded) = (vec![0u32; (w * h) as usize], vec![0u32; (w * h) as usize]);
+                let mut canvas = raster::Canvas::new(&mut one, w, h, 0.0, scale as f32);
+                raster::paint(&mut canvas, &mut Glyphs::default(), &[damage], &ops);
+                let mut canvas = raster::Canvas::new(&mut banded, w, h, 0.0, scale as f32);
+                raster::bands::paint_banded(&mut canvas, &mut Glyphs::default(), &[damage], &ops);
+                let differ = one.iter().zip(&banded).filter(|(a, b)| a != b).count();
+                assert_eq!(differ, 0, "{differ} pixels differ at scale {scale} in {damage:?}");
+            }
+        }
+    }
+
+    /// What rasterizing a whole 1440 × 900 point window takes, by kind of
+    /// op: `cargo test --release -p sidestep-ui timing_whole -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn timing_whole_window_rasterizing() {
+        use sidestep_engine::protocol::Op;
+        let size = Size::new(1440.0, 900.0);
+        for scale in [1.0, 2.0] {
+            let ops = plain_window(size, scale);
+            let (w, h) = ((size.width * scale) as u32, (size.height * scale) as u32);
+            let mut px = vec![0u32; (w * h) as usize];
+            let all = protocol::Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
+            let mut glyphs = Glyphs::default();
+            let mut time = |ops: &[Op]| {
+                sidestep_engine::backend::median(|| {
+                    let mut canvas = raster::Canvas::new(&mut px, w, h, 0.0, scale as f32);
+                    raster::paint(&mut canvas, &mut glyphs, &[all], ops);
+                })
+            };
+            let kind = |f: fn(&Op) -> bool| ops.iter().filter(|op| f(op)).cloned().collect::<Vec<Op>>();
+            let whole = time(&ops);
+            let fills = time(&kind(|op| matches!(op, Op::Fill { .. } | Op::FillWith { .. })));
+            let glyph_runs = time(&kind(|op| matches!(op, Op::Glyphs(_))));
+            let paths = time(&kind(|op| matches!(op, Op::FillPath { .. })));
+            let mut warm = Glyphs::default();
+            let banded = sidestep_engine::backend::median(|| {
+                let mut canvas = raster::Canvas::new(&mut px, w, h, 0.0, scale as f32);
+                raster::bands::paint_banded(&mut canvas, &mut warm, &[all], &ops);
+            });
+            println!(
+                "{w} × {h} pixels: {whole:.2} ms ({banded:.2} ms in bands); fills {fills:.2} ms, {} glyph runs {glyph_runs:.2} ms, paths {paths:.2} ms",
+                kind(|op| matches!(op, Op::Glyphs(_))).len()
+            );
+        }
+    }
 }

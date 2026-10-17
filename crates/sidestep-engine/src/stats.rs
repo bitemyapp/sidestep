@@ -5,10 +5,11 @@
 //! every five seconds, a line for each window that showed frames: how
 //! many, and the median, 95th percentile and slowest of each part of a
 //! frame in microseconds (recording its drawing on the main thread,
-//! rasterizing it on the render thread, presenting it: copying the
-//! changed pixels into a buffer and committing), of the whole, and how
-//! much of the window it redrew. A toolkit may collect them without the
-//! printing ([`set_period`]) and read the latest summaries ([`latest`]).
+//! rasterizing it into a buffer on the render thread, presenting it:
+//! catching the buffer up with the last and committing), of the whole,
+//! and how much of the window it redrew. A toolkit may collect them
+//! without the printing ([`set_period`]) and read the latest summaries
+//! ([`latest`]).
 //!
 //! A frame is what a main thread's `Present` shows: the toolkit notes how
 //! long it took to record ([`recorded`], before sending the paint), and

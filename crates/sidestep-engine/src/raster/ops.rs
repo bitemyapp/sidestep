@@ -149,7 +149,13 @@ pub fn run(canvas: &mut Canvas, glyphs: &mut Glyphs, damage: &Rect, ops: &[Op]) 
                     }
                 }
                 op => match layers.last_mut() {
-                    Some(layer) => draw_op(&mut layer.canvas(canvas), glyphs, st, damage, op),
+                    Some(layer) => {
+                        let mut target = layer.canvas(canvas);
+                        if !overdrawn(&target, damage, op, ops.get(i + 1)) {
+                            draw_op(&mut target, glyphs, st, damage, op);
+                        }
+                    }
+                    None if overdrawn(canvas, damage, op, ops.get(i + 1)) => {}
                     None => draw_op(canvas, glyphs, st, damage, op),
                 },
             }
@@ -241,6 +247,46 @@ fn draw_op(canvas: &mut Canvas, glyphs: &mut Glyphs, st: &mut State, damage: &Re
         }
         // Composites are drawn out before rasterizing (`ca::tree`).
         Op::BeginGroup { .. } | Op::EndGroup | Op::Composite(_) => {}
+    }
+}
+
+/// The rows of `canvas` an op rasterizes as a path (a shape, a clip
+/// path, a rectangle filled another way), where it draws: tiny-skia's
+/// antialiased paths come out a little differently cut off at other rows,
+/// so drawing in bands keeps them whole (see `bands`).
+pub(super) fn path_rows(canvas: &Canvas, damage: &Rect, op: &Op) -> Option<(usize, usize)> {
+    let rows = |r: Option<(usize, usize, usize, usize)>| r.map(|r| (r.1, r.3));
+    match op {
+        Op::FillPath { path, draw, .. } => rows(region(canvas, damage, draw, path.bounds(), 1.0)),
+        Op::StrokePath { path, stroke, draw, .. } => {
+            rows(region(canvas, damage, draw, path.bounds(), stroke_outset(canvas, draw, stroke)))
+        }
+        Op::FillWith { blend: Blend::SourceOver | Blend::Highlight | Blend::Copy | Blend::Clear, .. } => None,
+        Op::FillWith { rect, .. } => rows(canvas.pixels(&rect.intersect(damage))),
+        Op::BeginGroup { draw, .. } | Op::Image { draw, .. } if draw.mask.is_some() => {
+            rows(canvas.clip_pixels(draw, damage))
+        }
+        _ => None,
+    }
+}
+
+/// Whether `op`, a fill, would be painted over whole by `next`, an opaque
+/// fill: a window clears what it redraws, then fills its background over
+/// it. Leaving it out draws the same pixels, without writing them twice.
+pub(super) fn overdrawn(canvas: &Canvas, damage: &Rect, op: &Op, next: Option<&Op>) -> bool {
+    let rect = match op {
+        Op::Fill { rect, .. } => rect,
+        Op::FillWith { rect, blend: Blend::SourceOver | Blend::Highlight | Blend::Copy | Blend::Clear, .. } => rect,
+        _ => return false,
+    };
+    let Some(Op::Fill { rect: over, color }) = next else { return false };
+    if !super::opaque(*color) {
+        return false;
+    }
+    match (canvas.pixels(&rect.intersect(damage)), canvas.pixels(&over.intersect(damage))) {
+        (Some(a), Some(b)) => b.0 <= a.0 && b.1 <= a.1 && a.2 <= b.2 && a.3 <= b.3,
+        (None, _) => true,
+        (Some(_), None) => false,
     }
 }
 

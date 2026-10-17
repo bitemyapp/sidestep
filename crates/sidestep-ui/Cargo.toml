@@ -44,3 +44,9 @@ harness = false
 [[test]]
 name = "desktop"
 harness = false
+
+# What a whole window's repaint costs under the headless sway (see the
+# file).
+[[test]]
+name = "frame_budget"
+harness = false
