@@ -228,6 +228,10 @@ struct Win {
     bar: u32,
     /// A layer surface's placement, and the size it asked for.
     layer: Option<(LayerPlacement, (u32, u32))>,
+    /// For `stats`: what the frame's paints took to capture, and the
+    /// points they covered.
+    raster: std::time::Duration,
+    painted: f64,
 }
 
 impl Win {
@@ -299,6 +303,8 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
                     state: WindowState::default(),
                     bar: 0,
                     layer: layer.map(|p| (p, (width, height))),
+                    raster: std::time::Duration::ZERO,
+                    painted: 0.0,
                 };
                 win.place();
                 if let Some(all) = PIXELS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
@@ -323,6 +329,7 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
             }
             ToRender::CloseWindow { window } => {
                 windows.remove(&window);
+                crate::stats::closed(window);
                 with_ca(|ca| ca.drop_window(window));
                 if focused == Some(window) {
                     focus(&mut focused, None);
@@ -330,8 +337,14 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
                 note(Seen::Closed { window });
             }
             ToRender::Present { window } => {
-                if windows.contains_key(&window) {
+                if let Some(win) = windows.get_mut(&window) {
+                    let started = crate::stats::on().then(std::time::Instant::now);
                     composite(window, None, &mut glyphs);
+                    if let Some(started) = started {
+                        let all = f64::from(win.width) * f64::from(win.height);
+                        let damage = (std::mem::take(&mut win.painted) / all.max(1.0)) as f32;
+                        crate::stats::frame(window, std::mem::take(&mut win.raster), started.elapsed(), damage);
+                    }
                     send(FromRender::Frame { window });
                 }
             }
@@ -418,7 +431,16 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
             ToRender::Paint { window, target, rects, ops } => {
                 let ops = with_ca(|ca| ca.paint(window, target, &rects, ops));
                 if target == crate::protocol::Target::Root {
+                    let started = crate::stats::on().then(std::time::Instant::now);
                     capture(window, &rects, &ops, &mut glyphs);
+                    if let (Some(started), Some(win)) = (started, windows.get_mut(&window)) {
+                        // Rasterized only while a test captures pixels.
+                        win.raster += started.elapsed();
+                        let bounds = crate::protocol::Rect::new(0.0, 0.0, win.width as f32, win.height as f32);
+                        let area =
+                            |r: crate::protocol::Rect| f64::from((r.x1 - r.x0).max(0.0) * (r.y1 - r.y0).max(0.0));
+                        win.painted += rects.iter().map(|r| area(r.intersect(&bounds))).sum::<f64>();
+                    }
                 }
                 if let Some(text) = TEXT.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
                     let runs = ops.iter().filter_map(|op| match op {

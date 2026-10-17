@@ -4,8 +4,8 @@
 //! windows do, placed anew while they show and shown again as they were
 //! left, and a popup opened from the panel; outputs coming and going,
 //! and a panel put on one; the session locked with a lock screen, typed
-//! into and unlocked, and a lock the compositor ends. Each step waits
-//! for its condition, polled by a timer, with a deadline.
+//! into and unlocked, and a lock the compositor ends; frames measured.
+//! Each step waits for its condition, polled by a timer, with a deadline.
 
 fn main() {
     #[cfg(not(target_vendor = "apple"))]
@@ -296,7 +296,20 @@ mod linux {
                     }
                     assert!(self.lock.is_some_and(|l| cx.window(l).is_none()), "the lock screen closed");
                     assert!(!cx.is_session_locked());
+                    // Frames measured, the panel redrawn time after time.
+                    cx.set_frame_stats(Some(Duration::from_millis(20)));
                     self.step = 13;
+                }
+                13 => {
+                    cx.window(bar).expect("the bar").redraw();
+                    let stats = cx.frame_stats();
+                    let Some(s) = stats.iter().find(|s| s.window == bar && s.frames >= 2) else { return };
+                    println!("  {s:?}");
+                    assert!(s.record.max > Duration::ZERO && s.rasterize.max > Duration::ZERO, "{s:?}");
+                    assert!(s.total.max >= s.record.max.max(s.rasterize.max), "{s:?}");
+                    assert!((0.99..=1.0).contains(&s.damage), "redrawn whole: {s:?}");
+                    cx.set_frame_stats(None);
+                    self.step = 14;
                     cx.quit();
                 }
                 _ => {}
@@ -353,7 +366,7 @@ mod linux {
         testing::use_null_backend();
         testing::capture_pixels(true);
         let test = App::new().run(Test::default()).expect("the null render thread runs");
-        assert_eq!(test.step, 13, "every step ran");
+        assert_eq!(test.step, 14, "every step ran");
         println!("desktop: ok");
     }
 }

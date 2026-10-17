@@ -520,6 +520,10 @@ pub struct Win {
     text_input: bool,
     /// Where its caret is, in points from the top left of the content.
     caret: Option<Rect>,
+    /// For `stats`: the time the frame's paints took to rasterize, and
+    /// the device pixels they redrew.
+    raster_time: std::time::Duration,
+    raster_pixels: f64,
 }
 
 impl Win {
@@ -736,8 +740,15 @@ impl State {
                     win.main_waiting = true;
                     win.held = false;
                 }
+                // Its paints were rasterized as they came; layer trees drawn
+                // now are rasterized as part of presenting.
+                let started = crate::stats::on().then(std::time::Instant::now);
+                let before = self.windows.get(&window).map(|w| w.raster_time).unwrap_or_default();
                 self.ca_frame(window);
-                self.present(window)
+                self.present(window);
+                if let Some(started) = started {
+                    self.frame_measured(window, started.elapsed(), before);
+                }
             }
             ToRender::CloseWindow { window } => {
                 self.ca.drop_window(window);
@@ -925,6 +936,8 @@ impl State {
                 scale_given: false,
                 text_input: false,
                 caret: None,
+                raster_time: std::time::Duration::ZERO,
+                raster_pixels: 0.0,
             },
         );
         self.apply_limits(window);
@@ -988,6 +1001,7 @@ impl State {
     fn close_window(&mut self, window: WindowId) {
         let Some(win) = self.windows.remove(&window) else { return };
         outputs::window_closed(window);
+        crate::stats::closed(window);
         self.roles.retain(|_, role| role.window() != window);
         seat::window_closed(self, window);
         if let Some(f) = &win.fractional {
@@ -1196,6 +1210,7 @@ impl State {
             return;
         }
         let scale = win.scale;
+        let started = crate::stats::on().then(std::time::Instant::now);
         let mut canvas = Canvas::new(&mut win.canvas, win.px_width, win.px_height, 0.0, scale as f32);
         if crate::trace::tracing_tiles() {
             raster::paint_timed(&mut canvas, &mut self.glyphs, &rects, &ops, window);
@@ -1203,6 +1218,25 @@ impl State {
             raster::paint(&mut canvas, &mut self.glyphs, &rects, &ops);
         }
         win.damage.extend(rects.iter().map(|r| to_px(r, scale)));
+        if let Some(started) = started {
+            win.raster_time += started.elapsed();
+            let area = |r: Rect| f64::from((r.x1 - r.x0).max(0.0)) * f64::from((r.y1 - r.y0).max(0.0));
+            let bounds = Rect::new(0.0, 0.0, win.px_width as f32, win.px_height as f32);
+            win.raster_pixels += rects.iter().map(|r| area(to_px(r, scale).intersect(&bounds))).sum::<f64>();
+        }
+    }
+
+    /// A frame the main thread sent was presented, taking `took`, of
+    /// which what rasterizing took past `before` was rasterizing: to
+    /// `stats`, with what its paints took to rasterize.
+    fn frame_measured(&mut self, window: WindowId, took: std::time::Duration, before: std::time::Duration) {
+        let Some(win) = self.windows.get_mut(&window) else { return };
+        let took = took.saturating_sub(win.raster_time.saturating_sub(before));
+        let raster = std::mem::take(&mut win.raster_time);
+        let pixels = std::mem::take(&mut win.raster_pixels);
+        let all = f64::from(win.px_width) * f64::from(win.px_height);
+        let damage = if all > 0.0 { (pixels / all) as f32 } else { 0.0 };
+        crate::stats::frame(window, raster, took, damage);
     }
 
     /// Draw a paint into its target.

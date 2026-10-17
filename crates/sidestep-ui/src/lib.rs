@@ -78,7 +78,9 @@ mod window;
 #[doc(hidden)]
 pub mod testing;
 
-pub use app::{App, Cx, Drag, DropAction, DropResponse, Error, Handler, Output, Proxy, TimerId};
+pub use app::{
+    App, Cx, Drag, DropAction, DropResponse, Error, FrameStats, FrameTiming, Handler, Output, Proxy, TimerId,
+};
 pub use canvas::{
     BlendMode, Canvas, ImageOptions, LineCap, LineJoin, LinearGradient, Paint, RadialGradient, Shadow, StrokeStyle,
 };

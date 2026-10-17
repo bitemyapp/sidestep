@@ -686,7 +686,8 @@ text engine (`text`), the clipboard's shared state (`clipboard`), the
 compositor's outputs (`outputs`), the desktop's settings and the system
 colors they choose (`settings`, `desktop`, `palette`), image files
 (`codec`), CoreGraphics-style paths (`path`), touchpad coasting's physics
-(`momentum`) and `SIDESTEP_TRACE_FRAMES` (`trace`). `sidestep-appkit`
+(`momentum`), `SIDESTEP_TRACE_FRAMES` (`trace`) and `SIDESTEP_FRAME_STATS`
+(`stats`). `sidestep-appkit`
 re-exports those modules at its crate root,
 so its code names them as it always has (`crate::protocol`,
 `crate::backend`, …); the main-thread halves of mixed modules stay in
@@ -2503,6 +2504,23 @@ for each text view that damages itself after laying out (where), and for
 each slow paint of the window's surface its damage and its slowest
 operations (what they are, how long each took), which show what a slow
 present was redrawing.
+
+`SIDESTEP_FRAME_STATS=1` (the engine's `stats`) measures each frame a
+main thread presents, by the window, and every five seconds prints a
+line for each window that showed frames: how many, and the median, 95th
+percentile and slowest, in microseconds, of recording it on the main
+thread (sidestep-ui notes how long its display pass drew and made ops
+before sending the present; AppKit notes nothing), rasterizing its paints
+of the window's surface, and presenting it (layer trees drawn for it,
+copying the changed pixels into a buffer, decorations, the commit), of
+the three together, and how much of the window it redrew. The render
+thread pairs each present with the recording the main thread noted for
+it, in order; frames it draws on its own aren't counted. sidestep-ui's
+`Cx::set_frame_stats` measures without printing, summarizing every period
+it asks for, and `Cx::frame_stats` reads the latest summaries. Off, each
+measuring point is one relaxed atomic load. In a release build under the
+headless sway, a 1280 × 776 point window redrawn whole at scale 1 takes
+about 4 µs to record, 0.2 ms to rasterize and 0.5 ms to present.
 
 ### Core Animation
 

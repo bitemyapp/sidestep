@@ -10,7 +10,7 @@
 //!   output, both showing where they should; a click on the panel opening
 //!   a menu from it, which closes; the panel taking the
 //!   keyboard when asked, typed into, then growing, and windows making
-//!   room;
+//!   room; a window's frames measured;
 //! - outputs as sway names and places them; one plugged in (heard of), a
 //!   panel put on it, and the output unplugged, which closes the panel;
 //! - the session locked (ext-session-lock) with a lock screen on the
@@ -155,6 +155,7 @@ mod linux {
         Keyboard,
         Typed,
         Grown,
+        Measured,
         Done,
     }
 
@@ -286,6 +287,19 @@ mod linux {
                         return;
                     }
                     println!("  grown, and the window made room");
+                    cx.set_frame_stats(Some(Duration::from_millis(100)));
+                    self.next(Step::Measured);
+                }
+                // The window's frames measured as it's redrawn.
+                Step::Measured => {
+                    let window = self.window.expect("the window");
+                    cx.window(window).expect("the window").redraw();
+                    let stats = cx.frame_stats();
+                    let Some(s) = stats.iter().find(|s| s.window == window && s.frames >= 2) else { return };
+                    println!("  measured: {s:?}");
+                    assert!(s.rasterize.max > Duration::ZERO && s.present.max > Duration::ZERO, "{s:?}");
+                    assert!(s.damage > 0.99, "{s:?}");
+                    cx.set_frame_stats(None);
                     self.point(pointer::Do::Done);
                     self.next(Step::Done);
                     cx.quit();

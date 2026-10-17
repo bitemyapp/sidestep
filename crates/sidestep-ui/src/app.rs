@@ -20,7 +20,7 @@ use kurbo::{Point, Rect, Size, Vec2};
 use sidestep_engine::backend::{self, Backend};
 use sidestep_engine::clipboard::{self, Contents, Source};
 use sidestep_engine::protocol::{FromRender, Target, TitleText, ToRender};
-use sidestep_engine::{momentum, outputs, settings};
+use sidestep_engine::{momentum, outputs, settings, stats};
 
 use crate::canvas::Canvas;
 use crate::color::{Appearance, Color, SystemColor};
@@ -606,6 +606,24 @@ impl Cx {
         outputs::latest().map(|all| all.iter().map(Output::of).collect()).unwrap_or_default()
     }
 
+    // Frame statistics.
+
+    /// Measure every window's frames, summarizing them every `period`
+    /// for [`frame_stats`](Cx::frame_stats), or stop (`None`).
+    /// `SIDESTEP_FRAME_STATS=1` measures them from the start, summarizing
+    /// every five seconds and printing each summary on stderr. Measuring
+    /// costs a little; not measuring, nothing.
+    pub fn set_frame_stats(&mut self, period: Option<Duration>) {
+        stats::set_period(period);
+    }
+
+    /// The latest summary of each shown window's frames, if frames are
+    /// measured: for each, the frames of the last period, and how long
+    /// each part of a frame took.
+    pub fn frame_stats(&self) -> Vec<FrameStats> {
+        stats::latest().iter().filter_map(|s| Some(FrameStats::of(*self.showings.get(&s.window)?, s))).collect()
+    }
+
     // The session lock.
 
     /// Lock the session (ext-session-lock), as a lock screen does: the
@@ -1143,6 +1161,8 @@ impl Cx {
             if !w.wants_pass() {
                 continue;
             }
+            // Recording the frame, for `stats`: drawing it and making its ops.
+            let recording = stats::on().then(Instant::now);
             let damage = std::mem::take(&mut w.damage);
             let background = match w.background {
                 Background::System => Some(appearance.color(SystemColor::WindowBackground)),
@@ -1166,6 +1186,9 @@ impl Cx {
                 // Images made for this pass go once the render thread drew
                 // them: what drops them comes after the paint.
                 drop(temporaries);
+            }
+            if let Some(started) = recording {
+                stats::recorded(showing, started.elapsed());
             }
             send(&self.backend.tx, ToRender::Present { window: showing });
             w.frame_pending = true;
@@ -1206,6 +1229,59 @@ fn title_text(title: &str) -> TitleText {
     // Labels upright at scale 1 make no images.
     let (ops, _) = canvas.finish();
     TitleText { ops, width, height }
+}
+
+/// How long a part of a window's frames took over a period: the median,
+/// the 95th percentile and the slowest.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FrameTiming {
+    pub p50: Duration,
+    pub p95: Duration,
+    pub max: Duration,
+}
+
+impl FrameTiming {
+    fn of(t: &stats::Timing) -> FrameTiming {
+        let us = |v: u32| Duration::from_micros(u64::from(v));
+        FrameTiming { p50: us(t.p50), p95: us(t.p95), max: us(t.max) }
+    }
+}
+
+/// A window's frames over a period ([`Cx::frame_stats`]): how many, and
+/// how long each part of a frame took of the CPU.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FrameStats {
+    pub window: WindowId,
+    /// The period summarized, and the frames shown in it.
+    pub period: Duration,
+    pub frames: u32,
+    /// Drawing (the handler's [`draw`](Handler::draw), recording ops) on
+    /// the application's thread.
+    pub record: FrameTiming,
+    /// Rasterizing what was drawn, on the render thread.
+    pub rasterize: FrameTiming,
+    /// Copying the changed pixels into a buffer for the compositor, and
+    /// committing it.
+    pub present: FrameTiming,
+    /// The three, frame by frame.
+    pub total: FrameTiming,
+    /// How much of the window a frame redrew, on average: 0 to 1.
+    pub damage: f32,
+}
+
+impl FrameStats {
+    fn of(window: WindowId, s: &stats::Summary) -> FrameStats {
+        FrameStats {
+            window,
+            period: s.period,
+            frames: s.frames,
+            record: s.record.as_ref().map(FrameTiming::of).unwrap_or_default(),
+            rasterize: FrameTiming::of(&s.rasterize),
+            present: FrameTiming::of(&s.present),
+            total: FrameTiming::of(&s.total),
+            damage: s.damage,
+        }
+    }
 }
 
 /// An output (a screen), as the compositor describes it.
