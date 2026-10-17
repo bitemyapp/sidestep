@@ -65,10 +65,12 @@ pub enum Seen {
         window: u32,
         on: bool,
     },
-    /// The window shown (`Created`) is a layer surface, placed so.
+    /// The window shown (`Created`) is a layer surface, placed so, and
+    /// the size it asked for (a side of 0 the compositor's to decide).
     Layer {
         window: u32,
         placement: LayerPlacement,
+        asked: (u32, u32),
     },
     /// The main thread asked to lock the session, or to unlock it.
     SessionLock {
@@ -302,7 +304,7 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
             ToRender::CreateWindow { window, mut width, mut height, popup, sheet_of, layer, lock, .. } => {
                 let keyboard = layer.as_ref().map(|p| p.keyboard);
                 if let Some(placement) = &layer {
-                    note(Seen::Layer { window, placement: placement.clone() });
+                    note(Seen::Layer { window, placement: placement.clone(), asked: (width, height) });
                 }
                 if let Some(output) = lock {
                     note(Seen::LockSurface { window, output });

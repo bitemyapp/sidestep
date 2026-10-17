@@ -100,8 +100,13 @@ mod linux {
         /// The placement the render thread was given for `window`'s
         /// showing `showing`, the latest.
         fn placed(&self, showing: u32) -> Option<&testing::LayerPlacement> {
+            self.asked(showing).map(|(p, _)| p)
+        }
+
+        /// And the size it asked for.
+        fn asked(&self, showing: u32) -> Option<(&testing::LayerPlacement, (u32, u32))> {
             self.log.iter().rev().find_map(|s| match s {
-                Seen::Layer { window, placement } if *window == showing => Some(placement),
+                Seen::Layer { window, placement, asked } if *window == showing => Some((placement, *asked)),
                 _ => None,
             })
         }
@@ -210,6 +215,8 @@ mod linux {
                         return;
                     }
                     assert_eq!(placement.margins, [0, 10, 0, 10]);
+                    // As wide as the compositor decides, still.
+                    assert_eq!(self.asked(showing).map(|(_, a)| a), Some((0, 30)));
                     assert_eq!(placement.exclusive_zone, 30);
                     // Its regions, set again.
                     let input = Some(vec![testing::RenderRect::new(0.0, 0.0, 600.0, 30.0)]);

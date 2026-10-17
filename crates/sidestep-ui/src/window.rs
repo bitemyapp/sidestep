@@ -372,6 +372,9 @@ pub(crate) struct WindowData {
     /// the program set them.
     pub input_region: Option<Vec<Rect>>,
     pub opaque_region: Option<Vec<Rect>>,
+    /// The size a layer surface asked for, a side of 0 the compositor's
+    /// to decide: what it's shown at again, whatever it was configured to.
+    pub layer_size: Size,
 }
 
 /// The most rectangles a window's damage keeps before they become their
@@ -406,6 +409,7 @@ impl WindowData {
             text_input: (false, None),
             input_region: None,
             opaque_region: None,
+            layer_size: options.size,
         }
     }
 
@@ -456,14 +460,15 @@ impl WindowData {
             Kind::Toplevel { .. } | Kind::Layer(_) | Kind::Lock { .. } => None,
         };
         // A layer surface's side may be 0, the compositor's to decide (as
-        // a lock surface's size is).
+        // a lock surface's size is); it asks for what it asked for before.
         let least = if self.layer().is_some() || self.lock_output().is_some() { 0.0 } else { 1.0 };
+        let size = if self.layer().is_some() { self.layer_size } else { self.size };
         send(
             tx,
             ToRender::CreateWindow {
                 window: showing,
-                width: self.size.width.round().max(least) as u32,
-                height: self.size.height.round().max(least) as u32,
+                width: size.width.round().max(least) as u32,
+                height: size.height.round().max(least) as u32,
                 title: self.title.clone(),
                 style: self.style,
                 limits: self.limits,
@@ -679,9 +684,12 @@ impl Window<'_> {
     /// window shows at it next time. (A layer surface's side may be 0:
     /// see [`set_layer_size`](Window::set_layer_size).)
     pub fn request_size(&mut self, size: Size) {
-        let least = if self.data.layer().is_some() { 0.0 } else { 1.0 };
+        let layer = self.data.layer().is_some();
+        let least = if layer { 0.0 } else { 1.0 };
         let size = Size::new(size.width.round().max(least), size.height.round().max(least));
-        if self.data.showing.is_none() {
+        if layer {
+            self.data.layer_size = size;
+        } else if self.data.showing.is_none() {
             self.data.size = size;
         }
         self.request(WindowRequest::Resize(size.width as u32, size.height as u32));
