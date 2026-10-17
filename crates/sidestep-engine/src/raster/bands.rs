@@ -157,32 +157,48 @@ pub fn paint_banded(canvas: &mut Canvas, glyphs: &mut Glyphs, rects: &[Rect], op
             y0: y0 + from as i32,
         });
     }
-    let latch = Arc::new(Latch { left: Mutex::new(bands - 1), done: Condvar::new(), panicked: AtomicBool::new(false) });
-    let wait = WaitFor(latch.clone());
     let mut mine = canvases.remove(0);
+    let others: Vec<Box<dyn FnOnce() + Send + '_>> = canvases
+        .into_iter()
+        .map(|mut band| -> Box<dyn FnOnce() + Send + '_> {
+            Box::new(move || GLYPHS.with(|g| paint(&mut band, &mut g.borrow_mut(), rects, ops)))
+        })
+        .collect();
+    scoped(others, || paint(&mut mine, glyphs, rects, ops));
+}
+
+/// How many workers share work with a caller.
+pub fn workers() -> usize {
+    pool().workers
+}
+
+/// Run `others` on the workers and `mine` on the caller, and return once
+/// they're all done (the caller runs those no worker has taken by then):
+/// they may borrow what the caller has.
+pub fn scoped<'a>(others: Vec<Box<dyn FnOnce() + Send + 'a>>, mine: impl FnOnce()) {
+    let pool = pool();
+    let latch =
+        Arc::new(Latch { left: Mutex::new(others.len()), done: Condvar::new(), panicked: AtomicBool::new(false) });
+    let wait = WaitFor(latch.clone());
     {
         let mut jobs = pool.jobs.lock().unwrap_or_else(|e| e.into_inner());
-        for mut band in canvases {
+        for work in others {
             let latch = latch.clone();
-            let job: Box<dyn FnOnce() + Send + '_> = Box::new(move || {
-                let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    GLYPHS.with(|g| paint(&mut band, &mut g.borrow_mut(), rects, ops));
-                }));
-                if drawn.is_err() {
+            let job: Box<dyn FnOnce() + Send + 'a> = Box::new(move || {
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).is_err() {
                     latch.panicked.store(true, Ordering::Relaxed);
                 }
                 latch.finished();
             });
-            // SAFETY: the job borrows the canvas, `rects` and `ops`, which
-            // outlive it: `wait` waits for every job handed out before this
-            // function returns or unwinds.
-            let job: Job = unsafe { std::mem::transmute::<Box<dyn FnOnce() + Send + '_>, Job>(job) };
+            // SAFETY: the job borrows only what outlives it: `wait` waits
+            // for every job handed out before this function returns or
+            // unwinds.
+            let job: Job = unsafe { std::mem::transmute::<Box<dyn FnOnce() + Send + 'a>, Job>(job) };
             jobs.push(job);
         }
     }
     pool.wake.notify_all();
-    paint(&mut mine, glyphs, rects, ops);
-    // Bands no worker has taken yet, the caller draws.
+    mine();
     loop {
         let job = pool.jobs.lock().unwrap_or_else(|e| e.into_inner()).pop();
         let Some(job) = job else { break };

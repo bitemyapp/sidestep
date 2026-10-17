@@ -17,7 +17,7 @@
 //!
 //! [`Cx::hide_window`]: crate::Cx::hide_window
 
-use kurbo::{Point, Rect, Size};
+use kurbo::{Point, Rect, Size, Vec2};
 use sidestep_engine::protocol::{self, PopupLayout, PopupPlacement, SizeLimits, Style, ToRender, WindowRequest};
 use smithay_client_toolkit::reexports::calloop::channel::Sender;
 
@@ -375,6 +375,9 @@ pub(crate) struct WindowData {
     /// The size a layer surface asked for, a side of 0 the compositor's
     /// to decide: what it's shown at again, whatever it was configured to.
     pub layer_size: Size,
+    /// Rectangles of the content to move at the next pass (points), and by
+    /// how much, in order.
+    pub scrolls: Vec<(Rect, Vec2)>,
 }
 
 /// The most rectangles a window's damage keeps before they become their
@@ -410,6 +413,7 @@ impl WindowData {
             input_region: None,
             opaque_region: None,
             layer_size: options.size,
+            scrolls: Vec::new(),
         }
     }
 
@@ -497,6 +501,7 @@ impl WindowData {
         self.configured = false;
         self.frame_pending = false;
         self.damage.clear();
+        self.scrolls.clear();
         self.title_dirty = true;
         self.titlebar = 0;
         self.outputs.clear();
@@ -510,6 +515,7 @@ impl WindowData {
         self.configured = false;
         self.frame_pending = false;
         self.damage.clear();
+        self.scrolls.clear();
         self.focused = false;
         self.pointer_inside = false;
     }
@@ -532,8 +538,56 @@ impl WindowData {
         }
     }
 
+    /// Redraw all of the window at the next pass: nothing need move first.
     pub fn invalidate_all(&mut self) {
         self.damage = vec![self.bounds()];
+        self.scrolls.clear();
+    }
+
+    /// Move `rect` (content points) by `delta` at the next pass, if it can
+    /// be moved as pixels: else redraw it. See [`Window::scroll`].
+    pub fn scroll(&mut self, rect: Rect, delta: Vec2) {
+        let rect = rect.intersect(Rect::from_origin_size(Point::ZERO, self.size));
+        if rect.is_zero_area() || delta == Vec2::ZERO {
+            return;
+        }
+        let s = self.scale;
+        let whole = |v: f64| (v * s - (v * s).round()).abs() < 1e-6;
+        let aligned = [rect.x0, rect.y0, rect.x1, rect.y1, delta.x, delta.y].into_iter().all(whole);
+        let fits = |d: Vec2| d.x.abs() < rect.width() && d.y.abs() < rect.height();
+        let p = |r: Rect| protocol::Rect::new(r.x0 as f32, r.y0 as f32, r.x1 as f32, r.y1 as f32);
+        if self.showing.is_none() || !self.configured || !aligned || !fits(delta) {
+            self.invalidate(p(rect));
+            return;
+        }
+        // What waits to be redrawn inside moves with it.
+        let shift = |r: &protocol::Rect| {
+            let r = r.intersect(&p(rect));
+            let (dx, dy) = (delta.x as f32, delta.y as f32);
+            (!r.is_empty()).then(|| protocol::Rect::new(r.x0 + dx, r.y0 + dy, r.x1 + dx, r.y1 + dy).intersect(&p(rect)))
+        };
+        let moved: Vec<protocol::Rect> = self.damage.iter().filter_map(shift).collect();
+        // Moves of the same rectangle add up.
+        match self.scrolls.last_mut() {
+            Some((last, total)) if *last == rect => {
+                *total += delta;
+                if !fits(*total) {
+                    self.scrolls.pop();
+                    self.invalidate(p(rect));
+                    return;
+                }
+            }
+            _ => self.scrolls.push((rect, delta)),
+        }
+        for r in moved {
+            self.invalidate(r);
+        }
+        // The strips it uncovers.
+        let (dx, dy) = (delta.x, delta.y);
+        let rows = if dy > 0.0 { (rect.y0, rect.y0 + dy) } else { (rect.y1 + dy, rect.y1) };
+        let columns = if dx > 0.0 { (rect.x0, rect.x0 + dx) } else { (rect.x1 + dx, rect.x1) };
+        self.invalidate(p(Rect::new(rect.x0, rows.0, rect.x1, rows.1)));
+        self.invalidate(p(Rect::new(columns.0, rect.y0, columns.1, rect.y1)));
     }
 
     /// Whether the next pass has anything to send.
@@ -641,6 +695,19 @@ impl Window<'_> {
         if let Some(showing) = self.data.showing {
             send(self.tx, ToRender::SetOpaqueRegion { window: showing, rects: regions(&self.data.opaque_region) });
         }
+    }
+
+    /// Scroll `rect` (content points) by `delta`, as a list or an editor
+    /// scrolls: at the next pass the window's pixels there move by `delta`
+    /// (what moves out of `rect` is dropped), and only the strips they
+    /// uncover are redrawn, with what was waiting to be redrawn in `rect`,
+    /// moved along: the handler's [`draw`](crate::Handler::draw) gets those
+    /// as the canvas's damage, and draws its content where it now is.
+    /// Moves before a pass add up. Where the move isn't whole device pixels
+    /// (at a fractional scale), `rect` isn't on device pixels, or `delta`
+    /// moves all of it out, `rect` is redrawn instead.
+    pub fn scroll(&mut self, rect: Rect, delta: Vec2) {
+        self.data.scroll(rect, delta);
     }
 
     /// The pointer's appearance over the window's content.

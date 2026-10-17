@@ -622,8 +622,9 @@ impl Cx {
 
     // Frame statistics.
 
-    /// Measure every window's frames, summarizing them every `period`
-    /// for [`frame_stats`](Cx::frame_stats), or stop (`None`).
+    /// Measure every window's frames from now on, summarizing them every
+    /// `period` for [`frame_stats`](Cx::frame_stats) (the summaries so far
+    /// dropped), or stop (`None`).
     /// `SIDESTEP_FRAME_STATS=1` measures them from the start, summarizing
     /// every five seconds and printing each summary on stderr. Measuring
     /// costs a little; not measuring, nothing.
@@ -1199,6 +1200,7 @@ impl Cx {
             // Recording the frame, for `stats`: drawing it and making its ops.
             let recording = stats::on().then(Instant::now);
             let damage = std::mem::take(&mut w.damage);
+            let scrolls = std::mem::take(&mut w.scrolls);
             let background = match w.background {
                 Background::System => Some(appearance.color(SystemColor::WindowBackground)),
                 Background::Color(c) => Some(c),
@@ -1214,6 +1216,19 @@ impl Cx {
             if std::mem::take(&mut w.title_dirty) {
                 let text = if w.titlebar > 0 { title_text(&w.title) } else { TitleText::default() };
                 send(&self.backend.tx, ToRender::SetTitle { window: showing, title: w.title.clone(), text });
+            }
+            // Pixels move first, then what they uncover is drawn.
+            for (rect, delta) in scrolls {
+                let rect = sidestep_engine::protocol::Rect::new(
+                    rect.x0 as f32,
+                    rect.y0 as f32,
+                    rect.x1 as f32,
+                    rect.y1 as f32,
+                );
+                send(
+                    &self.backend.tx,
+                    ToRender::Scroll { window: showing, rect, dx: delta.x as f32, dy: delta.y as f32 },
+                );
             }
             if !damage.is_empty() {
                 let (ops, temporaries) = canvas.finish();

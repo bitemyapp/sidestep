@@ -349,6 +349,15 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
                 }
                 note(Seen::Closed { window });
             }
+            ToRender::Scroll { window, rect, dx, dy } => {
+                // Moved in the captured pixels, at the scale they're at.
+                let mut pixels = PIXELS.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some((w, h, px)) = pixels.as_mut().and_then(|all| all.get_mut(&window)) {
+                    let s = scale() as f32;
+                    let r = crate::protocol::Rect::new(rect.x0 * s, rect.y0 * s, rect.x1 * s, rect.y1 * s);
+                    super::scroll_in(px, *w, *h, &r, (dx * s).round() as i32, (dy * s).round() as i32);
+                }
+            }
             ToRender::Present { window } => {
                 if let Some(win) = windows.get_mut(&window) {
                     let started = crate::stats::on().then(std::time::Instant::now);

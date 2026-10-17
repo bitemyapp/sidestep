@@ -730,6 +730,17 @@ pub enum ToRender {
         layer: LayerId,
         tiles: Vec<TileKey>,
     },
+    /// Move the pixels of `rect` of the window's surface (points, on whole
+    /// device pixels) by `dx`, `dy` points (whole device pixels), as a
+    /// view scrolls: in order with the paints before the next present, so
+    /// the paints after it draw over what it moved, and what moves out of
+    /// `rect` is dropped.
+    Scroll {
+        window: WindowId,
+        rect: Rect,
+        dx: f32,
+        dy: f32,
+    },
     Present {
         window: WindowId,
     },

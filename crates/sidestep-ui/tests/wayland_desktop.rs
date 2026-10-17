@@ -17,6 +17,9 @@
 //!   sway holding the buffer shown has each buffer catch up with the
 //!   others: the screen is then exactly the last state drawn whole
 //!   offscreen;
+//! - a list scrolled by moving its pixels, frame after frame, each frame
+//!   drawing only the strip uncovered: the screen is then exactly the
+//!   list drawn whole;
 //! - outputs as sway names and places them; one plugged in (heard of), a
 //!   panel put on it, and the output unplugged, which closes the panel;
 //! - the session locked (ext-session-lock) with a lock screen on the
@@ -44,7 +47,7 @@ mod linux {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
-    use sidestep_ui::kurbo::{Point, Rect, Size};
+    use sidestep_ui::kurbo::{Point, Rect, Size, Vec2};
     use sidestep_ui::layer_shell::{Anchors, KeyboardInteractivity, Layer, LayerOptions};
     use sidestep_ui::*;
 
@@ -219,6 +222,101 @@ mod linux {
                 return;
             }
             println!("  60 frames of small damage, buffers caught up: the screen is the last state, exactly");
+            self.done = true;
+            cx.quit();
+        }
+    }
+
+    /// `Scrolled`'s list at `offset`, under a header that stays.
+    fn draw_list(canvas: &mut Canvas, offset: f64) {
+        let size = canvas.size();
+        let list = Rect::new(0.0, 48.0, size.width, size.height);
+        canvas.fill_rect(Rect::new(0.0, 0.0, size.width, list.y0), Color::hex(0x30343c));
+        let label = TextStyle::new(Font::system(13.0), Color::hex(0xe0e4ea));
+        canvas.draw_label("A header that stays", &label, Point::new(10.0, 16.0));
+        canvas.save();
+        canvas.clip_rect(list);
+        canvas.fill_rect(list, Color::hex(0x1b1d23));
+        let row = 26.0;
+        let first = (offset / row).floor().max(0.0) as i64;
+        for i in first.. {
+            let y = list.y0 + i as f64 * row - offset;
+            if y > list.y1 {
+                break;
+            }
+            let r = Rect::new(0.0, y, size.width, y + row);
+            if !canvas.needs(r) {
+                continue;
+            }
+            canvas.fill_rect(Rect::new(8.0, y + 4.0, 26.0, y + 22.0), cell_color(i as usize));
+            canvas.draw_label(&format!("Row {i}: a title, and some of its details"), &label, Point::new(34.0, y + 5.0));
+            canvas.fill_rect(Rect::new(0.0, y + row - 1.0, size.width, y + row), Color::hex(0x2a2e36));
+        }
+        canvas.restore();
+    }
+
+    /// A list over the whole output scrolled notch by notch (some notches
+    /// added up before a pass, some back up), each frame moving its pixels
+    /// and drawing only the strip they uncover, in buffers sway holds in
+    /// turn: the screen is then exactly the list drawn whole offscreen.
+    struct Scrolled {
+        started: Instant,
+        window: Option<WindowId>,
+        offset: f64,
+        passes: usize,
+        largest: f64,
+        done: bool,
+    }
+
+    impl Handler for Scrolled {
+        fn launched(&mut self, cx: &mut Cx) {
+            self.window = Some(cx.open_window(WindowOptions::new("Scrolled")));
+            cx.set_repeating_timer(Duration::from_millis(20));
+        }
+
+        fn draw(&mut self, cx: &mut Cx, window: WindowId, canvas: &mut Canvas) {
+            // Until sway has tiled it over the output, it's drawn whole.
+            if canvas.size() != OUTPUT {
+                draw_list(canvas, self.offset);
+                return;
+            }
+            if self.passes > 0 {
+                // Strips, each as wide as the list (they may overlap).
+                let rows: f64 = canvas.damage().iter().map(|r| r.height()).sum();
+                self.largest = self.largest.max(rows);
+            }
+            draw_list(canvas, self.offset);
+            self.passes += 1;
+            let by = match self.passes {
+                0..=20 => 39.0,
+                21..=25 => -26.0,
+                _ => return,
+            };
+            let list = Rect::new(0.0, 48.0, canvas.size().width, canvas.size().height);
+            self.offset += by;
+            let mut w = cx.window(window).expect("open");
+            w.scroll(list, Vec2::new(0.0, -by));
+            if self.passes.is_multiple_of(5) {
+                // Another notch before the pass: they add up.
+                self.offset += 13.0;
+                w.scroll(list, Vec2::new(0.0, -13.0));
+            }
+        }
+
+        fn timer(&mut self, cx: &mut Cx, _timer: TimerId) {
+            assert!(self.started.elapsed() < DEADLINE, "the list never settled");
+            if self.passes <= 25 {
+                return;
+            }
+            let expected = offscreen::render(OUTPUT, 1.0, Appearance::LIGHT, |c| draw_list(c, self.offset));
+            let expected = expected.to_rgba8().expect("pixels");
+            let shot = Shot::take();
+            let differ = shot.pixels.chunks(4).zip(expected.chunks(4)).filter(|(a, b)| a[..3] != b[..3]).count();
+            if differ > 0 {
+                return;
+            }
+            assert!(self.largest <= 80.0, "passes drew only strips: {}", self.largest);
+            println!("  a list scrolled by moving pixels: the screen is the list drawn whole, exactly");
             self.done = true;
             cx.quit();
         }
@@ -408,6 +506,15 @@ mod linux {
                     let (Some(through), Some(taken)) =
                         (pressed(self.since(self.wallpaper)), pressed(self.since(self.bar)))
                     else {
+                        // The panel took the first click as well: the clicks
+                        // came before sway had the region (the virtual pointer
+                        // is another client). Again.
+                        let bar = self.since(self.bar);
+                        let presses =
+                            bar.iter().filter(|e| matches!(e, WindowEvent::PointerButton { pressed: true, .. }));
+                        if presses.count() >= 2 {
+                            self.next(Step::Regions);
+                        }
                         return;
                     };
                     assert!(through.distance(Point::new(900.0, 16.0)) < 1.0, "{through:?}");
@@ -504,6 +611,9 @@ mod linux {
 
         let buffers = Buffers { started: Instant::now(), window: None, colors: vec![0; CELLS], frame: 0, done: false };
         assert!(App::new().run(buffers).expect("a compositor").done);
+        let scrolled =
+            Scrolled { started: Instant::now(), window: None, offset: 0.0, passes: 0, largest: 0.0, done: false };
+        assert!(App::new().run(scrolled).expect("a compositor").done);
 
         let (tx, rx) = mpsc::channel();
         let pointing = std::thread::spawn(move || pointer::run(rx));

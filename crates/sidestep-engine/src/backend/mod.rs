@@ -480,9 +480,9 @@ pub struct Win {
     px_width: u32,
     px_height: u32,
     configured: bool,
-    /// The paints since the last present, drawn into a buffer when it
-    /// comes: their rectangles (points) and ops.
-    pending: Vec<(Vec<Rect>, Vec<Op>)>,
+    /// The paints and moves since the last present, drawn into a buffer
+    /// when it comes.
+    pending: Vec<Pending>,
     /// Their damage in device pixels.
     damage: Vec<Rect>,
     buffers: Vec<RootBuffer>,
@@ -590,6 +590,14 @@ impl Win {
     }
 }
 
+/// What a window's surface was asked to draw before its next present.
+enum Pending {
+    /// Ops over rectangles, in points.
+    Paint(Vec<Rect>, Vec<Op>),
+    /// A rectangle of device pixels moved by `dx`, `dy` of them.
+    Scroll { rect: Rect, dx: i32, dy: i32 },
+}
+
 /// Pixels for `points` at `scale`, as wp_fractional_scale_v1 asks buffers
 /// to be sized: rounded half up.
 pub fn px(points: u32, scale: f64) -> u32 {
@@ -676,31 +684,142 @@ fn swizzle(px: &mut [u32], width: u32, height: u32, rects: &[Rect]) {
     }
 }
 
-/// Copy rectangles of device pixels from buffer `from` (which the
-/// compositor may still be showing: it's only read) into buffer `to`, the
-/// same size, a row at a time through a row of scratch that stays in the
-/// cache.
-fn copy_between(pool: &mut SlotPool, from: &Buffer, to: &Buffer, width: u32, height: u32, rects: &[Rect]) {
-    let source = from.slot();
-    let w = width as usize;
-    let mut row = Vec::with_capacity(w);
-    for r in rects {
-        let (x0, y0, x1, y1) = clamped(r, width, height);
-        for y in y0..y1 {
-            row.clear();
-            row.extend_from_slice(&as_pixels(pool.raw_data_mut(&source))[y * w + x0..y * w + x1]);
-            let Some(bytes) = to.canvas(pool) else { return };
-            as_pixels(bytes)[y * w + x0..y * w + x1].copy_from_slice(&row);
+/// Where a rectangle of device pixels moved by `dx`, `dy` lands within
+/// itself: what a move changes, but for the strip it uncovers.
+fn moved(r: &Rect, dx: i32, dy: i32) -> Rect {
+    let (dx, dy) = (dx as f32, dy as f32);
+    r.intersect(&Rect::new(r.x0 + dx, r.y0 + dy, r.x1 + dx, r.y1 + dy))
+}
+
+/// Rectangles covering what `rects` cover, without overlapping.
+fn disjoint(rects: &[Rect]) -> Vec<Rect> {
+    let mut out: Vec<Rect> = Vec::new();
+    for r in rects.iter().map(Rect::round_out) {
+        let mut pieces = vec![r];
+        for o in &out {
+            pieces = pieces.iter().flat_map(|p| subtract(p, o)).collect();
         }
+        out.extend(pieces);
+    }
+    out
+}
+
+/// `a` less `b`: up to four rectangles.
+fn subtract(a: &Rect, b: &Rect) -> Vec<Rect> {
+    let i = a.intersect(b);
+    if i.is_empty() {
+        return vec![*a];
+    }
+    [
+        Rect::new(a.x0, a.y0, a.x1, i.y0),
+        Rect::new(a.x0, i.y1, a.x1, a.y1),
+        Rect::new(a.x0, i.y0, i.x0, i.y1),
+        Rect::new(i.x1, i.y0, a.x1, i.y1),
+    ]
+    .into_iter()
+    .filter(|r| !r.is_empty())
+    .collect()
+}
+
+/// A buffer's pixels, for workers each moving their own rows or columns
+/// of it.
+#[derive(Clone, Copy)]
+struct Pixels(*mut u32);
+
+// SAFETY: workers given a buffer's pixels touch only their own rows or
+// columns of it (see `move_pixels`).
+unsafe impl Send for Pixels {}
+unsafe impl Sync for Pixels {}
+
+impl Pixels {
+    /// The pixel `i` pixels on.
+    ///
+    /// # Safety
+    ///
+    /// It is within the buffer.
+    unsafe fn at(self, i: usize) -> *mut u32 {
+        // SAFETY: as the caller promised.
+        unsafe { self.0.add(i) }
     }
 }
 
-/// The device pixels a frame's first paint replaces before it draws over
-/// what's there: those its leading ops fill replacing what's there, or
-/// with an opaque color. (Later paints may draw over pixels an earlier
-/// one blended with.)
-fn replaced(pending: &[(Vec<Rect>, Vec<Op>)], width: u32, height: u32, scale: f64) -> Vec<Rect> {
-    let Some((rects, ops)) = pending.first() else { return Vec::new() };
+/// Copy `dest` (device pixels: x0, y0, x1, y1) of the pixels at `to` from
+/// those at `from` `dx`, `dy` back: from another buffer of the same size,
+/// or from the same one (a scroll). A large one is shared with the raster
+/// workers, in bands of rows, or of columns where a vertical move within
+/// one buffer would have one band read rows another writes (a move both
+/// ways within one buffer stays on one thread).
+///
+/// # Safety
+///
+/// `from` and `to` each point to a buffer of `width` pixels a row holding
+/// `dest`, and `dest` moved back by `dx`, `dy`; nothing else touches the
+/// pixels of `dest` at `to` meanwhile, nor writes those at `from`.
+unsafe fn move_pixels(from: Pixels, to: Pixels, width: usize, dest: (usize, usize, usize, usize), dx: i32, dy: i32) {
+    let (x0, y0, x1, y1) = dest;
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    let within = std::ptr::eq(from.0, to.0);
+    // Rows in the order that reads each before it's written, within one.
+    let part = move |(x0, y0, x1, y1): (usize, usize, usize, usize)| {
+        let row = |y: usize| {
+            let src = (y as i64 - i64::from(dy)) as usize * width + (x0 as i64 - i64::from(dx)) as usize;
+            // SAFETY: as the caller promised; `copy` allows the overlap of
+            // a horizontal move within a row.
+            unsafe { std::ptr::copy(from.at(src), to.at(y * width + x0), x1 - x0) };
+        };
+        if within && dy > 0 { (y0..y1).rev().for_each(row) } else { (y0..y1).for_each(row) }
+    };
+    let area = (x1 - x0) * (y1 - y0);
+    let n =
+        if area >= raster::bands::BANDED && !(within && dx != 0 && dy != 0) { raster::bands::workers() + 1 } else { 1 };
+    let by_columns = within && dy != 0;
+    let piece = |i: usize| {
+        if by_columns {
+            (x0 + (x1 - x0) * i / n, y0, x0 + (x1 - x0) * (i + 1) / n, y1)
+        } else {
+            (x0, y0 + (y1 - y0) * i / n, x1, y0 + (y1 - y0) * (i + 1) / n)
+        }
+    };
+    let others: Vec<Box<dyn FnOnce() + Send>> =
+        (1..n).map(|i| -> Box<dyn FnOnce() + Send> { Box::new(move || part(piece(i))) }).collect();
+    raster::bands::scoped(others, || part(piece(0)));
+}
+
+/// Copy rectangles of device pixels from buffer `from` (which the
+/// compositor may still be showing: it's only read) into buffer `to`, the
+/// same size, `dx`, `dy` back.
+fn copy_between(pool: &mut SlotPool, from: &Buffer, to: &Buffer, size: (u32, u32), rects: &[Rect], dx: i32, dy: i32) {
+    let (width, height) = size;
+    let source = Pixels(as_pixels(pool.raw_data_mut(&from.slot())).as_mut_ptr());
+    let Some(bytes) = to.canvas(pool) else { return };
+    let target = Pixels(as_pixels(bytes).as_mut_ptr());
+    for r in rects {
+        // SAFETY: two slots of the pool, the same size, which stays mapped
+        // where it is while nothing makes buffers; `dest` and its source
+        // are within them (`moved`, `clamped`), and the target is ours.
+        unsafe { move_pixels(source, target, width as usize, clamped(r, width, height), dx, dy) };
+    }
+}
+
+/// Move a rectangle of device pixels within `px` by `dx`, `dy` (whole
+/// pixels): what lands within it is what was `dx`, `dy` back; the rest of
+/// it stays as it was.
+pub(super) fn scroll_in(px: &mut [u32], width: u32, height: u32, r: &Rect, dx: i32, dy: i32) {
+    let r = r.round_out().intersect(&Rect::new(0.0, 0.0, width as f32, height as f32));
+    let dest = clamped(&moved(&r, dx, dy), width, height);
+    let all = Pixels(px.as_mut_ptr());
+    // SAFETY: `px` is borrowed whole meanwhile; `dest` and its source are
+    // within `r`, which is within it.
+    unsafe { move_pixels(all, all, width as usize, dest, dx, dy) };
+}
+
+/// The device pixels a frame's first paint (`rects`, `ops`) replaces before
+/// it draws over what's there: those its leading ops fill replacing what's
+/// there, or with an opaque color. (Later paints may draw over pixels an
+/// earlier one blended with.)
+fn replaced(rects: &[Rect], ops: &[Op], width: u32, height: u32, scale: f64) -> Vec<Rect> {
     let probe = Canvas::new(&mut [], width, height, 0.0, scale as f32);
     let mut replaced = Vec::new();
     for op in ops {
@@ -819,6 +938,7 @@ impl State {
                 self.ca.drop_rects(window, Target::Tiles(layer), &rects);
                 tiles::drop_tiles(self, window, layer, &tiles)
             }
+            ToRender::Scroll { window, rect, dx, dy } => self.scroll(window, rect, dx, dy),
             ToRender::Present { window } => {
                 if let Some(win) = self.windows.get_mut(&window) {
                     win.main_waiting = true;
@@ -1337,7 +1457,24 @@ impl State {
         }
         let scale = win.scale;
         win.damage.extend(rects.iter().map(|r| to_px(r, scale)));
-        win.pending.push((rects, ops));
+        win.pending.push(Pending::Paint(rects, ops));
+    }
+
+    /// Move `rect` (points) of the window's surface by `dx`, `dy` points, at
+    /// the next present: all of it changes.
+    fn scroll(&mut self, window: WindowId, rect: Rect, dx: f32, dy: f32) {
+        let Some(win) = self.windows.get_mut(&window) else { return };
+        if !win.configured {
+            return;
+        }
+        let s = win.scale as f32;
+        let bounds = Rect::new(0.0, 0.0, win.px_width as f32, win.px_height as f32);
+        let rect = to_px(&rect, win.scale).intersect(&bounds);
+        if rect.is_empty() {
+            return;
+        }
+        win.damage.push(rect);
+        win.pending.push(Pending::Scroll { rect, dx: (dx * s).round() as i32, dy: (dy * s).round() as i32 });
     }
 
     /// A frame the main thread sent was presented, taking `took`, of
@@ -1531,12 +1668,27 @@ impl State {
         };
         let mut stale: Vec<&mut Vec<Rect>> = win.buffers.iter_mut().map(|b| &mut b.stale).collect();
         let stale = tiles::pass_on(&mut stale, index, &damage);
-        let replaced = replaced(&pending, width, height, scale);
-        let repair: Vec<Rect> = stale.into_iter().filter(|s| !replaced.iter().any(|r| r.intersect(s) == *s)).collect();
+        let replaced = match pending.first() {
+            Some(Pending::Paint(rects, ops)) => replaced(rects, ops, width, height, scale),
+            _ => Vec::new(),
+        };
+        let mut repair: Vec<Rect> =
+            stale.into_iter().filter(|s| !replaced.iter().any(|r| r.intersect(s) == *s)).collect();
+        // A frame that starts by moving pixels, drawn into a buffer behind
+        // the last, takes what it moves from the last, moving it.
+        let mut moved_first = false;
         match win.front {
             Some(last) if last != index => {
                 let (from, to) = (&win.buffers[last].buffer, &win.buffers[index].buffer);
-                copy_between(pool, from, to, width, height, &repair);
+                if let Some(&Pending::Scroll { rect, dx, dy }) = pending.first() {
+                    let dest = moved(&rect, dx, dy);
+                    repair = repair.iter().flat_map(|r| subtract(r, &dest)).collect();
+                    copy_between(pool, from, to, (width, height), &repair, 0, 0);
+                    copy_between(pool, from, to, (width, height), &[dest], dx, dy);
+                    moved_first = true;
+                } else {
+                    copy_between(pool, from, to, (width, height), &repair, 0, 0);
+                }
             }
             Some(_) => {}
             // The first frame at this size: what it doesn't draw is the
@@ -1551,21 +1703,26 @@ impl State {
         }
         let started = crate::stats::on().then(std::time::Instant::now);
         let px = as_pixels(win.buffers[index].buffer.canvas(pool).expect("a free buffer"));
-        if !rgba {
-            swizzle(px, width, height, &damage);
-        }
-        let mut canvas = Canvas::new(&mut px[..(width * height) as usize], width, height, 0.0, scale as f32);
-        for (rects, ops) in &pending {
-            if crate::trace::tracing_tiles() {
-                raster::paint_timed(&mut canvas, glyphs, rects, ops, window);
-            } else {
-                // A large paint on several threads.
-                raster::bands::paint_banded(&mut canvas, glyphs, rects, ops);
+        // Each pixel turned once, however the damage overlaps.
+        let turned = if rgba { Vec::new() } else { disjoint(&damage) };
+        swizzle(px, width, height, &turned);
+        let px = &mut px[..(width * height) as usize];
+        for (i, item) in pending.iter().enumerate() {
+            match item {
+                Pending::Paint(rects, ops) => {
+                    let mut canvas = Canvas::new(px, width, height, 0.0, scale as f32);
+                    if crate::trace::tracing_tiles() {
+                        raster::paint_timed(&mut canvas, glyphs, rects, ops, window);
+                    } else {
+                        // A large paint on several threads.
+                        raster::bands::paint_banded(&mut canvas, glyphs, rects, ops);
+                    }
+                }
+                Pending::Scroll { .. } if i == 0 && moved_first => {}
+                &Pending::Scroll { rect, dx, dy } => scroll_in(px, width, height, &rect, dx, dy),
             }
         }
-        if !rgba {
-            swizzle(px, width, height, &damage);
-        }
+        swizzle(px, width, height, &turned);
         if let Some(started) = started {
             win.raster_time += started.elapsed();
             let area = |r: &Rect| f64::from((r.x1 - r.x0).max(0.0)) * f64::from((r.y1 - r.y0).max(0.0));

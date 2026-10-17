@@ -50,3 +50,9 @@ harness = false
 [[test]]
 name = "frame_budget"
 harness = false
+
+# Scrolling by moving pixels, through the null render thread (see the
+# file).
+[[test]]
+name = "scrolling"
+harness = false

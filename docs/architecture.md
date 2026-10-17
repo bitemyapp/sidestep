@@ -2597,6 +2597,34 @@ paint names its slowest ops):
   image cache (images, image masks) keep a paint on one thread. Tests
   hold banded paints to one thread's, pixel for pixel.
 
+Scrolling redrew all of what scrolled, every notch: the kit measured a
+full-window list at 2× at 28 ms at the 95th percentile, most of it its
+own drawing. `Window::scroll(rect, delta)` moves the pixels instead:
+the next pass sends a `Scroll` before its paint, and the handler draws
+only the strips the move uncovered (with what was waiting to be redrawn
+in `rect`, moved along); moves before a pass add up, and one that isn't
+whole device pixels, or moves all of `rect` out, redraws it. The render
+thread keeps a scroll in order with the paints until the present. In a
+buffer behind the last one shown, a frame that starts with a move takes
+the moved pixels straight from the last, moved, and catches up only
+around them; otherwise it moves them within the buffer. A large move
+(or catching up) is shared with the raster workers, in bands of rows
+between buffers or of columns for a vertical move within one. The null
+render thread moves its captured pixels too, so `tests/scrolling.rs`
+holds a scrolled list to the list drawn whole, and under sway the
+screen is exactly that after 25 frames of moves. `frame_budget`'s list,
+scrolled 40 points a frame (a wheel's notch), redrawn whole against
+moved:
+
+| 1440 × 900 points, list scrolled | redrawn: record, total p50 / p95 | moved: record, total p50 / p95 |
+|---|---|---|
+| at 2× | 0.22 ms, 1.66–1.69 / 2.7–3.0 ms | 0.18 ms, 1.18–1.21 / 2.3–2.4 ms |
+| at 1× | 0.22 ms, 0.63 / 1.1 ms | 0.17 ms, 0.50 / 0.73 ms |
+
+Here the list's rows are cheap to draw, so redrawing them banded is
+nearly as quick; a list whose rows take longer to lay out and draw
+saves all of that but a strip's.
+
 ### Core Animation
 
 QuartzCore (`quartzcore/`) follows Core Animation as

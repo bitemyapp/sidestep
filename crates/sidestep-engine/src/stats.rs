@@ -49,16 +49,19 @@ pub fn printing() -> bool {
     *PRINTING.get_or_init(|| std::env::var("SIDESTEP_FRAME_STATS").is_ok_and(|v| !v.is_empty() && v != "0"))
 }
 
-/// Collect frames, summarizing them every `period` (none: stop, unless
-/// `SIDESTEP_FRAME_STATS` asks for them).
+/// Collect frames, summarizing them every `period` from now on, the frames
+/// and summaries so far dropped (none: stop, unless `SIDESTEP_FRAME_STATS`
+/// asks for them).
 pub fn set_period(period: Option<Duration>) {
     let mut s = store();
     s.period = period.map(|p| p.max(Duration::from_millis(1)));
     let on = printing() || s.period.is_some();
     if !on {
         s.recorded.clear();
-        s.frames.clear();
     }
+    s.frames.clear();
+    s.latest.clear();
+    s.since = None;
     STATE.store(if on { 2 } else { 1 }, Ordering::Relaxed);
 }
 
