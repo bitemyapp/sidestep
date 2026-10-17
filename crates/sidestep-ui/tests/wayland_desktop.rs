@@ -10,7 +10,8 @@
 //!   output, both showing where they should; a click on the panel opening
 //!   a menu from it, which closes; the panel taking the
 //!   keyboard when asked, typed into, then growing, and windows making
-//!   room; a window's frames measured;
+//!   room; a window's frames measured; the panel taking clicks only in
+//!   its input region, the wallpaper under it the others;
 //! - outputs as sway names and places them; one plugged in (heard of), a
 //!   panel put on it, and the output unplugged, which closes the panel;
 //! - the session locked (ext-session-lock) with a lock screen on the
@@ -156,6 +157,7 @@ mod linux {
         Typed,
         Grown,
         Measured,
+        Regions,
         Done,
     }
 
@@ -173,11 +175,14 @@ mod linux {
         marks: HashMap<WindowId, usize>,
         pointer: mpsc::Sender<pointer::Do>,
         typing: bool,
+        /// The step sent its input (it waits for what comes of it).
+        asked: bool,
     }
 
     impl Layers {
         fn next(&mut self, step: Step) {
             self.step = step;
+            self.asked = false;
             self.marks = self.events.iter().map(|(w, e)| (*w, e.len())).collect();
         }
 
@@ -300,6 +305,40 @@ mod linux {
                     assert!(s.rasterize.max > Duration::ZERO && s.present.max > Duration::ZERO, "{s:?}");
                     assert!(s.damage > 0.99, "{s:?}");
                     cx.set_frame_stats(None);
+                    // The panel takes clicks on its left half only: on the
+                    // right, they go to the wallpaper under it.
+                    let left = Rect::new(0.0, 0.0, OUTPUT.width / 2.0, 32.0);
+                    cx.window(bar).expect("the bar").set_input_region(Some(&[left]));
+                    self.next(Step::Regions);
+                }
+                Step::Regions => {
+                    let pressed = |events: &[WindowEvent]| {
+                        events.iter().find_map(|e| match e {
+                            WindowEvent::PointerButton { position, pressed: true, .. } => Some(*position),
+                            _ => None,
+                        })
+                    };
+                    if !std::mem::replace(&mut self.asked, true) {
+                        self.point(pointer::Do::MoveTo(900, 16));
+                        self.point(pointer::Do::Click);
+                        self.point(pointer::Do::MoveTo(100, 16));
+                        self.point(pointer::Do::Click);
+                    }
+                    let (Some(through), Some(taken)) =
+                        (pressed(self.since(self.wallpaper)), pressed(self.since(self.bar)))
+                    else {
+                        return;
+                    };
+                    assert!(through.distance(Point::new(900.0, 16.0)) < 1.0, "{through:?}");
+                    assert!(taken.distance(Point::new(100.0, 16.0)) < 1.0, "{taken:?}");
+                    let presses = |w| {
+                        self.since(w)
+                            .iter()
+                            .filter(|e| matches!(e, WindowEvent::PointerButton { pressed: true, .. }))
+                            .count()
+                    };
+                    assert_eq!((presses(self.bar), presses(self.wallpaper)), (1, 1));
+                    println!("  the panel took clicks in its input region, the wallpaper the others");
                     self.point(pointer::Do::Done);
                     self.next(Step::Done);
                     cx.quit();
@@ -387,6 +426,7 @@ mod linux {
             marks: HashMap::new(),
             pointer: tx,
             typing: has("wtype"),
+            asked: false,
         };
         let layers = App::new().run(layers).expect("a compositor");
         assert_eq!(layers.step, Step::Done, "every step ran");

@@ -520,6 +520,8 @@ pub struct Win {
     text_input: bool,
     /// Where its caret is, in points from the top left of the content.
     caret: Option<Rect>,
+    /// Where the content takes pointer input, if not everywhere.
+    input_region: Option<Vec<Rect>>,
     /// For `stats`: the time the frame's paints took to rasterize, and
     /// the device pixels they redrew.
     raster_time: std::time::Duration,
@@ -788,6 +790,20 @@ impl State {
             ToRender::PublishOutputs => outputs::requested(self),
             ToRender::TextInput { window, wanted, caret } => textinput::set_wanted(self, window, wanted, caret),
             ToRender::ResetTextInput { window } => textinput::reset(self, window),
+            ToRender::SetInputRegion { window, rects } => {
+                if let Some(win) = self.windows.get_mut(&window) {
+                    win.input_region = rects;
+                }
+                self.content_input(window);
+            }
+            ToRender::SetOpaqueRegion { window, rects } => {
+                let region = rects.and_then(|rects| self.region(&rects));
+                let Some(win) = self.windows.get(&window) else { return };
+                win.surface().set_opaque_region(region.as_ref().map(Region::wl_region));
+                if win.configured {
+                    win.commit();
+                }
+            }
             ToRender::SetParent { window, parent } => {
                 let parent = parent.and_then(|p| self.windows.get(&p)).and_then(|w| w.toplevel().cloned());
                 if let Some(w) = self.windows.get(&window).and_then(|w| w.toplevel()) {
@@ -938,6 +954,7 @@ impl State {
                 caret: None,
                 raster_time: std::time::Duration::ZERO,
                 raster_pixels: 0.0,
+                input_region: None,
             },
         );
         self.apply_limits(window);
@@ -1512,10 +1529,32 @@ impl State {
         // The window's commit applies the content's region and, as the
         // others are synchronized subsurfaces, theirs. A frame never takes
         // pointer input.
-        win.surface().set_input_region(empty.as_ref());
+        self.content_input(window);
+    }
+
+    /// Give the content's surface its input region: none if pointer input
+    /// goes through, else the one the main thread set, or all of it, and
+    /// commit it.
+    fn content_input(&mut self, window: WindowId) {
+        let Some(win) = self.windows.get(&window) else { return };
+        let set = win.input_region.clone();
+        let empty = win.passthrough.then(|| self.empty_region());
+        let region = if empty.is_some() { None } else { set.and_then(|rects| self.region(&rects)) };
+        let Some(win) = self.windows.get(&window) else { return };
+        win.surface().set_input_region(empty.as_ref().or(region.as_ref().map(Region::wl_region)));
         if win.configured {
             win.commit();
         }
+    }
+
+    /// A region of `rects` (points of a surface), for the moment it's set:
+    /// a surface copies it.
+    fn region(&self, rects: &[Rect]) -> Option<Region> {
+        let region = Region::new(&self.compositor).ok()?;
+        for r in rects.iter().map(Rect::round_out).filter(|r| !r.is_empty()) {
+            region.add(r.x0 as i32, r.y0 as i32, (r.x1 - r.x0) as i32, (r.y1 - r.y0) as i32);
+        }
+        Some(region)
     }
 
     /// The input region with nothing in it, made the first time it's

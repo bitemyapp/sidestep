@@ -19,6 +19,9 @@ pub use sidestep_engine::backend::null::{PaintedText, Seen};
 /// A layer surface's placement as the render thread was given it (in
 /// [`Seen::Layer`]).
 pub use sidestep_engine::protocol::LayerPlacement;
+/// A rectangle as the render thread was given it (in [`Seen`]): points,
+/// `x0`, `y0`, `x1`, `y1`.
+pub use sidestep_engine::protocol::Rect as RenderRect;
 
 use crate::app::Cx;
 use crate::event::{Modifiers, PointerButton};

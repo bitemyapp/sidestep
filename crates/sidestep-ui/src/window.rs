@@ -368,6 +368,10 @@ pub(crate) struct WindowData {
     pub outputs: Vec<u32>,
     pub cursor: Cursor,
     pub text_input: (bool, Option<Rect>),
+    /// Where the content takes pointer input, and where it's opaque, as
+    /// the program set them.
+    pub input_region: Option<Vec<Rect>>,
+    pub opaque_region: Option<Vec<Rect>>,
 }
 
 /// The most rectangles a window's damage keeps before they become their
@@ -400,6 +404,8 @@ impl WindowData {
             outputs: Vec::new(),
             cursor: Cursor::Default,
             text_input: (false, None),
+            input_region: None,
+            opaque_region: None,
         }
     }
 
@@ -471,9 +477,15 @@ impl WindowData {
             send(tx, ToRender::SetParent { window: showing, parent: Some(parent) });
         }
         // A new showing knows nothing of the pointer's appearance or of
-        // input methods.
+        // input methods; its regions are set again.
         if self.cursor != Cursor::Default {
             send(tx, ToRender::SetCursor { window: showing, cursor: self.cursor });
+        }
+        if self.input_region.is_some() {
+            send(tx, ToRender::SetInputRegion { window: showing, rects: regions(&self.input_region) });
+        }
+        if self.opaque_region.is_some() {
+            send(tx, ToRender::SetOpaqueRegion { window: showing, rects: regions(&self.opaque_region) });
         }
         self.text_input = (false, None);
         self.showing = Some(showing);
@@ -526,6 +538,12 @@ impl WindowData {
             && !self.frame_pending
             && (!self.damage.is_empty() || self.title_dirty)
     }
+}
+
+/// Rectangles of a region as the render thread takes them.
+fn regions(rects: &Option<Vec<Rect>>) -> Option<Vec<protocol::Rect>> {
+    let p = |r: &Rect| protocol::Rect::new(r.x0 as f32, r.y0 as f32, r.x1 as f32, r.y1 as f32);
+    rects.as_ref().map(|rects| rects.iter().map(p).collect())
 }
 
 pub(crate) fn send(tx: &Sender<ToRender>, msg: ToRender) {
@@ -597,6 +615,27 @@ impl Window<'_> {
     /// Draw `rect` (content points) again at the next pass.
     pub fn invalidate(&mut self, rect: Rect) {
         self.data.invalidate(protocol::Rect::new(rect.x0 as f32, rect.y0 as f32, rect.x1 as f32, rect.y1 as f32));
+    }
+
+    /// Take pointer input only inside `region` (rectangles of the
+    /// content, in points), letting it through elsewhere to what's behind
+    /// (a shadow drawn around a panel or a menu); `None`, the default,
+    /// takes it everywhere. Shown again, the window keeps it.
+    pub fn set_input_region(&mut self, region: Option<&[Rect]>) {
+        self.data.input_region = region.map(<[Rect]>::to_vec);
+        if let Some(showing) = self.data.showing {
+            send(self.tx, ToRender::SetInputRegion { window: showing, rects: regions(&self.data.input_region) });
+        }
+    }
+
+    /// Tell the compositor where the content is opaque (rectangles, in
+    /// points), so it needn't draw what's behind there: a wallpaper, a
+    /// panel without rounded corners. `None`, the default, is nowhere.
+    pub fn set_opaque_region(&mut self, region: Option<&[Rect]>) {
+        self.data.opaque_region = region.map(<[Rect]>::to_vec);
+        if let Some(showing) = self.data.showing {
+            send(self.tx, ToRender::SetOpaqueRegion { window: showing, rects: regions(&self.data.opaque_region) });
+        }
     }
 
     /// The pointer's appearance over the window's content.

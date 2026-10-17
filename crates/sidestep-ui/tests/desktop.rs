@@ -2,10 +2,11 @@
 //! layer surfaces (a panel along the top, a wallpaper the compositor
 //! sizes, one that takes the keyboard), sized, drawn and taking input as
 //! windows do, placed anew while they show and shown again as they were
-//! left, and a popup opened from the panel; outputs coming and going,
-//! and a panel put on one; the session locked with a lock screen, typed
-//! into and unlocked, and a lock the compositor ends; frames measured.
-//! Each step waits for its condition, polled by a timer, with a deadline.
+//! left, with their input and opaque regions, and a popup opened from
+//! the panel; outputs coming and going, and a panel put on one; the
+//! session locked with a lock screen, typed into and unlocked, and a lock
+//! the compositor ends; frames measured. Each step waits for its
+//! condition, polled by a timer, with a deadline.
 
 fn main() {
     #[cfg(not(target_vendor = "apple"))]
@@ -176,6 +177,9 @@ mod linux {
                     w.set_layer(Layer::Overlay);
                     w.set_layer_exclusive_zone(30);
                     w.set_layer_keyboard(KeyboardInteractivity::Exclusive);
+                    // Clicks taken on its left only; opaque all over.
+                    w.set_input_region(Some(&[Rect::new(0.0, 0.0, 600.0, 30.0)]));
+                    w.set_opaque_region(Some(&[Rect::new(0.0, 0.0, 1260.0, 30.0)]));
                     self.step = 3;
                 }
                 3 => {
@@ -204,6 +208,14 @@ mod linux {
                     }
                     assert_eq!(placement.margins, [0, 10, 0, 10]);
                     assert_eq!(placement.exclusive_zone, 30);
+                    // Its regions, set again.
+                    let input = Some(vec![testing::RenderRect::new(0.0, 0.0, 600.0, 30.0)]);
+                    assert!(self.log.contains(&Seen::InputRegion { window: showing, rects: input }), "{:?}", self.log);
+                    assert!(
+                        self.log
+                            .iter()
+                            .any(|s| matches!(s, Seen::OpaqueRegion { window, rects: Some(_) } if *window == showing))
+                    );
                     // A layer surface that takes the keyboard has it at once.
                     let options = LayerOptions::new(Layer::Top, "search")
                         .anchors(Anchors::TOP)

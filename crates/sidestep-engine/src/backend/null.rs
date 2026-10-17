@@ -79,6 +79,16 @@ pub enum Seen {
         window: u32,
         output: u32,
     },
+    /// Where the window takes pointer input, or is opaque (none: all of
+    /// it, or none of it).
+    InputRegion {
+        window: u32,
+        rects: Option<Vec<crate::protocol::Rect>>,
+    },
+    OpaqueRegion {
+        window: u32,
+        rects: Option<Vec<crate::protocol::Rect>>,
+    },
 }
 
 /// A run of text the main thread asked the null render thread to paint.
@@ -425,6 +435,8 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
             ToRender::SetCursor { window, cursor } => note(Seen::Cursor { window, name: cursor.name().into() }),
             ToRender::HideCursor { hidden, until_moved } => note(Seen::CursorHidden { hidden, until_moved }),
             ToRender::SetParent { window, parent } => note(Seen::Parent { window, parent }),
+            ToRender::SetInputRegion { window, rects } => note(Seen::InputRegion { window, rects }),
+            ToRender::SetOpaqueRegion { window, rects } => note(Seen::OpaqueRegion { window, rects }),
             ToRender::Paint { window: _, target: crate::protocol::Target::Content(layer), rects, ops } => {
                 with_ca(|ca| ca.paint_content(layer, &rects, &ops, &mut glyphs));
             }

@@ -798,6 +798,19 @@ pub enum ToRender {
         window: WindowId,
         parent: Option<WindowId>,
     },
+    /// Where the window's content takes pointer input, in its points (none:
+    /// all of it); clicks elsewhere go to what's behind. A passthrough style
+    /// takes none anywhere.
+    SetInputRegion {
+        window: WindowId,
+        rects: Option<Vec<Rect>>,
+    },
+    /// Where the window's content is opaque, in its points (none: nowhere),
+    /// so the compositor needn't draw what's behind it there.
+    SetOpaqueRegion {
+        window: WindowId,
+        rects: Option<Vec<Rect>>,
+    },
     /// Image representations that went away: drop what's cached of them.
     ForgetImages {
         keys: Vec<u64>,

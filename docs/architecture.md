@@ -771,6 +771,14 @@ through the same protocol AppKit does, and keeps AppKit's rhythm:
   `tests/wayland_desktop.rs` checks a panel's exclusive zone tiles a
   window under it, a wallpaper fills the output, a menu opens from the
   panel's press, and the panel takes the keyboard and grows.
+- **Regions**: `Window::set_input_region` limits where a window's content
+  takes pointer input (a panel's or a menu's shadow lets clicks through to
+  what's behind), and `set_opaque_region` tells the compositor where it
+  needn't draw what's behind, both in content points and kept for later
+  showings (`SetInputRegion`, `SetOpaqueRegion`); the render thread sets
+  them on the content's surface, a passthrough style still emptying the
+  input region. Under sway, a panel taking clicks on its left half only
+  lets those on its right through to the wallpaper.
 - **The session lock** (the engine's `backend::lock`): `Cx::lock_session`
   sends `LockSession`, and the render thread asks for an
   ext-session-lock; a window opened with `WindowOptions::lock(output)`
