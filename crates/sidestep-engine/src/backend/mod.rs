@@ -34,6 +34,7 @@ mod decor;
 mod dnd;
 mod keyboard;
 mod layer;
+mod lock;
 mod menubar;
 pub mod null;
 mod outputs;
@@ -90,6 +91,7 @@ use smithay_client_toolkit::reexports::protocols::xdg::shell::client::xdg_positi
     Anchor, ConstraintAdjustment, Gravity,
 };
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState, SimpleGlobal};
+use smithay_client_toolkit::session_lock::{SessionLock, SessionLockState, SessionLockSurface};
 use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shell::wlr_layer::{LayerShell, LayerSurface};
 use smithay_client_toolkit::shell::xdg::popup::{Popup, PopupConfigure, PopupHandler};
@@ -101,9 +103,9 @@ use smithay_client_toolkit::shm::slot::{Buffer, SlotPool};
 use smithay_client_toolkit::shm::{Shm, ShmHandler};
 use smithay_client_toolkit::subcompositor::SubcompositorState;
 use smithay_client_toolkit::{
-    delegate_activation, delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_shm,
-    delegate_simple, delegate_subcompositor, delegate_xdg_popup, delegate_xdg_shell, delegate_xdg_window,
-    registry_handlers,
+    delegate_activation, delegate_compositor, delegate_layer, delegate_output, delegate_registry,
+    delegate_session_lock, delegate_shm, delegate_simple, delegate_subcompositor, delegate_xdg_popup,
+    delegate_xdg_shell, delegate_xdg_window, registry_handlers,
 };
 
 use crate::protocol::{
@@ -271,6 +273,8 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
         text_inputs: textinput::TextInputs::new(&globals, &qh),
         activation: ActivationState::bind(&globals, &qh).ok(),
         layer_shell: LayerShell::bind(&globals, &qh).ok(),
+        session_locks: SessionLockState::new(&globals, &qh),
+        session_lock: None,
         compositor,
         subcompositor,
         viewporter,
@@ -311,6 +315,12 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
         }
         state.rasterize_tiles();
     }
+    // A program that stops while it holds the session lock leaves the
+    // session locked: the lock goes with the connection, not destroyed
+    // (a protocol error while locked).
+    if let Some(lock) = state.session_lock.take().filter(SessionLock::is_locked) {
+        std::mem::forget(lock);
+    }
 }
 
 /// How long the render thread rasterizes tiles between looks for events:
@@ -327,6 +337,9 @@ pub struct State {
     activation: Option<ActivationState>,
     /// wlr-layer-shell, where the compositor offers it (see `layer`).
     layer_shell: Option<LayerShell>,
+    /// ext-session-lock (see `lock`), and the lock asked for or held.
+    session_locks: SessionLockState,
+    session_lock: Option<SessionLock>,
     compositor: CompositorState,
     subcompositor: SubcompositorState,
     viewporter: SimpleGlobal<WpViewporter, 1>,
@@ -385,6 +398,8 @@ enum Shell {
     Sheet(sheet::Sheet),
     /// A desktop surface (see `layer`).
     Layer(LayerSurface),
+    /// The session lock's surface on an output, by its id (see `lock`).
+    Lock(SessionLockSurface, u32),
 }
 
 /// A toplevel's own surface, its frame: exactly the window geometry, the
@@ -515,6 +530,7 @@ impl Win {
             Shell::Popup(p) => p.wl_surface(),
             Shell::Sheet(s) => s.surface(),
             Shell::Layer(l) => l.wl_surface(),
+            Shell::Lock(l, _) => l.wl_surface(),
         }
     }
 
@@ -523,14 +539,14 @@ impl Win {
     fn main_surface(&self) -> &WlSurface {
         match &self.shell {
             Shell::Toplevel(f) => f.window.wl_surface(),
-            Shell::Popup(_) | Shell::Sheet(_) | Shell::Layer(_) => self.surface(),
+            Shell::Popup(_) | Shell::Sheet(_) | Shell::Layer(_) | Shell::Lock(..) => self.surface(),
         }
     }
 
     fn toplevel(&self) -> Option<&Window> {
         match &self.shell {
             Shell::Toplevel(f) => Some(&f.window),
-            Shell::Popup(_) | Shell::Sheet(_) | Shell::Layer(_) => None,
+            Shell::Popup(_) | Shell::Sheet(_) | Shell::Layer(_) | Shell::Lock(..) => None,
         }
     }
 
@@ -649,9 +665,11 @@ impl State {
 
     fn handle(&mut self, msg: ToRender) {
         match msg {
-            ToRender::CreateWindow { window, width, height, title, style, limits, popup, sheet_of, layer } => {
-                self.create_window(window, width, height, title, style, limits, popup, sheet_of, layer)
+            ToRender::CreateWindow { window, width, height, title, style, limits, popup, sheet_of, layer, lock } => {
+                self.create_window(window, width, height, title, style, limits, popup, sheet_of, layer, lock)
             }
+            ToRender::LockSession => lock::lock(self),
+            ToRender::UnlockSession => lock::unlock(self),
             ToRender::SetTitle { window, title, text } => {
                 let Some(win) = self.windows.get_mut(&window) else { return };
                 if let Some(w) = win.toplevel() {
@@ -792,6 +810,7 @@ impl State {
         popup: Option<PopupPlacement>,
         sheet_of: Option<WindowId>,
         layer: Option<LayerPlacement>,
+        lock: Option<u32>,
     ) {
         let mut scale = self.initial_scale();
         let sheet = match sheet_of {
@@ -802,12 +821,12 @@ impl State {
             }
             None => None,
         };
-        let (shell, surface) = match (popup, sheet, layer) {
-            (_, Some(sheet), _) => {
+        let (shell, surface) = match (popup, sheet, layer, lock) {
+            (_, Some(sheet), ..) => {
                 let surface = sheet.surface().clone();
                 (Shell::Sheet(sheet), surface)
             }
-            (Some(placement), None, _) => {
+            (Some(placement), None, ..) => {
                 let surface = self.compositor.create_surface(&self.qh);
                 let Some(popup) = self.create_popup(&surface, width, height, placement) else {
                     surface.destroy();
@@ -815,7 +834,7 @@ impl State {
                 };
                 (Shell::Popup(popup), surface)
             }
-            (None, None, Some(placement)) => {
+            (None, None, Some(placement), _) => {
                 let surface = self.compositor.create_surface(&self.qh);
                 let Some(l) = layer::create(self, &surface, width, height, &placement) else {
                     // Without a layer shell it can't show: it is closed at once.
@@ -827,7 +846,19 @@ impl State {
                 scale = layer::initial_scale(self, placement.output).unwrap_or(scale);
                 (Shell::Layer(l), surface)
             }
-            (None, None, None) => {
+            (None, None, None, Some(output)) => {
+                let surface = self.compositor.create_surface(&self.qh);
+                let Some(l) = lock::create(self, &surface, output) else {
+                    // No lock asked for, no such output, or one there already.
+                    eprintln!("sidestep: no session lock surface for window {window} on output {output}");
+                    surface.destroy();
+                    self.send(FromRender::CloseRequested { window });
+                    return;
+                };
+                scale = layer::initial_scale(self, Some(output)).unwrap_or(scale);
+                (Shell::Lock(l, output), surface)
+            }
+            (None, None, None, None) => {
                 let decorations = if !style.titled || force_client_decorations() {
                     WindowDecorations::ClientOnly
                 } else {
@@ -938,8 +969,8 @@ impl State {
             // A layer surface's popup has no xdg parent: it is given to
             // the layer surface before its first commit.
             Shell::Layer(_) => None,
-            // Popups of sheets aren't placed yet.
-            Shell::Sheet(_) => return None,
+            // Popups of sheets aren't placed yet; a lock surface has none.
+            Shell::Sheet(_) | Shell::Lock(..) => return None,
         };
         let popup = Popup::from_surface(parent_xdg.as_ref(), &positioner, &self.qh, surface.clone(), &self.xdg).ok()?;
         if let Shell::Layer(l) = &parent.shell {
@@ -1358,13 +1389,13 @@ impl State {
                     f.window.xdg_surface().set_window_geometry(geometry.0, geometry.1, geometry.2, geometry.3)
                 }
                 Shell::Popup(p) => p.xdg_surface().set_window_geometry(0, 0, geometry.2, geometry.3),
-                Shell::Sheet(_) | Shell::Layer(_) => {}
+                Shell::Sheet(_) | Shell::Layer(_) | Shell::Lock(..) => {}
             }
         }
         let (width, height, top) = (win.width, win.height, win.titlebar());
         let moved = match &mut win.shell {
             Shell::Toplevel(f) => f.place(width, height, top, &mut self.pool),
-            Shell::Popup(_) | Shell::Sheet(_) | Shell::Layer(_) => false,
+            Shell::Popup(_) | Shell::Sheet(_) | Shell::Layer(_) | Shell::Lock(..) => false,
         };
         let bar = win.bar_height();
         if let Some(menubar) = &mut win.menubar {
@@ -1806,6 +1837,7 @@ delegate_xdg_shell!(State);
 delegate_xdg_window!(State);
 delegate_xdg_popup!(State);
 delegate_layer!(State);
+delegate_session_lock!(State);
 delegate_activation!(State, Activation);
 delegate_simple!(State, WpViewporter, 1);
 delegate_registry!(State);

@@ -69,6 +69,20 @@ pub trait Handler {
         let _ = cx;
     }
 
+    /// The compositor locked the session, as [`Cx::lock_session`] asked:
+    /// nothing but the lock's surfaces shows, and they have all the input,
+    /// until [`Cx::unlock_session`].
+    fn session_locked(&mut self, cx: &mut Cx) {
+        let _ = cx;
+    }
+
+    /// The session lock ended without [`Cx::unlock_session`]: the
+    /// compositor refused it (another program holds one, or it can't lock)
+    /// or ended it. Its surfaces have closed.
+    fn session_lock_finished(&mut self, cx: &mut Cx) {
+        let _ = cx;
+    }
+
     /// A drag entered `window` or moved over it (or waits there, if the
     /// last answer asked to be asked periodically): what dropping it there
     /// would do. The default, [`DropResponse::REFUSE`], refuses it.
@@ -159,6 +173,15 @@ impl From<DropAction> for DropResponse {
     fn from(action: DropAction) -> DropResponse {
         DropResponse { action, mime: None, periodic: false }
     }
+}
+
+/// Where the program's session lock is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Locking {
+    Unlocked,
+    /// Asked for, not yet confirmed.
+    Asked,
+    Locked,
 }
 
 /// A timer, as [`Cx::set_timer`] returns it.
@@ -335,6 +358,7 @@ impl App {
             clipboard: None,
             drags: HashMap::new(),
             looks: (Appearance::system(), Appearance::system().color(SystemColor::Accent)),
+            locking: Locking::Unlocked,
         };
         handler.launched(&mut cx);
         let result = cx.run(&mut handler);
@@ -397,6 +421,7 @@ pub struct Cx {
     drags: HashMap<u64, DragState>,
     /// The appearance and accent windows last drew in.
     looks: (Appearance, Color),
+    locking: Locking,
 }
 
 impl Cx {
@@ -579,6 +604,47 @@ impl Cx {
     /// then), and none without a display. This never waits.
     pub fn outputs(&self) -> Vec<Output> {
         outputs::latest().map(|all| all.iter().map(Output::of).collect()).unwrap_or_default()
+    }
+
+    // The session lock.
+
+    /// Lock the session (ext-session-lock), as a lock screen does: the
+    /// compositor hides everything but the lock's surfaces, which the
+    /// program opens at once, one on each output
+    /// ([`WindowOptions::lock`]), and gives them all the input; the
+    /// handler hears [`session_locked`](Handler::session_locked) once it
+    /// has, or [`session_lock_finished`](Handler::session_lock_finished)
+    /// if it won't. Nothing while a lock is asked for or held. A program
+    /// that ends while it holds the lock leaves the session locked.
+    pub fn lock_session(&mut self) {
+        if self.locking == Locking::Unlocked {
+            self.locking = Locking::Asked;
+            send(&self.backend.tx, ToRender::LockSession);
+        }
+    }
+
+    /// Unlock the session (or stop asking for a lock): the lock's
+    /// surfaces close.
+    pub fn unlock_session(&mut self) {
+        if self.locking != Locking::Unlocked {
+            self.locking = Locking::Unlocked;
+            send(&self.backend.tx, ToRender::UnlockSession);
+            // After the unlock: a lock surface gone while the session is
+            // locked leaves its output blank.
+            self.close_lock_windows();
+        }
+    }
+
+    /// Whether the compositor has locked the session for the program.
+    pub fn is_session_locked(&self) -> bool {
+        self.locking == Locking::Locked
+    }
+
+    fn close_lock_windows(&mut self) {
+        let locks: Vec<WindowId> = self.windows.values().filter(|w| w.lock_output().is_some()).map(|w| w.id).collect();
+        for id in locks {
+            self.close_window(id);
+        }
     }
 
     /// Hide the pointer over every window, until it moves if
@@ -971,6 +1037,21 @@ impl Cx {
                 send(&self.backend.tx, ToRender::DndFinish { drag, performed });
             }
             FromRender::ScreensChanged => handler.outputs_changed(self),
+            // What's said of a lock the program gave up meanwhile finds
+            // nothing.
+            FromRender::SessionLocked => {
+                if self.locking == Locking::Asked {
+                    self.locking = Locking::Locked;
+                    handler.session_locked(self);
+                }
+            }
+            FromRender::SessionLockFinished => {
+                if self.locking != Locking::Unlocked {
+                    self.locking = Locking::Unlocked;
+                    self.close_lock_windows();
+                    handler.session_lock_finished(self);
+                }
+            }
             FromRender::WindowOutputs { window, outputs } => {
                 let Some(window) = of(self, window) else { return };
                 if let Some(w) = self.windows.get_mut(&window) {

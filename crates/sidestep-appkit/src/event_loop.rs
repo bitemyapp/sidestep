@@ -344,6 +344,8 @@ fn handle(msg: FromRender) {
         }
         // Core Animation (quartzcore).
         FromRender::Tick { window, time } => crate::quartzcore::display_link::tick(window, time),
+        // AppKit never locks the session (sidestep-ui's `Cx::lock_session` does).
+        FromRender::SessionLocked | FromRender::SessionLockFinished => {}
         FromRender::Repaint { window, target, rects } => {
             if let Some(w) = app::find_window(window) {
                 let key = match target {

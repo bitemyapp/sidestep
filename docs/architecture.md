@@ -770,6 +770,26 @@ through the same protocol AppKit does, and keeps AppKit's rhythm:
   `tests/wayland_desktop.rs` checks a panel's exclusive zone tiles a
   window under it, a wallpaper fills the output, a menu opens from the
   panel's press, and the panel takes the keyboard and grows.
+- **The session lock** (the engine's `backend::lock`): `Cx::lock_session`
+  sends `LockSession`, and the render thread asks for an
+  ext-session-lock; a window opened with `WindowOptions::lock(output)`
+  (`CreateWindow`'s `lock`) is the lock's surface on that output, the
+  content's surface itself, never committed before the compositor
+  configures it (the protocol forbids it), its role the root's, so it
+  takes the keyboard and pointer. The compositor sizes it. `locked`
+  reaches the handler as `session_locked`; `finished` (refused or ended)
+  unlocks or destroys the lock as it was or wasn't locked, closes the
+  lock's windows and reaches the handler as `session_lock_finished`.
+  `Cx::unlock_session` unlocks (or withdraws a lock not yet confirmed),
+  then closes the lock's windows, so outputs don't blank first. A second
+  lock surface on an output, a protocol error, is refused (the window
+  closes), as is one without a lock. A render thread that stops while it
+  holds the lock leaves it to the connection's end rather than destroying
+  it, which would be a protocol error: the session stays locked, as the
+  protocol wants of a lock screen that dies. The null render thread locks
+  at once and sizes lock surfaces as its output; under sway the test
+  locks, sees only the lock screen in a screenshot, clicks and types into
+  it, and unlocks to the window under it.
 - **The display pass** gives each window that needs it a `Canvas`: a
   window draws once configured, only when the render thread showed its
   last frame (so drawing keeps pace with the compositor's frame

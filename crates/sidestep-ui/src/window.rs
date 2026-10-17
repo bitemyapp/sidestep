@@ -140,6 +140,7 @@ pub(crate) enum Kind {
     Toplevel { parent: Option<WindowId> },
     Popup { parent: WindowId, anchor: Rect, grab: bool, position: PopupPosition },
     Layer(LayerOptions),
+    Lock { output: u32 },
 }
 
 /// What a window is asked to be when it opens.
@@ -209,6 +210,27 @@ impl WindowOptions {
             resizable: false,
             minimizable: false,
             kind: Kind::Layer(options),
+            ..WindowOptions::new("")
+        }
+    }
+
+    /// The session lock's surface on output `output` (an
+    /// [`Output::id`](crate::Output::id)), while the program locks the
+    /// session ([`Cx::lock_session`](crate::Cx::lock_session)): a lock
+    /// screen, all that shows there while the session is locked, with all
+    /// the input. The compositor sizes it (the output's size), and it
+    /// closes when the lock ends. Open one for each output as soon as the
+    /// lock is asked for: compositors wait for them (a while) before
+    /// confirming the lock. One output has one at a time; a second, or
+    /// one without a lock asked for, closes at once.
+    pub fn lock(output: u32) -> WindowOptions {
+        WindowOptions {
+            size: Size::ZERO,
+            decorated: false,
+            resizable: false,
+            minimizable: false,
+            closable: false,
+            kind: Kind::Lock { output },
             ..WindowOptions::new("")
         }
     }
@@ -385,7 +407,7 @@ impl WindowData {
     pub fn popup_of(&self) -> Option<WindowId> {
         match self.kind {
             Kind::Popup { parent, .. } => Some(parent),
-            Kind::Toplevel { .. } | Kind::Layer(_) => None,
+            Kind::Toplevel { .. } | Kind::Layer(_) | Kind::Lock { .. } => None,
         }
     }
 
@@ -393,7 +415,7 @@ impl WindowData {
     pub fn transient_for(&self) -> Option<WindowId> {
         match self.kind {
             Kind::Toplevel { parent } => parent,
-            Kind::Popup { .. } | Kind::Layer(_) => None,
+            Kind::Popup { .. } | Kind::Layer(_) | Kind::Lock { .. } => None,
         }
     }
 
@@ -401,7 +423,15 @@ impl WindowData {
     pub fn layer(&self) -> Option<&LayerOptions> {
         match &self.kind {
             Kind::Layer(options) => Some(options),
-            Kind::Toplevel { .. } | Kind::Popup { .. } => None,
+            Kind::Toplevel { .. } | Kind::Popup { .. } | Kind::Lock { .. } => None,
+        }
+    }
+
+    /// The output a session lock's surface is on.
+    pub fn lock_output(&self) -> Option<u32> {
+        match self.kind {
+            Kind::Lock { output } => Some(output),
+            Kind::Toplevel { .. } | Kind::Popup { .. } | Kind::Layer(_) => None,
         }
     }
 
@@ -417,10 +447,11 @@ impl WindowData {
                 grab,
                 layout: (position != PopupPosition::BELOW).then(|| position.layout()),
             }),
-            Kind::Toplevel { .. } | Kind::Layer(_) => None,
+            Kind::Toplevel { .. } | Kind::Layer(_) | Kind::Lock { .. } => None,
         };
-        // A layer surface's side may be 0, the compositor's to decide.
-        let least = if self.layer().is_some() { 0.0 } else { 1.0 };
+        // A layer surface's side may be 0, the compositor's to decide (as
+        // a lock surface's size is).
+        let least = if self.layer().is_some() || self.lock_output().is_some() { 0.0 } else { 1.0 };
         send(
             tx,
             ToRender::CreateWindow {
@@ -433,6 +464,7 @@ impl WindowData {
                 popup,
                 sheet_of: None,
                 layer: self.layer().map(LayerOptions::placement),
+                lock: self.lock_output(),
             },
         );
         if let (Kind::Toplevel { parent: Some(_) }, Some(parent)) = (&self.kind, parent) {

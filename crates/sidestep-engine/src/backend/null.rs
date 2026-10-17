@@ -8,7 +8,8 @@
 //! present is shown at once (a frame). A layer surface is on an output
 //! [`OUTPUT`] big: a side it leaves to the compositor is the output's,
 //! less its margins, and it gets the keyboard if it takes it
-//! exclusively. Drawing is dropped, but for the
+//! exclusively. A session lock is locked at once, and its surfaces are the
+//! output's size and take the keyboard. Drawing is dropped, but for the
 //! colors and places of the text painted while a test asks for them
 //! (`testing::note_painted_text`). Everything else the main thread asks is
 //! written down for tests to read (`testing::take_render_log`), and input
@@ -67,6 +68,16 @@ pub enum Seen {
     Layer {
         window: u32,
         placement: LayerPlacement,
+    },
+    /// The main thread asked to lock the session, or to unlock it.
+    SessionLock {
+        locked: bool,
+    },
+    /// The window shown (`Created`) is the session lock's surface on
+    /// output `output`.
+    LockSurface {
+        window: u32,
+        output: u32,
     },
 }
 
@@ -273,10 +284,14 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
     };
     while let Ok(msg) = channel.recv() {
         match msg {
-            ToRender::CreateWindow { window, width, height, popup, sheet_of, layer, .. } => {
+            ToRender::CreateWindow { window, mut width, mut height, popup, sheet_of, layer, lock, .. } => {
                 let keyboard = layer.as_ref().map(|p| p.keyboard);
                 if let Some(placement) = &layer {
                     note(Seen::Layer { window, placement: placement.clone() });
+                }
+                if let Some(output) = lock {
+                    note(Seen::LockSurface { window, output });
+                    (width, height) = OUTPUT;
                 }
                 let mut win = Win {
                     width,
@@ -335,6 +350,11 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
                 let _ = reply.send(cropped(window, crop));
             }
             ToRender::FrameTicks { window, on } => note(Seen::FrameTicks { window, on }),
+            ToRender::LockSession => {
+                note(Seen::SessionLock { locked: true });
+                send(FromRender::SessionLocked);
+            }
+            ToRender::UnlockSession => note(Seen::SessionLock { locked: false }),
             ToRender::Request { window, request } => {
                 note(Seen::Request { window, request: format!("{request:?}") });
                 let Some(win) = windows.get_mut(&window) else { continue };

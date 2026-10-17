@@ -669,6 +669,9 @@ pub enum ToRender {
         /// Open as a layer surface (see `backend::layer`), `width` or
         /// `height` 0 for the compositor to decide.
         layer: Option<LayerPlacement>,
+        /// Open as the session lock's surface on this output (by its id),
+        /// sized by the compositor (see `backend::lock`).
+        lock: Option<u32>,
     },
     /// A new title, with its text set in the title bar's font as drawing
     /// ops (top-left origin, `width` by `height` points) for client-side
@@ -820,6 +823,14 @@ pub enum ToRender {
         window: WindowId,
         at: Option<f64>,
     },
+    /// Lock the session (ext-session-lock): the compositor hides
+    /// everything but the lock's surfaces and gives them all input, and
+    /// answers `FromRender::SessionLocked` once it has, or
+    /// `SessionLockFinished` if it won't. Nothing while a lock is asked
+    /// for or held.
+    LockSession,
+    /// Unlock the session (or stop asking for a lock).
+    UnlockSession,
     /// Composite and copy a crop on the null render thread, then answer
     /// without involving the main thread. Other backends answer `None`.
     CaptureWindow {
@@ -1018,6 +1029,12 @@ pub enum FromRender {
         window: WindowId,
         time: f64,
     },
+    /// The compositor locked the session, as `ToRender::LockSession` asked.
+    SessionLocked,
+    /// The session lock is over without the program unlocking it: the
+    /// compositor refused it (another program holds one, or it has no
+    /// ext-session-lock) or ended it. Its surfaces show nothing more.
+    SessionLockFinished,
     /// Parts of a target the render thread can't draw again on its own (a
     /// layer animated outside where its tree was recorded): the main
     /// thread repaints them.

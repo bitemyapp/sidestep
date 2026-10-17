@@ -3,8 +3,9 @@
 //! sizes, one that takes the keyboard), sized, drawn and taking input as
 //! windows do, placed anew while they show and shown again as they were
 //! left, and a popup opened from the panel; outputs coming and going,
-//! and a panel put on one. Each step waits for its
-//! condition, polled by a timer, with a deadline.
+//! and a panel put on one; the session locked with a lock screen, typed
+//! into and unlocked, and a lock the compositor ends. Each step waits
+//! for its condition, polled by a timer, with a deadline.
 
 fn main() {
     #[cfg(not(target_vendor = "apple"))]
@@ -69,6 +70,11 @@ mod linux {
         /// A panel on the second output.
         other: Option<WindowId>,
         outputs_changed: usize,
+        /// The lock screen, and how often the session was locked and the
+        /// lock finished.
+        lock: Option<WindowId>,
+        locked: usize,
+        finished: usize,
         events: HashMap<WindowId, Vec<WindowEvent>>,
         draws: HashMap<WindowId, usize>,
         log: Vec<Seen>,
@@ -239,7 +245,58 @@ mod linux {
                         return;
                     }
                     assert_eq!(cx.outputs(), [laptop()]);
+                    // The session locked, with a lock screen on the output.
+                    cx.lock_session();
+                    self.lock = Some(cx.open_window(WindowOptions::lock(laptop().id)));
                     self.step = 9;
+                }
+                9 => {
+                    let lock = self.lock;
+                    if self.locked == 0
+                        || !self.saw(lock, &WindowEvent::Resized(OUTPUT))
+                        || !self.saw(lock, &WindowEvent::Focused(true))
+                        || !self.drawn(lock)
+                    {
+                        return;
+                    }
+                    assert!(cx.is_session_locked());
+                    let showing = lock.and_then(|l| testing::showing_id(cx, l)).expect("shown");
+                    assert!(self.log.contains(&Seen::SessionLock { locked: true }), "{:?}", self.log);
+                    assert!(self.log.contains(&Seen::LockSurface { window: showing, output: 61 }), "{:?}", self.log);
+                    testing::inject_key(cx, lock.expect("the lock"), 30, "a", "a", Modifiers::NONE, true);
+                    self.step = 10;
+                }
+                // Typed into, then unlocked: the lock screen closes.
+                10 => {
+                    let lock = self.lock.expect("the lock");
+                    let typed = self.events[&lock]
+                        .iter()
+                        .any(|e| matches!(e, WindowEvent::Key(k) if k.text.as_deref() == Some("a")));
+                    if !typed {
+                        return;
+                    }
+                    cx.unlock_session();
+                    assert!(cx.window(lock).is_none() && !cx.is_session_locked());
+                    // Locked again, the compositor ends it.
+                    cx.lock_session();
+                    self.lock = Some(cx.open_window(WindowOptions::lock(laptop().id)));
+                    self.step = 11;
+                }
+                11 => {
+                    if self.locked < 2 || !self.drawn(self.lock) {
+                        return;
+                    }
+                    assert!(self.log.contains(&Seen::SessionLock { locked: false }), "{:?}", self.log);
+                    testing::inject_session_lock_finished(cx);
+                    self.step = 12;
+                }
+                12 => {
+                    if self.finished == 0 {
+                        return;
+                    }
+                    assert!(self.lock.is_some_and(|l| cx.window(l).is_none()), "the lock screen closed");
+                    assert!(!cx.is_session_locked());
+                    self.step = 13;
                     cx.quit();
                 }
                 _ => {}
@@ -272,6 +329,14 @@ mod linux {
             self.outputs_changed += 1;
         }
 
+        fn session_locked(&mut self, _cx: &mut Cx) {
+            self.locked += 1;
+        }
+
+        fn session_lock_finished(&mut self, _cx: &mut Cx) {
+            self.finished += 1;
+        }
+
         fn timer(&mut self, cx: &mut Cx, _timer: TimerId) {
             let started = self.started.expect("launched");
             assert!(started.elapsed() < DEADLINE, "step {} didn't finish in {DEADLINE:?}", self.step);
@@ -288,7 +353,7 @@ mod linux {
         testing::use_null_backend();
         testing::capture_pixels(true);
         let test = App::new().run(Test::default()).expect("the null render thread runs");
-        assert_eq!(test.step, 9, "every step ran");
+        assert_eq!(test.step, 13, "every step ran");
         println!("desktop: ok");
     }
 }

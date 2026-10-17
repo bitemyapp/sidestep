@@ -12,7 +12,10 @@
 //!   keyboard when asked, typed into, then growing, and windows making
 //!   room;
 //! - outputs as sway names and places them; one plugged in (heard of), a
-//!   panel put on it, and the output unplugged, which closes the panel.
+//!   panel put on it, and the output unplugged, which closes the panel;
+//! - the session locked (ext-session-lock) with a lock screen on the
+//!   output, all that shows, clicked and typed into; then unlocked, the
+//!   window under it showing again.
 //!
 //! Linux only, and only under the headless sway, with `grim` and
 //! `swaymsg` (`wtype` for typing, left out without it):
@@ -379,6 +382,23 @@ mod linux {
         let outputs = Outputs { started: Instant::now(), step: Plug::Waiting, changed: 0, panel: None, closing: false };
         let outputs = App::new().quit_when_last_window_closes(false).run(outputs).expect("a compositor");
         assert_eq!(outputs.step, Plug::Done);
+
+        let (tx, rx) = mpsc::channel();
+        let pointing = std::thread::spawn(move || pointer::run(rx));
+        let locking = Locking {
+            started: Instant::now(),
+            step: Lock::Showing,
+            window: None,
+            lock: None,
+            locked: false,
+            events: Vec::new(),
+            pointer: tx,
+            typing: has("wtype"),
+        };
+        let locking = App::new().run(locking).expect("a compositor");
+        assert_eq!(locking.step, Lock::Done);
+        drop(locking);
+        pointing.join().expect("the virtual pointer");
         println!("wayland_desktop: ok");
     }
 
@@ -478,6 +498,144 @@ mod linux {
                 }
                 Plug::Done => {}
             }
+        }
+    }
+
+    const LOCK: Color = Color::rgb8(0x00, 0x87, 0x51);
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Lock {
+        Showing,
+        Locked,
+        Clicked,
+        Typed,
+        Unlocked,
+        Done,
+    }
+
+    /// A window, then the session locked with a lock screen on the output,
+    /// which shows instead of the window and takes clicks and keys; then
+    /// unlocked, the lock screen gone and the window showing again.
+    struct Locking {
+        started: Instant,
+        step: Lock,
+        window: Option<WindowId>,
+        lock: Option<WindowId>,
+        locked: bool,
+        /// The lock screen's.
+        events: Vec<WindowEvent>,
+        pointer: mpsc::Sender<pointer::Do>,
+        typing: bool,
+    }
+
+    impl Handler for Locking {
+        fn launched(&mut self, cx: &mut Cx) {
+            self.window = Some(cx.open_window(WindowOptions::new("Desktop window")));
+            cx.set_repeating_timer(Duration::from_millis(20));
+        }
+
+        fn session_locked(&mut self, _cx: &mut Cx) {
+            self.locked = true;
+        }
+
+        fn session_lock_finished(&mut self, _cx: &mut Cx) {
+            panic!("sway refused or ended the lock");
+        }
+
+        fn window_event(&mut self, _cx: &mut Cx, window: WindowId, event: WindowEvent) {
+            if Some(window) == self.lock {
+                self.events.push(event);
+            }
+        }
+
+        fn draw(&mut self, _cx: &mut Cx, window: WindowId, canvas: &mut Canvas) {
+            let color = if Some(window) == self.lock { LOCK } else { GREEN };
+            canvas.fill_rect(Rect::from_origin_size(Point::ZERO, canvas.size()), color);
+        }
+
+        fn timer(&mut self, cx: &mut Cx, _timer: TimerId) {
+            assert!(self.started.elapsed() < DEADLINE, "stuck at {:?}: {:?}", self.step, self.events);
+            let size = |cx: &mut Cx, w: Option<WindowId>| w.and_then(|w| cx.window(w).map(|w| w.size()));
+            match self.step {
+                Lock::Showing => {
+                    let outputs = cx.outputs();
+                    if outputs.is_empty() || !Shot::take().shows(&[((640, 400), GREEN)]) {
+                        return;
+                    }
+                    // A lock screen on every output, at once.
+                    cx.lock_session();
+                    for output in outputs {
+                        self.lock = Some(cx.open_window(WindowOptions::lock(output.id)));
+                    }
+                    self.step = Lock::Locked;
+                }
+                // Locked, the lock screen the output's size and all that
+                // shows.
+                Lock::Locked => {
+                    if !self.locked
+                        || size(cx, self.lock) != Some(OUTPUT)
+                        || !Shot::take().shows(&[((5, 5), LOCK), ((640, 400), LOCK)])
+                    {
+                        return;
+                    }
+                    assert!(cx.is_session_locked());
+                    println!("  locked, the lock screen showing");
+                    self.pointer.send(pointer::Do::MoveTo(300, 200)).expect("the virtual pointer");
+                    self.pointer.send(pointer::Do::Click).expect("the virtual pointer");
+                    self.step = Lock::Clicked;
+                }
+                Lock::Clicked => {
+                    let Some(at) = self.events.iter().find_map(|e| match e {
+                        WindowEvent::PointerButton { position, pressed: true, .. } => Some(*position),
+                        _ => None,
+                    }) else {
+                        return;
+                    };
+                    assert!(at.distance(Point::new(300.0, 200.0)) < 1.0, "{at:?}");
+                    if self.typing {
+                        // wtype's first press goes while the compositor takes its
+                        // keymap.
+                        let _ = std::thread::spawn(|| sh("wtype -k Shift_L 'pw'"));
+                        self.step = Lock::Typed;
+                    } else {
+                        println!("  clicked (no wtype: no typing)");
+                        self.unlock(cx);
+                    }
+                }
+                Lock::Typed => {
+                    let typed: String = self
+                        .events
+                        .iter()
+                        .filter_map(|e| if let WindowEvent::Key(k) = e { k.text.clone() } else { None })
+                        .collect();
+                    if typed != "pw" {
+                        return;
+                    }
+                    assert!(self.events.contains(&WindowEvent::Focused(true)));
+                    println!("  clicked and typed into");
+                    self.unlock(cx);
+                }
+                // Unlocked: the lock screen gone, the window showing.
+                Lock::Unlocked => {
+                    if !Shot::take().shows(&[((640, 400), GREEN)]) {
+                        return;
+                    }
+                    println!("  unlocked, the window showing again");
+                    self.pointer.send(pointer::Do::Done).expect("the virtual pointer");
+                    self.step = Lock::Done;
+                    cx.quit();
+                }
+                Lock::Done => {}
+            }
+        }
+    }
+
+    impl Locking {
+        fn unlock(&mut self, cx: &mut Cx) {
+            cx.unlock_session();
+            assert!(self.lock.is_some_and(|l| cx.window(l).is_none()), "the lock screen closed");
+            assert!(!cx.is_session_locked());
+            self.step = Lock::Unlocked;
         }
     }
 }

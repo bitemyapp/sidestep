@@ -261,3 +261,9 @@ pub fn inject_outputs(cx: &mut Cx, outputs: &[crate::Output]) {
     sidestep_engine::outputs::publish(outputs.iter().map(crate::Output::engine).collect(), true);
     cx.inject(FromRender::ScreensChanged);
 }
+
+/// The compositor ending the session lock (or refusing it) without the
+/// program unlocking.
+pub fn inject_session_lock_finished(cx: &mut Cx) {
+    cx.inject(FromRender::SessionLockFinished);
+}
