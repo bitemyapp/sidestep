@@ -2564,7 +2564,12 @@ the three together, and how much of the window it redrew. The render
 thread pairs each present with the recording the main thread noted for
 it, in order; frames it draws on its own aren't counted. sidestep-ui's
 `Cx::set_frame_stats` measures without printing, summarizing every period
-it asks for, and `Cx::frame_stats` reads the latest summaries. Off, each
+it asks for, and `Cx::frame_stats` reads the latest summaries. Drawings into
+images (`offscreen::render`, on any thread) are measured the same way,
+recording and rasterizing, as frames of a window of their own
+(`stats::OFFSCREEN`, printed as `offscreen`): `offscreen::set_frame_stats`
+and `offscreen::frame_stats` need no application, for a compositor
+setting its labels or a test harness. Off, each
 measuring point is one relaxed atomic load.
 
 #### Frame time

@@ -16,12 +16,15 @@
 
 use std::cell::RefCell;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use kurbo::Size;
 use sidestep_engine::protocol;
 use sidestep_engine::raster::images::{ImageData, Pixels, next_key};
 use sidestep_engine::raster::{self, Glyphs};
+use sidestep_engine::stats;
 
+use crate::FrameTiming;
 use crate::canvas::Canvas;
 use crate::color::Appearance;
 use crate::image::Image;
@@ -46,10 +49,12 @@ pub fn render(size: Size, scale: f64, appearance: Appearance, draw: impl FnOnce(
     };
     let (width, height) = (side(size.width), side(size.height));
     let bounds = protocol::Rect::new(0.0, 0.0, size.width.max(0.0) as f32, size.height.max(0.0) as f32);
+    let recording = stats::on().then(Instant::now);
     let mut canvas = Canvas::blank(size, scale, vec![bounds], appearance);
     draw(&mut canvas);
     // Images the canvas made for itself live until the pixels are drawn.
     let (ops, _temporaries) = canvas.finish();
+    let rasterizing = recording.map(|r| (r.elapsed(), Instant::now()));
     let mut px = vec![0u32; width as usize * height as usize];
     if !ops.is_empty() {
         let mut target = raster::Canvas::new(&mut px, width, height, 0.0, scale as f32);
@@ -61,9 +66,48 @@ pub fn render(size: Size, scale: f64, appearance: Appearance, draw: impl FnOnce(
             Err(_) => raster::paint(&mut target, &mut Glyphs::default(), &[all], &ops),
         });
     }
+    if let Some((record, started)) = rasterizing {
+        stats::offscreen(record, started.elapsed());
+    }
     let bytes: Arc<[u8]> = Arc::from(&*raster::as_bytes(&mut px));
     let data = ImageData { key: next_key(), generation: 0, width, height, pixels: Pixels::Rgba(bytes) };
     Image::from_data(Arc::new(data), 1.0 / scale)
+}
+
+/// Measure offscreen renders, as windows' frames are measured, summarizing
+/// them every `period` for [`frame_stats`] (the summaries so far dropped),
+/// or stop (`None`). It's the switch [`Cx::set_frame_stats`](crate::Cx::set_frame_stats)
+/// throws, for windows and renders alike, and needs no application
+/// running; `SIDESTEP_FRAME_STATS=1` measures from the start and prints
+/// the summaries, renders' as `offscreen`.
+pub fn set_frame_stats(period: Option<Duration>) {
+    stats::set_period(period);
+}
+
+/// Offscreen renders over a period ([`frame_stats`]): how many, and how
+/// long drawing (recording ops) and rasterizing took.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RenderStats {
+    pub period: Duration,
+    pub renders: u32,
+    pub record: FrameTiming,
+    pub rasterize: FrameTiming,
+    pub total: FrameTiming,
+}
+
+/// The latest summary of the renders on every thread, if renders are
+/// measured and some were made in the last period.
+pub fn frame_stats() -> Option<RenderStats> {
+    let s = stats::latest().into_iter().find(|s| s.window == stats::OFFSCREEN)?;
+    let us = |v: u32| Duration::from_micros(u64::from(v));
+    let timing = |t: &stats::Timing| FrameTiming { p50: us(t.p50), p95: us(t.p95), max: us(t.max) };
+    Some(RenderStats {
+        period: s.period,
+        renders: s.frames,
+        record: s.record.as_ref().map(timing).unwrap_or_default(),
+        rasterize: timing(&s.rasterize),
+        total: timing(&s.total),
+    })
 }
 
 #[cfg(test)]
@@ -109,6 +153,22 @@ mod tests {
         assert_eq!(&premultiplied[..4], [128, 0, 0, 128]);
         assert_eq!(&straight[straight.len() - 4..], [0, 0, 0, 0]);
         assert_eq!(render(Size::ZERO, 2.0, Appearance::LIGHT, |_| {}).pixel_size(), (1, 1));
+    }
+
+    #[test]
+    fn renders_are_measured_as_frames() {
+        set_frame_stats(Some(Duration::from_millis(30)));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let stats = loop {
+            let _ = label(2.0);
+            if let Some(s) = frame_stats().filter(|s| s.renders >= 3) {
+                break s;
+            }
+            assert!(Instant::now() < deadline, "renders never summarized");
+        };
+        set_frame_stats(None);
+        assert!(stats.record.max > Duration::ZERO && stats.rasterize.max > Duration::ZERO, "{stats:?}");
+        assert!(stats.total.max >= stats.rasterize.max, "{stats:?}");
     }
 
     #[test]

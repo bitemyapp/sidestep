@@ -121,7 +121,26 @@ pub fn frame(window: u32, raster: Duration, present: Duration, damage: f32) {
     }
     let mut s = store();
     let record = s.recorded.get_mut(&window).and_then(VecDeque::pop_front);
-    s.frames.entry(window).or_default().push(Frame { record, raster, present, damage: damage.clamp(0.0, 1.0) });
+    add(&mut s, window, Frame { record, raster, present, damage: damage.clamp(0.0, 1.0) });
+}
+
+/// The window [`offscreen`] frames are counted under: drawings into images
+/// rather than windows, on any thread.
+pub const OFFSCREEN: u32 = u32::MAX;
+
+/// A drawing into an image (a toolkit's offscreen render) took `record` to
+/// record and `raster` to rasterize, all of it: a frame of [`OFFSCREEN`].
+pub fn offscreen(record: Duration, raster: Duration) {
+    if !on() {
+        return;
+    }
+    let frame = Frame { record: Some(record), raster, present: Duration::ZERO, damage: 1.0 };
+    add(&mut store(), OFFSCREEN, frame);
+}
+
+/// Count `frame` of `window`, and summarize the period if it's over.
+fn add(s: &mut Store, window: u32, frame: Frame) {
+    s.frames.entry(window).or_default().push(frame);
     let now = Instant::now();
     let since = *s.since.get_or_insert(now);
     let period = s.period.unwrap_or(PERIOD);
@@ -211,11 +230,11 @@ fn summarize(window: u32, frames: &[Frame], period: Duration) -> Summary {
 pub fn line(s: &Summary) -> String {
     let t = |t: &Timing| format!("{}/{}/{}", t.p50, t.p95, t.max);
     let record = s.record.as_ref().map_or_else(|| "-".to_owned(), t);
+    let window = if s.window == OFFSCREEN { "offscreen".to_owned() } else { format!("window {}", s.window) };
     format!(
-        "sidestep frame stats ({:.1} s): window {}: {} frame{}, µs p50/p95/max: record {record}, rasterize {}, \
+        "sidestep frame stats ({:.1} s): {window}: {} frame{}, µs p50/p95/max: record {record}, rasterize {}, \
          present {}, total {}; damage {:.0}%",
         s.period.as_secs_f64(),
-        s.window,
         s.frames,
         if s.frames == 1 { "" } else { "s" },
         t(&s.rasterize),
@@ -252,5 +271,7 @@ mod tests {
         let printed = line(&s);
         assert!(printed.contains("window 3: 2 frames") && printed.contains("total 2000/4000/4000"), "{printed}");
         assert!(printed.contains("damage 75%"), "{printed}");
+        // Offscreen renders are named so.
+        assert!(line(&summarize(OFFSCREEN, &frames, ms(5000))).contains("): offscreen: 2 frames"));
     }
 }
