@@ -1624,13 +1624,14 @@ compositor.
   each column and row takes is worked out once, with tiny-skia's sums in
   the same floats (pixel centers through the inverse transform, clamped
   to the image), and rows are copied (`memcpy` one to one) where the
-  image is opaque or copied, or composited a pixel at a time with
-  tiny-skia's arithmetic where not, in bands on the raster workers when
-  large; the pixels are the ones tiny-skia draws (a test holds every case
-  to them), at about the cost of a solid fill (a 2800 × 1800 photo one
-  to one in under a millisecond rather than 23). Gradients are
-  tiny-skia shaders, two-point conical for the radial ones; where the
-  options don't extend them, the filled shape is the band they cover.
+  image is opaque or copied, or composited a pixel at a time where not
+  (in integers, which round as tiny-skia's floats do for every value),
+  in bands on the raster workers when large; the pixels are the ones
+  tiny-skia draws (a test holds every case to them), at about the cost
+  of a solid fill (a 2800 × 1800 photo one to one in under a millisecond
+  rather than 23). Gradients are tiny-skia shaders, two-point conical
+  for the radial ones; where the options don't extend them, the filled
+  shape is the band they cover.
 - **Images.** An `NSImage` holds representations and draws the smallest
   bitmap whose pixels cover the destination in device pixels. Files are
   read with the pure-Rust codecs of the `image` crate (PNG, JPEG, GIF,

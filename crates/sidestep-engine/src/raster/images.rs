@@ -558,21 +558,17 @@ fn opaque(data: &[u8]) -> bool {
 }
 
 /// `src` (premultiplied RGBA) over the canvas pixel `dst`, as tiny-skia's
-/// pipeline composites an image's pixels: in floats, rounded to even.
+/// pipeline composites an image's pixels, but in integers. The pipeline
+/// takes each channel as `d × (1 − sa) + s` in floats (the 8-bit values
+/// over 255), times 255, rounded. Exactly, that's `s + d × (255 − sa) /
+/// 255`: a whole number of 255ths, never nearer a half than half of one
+/// (0.002), and the floats are off by a ten-thousandth at most, so they
+/// round as the exact sum does (`over_is_the_pipelines` holds every value
+/// to them).
 fn over(dst: u32, src: [u8; 4]) -> u32 {
-    match src[3] {
-        255 => u32::from_ne_bytes(src),
-        0 => dst,
-        sa => {
-            const UNIT: f32 = 1.0 / 255.0;
-            let inv = 1.0 - f32::from(sa) * UNIT;
-            let d = dst.to_ne_bytes();
-            let ch = |s: u8, d: u8| {
-                ((f32::from(d) * UNIT * inv + f32::from(s) * UNIT).clamp(0.0, 1.0) * 255.0).round_ties_even() as u8
-            };
-            u32::from_ne_bytes([ch(src[0], d[0]), ch(src[1], d[1]), ch(src[2], d[2]), ch(sa, d[3])])
-        }
-    }
+    let (d, inv) = (dst.to_ne_bytes(), 255 - u32::from(src[3]));
+    let ch = |s: u8, d: u8| (u32::from(s) + (u32::from(d) * inv + 127) / 255).min(255) as u8;
+    u32::from_ne_bytes([ch(src[0], d[0]), ch(src[1], d[1]), ch(src[2], d[2]), ch(src[3], d[3])])
 }
 
 /// Whether `m` takes image pixels to device pixels one to one: a whole
@@ -777,6 +773,25 @@ mod tests {
             }
             let drew = BLITS.with(std::cell::Cell::get) - before;
             assert_eq!(drew > 0, blits, "case {n}: {drew} blits");
+        }
+    }
+
+    /// [`over`] composites every channel value over every other at every
+    /// alpha as tiny-skia's pipeline does: `d × (1 − sa) + s` in floats,
+    /// clamped, times 255, rounded to even.
+    #[test]
+    fn over_is_the_pipelines() {
+        const UNIT: f32 = 1.0 / 255.0;
+        for sa in 0..=255u8 {
+            let inv = 1.0 - f32::from(sa) * UNIT;
+            for s in 0..=255u8 {
+                for d in 0..=255u8 {
+                    let float = ((f32::from(d) * UNIT * inv + f32::from(s) * UNIT).clamp(0.0, 1.0) * 255.0)
+                        .round_ties_even() as u8;
+                    let got = over(u32::from_ne_bytes([d, d, d, d]), [s, s, s, sa]).to_ne_bytes()[0];
+                    assert_eq!(got, float, "{s} over {d} at alpha {sa}");
+                }
+            }
         }
     }
 
