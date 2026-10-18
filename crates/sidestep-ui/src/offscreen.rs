@@ -115,7 +115,7 @@ mod tests {
     use kurbo::{Point, Rect};
 
     use super::*;
-    use crate::{Color, Font, TextStyle};
+    use crate::{Color, Font, ImageOptions, TextStyle};
 
     fn label(scale: f64) -> Image {
         render(Size::new(200.0, 22.0), scale, Appearance::LIGHT, |c| {
@@ -176,6 +176,49 @@ mod tests {
         let here = label(2.0).to_rgba8();
         let there = std::thread::spawn(|| label(2.0).to_rgba8()).join().expect("the thread");
         assert!(here == there, "the same pixels on another thread");
+    }
+
+    /// A photo drawn smooth where its pixels land one to one on the
+    /// render's, at fractional scales too, keeps them: nothing to smooth.
+    #[test]
+    fn smooth_photos_drawn_one_to_one_keep_their_pixels() {
+        // A strip of every width from 20 pixels to 140, as many points as
+        // that makes at each scale (the sums in floats rarely come to one).
+        for scale in [1.25, 1.5, 1.75, 2.5, 3.0] {
+            for px in 20u32..140 {
+                let (w, h) = (f64::from(px) / scale, 4.0 / scale);
+                let strip: Vec<u8> =
+                    (0..px * 4).flat_map(|i| [(i * 7) as u8, (i * 13) as u8, (i * 5) as u8, 255]).collect();
+                let image = Image::from_rgba(px, 4, &strip).expect("pixels");
+                let drawn = render(Size::new(w + 8.0, h + 8.0), scale, Appearance::LIGHT, |c| {
+                    c.draw_image_with(&image, None, Rect::new(4.0, 4.0, 4.0 + w, 4.0 + h), ImageOptions::default());
+                });
+                let got = drawn.to_rgba8().expect("pixels");
+                let (side, at) = (drawn.pixel_size().0 as usize, (4.0 * scale) as usize);
+                for y in 0..4 {
+                    let row = &got[((at + y) * side + at) * 4..][..px as usize * 4];
+                    assert!(row == &strip[y * px as usize * 4..][..px as usize * 4], "{px} pixels at {scale}");
+                }
+            }
+        }
+        for (scale, px) in [(1.0, 200u32), (1.25, 250), (1.5, 300), (2.0, 400)] {
+            let photo: Vec<u8> =
+                (0..px * px).flat_map(|i| [(i * 7) as u8, (i * 13 + i / px) as u8, (i / px * 5) as u8, 255]).collect();
+            let image = Image::from_rgba(px, px, &photo).expect("pixels");
+            let drawn = render(Size::new(220.0, 220.0), scale, Appearance::LIGHT, |c| {
+                c.draw_image_with(&image, None, Rect::new(8.0, 20.0, 208.0, 220.0), ImageOptions::default());
+            });
+            let got = drawn.to_rgba8().expect("pixels");
+            let side = drawn.pixel_size().0 as usize;
+            let (x0, y0) = ((8.0 * scale) as usize, (20.0 * scale) as usize);
+            let differ = (0..px as usize * px as usize)
+                .filter(|&i| {
+                    let (x, y) = (i % px as usize, i / px as usize);
+                    got[((y0 + y) * side + x0 + x) * 4..][..4] != photo[i * 4..][..4]
+                })
+                .count();
+            assert_eq!(differ, 0, "{differ} pixels changed at scale {scale}");
+        }
     }
 
     /// `cargo test --release -p sidestep-ui offscreen -- --ignored --nocapture`

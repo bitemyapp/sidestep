@@ -831,7 +831,9 @@ through the same protocol AppKit does, and keeps AppKit's rhythm:
   `FillPath`s and `StrokePath`s of their kurbo paths; images are `Image`
   ops of the engine's `ImageData` (a file is decoded on the render thread
   the first time it's drawn, and its cache entry goes when the last
-  `Image` does); groups are `BeginGroup`/`EndGroup`. Text is the glyph
+  `Image` does), smooth ones bicubic but those landing one to one on
+  whole device pixels (within a float's rounding) linear, which the
+  engine blits; groups are `BeginGroup`/`EndGroup`. Text is the glyph
   runs the text engine placed, as `Glyphs` ops from the render thread's
   glyph cache while the transform keeps glyphs upright and scales both
   ways alike (the size scaled with it). Turned, mirrored or stretched, or
@@ -1615,7 +1617,18 @@ compositor.
   exact multiply for each mean, so a window-wide group with a soft shadow
   costs what its shadow covers. An image whose pixels land one to one on
   whole device pixels (a view's drawing, composited where it was drawn) is
-  sampled without filtering, which leaves the same pixels. Gradients are
+  sampled without filtering, which leaves the same pixels. An image drawn
+  that way or nearest-neighbour, upright (scaled any amount, mirrored or
+  not) onto whole device pixels with nothing else set (no tint, mask,
+  shadow or opacity; drawn over or copied) is blitted: the image pixel
+  each column and row takes is worked out once, with tiny-skia's sums in
+  the same floats (pixel centers through the inverse transform, clamped
+  to the image), and rows are copied (`memcpy` one to one) where the
+  image is opaque or copied, or composited a pixel at a time with
+  tiny-skia's arithmetic where not, in bands on the raster workers when
+  large; the pixels are the ones tiny-skia draws (a test holds every case
+  to them), at about the cost of a solid fill (a 2800 × 1800 photo one
+  to one in under a millisecond rather than 23). Gradients are
   tiny-skia shaders, two-point conical for the radial ones; where the
   options don't extend them, the filled shape is the band they cover.
 - **Images.** An `NSImage` holds representations and draws the smallest

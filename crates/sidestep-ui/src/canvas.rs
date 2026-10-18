@@ -218,7 +218,8 @@ impl BlendMode {
 pub struct ImageOptions {
     pub alpha: f32,
     /// Resample smoothly (`true`), or take the nearest pixel, for pixel
-    /// art.
+    /// art. An image that lands one to one on whole device pixels is
+    /// copied as it is either way, which is much the cheapest.
     pub smooth: bool,
     /// Draw the image's shape (its alpha) in this color: a symbol or icon
     /// made to be tinted.
@@ -574,16 +575,43 @@ impl Canvas {
         }
         let (w, h) = image.pixel_size();
         let src = src.map_or(protocol::Rect::new(0.0, 0.0, w as f32, h as f32), prect);
+        // Bicubic resampling blurs even an image that lands one to one on
+        // whole device pixels, where there is nothing to smooth: ask for
+        // linear there, which the render thread turns into copying rows.
+        let quality = if !options.smooth {
+            Quality::None
+        } else if self.lands_one_to_one(src, dst) {
+            Quality::Medium
+        } else {
+            Quality::High
+        };
         self.ops.push(Op::Image {
             image: image.data().clone(),
             src,
             dst: prect(dst),
             alpha: options.alpha.clamp(0.0, 1.0),
-            quality: if options.smooth { Quality::High } else { Quality::None },
+            quality,
             tint: options.tint.map(Color::raw),
             tiled: false,
             draw: self.draw(),
         });
+    }
+
+    /// Whether the image pixels `src` drawn into `dst` land one to one on
+    /// whole device pixels.
+    fn lands_one_to_one(&self, src: protocol::Rect, dst: Rect) -> bool {
+        let (sw, sh) = (f64::from(src.x1 - src.x0), f64::from(src.y1 - src.y0));
+        if sw <= 0.0 || sh <= 0.0 {
+            return false;
+        }
+        let placed = Affine::scale(self.scale)
+            * self.state.xf
+            * Affine::translate((dst.x0, dst.y0))
+            * Affine::scale_non_uniform(dst.width() / sw, dst.height() / sh)
+            * Affine::translate((-f64::from(src.x0), -f64::from(src.y0)));
+        let [a, b, c, d, e, f] = placed.as_coeffs();
+        let whole = |v: f64| (v - v.round()).abs() < 1e-4;
+        (a - 1.0).abs() < 1e-6 && (d - 1.0).abs() < 1e-6 && b.abs() < 1e-9 && c.abs() < 1e-9 && whole(e) && whole(f)
     }
 
     // Groups.

@@ -27,7 +27,7 @@ use tiny_skia::{FilterQuality, Pixmap, PixmapRef, SpreadMode, Transform};
 
 use super::Canvas;
 use super::ops::{ScratchSource, region, with_region};
-use crate::protocol::{Color, Draw, Quality, Rect};
+use crate::protocol::{Blend, Color, Draw, Quality, Rect};
 
 /// An image's pixels as a draw sees them.
 #[derive(Debug)]
@@ -57,6 +57,8 @@ pub enum Pixels {
 struct Entry {
     generation: u64,
     base: Base,
+    /// Whether every pixel at full size is opaque, once a blit asked.
+    opaque: std::cell::Cell<Option<bool>>,
     /// Level 1 on: each half the size of the one before.
     halvings: Vec<Pixmap>,
     /// Tinted copies, oldest first, by tint and level.
@@ -159,7 +161,15 @@ impl Cache {
             self.bytes += bytes;
             self.entries.insert(
                 image.key,
-                Entry { generation: image.generation, base, halvings: Vec::new(), tints: Vec::new(), bytes, used: 0 },
+                Entry {
+                    generation: image.generation,
+                    base,
+                    opaque: Default::default(),
+                    halvings: Vec::new(),
+                    tints: Vec::new(),
+                    bytes,
+                    used: 0,
+                },
             );
             self.evict(image.key);
         }
@@ -330,6 +340,14 @@ pub fn draw(
             }
         };
         entry.bytes = entry.bytes + added - dropped;
+        // Whether it may be a blit (see `blit`).
+        let blit_candidate = !tiled
+            && tint.is_none()
+            && level == 0
+            && draw.shadow.is_none()
+            && draw.mask.is_none()
+            && alpha >= 1.0
+            && matches!(draw.blend, Blend::SourceOver | Blend::Copy);
         let (w0, h0) = (image.width as f32, image.height as f32);
         let pixmap = match tint_index {
             None => entry.level(level),
@@ -343,6 +361,25 @@ pub fn draw(
         // neighbour leaves the same pixels, for a fraction of the work.
         let quality =
             if quality != Quality::High && one_to_one(&base.pre_concat(pattern_xf)) { Quality::None } else { quality };
+        // Whether a blit replaces what's under it: copying, or opaque over
+        // it.
+        let replaces = || {
+            draw.blend == Blend::Copy || {
+                let opaque = entry.opaque.get().unwrap_or_else(|| opaque(pixmap.data()));
+                entry.opaque.set(Some(opaque));
+                opaque
+            }
+        };
+        if blit_candidate
+            && !tests::slow()
+            && blit(canvas, region, bounds, &base, &pattern_xf, pixmap, quality == Quality::None, &replaces)
+        {
+            tests::blitted(true);
+            cache.bytes = cache.bytes + added - dropped;
+            cache.evict(image.key);
+            return;
+        }
+        tests::blitted(false);
         with_region(canvas, st, region, |pm, spare, masks, origin| {
             // The region's pixels, from the canvas's (the origin is on the
             // layer's grid, for masks).
@@ -390,6 +427,154 @@ pub fn draw(
     });
 }
 
+/// Draw `pixmap` placed by `pattern_xf` (its pixels to user space, then
+/// through `base` to the canvas's) where `bounds` lands within `region`,
+/// as the slow way's tiny-skia draws it nearest-neighbour, source over or
+/// copying, but row by row. The slow way fills `bounds` in the region's
+/// pixels, sampling the image at each pixel's center through the inverse
+/// transform, clamped to the image's edges; this takes the same sums (in
+/// the same floats) once per column and once per row, which it can when
+/// the transform keeps the image upright (scaled any amount, mirrored or
+/// not), `bounds` lands on whole pixels, and the filter is nearest
+/// neighbour: asked for (`nearest`), or what tiny-skia takes for any
+/// filter when the image isn't scaled at all. When it `replace`s what's
+/// there (an opaque image, or the copy blend; asked once it's sure to
+/// draw) pixels are copied, and a row sampling the same image row as the
+/// one above copies that; otherwise each pixel is composited over what's
+/// there with tiny-skia's arithmetic. A large one
+/// is shared with the raster workers, in bands of rows. Whether it drew;
+/// if not, nothing was touched.
+#[allow(clippy::too_many_arguments)]
+fn blit(
+    canvas: &mut Canvas,
+    region: (usize, usize, usize, usize),
+    bounds: tiny_skia::Rect,
+    base: &Transform,
+    pattern_xf: &Transform,
+    pixmap: PixmapRef,
+    nearest: bool,
+    replace: &dyn Fn() -> bool,
+) -> bool {
+    let (rw, rh) = (region.2 - region.0, region.3 - region.1);
+    // tiny-skia draws into a pixmap this large in tiles, offsetting the
+    // sums.
+    if rw >= 8192 || rh >= 8192 {
+        return false;
+    }
+    // What the slow way fills through, in the region's pixels, and the
+    // pattern's transform as tiny-skia combines and inverts it.
+    let xf = base.post_translate(-(region.0 as f32), -(region.1 as f32));
+    let Some(inv) = pattern_xf.post_concat(xf).invert() else { return false };
+    if !inv.is_finite() || inv.kx != 0.0 || inv.ky != 0.0 || !(nearest || (inv.sx == 1.0 && inv.sy == 1.0)) {
+        return false;
+    }
+    let Some(dev) = bounds.transform(xf) else { return false };
+    let whole = |v: f32| (v - v.round()).abs() < 1e-3;
+    if ![dev.left(), dev.top(), dev.right(), dev.bottom()].into_iter().all(whole) {
+        return false;
+    }
+    // The region's pixels filled.
+    let r = |v: f32, limit: usize| (v.round().max(0.0) as usize).min(limit);
+    let (x0, x1) = (r(dev.left(), rw), r(dev.right(), rw));
+    let (y0, y1) = (r(dev.top(), rh), r(dev.bottom(), rh));
+    if x0 >= x1 || y0 >= y1 {
+        return true;
+    }
+    let replace = replace();
+    // The image pixel each column and row of those samples: its center
+    // through the inverse, clamped inside the image, truncated.
+    let sample = |v: usize, scale: f32, offset: f32, limit: u32| {
+        let last = f32::from_bits((limit as f32).to_bits() - 1);
+        ((v as f32 + 0.5) * scale + offset).max(0.0).min(last) as usize
+    };
+    let w = pixmap.width() as usize;
+    let xs: Vec<usize> = (x0..x1).map(|x| sample(x, inv.sx, inv.tx, pixmap.width())).collect();
+    let ys: Vec<usize> = (y0..y1).map(|y| sample(y, inv.sy, inv.ty, pixmap.height())).collect();
+    // One to one across: each row a run of an image row's pixels.
+    let run = xs.windows(2).all(|p| p[1] == p[0] + 1);
+    let src = pixmap.data();
+    // The `j`th row filled, into `dst`.
+    let draw_row = |j: usize, dst: &mut [u32]| {
+        let line = &src[ys[j] * w * 4..][..w * 4];
+        if run {
+            let from = &line[xs[0] * 4..(xs[xs.len() - 1] + 1) * 4];
+            if replace {
+                super::as_bytes(dst).copy_from_slice(from);
+            } else {
+                for (d, s) in dst.iter_mut().zip(from.as_chunks::<4>().0) {
+                    *d = over(*d, *s);
+                }
+            }
+        } else {
+            for (d, &x) in dst.iter_mut().zip(&xs) {
+                let s = [line[x * 4], line[x * 4 + 1], line[x * 4 + 2], line[x * 4 + 3]];
+                *d = if replace { u32::from_ne_bytes(s) } else { over(*d, s) };
+            }
+        }
+    };
+    // The canvas's rows, from the first filled.
+    let (cx0, cx1, cy0) = (region.0 + x0, region.0 + x1, region.1 + y0);
+    let stride = canvas.stride;
+    let end = ((cy0 + ys.len() - 1) * stride + cx1).min(canvas.px.len());
+    let rows = &mut canvas.px[cy0 * stride..end];
+    // Rows `first..`, in `rows`.
+    let band = |first: usize, rows: &mut [u32]| {
+        for i in 0..rows.len().div_ceil(stride) {
+            let j = first + i;
+            if replace && i > 0 && ys[j] == ys[j - 1] {
+                let (above, here) = rows.split_at_mut(i * stride);
+                here[cx0..cx1].copy_from_slice(&above[(i - 1) * stride + cx0..(i - 1) * stride + cx1]);
+            } else {
+                draw_row(j, &mut rows[i * stride + cx0..i * stride + cx1]);
+            }
+        }
+    };
+    let n = if xs.len() * ys.len() >= super::bands::BANDED { super::bands::workers() + 1 } else { 1 };
+    let mut bands: Vec<(usize, &mut [u32])> = Vec::with_capacity(n);
+    let mut rest = rows;
+    for b in 0..n {
+        let (from, to) = (ys.len() * b / n, ys.len() * (b + 1) / n);
+        let len = if b + 1 == n { rest.len() } else { (to - from) * stride };
+        let (this, after) = rest.split_at_mut(len);
+        rest = after;
+        bands.push((from, this));
+    }
+    let mut bands = bands.into_iter();
+    let (first, mine) = bands.next().expect("a band");
+    let band = &band;
+    let others: Vec<Box<dyn FnOnce() + Send + '_>> =
+        bands.map(|(from, rows)| -> Box<dyn FnOnce() + Send + '_> { Box::new(move || band(from, rows)) }).collect();
+    super::bands::scoped(others, || band(first, mine));
+    true
+}
+
+/// Whether every pixel of `data` (RGBA) is opaque: their alphas and'ed
+/// together a word at a time, a stretch at a time.
+fn opaque(data: &[u8]) -> bool {
+    data.as_chunks::<4>().0.chunks(1 << 14).all(|stretch| {
+        let all = stretch.iter().fold(u32::MAX, |all, p| all & u32::from_ne_bytes(*p));
+        all.to_ne_bytes()[3] == 255
+    })
+}
+
+/// `src` (premultiplied RGBA) over the canvas pixel `dst`, as tiny-skia's
+/// pipeline composites an image's pixels: in floats, rounded to even.
+fn over(dst: u32, src: [u8; 4]) -> u32 {
+    match src[3] {
+        255 => u32::from_ne_bytes(src),
+        0 => dst,
+        sa => {
+            const UNIT: f32 = 1.0 / 255.0;
+            let inv = 1.0 - f32::from(sa) * UNIT;
+            let d = dst.to_ne_bytes();
+            let ch = |s: u8, d: u8| {
+                ((f32::from(d) * UNIT * inv + f32::from(s) * UNIT).clamp(0.0, 1.0) * 255.0).round_ties_even() as u8
+            };
+            u32::from_ne_bytes([ch(src[0], d[0]), ch(src[1], d[1]), ch(src[2], d[2]), ch(sa, d[3])])
+        }
+    }
+}
+
 /// Whether `m` takes image pixels to device pixels one to one: a whole
 /// number of pixels across and down, mirrored or not, without scaling.
 fn one_to_one(m: &Transform) -> bool {
@@ -402,9 +587,31 @@ fn one_to_one(m: &Transform) -> bool {
         && whole(m.ty)
 }
 
+#[cfg(not(test))]
+mod tests {
+    /// Whether a test draws every image the slow way, to hold blits to it.
+    pub fn slow() -> bool {
+        false
+    }
+
+    pub fn blitted(_: bool) {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local!(static SLOW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
+
+    pub fn slow() -> bool {
+        SLOW.with(std::cell::Cell::get)
+    }
+
+    thread_local!(static BLITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
+
+    pub fn blitted(blit: bool) {
+        BLITS.with(|b| b.set(b.get() + usize::from(blit)));
+    }
     use crate::protocol::Blend;
     use crate::raster::channels;
 
@@ -454,6 +661,123 @@ mod tests {
             &[Rect::new(0.0, 0.0, w as f32, h as f32)],
             &[op],
         );
+    }
+
+    /// Draw `img` (`src`, image pixels) into `dst` (user space) of a canvas
+    /// `w` × `h` pixels at `scale`, its pixels first `ground`, through
+    /// `damage` and `clip`, as a blit where it can be, or the slow way.
+    #[allow(clippy::too_many_arguments)]
+    fn drawn(
+        slow: bool,
+        (w, h, scale): (u32, u32, f32),
+        ground: &dyn Fn(u32, u32) -> u32,
+        img: &Arc<ImageData>,
+        (src, dst): (Rect, Rect),
+        (damage, clip): (Rect, Rect),
+        (quality, blend, xf): (Quality, Blend, Transform),
+    ) -> Vec<u32> {
+        let mut px: Vec<u32> = (0..w * h).map(|i| ground(i % w, i / w)).collect();
+        let mut canvas = Canvas::new(&mut px, w, h, 0.0, scale);
+        let draw = Draw { xf, blend, aa: true, clip, mask: None, shadow: None };
+        let op = crate::protocol::Op::Image {
+            image: img.clone(),
+            src,
+            dst,
+            alpha: 1.0,
+            quality,
+            tint: None,
+            tiled: false,
+            draw,
+        };
+        SLOW.with(|s| s.set(slow));
+        crate::raster::paint(&mut canvas, &mut crate::raster::Glyphs::default(), &[damage], &[op]);
+        SLOW.with(|s| s.set(false));
+        px
+    }
+
+    /// Images landing on whole device pixels, upright, one to one or
+    /// nearest-neighbour, are blitted: copied, or composited row by row,
+    /// enlarged or shrunk any amount, mirrored, padded past their edges,
+    /// in bands on the workers when large; every pixel is the one the slow
+    /// way draws, translucent ones over every ground included. Those it
+    /// can't blit (a fraction of a pixel off, smoothed while scaled,
+    /// turned) are drawn the slow way.
+    #[test]
+    fn blits_draw_what_the_slow_way_draws() {
+        let premultiply = |c: u8, a: u8| ((u32::from(c) * u32::from(a) + 127) / 255) as u8;
+        let opaque =
+            Arc::new(image(40, 640, 480, |x, y| [(x % 256) as u8, (y % 256) as u8, ((x * y) % 256) as u8, 255]));
+        // Every alpha down the rows, every color across them.
+        let translucent = Arc::new(image(41, 256, 256, |x, y| {
+            let (a, c) = (y as u8, x as u8);
+            [premultiply(c, a), premultiply(255 - c, a), premultiply(c / 2, a), a]
+        }));
+        let grounds: [&dyn Fn(u32, u32) -> u32; 3] = [
+            &|x, y| u32::from_ne_bytes([(x * 7 % 256) as u8, (y * 3 % 256) as u8, ((x + y) % 256) as u8, 255]),
+            &|x, y| u32::from_ne_bytes([(x % 128) as u8, 0, (y % 64) as u8, ((x % 128) * 2) as u8]),
+            &|_, _| 0,
+        ];
+        let r = Rect::new;
+        let up = Transform::identity();
+        // Turned a quarter, about (350, 0).
+        let turned = Transform::from_row(0.0, 1.0, -1.0, 0.0, 350.0, 0.0);
+        let (none, low, medium, high) = (Quality::None, Quality::Low, Quality::Medium, Quality::High);
+        let (over, copy) = (Blend::SourceOver, Blend::Copy);
+        #[rustfmt::skip]
+        // The image, the scale, src, dst, how it's drawn, and whether that
+        // blits.
+        type Case<'a> = (&'a Arc<ImageData>, f32, Rect, Rect, (Quality, Blend, Transform), bool);
+        let cases: Vec<Case> = vec![
+            // One to one at whole pixels, at scales 1 and 2.
+            (&opaque, 1.0, r(0.0, 0.0, 640.0, 480.0), r(3.0, 5.0, 643.0, 485.0), (none, over, up), true),
+            (&opaque, 2.0, r(0.0, 0.0, 640.0, 480.0), r(1.5, 2.0, 321.5, 242.0), (medium, copy, up), true),
+            (&opaque, 1.0, r(10.0, 20.0, 300.0, 200.0), r(0.0, 0.0, 290.0, 180.0), (low, over, up), true),
+            (&translucent, 1.0, r(0.0, 0.0, 256.0, 256.0), r(7.0, 9.0, 263.0, 265.0), (none, over, up), true),
+            (&translucent, 2.0, r(0.0, 0.0, 256.0, 256.0), r(4.0, 4.5, 132.0, 132.5), (none, copy, up), true),
+            // Smoothed, but not scaled: tiny-skia takes the nearest pixel.
+            (&opaque, 1.0, r(0.0, 0.0, 640.0, 480.0), r(0.0, 0.0, 640.0, 480.0), (high, over, up), true),
+            (&translucent, 2.0, r(0.0, 0.0, 256.0, 256.0), r(20.0, 10.0, 148.0, 138.0), (high, over, up), true),
+            // Enlarged two, three and one and a half times, nearest.
+            (&translucent, 1.0, r(0.0, 0.0, 256.0, 256.0), r(1.0, 2.0, 513.0, 514.0), (none, over, up), true),
+            (&opaque, 1.0, r(0.0, 0.0, 200.0, 150.0), r(0.0, 0.0, 600.0, 450.0), (none, over, up), true),
+            (&opaque, 2.0, r(10.0, 10.0, 210.0, 160.0), r(0.0, 0.0, 150.0, 112.5), (none, over, up), true),
+            // Shrunk by halves, thirds and 0.7, opaque and not.
+            (&opaque, 1.0, r(0.0, 0.0, 640.0, 480.0), r(0.0, 0.0, 320.0, 240.0), (none, copy, up), true),
+            (&opaque, 1.0, r(0.0, 0.0, 639.0, 480.0), r(5.0, 5.0, 218.0, 165.0), (none, over, up), true),
+            (&opaque, 1.0, r(0.0, 0.0, 640.0, 480.0), r(0.0, 0.0, 448.0, 336.0), (none, over, up), true),
+            (&translucent, 1.0, r(0.0, 0.0, 256.0, 256.0), r(30.0, 40.0, 230.0, 220.0), (none, over, up), true),
+            // Mirrored both ways; padded past the image's edges.
+            (&translucent, 1.0, r(0.0, 0.0, 256.0, 256.0), r(300.0, 280.0, 44.0, 24.0), (none, over, up), true),
+            (&opaque, 1.0, r(-20.0, -10.0, 620.0, 470.0), r(0.0, 0.0, 640.0, 480.0), (none, over, up), true),
+            // A quarter pixel off, smoothed while scaled, and turned: the
+            // slow way.
+            (&opaque, 1.0, r(0.0, 0.0, 640.0, 480.0), r(0.25, 0.0, 640.25, 480.0), (none, over, up), false),
+            (&opaque, 1.0, r(0.0, 0.0, 200.0, 150.0), r(0.0, 0.0, 400.0, 300.0), (high, over, up), false),
+            (&opaque, 1.0, r(0.0, 0.0, 200.0, 150.0), r(0.0, 0.0, 300.0, 225.0), (medium, over, up), false),
+            (&translucent, 1.0, r(0.0, 0.0, 256.0, 256.0), r(0.0, 0.0, 256.0, 256.0), (none, over, turned), false),
+        ];
+        let size = (700, 560);
+        for (n, (img, scale, src, dst, how, blits)) in cases.into_iter().enumerate() {
+            let before = BLITS.with(std::cell::Cell::get);
+            let canvas = (size.0, size.1, scale);
+            let points = (size.0 as f32 / scale, size.1 as f32 / scale);
+            // The whole canvas, and damage and a clip cutting through it.
+            let whole = Rect::new(0.0, 0.0, points.0, points.1);
+            let cut = (
+                Rect::new(10.0, 33.5, points.0 - 20.0, points.1 - 7.0),
+                Rect::new(0.0, 2.0, points.0 - 31.0, points.1),
+            );
+            for (damage, clip) in [(whole, whole), cut] {
+                for ground in grounds {
+                    let fast = drawn(false, canvas, ground, img, (src, dst), (damage, clip), how);
+                    let slow = drawn(true, canvas, ground, img, (src, dst), (damage, clip), how);
+                    let differ = fast.iter().zip(&slow).filter(|(a, b)| a != b).count();
+                    assert_eq!(differ, 0, "case {n}: {differ} pixels differ: {dst:?} at {scale}, {how:?}, {damage:?}");
+                }
+            }
+            let drew = BLITS.with(std::cell::Cell::get) - before;
+            assert_eq!(drew > 0, blits, "case {n}: {drew} blits");
+        }
     }
 
     #[test]
