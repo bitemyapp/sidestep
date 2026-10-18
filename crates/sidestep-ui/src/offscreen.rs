@@ -61,6 +61,40 @@ pub fn render_damage(
     rendered(size, scale, appearance, Some(damage), draw)
 }
 
+/// [`render_damage`] into pixels the caller keeps from one frame to the
+/// next, as a window's renderer draws into the buffer it keeps: `px` holds
+/// a drawing `size` points big at `scale` (made that size, transparent,
+/// if it held another), and only `damage`'s pixels change, cleared and
+/// drawn again. No image is made, so nothing is allocated or cleared but
+/// the damage: what a frame costs a window, to the pixel.
+pub fn paint_damage(
+    px: &mut Vec<u32>,
+    size: Size,
+    scale: f64,
+    appearance: Appearance,
+    damage: &[kurbo::Rect],
+    draw: impl FnOnce(&mut Canvas),
+) {
+    let (scale, width, height) = sized(size, scale);
+    let len = width as usize * height as usize;
+    if px.len() != len {
+        px.clear();
+        px.resize(len, 0);
+    }
+    paint_into(px, (width, height), size, scale, appearance, Some(damage), draw);
+}
+
+/// The scale an offscreen drawing is made at, and its pixels across and
+/// down.
+fn sized(size: Size, scale: f64) -> (f64, u32, u32) {
+    let scale = if scale.is_finite() { scale.clamp(1.0 / 16.0, 16.0) } else { 1.0 };
+    let side = |points: f64| {
+        let px = (points.max(0.0) * scale - 1e-6).ceil();
+        if px.is_finite() { (px as u32).clamp(1, MAX_PIXELS) } else { 1 }
+    };
+    (scale, side(size.width), side(size.height))
+}
+
 fn rendered(
     size: Size,
     scale: f64,
@@ -68,12 +102,29 @@ fn rendered(
     damage: Option<&[kurbo::Rect]>,
     draw: impl FnOnce(&mut Canvas),
 ) -> Image {
-    let scale = if scale.is_finite() { scale.clamp(1.0 / 16.0, 16.0) } else { 1.0 };
-    let side = |points: f64| {
-        let px = (points.max(0.0) * scale - 1e-6).ceil();
-        if px.is_finite() { (px as u32).clamp(1, MAX_PIXELS) } else { 1 }
-    };
-    let (width, height) = (side(size.width), side(size.height));
+    let (scale, width, height) = sized(size, scale);
+    // Drawn straight into the image's pixels, which start transparent
+    // (zeroed by the allocator: a large image's pages are the system's
+    // zero pages until drawn on), rather than drawn and then copied out: a
+    // window's worth at 2× is 20 MB.
+    let mut bytes = zeroed(width as usize * height as usize * 4);
+    let px = pixels_of(Arc::get_mut(&mut bytes).expect("a new image's pixels are its own"));
+    paint_into(px, (width, height), size, scale, appearance, damage, draw);
+    let data = ImageData { key: next_key(), generation: 0, width, height, pixels: Pixels::Rgba(bytes) };
+    Image::from_data(Arc::new(data), 1.0 / scale)
+}
+
+/// Draw with `draw` and rasterize it into `px` (`width × height` pixels):
+/// all of it, or (where `damage` says) those rectangles, cleared first.
+fn paint_into(
+    px: &mut [u32],
+    (width, height): (u32, u32),
+    size: Size,
+    scale: f64,
+    appearance: Appearance,
+    damage: Option<&[kurbo::Rect]>,
+    draw: impl FnOnce(&mut Canvas),
+) {
     let bounds = protocol::Rect::new(0.0, 0.0, size.width.max(0.0) as f32, size.height.max(0.0) as f32);
     // All of the pixels, an edge rounded up included.
     let all = protocol::Rect::new(0.0, 0.0, (width as f64 / scale) as f32, (height as f64 / scale) as f32);
@@ -94,14 +145,13 @@ fn rendered(
     // Images the canvas made for itself live until the pixels are drawn.
     let (ops, _temporaries) = canvas.finish();
     let rasterizing = recording.map(|r| (r.elapsed(), Instant::now()));
-    // Drawn straight into the image's pixels, which start transparent
-    // (zeroed by the allocator: a large image's pages are the system's
-    // zero pages until drawn on), rather than drawn and then copied out: a
-    // window's worth at 2× is 20 MB.
-    let mut bytes = zeroed(width as usize * height as usize * 4);
-    let px = pixels_of(Arc::get_mut(&mut bytes).expect("a new image's pixels are its own"));
+    let mut target = raster::Canvas::new(px, width, height, 0.0, scale as f32);
+    if damage.is_some() {
+        for r in &painted {
+            raster::replace(&mut target, r, 0);
+        }
+    }
     if !ops.is_empty() && !painted.is_empty() {
-        let mut target = raster::Canvas::new(px, width, height, 0.0, scale as f32);
         GLYPHS.with(|g| match g.try_borrow_mut() {
             Ok(mut glyphs) => raster::paint(&mut target, &mut glyphs, &painted, &ops),
             // Drawing offscreen from inside a drawing offscreen.
@@ -111,8 +161,6 @@ fn rendered(
     if let Some((record, started)) = rasterizing {
         stats::offscreen(record, started.elapsed());
     }
-    let data = ImageData { key: next_key(), generation: 0, width, height, pixels: Pixels::Rgba(bytes) };
-    Image::from_data(Arc::new(data), 1.0 / scale)
 }
 
 /// `len` zero bytes, shared.
@@ -232,6 +280,21 @@ mod tests {
                     assert_eq!(part[at..at + 4], whole[at..at + 4], "({x}, {y})");
                 } else {
                     assert_eq!(part[at + 3], 0, "({x}, {y}) is left alone");
+                }
+            }
+        }
+        // Into pixels kept from before: the damage drawn as it is in the
+        // image, the rest left as it was.
+        let mut kept = vec![0x1234_5678u32; 120 * 80];
+        paint_damage(&mut kept, size, 2.0, Appearance::DARK, &damage, draw);
+        for y in 0..80 {
+            for x in 0..120 {
+                let at = (y * 120 + x) * 4;
+                let p = kept[y * 120 + x].to_ne_bytes();
+                if inside(x, y) {
+                    assert_eq!(p[..], whole[at..at + 4], "({x}, {y}) in pixels kept");
+                } else {
+                    assert_eq!(kept[y * 120 + x], 0x1234_5678, "({x}, {y}) kept as it was");
                 }
             }
         }
