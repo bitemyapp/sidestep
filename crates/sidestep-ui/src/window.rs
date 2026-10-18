@@ -383,9 +383,54 @@ pub(crate) struct WindowData {
     pub scrolls: Vec<(Rect, Vec2)>,
 }
 
-/// The most rectangles a window's damage keeps before they become their
-/// union.
+/// The most rectangles a window's damage keeps; past them, the two that
+/// make the least extra area together become their union.
 const MAX_DAMAGE: usize = 16;
+
+/// `r` added to `damage`, within `bounds`, as a window gathers it: rounded
+/// out to whole points, left out inside another, taking in those inside
+/// it; and past [`MAX_DAMAGE`] rectangles, the two whose union covers the
+/// least that neither did become one, until there are that many again.
+/// (All of them becoming one, as before, made damage in many places — a
+/// chart's segments, a table's rows and the status line — most of the
+/// window.)
+fn add_damage(damage: &mut Vec<protocol::Rect>, r: protocol::Rect, bounds: protocol::Rect) {
+    let r = r.round_out().intersect(&bounds);
+    if r.is_empty() || damage.iter().any(|d| d.intersect(&r) == r) {
+        return;
+    }
+    damage.retain(|d| r.intersect(d) != *d);
+    damage.push(r);
+    let area = |r: &protocol::Rect| f64::from((r.x1 - r.x0).max(0.0)) * f64::from((r.y1 - r.y0).max(0.0));
+    while damage.len() > MAX_DAMAGE {
+        let mut best = (0, 1, f64::INFINITY);
+        for i in 0..damage.len() {
+            for j in i + 1..damage.len() {
+                let extra = area(&damage[i].union(&damage[j])) - area(&damage[i]) - area(&damage[j]);
+                if extra < best.2 {
+                    best = (i, j, extra);
+                }
+            }
+        }
+        let (i, j, _) = best;
+        let merged = damage[i].union(&damage[j]);
+        damage.swap_remove(j);
+        damage[i] = merged;
+        damage.retain(|d| *d == merged || merged.intersect(d) != *d);
+    }
+}
+
+/// Damage `rects` (content points) of a window `size` points big, gathered
+/// as the window gathers what it redraws at its next pass: what a test
+/// drawing a frame's damage offscreen should draw.
+pub fn gather_damage(size: Size, rects: &[Rect]) -> Vec<Rect> {
+    let bounds = protocol::Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
+    let mut damage = Vec::new();
+    for r in rects {
+        add_damage(&mut damage, protocol::Rect::new(r.x0 as f32, r.y0 as f32, r.x1 as f32, r.y1 as f32), bounds);
+    }
+    damage.into_iter().map(|d| Rect::new(f64::from(d.x0), f64::from(d.y0), f64::from(d.x1), f64::from(d.y1))).collect()
+}
 
 impl WindowData {
     /// What the toolkit keeps of a window, not yet shown.
@@ -536,16 +581,8 @@ impl WindowData {
 
     /// Redraw `r` (content points) at the next pass.
     pub fn invalidate(&mut self, r: protocol::Rect) {
-        let r = r.round_out().intersect(&self.bounds());
-        if r.is_empty() || self.damage.iter().any(|d| d.intersect(&r) == r) {
-            return;
-        }
-        self.damage.retain(|d| r.intersect(d) != *d);
-        self.damage.push(r);
-        if self.damage.len() > MAX_DAMAGE {
-            let all = self.damage.iter().fold(r, |a, d| a.union(d));
-            self.damage = vec![all];
-        }
+        let bounds = self.bounds();
+        add_damage(&mut self.damage, r, bounds);
     }
 
     /// Redraw all of the window at the next pass: nothing need move first.
@@ -937,5 +974,31 @@ mod tests {
         assert!(beside.flip_x && !beside.flip_y && !beside.slide_x);
         assert_eq!(beside.offset, (-1, -4));
         assert!(PopupPosition::AT_POINT.layout().resize_y);
+    }
+
+    /// Damage in many places stays in as many rectangles as a window
+    /// keeps, near ones put together first, rather than becoming the
+    /// window; what's inside another goes.
+    #[test]
+    fn damage_in_many_places_keeps_apart() {
+        let size = Size::new(1000.0, 800.0);
+        // Rows down the left, a strip along the top and the bottom, and a
+        // cell's worth at the right: twenty-three rectangles.
+        let mut rects: Vec<Rect> =
+            (0..20).map(|i| Rect::new(10.0, 100.0 + i as f64 * 24.0, 300.0, 120.0 + i as f64 * 24.0)).collect();
+        rects.push(Rect::new(0.0, 0.0, 1000.0, 30.0));
+        rects.push(Rect::new(0.0, 780.0, 1000.0, 800.0));
+        rects.push(Rect::new(900.5, 400.25, 950.0, 420.0));
+        rects.push(Rect::new(920.0, 405.0, 930.0, 410.0));
+        let damage = gather_damage(size, &rects);
+        assert!(damage.len() <= MAX_DAMAGE, "{}", damage.len());
+        let area: f64 = damage.iter().map(|r| r.area()).sum();
+        assert!(area < size.area() / 3.0, "{area} of {}", size.area());
+        // Every rectangle asked for is covered, rounded out to whole points.
+        for r in &rects {
+            let r = r.expand();
+            assert!(damage.iter().any(|d| d.intersect(r) == r), "{r:?} in {damage:?}");
+        }
+        assert!(damage.contains(&Rect::new(900.0, 400.0, 950.0, 420.0)), "{damage:?}");
     }
 }
