@@ -16,6 +16,7 @@ use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
+use super::images::{ImageData, Pixels};
 use super::{Canvas, Glyphs, paint};
 use crate::protocol::{Draw, Op, Rect};
 
@@ -103,14 +104,24 @@ impl Drop for WaitFor {
     }
 }
 
+/// The most pixels an image has for a paint drawing it to go in bands:
+/// each band's thread keeps it in its own image cache (a tinted copy, a
+/// halving), which for icons and the like costs next to nothing.
+const SMALL_IMAGE: u32 = 256 * 256;
+
 /// Whether every op draws its pixels from nothing but itself and what's
-/// under them, with no image cache.
+/// under them, with no image cache but for small images whose pixels are
+/// shared (icons, glyph-like pictures): each band's thread caches its own
+/// copies of those, where large ones and files to decode keep a paint on
+/// one thread.
 fn bandable(ops: &[Op]) -> bool {
     let plain = |d: &Draw| d.shadow.is_none() && d.mask.iter().flat_map(|m| m.iter()).all(|c| c.image.is_none());
+    let small = |i: &ImageData| matches!(i.pixels, Pixels::Rgba(_)) && i.width.saturating_mul(i.height) <= SMALL_IMAGE;
     ops.iter().all(|op| match op {
         Op::Fill { .. } | Op::FillWith { .. } | Op::Glyphs(_) | Op::EndGroup => true,
         Op::FillPath { draw, .. } | Op::StrokePath { draw, .. } | Op::BeginGroup { draw, .. } => plain(draw),
-        Op::Image { .. } | Op::Composite(_) => false,
+        Op::Image { image, draw, .. } => plain(draw) && small(image),
+        Op::Composite(_) => false,
     })
 }
 
@@ -309,5 +320,72 @@ mod tests {
             paint(&mut Canvas::new(&mut one, pw, ph, 0.0, scale), &mut Glyphs::default(), &part, &ops[2..]);
             assert!(one == banded, "a part, at scale {scale}");
         }
+    }
+
+    /// Small images (icons: tinted, scaled smooth or not, one to one,
+    /// translucent) drawn in bands are the pixels one thread draws; a large
+    /// one keeps the paint on one thread.
+    #[test]
+    fn small_images_draw_in_bands_as_on_one_thread() {
+        use crate::protocol::Quality;
+        use crate::raster::images::next_key;
+        let icon = |w: u32, h: u32| {
+            let px: Vec<u8> = (0..w * h)
+                .flat_map(|i| {
+                    let (x, y) = (i % w, i / w);
+                    let a = if (x + y) % 5 == 0 { 0 } else { 40 + ((x * 7 + y * 3) % 200) as u8 };
+                    [a / 2, a / 3, a, a]
+                })
+                .collect();
+            Arc::new(ImageData { key: next_key(), generation: 0, width: w, height: h, pixels: Pixels::Rgba(px.into()) })
+        };
+        let small = icon(24, 24);
+        let draw = |w: f32, h: f32| Draw {
+            xf: tiny_skia::Transform::identity(),
+            blend: Blend::SourceOver,
+            aa: true,
+            clip: Rect::new(0.0, 0.0, w, h),
+            mask: None,
+            shadow: None,
+        };
+        let ops = |w: f32, h: f32| -> Vec<Op> {
+            let mut ops =
+                vec![Op::FillWith { rect: Rect::new(0.0, 0.0, w, h), color: [0.1, 0.1, 0.1, 1.0], blend: Blend::Copy }];
+            for i in 0..40 {
+                let (x, y) = (7.3 + (i % 8) as f32 * 61.0, 11.0 + (i / 8) as f32 * 97.0);
+                let size = if i % 3 == 0 { 12.0 } else { 16.5 + (i % 4) as f32 * 7.25 };
+                let quality = [Quality::None, Quality::Low, Quality::High][i % 3];
+                ops.push(Op::Image {
+                    image: small.clone(),
+                    src: Rect::new(0.0, 0.0, 24.0, 24.0),
+                    dst: Rect::new(x, y, x + size, y + size),
+                    alpha: if i % 5 == 0 { 0.6 } else { 1.0 },
+                    quality,
+                    tint: (i % 4 == 1).then_some([0.9, 0.6, 0.2, 1.0]),
+                    tiled: false,
+                    draw: draw(w, h),
+                });
+            }
+            ops
+        };
+        for scale in [1.0f32, 1.5, 2.0] {
+            let (w, h) = (520.0f32, 513.0f32);
+            let (pw, ph) = ((w * scale).ceil() as u32, (h * scale).ceil() as u32);
+            let ops = ops(w, h);
+            assert!(bandable(&ops));
+            let damage = [Rect::new(0.0, 0.0, w, h)];
+            let mut one = vec![0u32; (pw * ph) as usize];
+            paint(&mut Canvas::new(&mut one, pw, ph, 0.0, scale), &mut Glyphs::default(), &damage, &ops);
+            let mut banded = vec![0u32; (pw * ph) as usize];
+            paint_banded(&mut Canvas::new(&mut banded, pw, ph, 0.0, scale), &mut Glyphs::default(), &damage, &ops);
+            let differ = one.iter().zip(&banded).filter(|(a, b)| a != b).count();
+            assert_eq!(differ, 0, "{differ} pixels differ at scale {scale}");
+        }
+        let large = icon(600, 400);
+        let mut big = ops(520.0, 513.0);
+        if let Op::Image { image, .. } = &mut big[1] {
+            *image = large;
+        }
+        assert!(!bandable(&big), "a large image keeps the paint on one thread");
     }
 }

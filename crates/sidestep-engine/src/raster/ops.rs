@@ -266,6 +266,13 @@ pub(super) fn path_rows(canvas: &Canvas, damage: &Rect, op: &Op) -> Option<(usiz
         Op::BeginGroup { draw, .. } | Op::Image { draw, .. } if draw.mask.is_some() => {
             rows(canvas.clip_pixels(draw, damage))
         }
+        // Images scaled through tiny-skia's pattern come out a little
+        // differently cut off at other rows too (those copied row by row
+        // don't, but which way one goes is known only when it's drawn).
+        Op::Image { dst, draw, tiled: false, .. } => {
+            super::images::dst_bounds(dst).and_then(|b| rows(region(canvas, damage, draw, b, 1.0)))
+        }
+        Op::Image { draw, tiled: true, .. } => rows(canvas.clip_pixels(draw, damage)),
         _ => None,
     }
 }
