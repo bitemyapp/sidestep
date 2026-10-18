@@ -302,8 +302,16 @@ pub fn draw(
     // How many device pixels an image pixel covers.
     let device = base.pre_concat(placed);
     let shrink = device.sx.hypot(device.ky).min(device.kx.hypot(device.sy));
-    CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
+    CACHE.with(|cell| {
+        // Drawing an image from inside drawing one (a raster worker that,
+        // waiting for its bands, takes another paint's band): a cache of
+        // its own for this draw.
+        let mut spare = None;
+        let mut borrowed = cell.try_borrow_mut();
+        let cache: &mut Cache = match borrowed.as_deref_mut() {
+            Ok(cache) => cache,
+            Err(_) => spare.insert(Cache::default()),
+        };
         let Some(entry) = cache.entry(image) else { return };
         // Bytes this draw adds to the entry (halvings, a tint) and drops
         // from it (the oldest tint).

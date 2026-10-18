@@ -172,7 +172,13 @@ pub fn paint_banded(canvas: &mut Canvas, glyphs: &mut Glyphs, rects: &[Rect], op
     let others: Vec<Box<dyn FnOnce() + Send + '_>> = canvases
         .into_iter()
         .map(|mut band| -> Box<dyn FnOnce() + Send + '_> {
-            Box::new(move || GLYPHS.with(|g| paint(&mut band, &mut g.borrow_mut(), rects, ops)))
+            Box::new(move || {
+                GLYPHS.with(|g| match g.try_borrow_mut() {
+                    Ok(mut glyphs) => paint(&mut band, &mut glyphs, rects, ops),
+                    // A band taken while this thread draws another's.
+                    Err(_) => paint(&mut band, &mut Glyphs::default(), rects, ops),
+                })
+            })
         })
         .collect();
     scoped(others, || paint(&mut mine, glyphs, rects, ops));
