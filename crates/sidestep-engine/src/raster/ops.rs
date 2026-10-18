@@ -423,6 +423,58 @@ pub fn region(
     (x0 < x1 && y0 < y1).then_some((x0, y0, x1, y1))
 }
 
+/// Whether a shape (its `bounds`, reaching `outset` pixels beyond them
+/// through `base`) can be drawn straight into the canvas's rows of
+/// `region` rather than into a copy of the region: drawn plainly (without
+/// antialiasing, and no clip path, shadow or blend tiny-skia lacks), into
+/// rows that follow one another, and reaching no column the region leaves
+/// out but those past the canvas's own edges, which the rows' edges cut
+/// off as the copy's do. Either way the shape's pixels are the same, but
+/// copying the region in and out was most of what a large plain shape
+/// cost (the rings of a disk-usage chart while they move, drawn plainly
+/// for speed). Antialiased shapes stay in a copy: tiny-skia draws them
+/// more slowly into rows as wide as a window's than into a copy as wide as
+/// they are.
+fn direct(
+    canvas: &Canvas,
+    draw: &Draw,
+    bounds: tiny_skia::Rect,
+    outset: f32,
+    base: &Transform,
+    region: (usize, usize, usize, usize),
+) -> bool {
+    if draw.aa
+        || draw.mask.is_some()
+        || draw.shadow.is_some()
+        || matches!(draw.blend, Blend::PlusDarker | Blend::ColorBurn | Blend::SoftLight)
+        || canvas.stride != canvas.width as usize
+        || copying::always()
+    {
+        return false;
+    }
+    let Some(dev) = bounds.transform(*base) else { return false };
+    let (left, right) = ((dev.left() - outset).floor(), (dev.right() + outset).ceil());
+    (left >= region.0 as f32 || region.0 == 0) && (right <= region.2 as f32 || region.2 == canvas.width as usize)
+}
+
+#[cfg(not(test))]
+mod copying {
+    /// Whether a test draws every shape into a copy, to hold the shapes
+    /// drawn in place to it.
+    pub fn always() -> bool {
+        false
+    }
+}
+
+#[cfg(test)]
+mod copying {
+    thread_local!(pub static ALWAYS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
+
+    pub fn always() -> bool {
+        ALWAYS.with(|a| a.get())
+    }
+}
+
 fn shape(canvas: &mut Canvas, st: &mut State, damage: &Rect, draw: &Draw, shape: &Shape, paint: &Paint) {
     let (bounds, outset) = match shape {
         Shape::Fill(path, _) => (path.bounds(), 1.0),
@@ -430,6 +482,18 @@ fn shape(canvas: &mut Canvas, st: &mut State, damage: &Rect, draw: &Draw, shape:
     };
     let Some(region) = region(canvas, damage, draw, bounds, outset) else { return };
     let base = canvas.transform().pre_concat(draw.xf);
+    if direct(canvas, draw, bounds, outset, &base, region) {
+        // Into the canvas's own rows, as into a copy of the region: the
+        // shape reaches no column the region leaves out.
+        let Some(mut paint) = to_paint(paint) else { return };
+        paint.blend_mode = blend_mode(draw.blend);
+        let (width, stride) = (canvas.width, canvas.stride);
+        let rows = &mut canvas.px[region.1 * stride..region.3 * stride];
+        if let Some(mut pm) = PixmapMut::from_bytes(as_bytes(rows), width, (region.3 - region.1) as u32) {
+            paint_shape(&mut pm, shape, &paint, draw.aa, base.post_translate(0.0, -(region.1 as f32)), None);
+        }
+        return;
+    }
     with_region(canvas, st, region, |pm, source, masks, origin| {
         // The region's pixels, from the canvas's (the origin is on the
         // layer's grid, for masks).
@@ -1201,6 +1265,50 @@ mod tests {
         let px = render(100, 100, 2.0, &ops[1..]);
         assert_eq!(channels(px[100 * 200 + 101]), [255, 0, 0, 255]);
         assert_eq!(px.iter().filter(|&&p| p != 0).count(), 8);
+    }
+
+    /// Plain shapes drawn straight into the canvas are the pixels drawn
+    /// into a copy of their region, filled and stroked, over and among
+    /// antialiased ones, at whole and fractional scales.
+    #[test]
+    fn shapes_drawn_in_place_are_the_ones_drawn_in_a_copy() {
+        let (w, h) = (97.0f32, 61.0f32);
+        let mut ops = Vec::new();
+        for i in 0..36 {
+            let (x, y, r) = (9.3 + (i % 6) as f32 * 15.7, 8.6 + (i / 6 % 4) as f32 * 13.9, 3.1 + (i % 5) as f32 * 1.7);
+            let mut pb = tiny_skia::PathBuilder::new();
+            pb.move_to(x - r, y);
+            pb.cubic_to(x - r, y - r * 1.3, x + r * 0.7, y - r, x + r, y + 0.3);
+            pb.quad_to(x + r * 0.2, y + r * 1.4, x - r * 0.4, y + r * 0.6);
+            pb.close();
+            let path = Arc::new(pb.finish().unwrap());
+            let mut d = draw(Rect::new(0.0, 0.0, w, h));
+            d.aa = i % 4 == 3;
+            d.xf = Transform::from_rotate_at(i as f32 * 11.0, x, y);
+            let color = [0.1 + (i % 3) as f32 * 0.3, 0.8 - (i % 4) as f32 * 0.2, 0.5, 0.55 + (i % 2) as f32 * 0.45];
+            ops.push(if i % 3 == 2 {
+                let stroke = StrokeSpec { width: 0.6 + (i % 4) as f32, cap: 1, join: 1, miter: 4.0, dash: None };
+                Op::StrokePath { path, stroke: Arc::new(stroke), paint: Paint::Solid(color), draw: d }
+            } else {
+                Op::FillPath { path, even_odd: i % 2 == 0, paint: Paint::Solid(color), draw: d }
+            });
+        }
+        for scale in [1.0f32, 1.5, 2.0, 2.25] {
+            let (pw, ph) = ((w * scale).ceil() as u32, (h * scale).ceil() as u32);
+            let paint_all = || {
+                let mut px = vec![0u32; (pw * ph) as usize];
+                let mut canvas = Canvas::new(&mut px, pw, ph, 0.0, scale);
+                paint(&mut canvas, &mut Glyphs::default(), &[Rect::new(0.0, 0.0, w, h)], &ops);
+                px
+            };
+            let in_place = paint_all();
+            copying::ALWAYS.with(|a| a.set(true));
+            let copied = paint_all();
+            copying::ALWAYS.with(|a| a.set(false));
+            let differ = in_place.iter().zip(&copied).filter(|(a, b)| a != b).count();
+            assert_eq!(differ, 0, "{differ} pixels differ at scale {scale}");
+            assert!(in_place.iter().filter(|p| **p != 0).count() > 1000, "the shapes are drawn");
+        }
     }
 
     #[test]
