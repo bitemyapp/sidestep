@@ -277,19 +277,34 @@ pub(super) fn path_rows(canvas: &Canvas, damage: &Rect, op: &Op) -> Option<(usiz
     }
 }
 
-/// Whether `op`, a fill, would be painted over whole by `next`, an opaque
-/// fill: a window clears what it redraws, then fills its background over
-/// it. Leaving it out draws the same pixels, without writing them twice.
+/// Whether `op`, a fill, would be painted over whole by `next`: an opaque
+/// fill (a window clears what it redraws, then fills its background over
+/// it), or a picture copied in place of what's there (a photo filling a
+/// viewer's window). Leaving it out draws the same pixels, without writing
+/// them twice.
 pub(super) fn overdrawn(canvas: &Canvas, damage: &Rect, op: &Op, next: Option<&Op>) -> bool {
     let rect = match op {
         Op::Fill { rect, .. } => rect,
         Op::FillWith { rect, blend: Blend::SourceOver | Blend::Highlight | Blend::Copy | Blend::Clear, .. } => rect,
         _ => return false,
     };
-    let Some(Op::Fill { rect: over, color }) = next else { return false };
-    if !super::opaque(*color) {
-        return false;
-    }
+    let over = match next {
+        Some(Op::Fill { rect: over, color }) if super::opaque(*color) => *over,
+        // Copying replaces every pixel the picture's rectangle takes in
+        // (those whose centres lie in it, as for a fill), whatever it holds.
+        Some(Op::Image { dst, alpha, tint: None, tiled: false, draw, .. })
+            if draw.blend == Blend::Copy
+                && *alpha >= 1.0
+                && draw.mask.is_none()
+                && draw.shadow.is_none()
+                && draw.xf.kx == 0.0
+                && draw.xf.ky == 0.0 =>
+        {
+            let Some(b) = super::images::dst_bounds(dst).and_then(|b| b.transform(draw.xf)) else { return false };
+            Rect::new(b.left(), b.top(), b.right(), b.bottom()).intersect(&draw.clip)
+        }
+        _ => return false,
+    };
     match (canvas.pixels(&rect.intersect(damage)), canvas.pixels(&over.intersect(damage))) {
         (Some(a), Some(b)) => b.0 <= a.0 && b.1 <= a.1 && a.2 <= b.2 && a.3 <= b.3,
         (None, _) => true,
@@ -1315,6 +1330,85 @@ mod tests {
             let differ = in_place.iter().zip(&copied).filter(|(a, b)| a != b).count();
             assert_eq!(differ, 0, "{differ} pixels differ at scale {scale}");
             assert!(in_place.iter().filter(|p| **p != 0).count() > 1000, "the shapes are drawn");
+        }
+    }
+
+    /// A fill a picture is copied over whole is left out, and the pixels
+    /// are the ones drawing both makes: the picture's where it lands, the
+    /// fill's around it (where the picture doesn't cover the damage, the
+    /// fill is drawn).
+    #[test]
+    fn fills_under_a_copied_picture_go() {
+        use crate::protocol::Quality;
+        use crate::raster::images::{ImageData, Pixels, next_key};
+        let (iw, ih) = (40u32, 30u32);
+        let px: Vec<u8> = (0..iw * ih)
+            .flat_map(|i| [(i % 251) as u8, (i % 7) as u8 * 30, 200, if i % 9 == 0 { 0 } else { 255 }])
+            .collect();
+        let image = Arc::new(ImageData {
+            key: next_key(),
+            generation: 0,
+            width: iw,
+            height: ih,
+            pixels: Pixels::Rgba(px.into()),
+        });
+        let picture = |dst: Rect| {
+            let mut d = draw(Rect::new(0.0, 0.0, 100.0, 80.0));
+            d.blend = Blend::Copy;
+            Op::Image {
+                image: image.clone(),
+                src: Rect::new(0.0, 0.0, iw as f32, ih as f32),
+                dst,
+                alpha: 1.0,
+                quality: Quality::None,
+                tint: None,
+                tiled: false,
+                draw: d,
+            }
+        };
+        let ground =
+            Op::FillWith { rect: Rect::new(0.0, 0.0, 100.0, 80.0), color: [0.2, 0.3, 0.4, 1.0], blend: Blend::Copy };
+        for scale in [1.0f32, 2.0, 1.5] {
+            let (pw, ph) = ((100.0 * scale) as u32, (80.0 * scale) as u32);
+            fn canvas_of(px: &mut [u32], pw: u32, ph: u32, scale: f32) -> Canvas<'_> {
+                Canvas::new(px, pw, ph, 0.0, scale)
+            }
+            // Covering all of it: the ground goes, the picture is all there is.
+            let over = picture(Rect::new(0.0, 0.0, 100.0, 80.0));
+            let mut probe = vec![0u32; 0];
+            assert!(overdrawn(
+                &canvas_of(&mut probe, pw, ph, scale),
+                &Rect::new(0.0, 0.0, 100.0, 80.0),
+                &ground,
+                Some(&over)
+            ));
+            // Covering part of it: kept.
+            let part = picture(Rect::new(10.3, 7.6, 70.1, 50.2));
+            assert!(!overdrawn(
+                &canvas_of(&mut probe, pw, ph, scale),
+                &Rect::new(0.0, 0.0, 100.0, 80.0),
+                &ground,
+                Some(&part)
+            ));
+            // Damage inside the part the picture covers: left out, and the
+            // pixels are the picture's either way.
+            let damage = Rect::new(12.0, 9.0, 60.0, 45.0);
+            assert!(overdrawn(&canvas_of(&mut probe, pw, ph, scale), &damage, &ground, Some(&part)));
+            let mut both = vec![0x55u32; (pw * ph) as usize];
+            paint(
+                &mut canvas_of(&mut both, pw, ph, scale),
+                &mut Glyphs::default(),
+                &[damage],
+                &[ground.clone(), part.clone()],
+            );
+            let mut alone = vec![0x55u32; (pw * ph) as usize];
+            paint(
+                &mut canvas_of(&mut alone, pw, ph, scale),
+                &mut Glyphs::default(),
+                &[damage],
+                std::slice::from_ref(&part),
+            );
+            assert!(both == alone, "at {scale}×");
         }
     }
 

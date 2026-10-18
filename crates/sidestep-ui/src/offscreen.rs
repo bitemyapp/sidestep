@@ -81,7 +81,7 @@ pub fn paint_damage(
         px.clear();
         px.resize(len, 0);
     }
-    paint_into(px, (width, height), size, scale, appearance, Some(damage), draw);
+    paint_into(px, (width, height), size, scale, appearance, Some(damage), true, draw);
 }
 
 /// The scale an offscreen drawing is made at, and its pixels across and
@@ -109,13 +109,16 @@ fn rendered(
     // window's worth at 2× is 20 MB.
     let mut bytes = zeroed(width as usize * height as usize * 4);
     let px = pixels_of(Arc::get_mut(&mut bytes).expect("a new image's pixels are its own"));
-    paint_into(px, (width, height), size, scale, appearance, damage, draw);
+    paint_into(px, (width, height), size, scale, appearance, damage, false, draw);
     let data = ImageData { key: next_key(), generation: 0, width, height, pixels: Pixels::Rgba(bytes) };
     Image::from_data(Arc::new(data), 1.0 / scale)
 }
 
 /// Draw with `draw` and rasterize it into `px` (`width × height` pixels):
-/// all of it, or (where `damage` says) those rectangles, cleared first.
+/// all of it, or (where `damage` says) those rectangles, cleared first if
+/// `clear` (as a window's canvas clears them: ops that what's drawn over
+/// them whole leaves out).
+#[allow(clippy::too_many_arguments)]
 fn paint_into(
     px: &mut [u32],
     (width, height): (u32, u32),
@@ -123,6 +126,7 @@ fn paint_into(
     scale: f64,
     appearance: Appearance,
     damage: Option<&[kurbo::Rect]>,
+    clear: bool,
     draw: impl FnOnce(&mut Canvas),
 ) {
     let bounds = protocol::Rect::new(0.0, 0.0, size.width.max(0.0) as f32, size.height.max(0.0) as f32);
@@ -140,17 +144,16 @@ fn paint_into(
         }
     };
     let recording = stats::on().then(Instant::now);
-    let mut canvas = Canvas::blank(size, scale, marked, appearance);
+    let mut canvas = if clear {
+        Canvas::new(size, scale, marked, None, appearance)
+    } else {
+        Canvas::blank(size, scale, marked, appearance)
+    };
     draw(&mut canvas);
     // Images the canvas made for itself live until the pixels are drawn.
     let (ops, _temporaries) = canvas.finish();
     let rasterizing = recording.map(|r| (r.elapsed(), Instant::now()));
     let mut target = raster::Canvas::new(px, width, height, 0.0, scale as f32);
-    if damage.is_some() {
-        for r in &painted {
-            raster::replace(&mut target, r, 0);
-        }
-    }
     if !ops.is_empty() && !painted.is_empty() {
         GLYPHS.with(|g| match g.try_borrow_mut() {
             Ok(mut glyphs) => raster::paint(&mut target, &mut glyphs, &painted, &ops),
