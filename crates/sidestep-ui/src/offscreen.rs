@@ -55,9 +55,14 @@ pub fn render(size: Size, scale: f64, appearance: Appearance, draw: impl FnOnce(
     // Images the canvas made for itself live until the pixels are drawn.
     let (ops, _temporaries) = canvas.finish();
     let rasterizing = recording.map(|r| (r.elapsed(), Instant::now()));
-    let mut px = vec![0u32; width as usize * height as usize];
+    // Drawn straight into the image's pixels, which start transparent
+    // (zeroed by the allocator: a large image's pages are the system's
+    // zero pages until drawn on), rather than drawn and then copied out: a
+    // window's worth at 2× is 20 MB.
+    let mut bytes = zeroed(width as usize * height as usize * 4);
+    let px = pixels_of(Arc::get_mut(&mut bytes).expect("a new image's pixels are its own"));
     if !ops.is_empty() {
-        let mut target = raster::Canvas::new(&mut px, width, height, 0.0, scale as f32);
+        let mut target = raster::Canvas::new(px, width, height, 0.0, scale as f32);
         // All of the pixels, an edge rounded up included.
         let all = protocol::Rect::new(0.0, 0.0, (width as f64 / scale) as f32, (height as f64 / scale) as f32);
         GLYPHS.with(|g| match g.try_borrow_mut() {
@@ -69,9 +74,24 @@ pub fn render(size: Size, scale: f64, appearance: Appearance, draw: impl FnOnce(
     if let Some((record, started)) = rasterizing {
         stats::offscreen(record, started.elapsed());
     }
-    let bytes: Arc<[u8]> = Arc::from(&*raster::as_bytes(&mut px));
     let data = ImageData { key: next_key(), generation: 0, width, height, pixels: Pixels::Rgba(bytes) };
     Image::from_data(Arc::new(data), 1.0 / scale)
+}
+
+/// `len` zero bytes, shared.
+fn zeroed(len: usize) -> Arc<[u8]> {
+    // SAFETY: zero bytes are valid u8s.
+    unsafe { Arc::<[u8]>::new_zeroed_slice(len).assume_init() }
+}
+
+/// Bytes as the canvas pixels they hold, four to a pixel.
+fn pixels_of(bytes: &mut [u8]) -> &mut [u32] {
+    // SAFETY: any four bytes are a u32, and `align_to_mut` gives only the
+    // aligned middle: all of them when they start on a u32's boundary, as
+    // an `Arc`'s data does (after its two counters).
+    let (before, px, after) = unsafe { bytes.align_to_mut::<u32>() };
+    assert!(before.is_empty() && after.is_empty(), "sidestep: an image's pixels start on a pixel's boundary");
+    px
 }
 
 /// Measure offscreen renders, as windows' frames are measured, summarizing
