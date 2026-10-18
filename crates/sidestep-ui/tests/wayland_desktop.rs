@@ -13,6 +13,9 @@
 //!   panel taking the keyboard when asked, typed into, then growing, and
 //!   windows making room; a window's frames measured; the panel taking
 //!   clicks only in its input region, the wallpaper under it the others;
+//! - a panel that has had no input opening a grabbing menu (as from a key
+//!   binding that reached a shell over IPC): it grabs, with no serial,
+//!   and a click where no surface is dismisses it;
 //! - frame after frame of small damage all over a window, which with
 //!   sway holding the buffer shown has each buffer catch up with the
 //!   others: the screen is then exactly the last state drawn whole
@@ -769,6 +772,95 @@ mod linux {
         }
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Grab {
+        Showing,
+        Open,
+        Clicked,
+        Done,
+    }
+
+    /// A panel that has had no input at all (no press, no key, never the
+    /// keyboard) opens a grabbing menu, as a shell does from a key binding
+    /// that reached it over IPC: it grabs all the same, with no serial to
+    /// give, so a click where no surface is dismisses it.
+    struct Grabbed {
+        started: Instant,
+        step: Grab,
+        bar: Option<WindowId>,
+        menu: Option<WindowId>,
+        events: Vec<(WindowId, WindowEvent)>,
+        pointer: mpsc::Sender<pointer::Do>,
+        clicked: Option<Instant>,
+    }
+
+    impl Handler for Grabbed {
+        fn launched(&mut self, cx: &mut Cx) {
+            let panel = LayerOptions::new(Layer::Top, "panel")
+                .anchors(Anchors::TOP | Anchors::LEFT | Anchors::RIGHT)
+                .exclusive_zone(24);
+            self.bar = Some(cx.open_window(WindowOptions::layer(panel).size(0.0, 24.0)));
+            cx.set_repeating_timer(Duration::from_millis(20));
+        }
+
+        fn window_event(&mut self, _cx: &mut Cx, window: WindowId, event: WindowEvent) {
+            self.events.push((window, event));
+        }
+
+        fn draw(&mut self, _cx: &mut Cx, window: WindowId, canvas: &mut Canvas) {
+            let color = if Some(window) == self.menu { MENU } else { BAR };
+            canvas.fill_rect(Rect::from_origin_size(Point::ZERO, canvas.size()), color);
+        }
+
+        fn timer(&mut self, cx: &mut Cx, _timer: TimerId) {
+            assert!(self.started.elapsed() < DEADLINE, "stuck at {:?}: {:?}", self.step, self.events);
+            let bar = self.bar.expect("the bar");
+            let point = |to| self.pointer.send(to).expect("the virtual pointer");
+            match self.step {
+                Grab::Showing => {
+                    if cx.window(bar).map(|w| w.size()) != Some(Size::new(OUTPUT.width, 24.0))
+                        || !Shot::take().shows(&[((5, 5), BAR)])
+                    {
+                        return;
+                    }
+                    let input = self.events.iter().any(|(_, e)| {
+                        matches!(
+                            e,
+                            WindowEvent::PointerButton { .. } | WindowEvent::Key(_) | WindowEvent::Focused(true)
+                        )
+                    });
+                    assert!(!input, "nothing reached the panel to grab with: {:?}", self.events);
+                    let anchor = Rect::new(30.0, 0.0, 90.0, 24.0);
+                    self.menu = Some(cx.open_window(WindowOptions::popup(bar, anchor, Size::new(160.0, 120.0), true)));
+                    self.step = Grab::Open;
+                }
+                Grab::Open => {
+                    if !Shot::take().shows(&[((40, 30), MENU), ((180, 140), MENU)]) {
+                        return;
+                    }
+                    println!("  a menu from a panel that has had no input");
+                    point(pointer::Do::MoveTo(640, 600));
+                    point(pointer::Do::Click);
+                    self.clicked = Some(Instant::now());
+                    self.step = Grab::Clicked;
+                }
+                Grab::Clicked => {
+                    let menu = self.menu.expect("the menu");
+                    if self.events.iter().any(|(w, e)| *w == menu && *e == WindowEvent::PopupDismissed) {
+                        println!("  it grabbed: a click where no surface is dismissed it");
+                        point(pointer::Do::Done);
+                        self.step = Grab::Done;
+                        cx.quit();
+                        return;
+                    }
+                    let waited = self.clicked.expect("clicked").elapsed();
+                    assert!(waited < Duration::from_secs(5), "no grab: a click elsewhere left the menu open");
+                }
+                Grab::Done => {}
+            }
+        }
+    }
+
     pub fn run() {
         if std::env::var_os("WAYLAND_DISPLAY").is_none() || std::env::var("WLR_BACKENDS").as_deref() != Ok("headless") {
             println!("skipped: needs the headless sway (run it under scripts/headless-wayland)");
@@ -809,6 +901,22 @@ mod linux {
         let layers = App::new().run(layers).expect("a compositor");
         assert_eq!(layers.step, Step::Done, "every step ran");
         drop(layers);
+        pointing.join().expect("the virtual pointer");
+
+        let (tx, rx) = mpsc::channel();
+        let pointing = std::thread::spawn(move || pointer::run(rx));
+        let grabbed = Grabbed {
+            started: Instant::now(),
+            step: Grab::Showing,
+            bar: None,
+            menu: None,
+            events: Vec::new(),
+            pointer: tx,
+            clicked: None,
+        };
+        let grabbed = App::new().run(grabbed).expect("a compositor");
+        assert_eq!(grabbed.step, Grab::Done);
+        drop(grabbed);
         pointing.join().expect("the virtual pointer");
 
         let (tx, rx) = mpsc::channel();

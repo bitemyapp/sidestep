@@ -193,6 +193,11 @@ impl Seats {
         self.latest.clone()
     }
 
+    /// The first seat, if there is one.
+    pub fn first_seat(&self) -> Option<WlSeat> {
+        self.list.first().map(|s| s.seat.clone())
+    }
+
     fn by_name(&mut self, name: u32) -> Option<&mut Seat> {
         self.list.iter_mut().find(|s| s.name == name)
     }

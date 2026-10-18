@@ -769,15 +769,22 @@ through the same protocol AppKit does, and keeps AppKit's rhythm:
   the surface is anchored to both edges that way) is the compositor's to
   decide. `closed` is a close request. Popups of a layer surface are
   xdg_popups made with no xdg parent and given to it before their first
-  commit (`get_popup`), as a panel's menus are. Its size, layer, anchors,
-  zone, margins and keyboard change while it shows (`WindowRequest`'s
-  layer requests, `Window::set_layer_…`), and a showing after a hide is
-  placed as it was left. Without wlr-layer-shell the window is closed at
-  once. The null render thread places them on a 1280 × 800 point output
-  and gives the keyboard to those that take it exclusively; under sway,
-  `tests/wayland_desktop.rs` checks a panel's exclusive zone tiles a
-  window under it, a wallpaper fills the output, a menu opens from the
-  panel's press, and the panel takes the keyboard and grows.
+  commit (`get_popup`), as a panel's menus are; a grabbing one grabs with
+  the latest press's or keyboard entry's serial, or with 0 when the
+  program has had none (a shell's menu opened by a key binding that
+  reached it over IPC), which Aizome's compositor and sway take. Other
+  popups don't grab without a serial, since a compositor that checks
+  serials dismisses a popup whose grab it refuses. A layer surface's
+  size, layer, anchors, zone, margins and keyboard change while it shows
+  (`WindowRequest`'s layer requests, `Window::set_layer_…`), and a
+  showing after a hide is placed as it was left. Without wlr-layer-shell
+  the window is closed at once. The null render thread places them on a
+  1280 × 800 point output and gives the keyboard to those that take it
+  exclusively; under sway, `tests/wayland_desktop.rs` checks a panel's
+  exclusive zone tiles a window under it, a wallpaper fills the output,
+  a menu opens from the panel's press, a panel that has had no input
+  opens a menu that grabs (a click where no surface is dismisses it),
+  and the panel takes the keyboard and grows.
 - **Activation for others**: `Window::activate` asks for a token for
   the program's own window and activates it; `Cx::request_activation_token`
   asks for one (`RequestActivationToken`) for a program the program

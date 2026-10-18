@@ -1224,12 +1224,35 @@ impl State {
             l.get_popup(popup.xdg_popup());
         }
         if placement.grab
-            && let Some((seat, serial)) = self.seats.latest_serial()
+            && let Some((seat, serial)) = self.grab_serial(placement.parent)
         {
             popup.xdg_popup().grab(&seat, serial);
         }
         popup.wl_surface().commit();
         Some(popup)
+    }
+
+    /// The seat and serial a popup of `parent` grabs with: the latest
+    /// press's or keyboard entry's. With none (a shell's menu opened by a
+    /// key binding that reached it over IPC, its panel never pressed nor
+    /// given the keyboard), a popup of a layer surface grabs with serial
+    /// 0, which Aizome's compositor and sway take. Other popups don't
+    /// grab then, as before: a compositor that checks serials dismisses a
+    /// popup whose grab it refuses.
+    fn grab_serial(&self, parent: WindowId) -> Option<(WlSeat, u32)> {
+        self.seats.latest_serial().or_else(|| {
+            // Up the popups to the window they all come from.
+            let mut id = parent;
+            for _ in 0..64 {
+                let win = self.windows.get(&id)?;
+                match win.shell {
+                    Shell::Popup(_) => id = win.popup_parent,
+                    Shell::Layer(_) => return self.seats.first_seat().map(|seat| (seat, 0)),
+                    _ => return None,
+                }
+            }
+            None
+        })
     }
 
     fn close_window(&mut self, window: WindowId) {
