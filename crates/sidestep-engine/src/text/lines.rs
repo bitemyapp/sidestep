@@ -883,15 +883,43 @@ const EDIT_CHUNK: usize = 2;
 impl Frame {
     /// Lay out all of `styled`.
     pub fn new(styled: Styled<'_>, container: Container) -> Frame {
-        super::with_ctx(|ctx| {
-            let mut frame = Frame { paragraphs: Vec::new(), container, len: 0, bytes: styled.text.len(), reach: 0.0 };
-            let mut left = container.max_lines;
-            let (paragraphs, len) = frame.lay_out(ctx, styled, 0, 0, None, None, &mut left, None);
-            frame.reach = widest(&paragraphs);
-            frame.paragraphs = paragraphs;
-            frame.len = len;
-            frame
-        })
+        super::with_ctx(|ctx| Frame::new_in(ctx, styled, container))
+    }
+
+    fn new_in(ctx: &mut super::Ctx, styled: Styled<'_>, container: Container) -> Frame {
+        let mut frame = Frame { paragraphs: Vec::new(), container, len: 0, bytes: styled.text.len(), reach: 0.0 };
+        let mut left = container.max_lines;
+        let (paragraphs, len) = frame.lay_out(ctx, styled, 0, 0, None, None, &mut left, None);
+        frame.reach = widest(&paragraphs);
+        frame.paragraphs = paragraphs;
+        frame.len = len;
+        frame
+    }
+
+    /// Lay out each of `texts` (each text, its attributes and its spans)
+    /// in its container, sharing the work with the text workers when
+    /// there's enough of it (see `pool`), as a display pass lays out the
+    /// lines it hasn't shown before: the frames, in order.
+    pub fn new_all(texts: Vec<(String, Vec<Attrs>, Vec<Span>, Container)>) -> Vec<Frame> {
+        let bytes: usize = texts.iter().map(|t| t.0.len()).sum();
+        let lay_out =
+            |ctx: &mut super::Ctx, (text, attrs, spans, container): &(String, Vec<Attrs>, Vec<Span>, Container)| {
+                Frame::new_in(ctx, Styled { text, attrs, spans }, *container)
+            };
+        // About 60 µs of work: below it, waking helpers costs more than it
+        // saves.
+        if texts.len() < 4 || bytes < 512 {
+            return super::with_ctx(|ctx| texts.iter().map(|t| lay_out(ctx, t)).collect());
+        }
+        super::pool::map(texts, lay_out)
+            .into_iter()
+            .map(|(t, frame)| {
+                frame.unwrap_or_else(|| {
+                    let empty = [Span { start: 0, end: 0, attrs: 0 }];
+                    Frame::new(Styled { text: "", attrs: &t.1, spans: &empty }, t.3)
+                })
+            })
+            .collect()
     }
 
     /// The text's length in UTF-16 units.

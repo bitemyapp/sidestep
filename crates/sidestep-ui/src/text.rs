@@ -409,6 +409,37 @@ impl TextLayoutBuilder {
     }
 
     pub fn build(self) -> TextLayout {
+        let (attrs, spans, container) = self.parts();
+        let frame = Frame::new(Styled { text: &self.text, attrs: &attrs, spans: &spans }, container);
+        TextLayout { text: self.text.into(), frame: Arc::new(frame), width: self.width }
+    }
+
+    /// Lay out each of `builders`, sharing the work with other threads
+    /// when there's enough of it (shaping is the costly part, and texts
+    /// are independent): a view showing many lines nothing has shown
+    /// before, such as an editor after a jump, lays them out together. The
+    /// layouts, in order, as [`build`](Self::build) makes them.
+    pub fn build_all(builders: Vec<TextLayoutBuilder>) -> Vec<TextLayout> {
+        let mut widths = Vec::with_capacity(builders.len());
+        let texts: Vec<_> = builders
+            .into_iter()
+            .map(|b| {
+                let (attrs, spans, container) = b.parts();
+                widths.push(b.width);
+                (b.text, attrs, spans, container)
+            })
+            .collect();
+        let strings: Vec<Arc<str>> = texts.iter().map(|t| Arc::from(t.0.as_str())).collect();
+        Frame::new_all(texts)
+            .into_iter()
+            .zip(strings)
+            .zip(widths)
+            .map(|((frame, text), width)| TextLayout { text, frame: Arc::new(frame), width })
+            .collect()
+    }
+
+    /// The attributes, spans and container a frame is laid out from.
+    fn parts(&self) -> (Vec<Attrs>, Vec<Span>, Container) {
         let paragraph = Paragraph {
             alignment: match self.alignment {
                 Alignment::Start => Align::Natural,
@@ -470,8 +501,7 @@ impl TextLayoutBuilder {
             truncation: (self.wrap == Wrap::Truncate || self.ellipsis).then_some(LineBreak::TruncateTail),
             ..Container::UNBOUNDED
         };
-        let frame = Frame::new(Styled { text: &self.text, attrs: &attrs, spans: &spans }, container);
-        TextLayout { text: self.text.into(), frame: Arc::new(frame), width: self.width }
+        (attrs, spans, container)
     }
 }
 
@@ -755,6 +785,29 @@ mod tests {
         };
         let (m, condensed) = (inked(&normal), inked(&narrow));
         assert!(condensed < m, "an M {condensed} pixels wide at 87.5%, {m} at 100%");
+    }
+
+    /// Laid out together (on several threads, once there are enough), each
+    /// text comes out as it does alone.
+    #[test]
+    fn layouts_built_together_are_built_alone() {
+        let base = style();
+        let builders: Vec<TextLayoutBuilder> = (0..24)
+            .map(|i| {
+                let text = format!("    let value_{i} = compute(\"tile {i}\", {i}.5); // line {i}");
+                let b = TextLayout::builder(&text, &base).style(4..7, base.clone().underlined());
+                if i % 3 == 0 { b.width(120.0) } else { b.wrap(Wrap::None) }
+            })
+            .collect();
+        let together = TextLayoutBuilder::build_all(builders.clone());
+        assert_eq!(together.len(), builders.len());
+        for (b, t) in builders.into_iter().zip(together) {
+            let alone = b.build();
+            assert_eq!(t.text(), alone.text());
+            assert_eq!(t.size(), alone.size());
+            assert_eq!(t.lines(), alone.lines());
+            assert_eq!(t.caret(9, false), alone.caret(9, false));
+        }
     }
 
     #[test]
