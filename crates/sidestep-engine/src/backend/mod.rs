@@ -487,6 +487,8 @@ pub struct Win {
     /// Their damage in device pixels.
     damage: Vec<Rect>,
     buffers: Vec<RootBuffer>,
+    /// See-through where it draws nothing: its buffers carry alpha.
+    transparent: bool,
     /// The buffer presented last, which holds the window as it shows.
     front: Option<usize>,
     layers: tiles::Layers,
@@ -626,6 +628,30 @@ const BACKGROUND: u32 = u32::from_ne_bytes([0xec, 0xec, 0xec, 0xff]);
 /// The buffer format for canvas pixels.
 fn format(rgba: bool) -> wl_shm::Format {
     if rgba { wl_shm::Format::Xbgr8888 } else { wl_shm::Format::Xrgb8888 }
+}
+
+/// A buffer format for a window: with alpha for a see-through one (its
+/// pixels are premultiplied, as wl_shm's alpha formats take them), else
+/// without, so the compositor needn't draw what's under it.
+fn window_format(rgba: bool, transparent: bool) -> wl_shm::Format {
+    match (rgba, transparent) {
+        (true, true) => wl_shm::Format::Abgr8888,
+        (false, true) => wl_shm::Format::Argb8888,
+        (rgba, false) => format(rgba),
+    }
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+
+    #[test]
+    fn see_through_windows_get_alpha_and_the_rest_dont() {
+        assert_eq!(window_format(true, false), wl_shm::Format::Xbgr8888);
+        assert_eq!(window_format(false, false), wl_shm::Format::Xrgb8888);
+        assert_eq!(window_format(true, true), wl_shm::Format::Abgr8888);
+        assert_eq!(window_format(false, true), wl_shm::Format::Argb8888);
+    }
 }
 
 /// Copy canvas pixels into a buffer, swizzling them in the same pass
@@ -874,8 +900,23 @@ impl State {
 
     fn handle(&mut self, msg: ToRender) {
         match msg {
-            ToRender::CreateWindow { window, width, height, title, style, limits, popup, sheet_of, layer, lock } => {
-                self.create_window(window, width, height, title, style, limits, popup, sheet_of, layer, lock)
+            ToRender::CreateWindow {
+                window,
+                width,
+                height,
+                title,
+                style,
+                limits,
+                popup,
+                sheet_of,
+                layer,
+                lock,
+                transparent,
+            } => {
+                self.create_window(window, width, height, title, style, limits, popup, sheet_of, layer, lock);
+                if let Some(w) = self.windows.get_mut(&window) {
+                    w.transparent = transparent;
+                }
             }
             ToRender::LockSession => lock::lock(self),
             ToRender::UnlockSession => lock::unlock(self),
@@ -1138,6 +1179,7 @@ impl State {
                 pending: Vec::new(),
                 damage: Vec::new(),
                 buffers: Vec::new(),
+                transparent: false,
                 front: None,
                 layers: tiles::Layers::default(),
                 frame_seq: 0,
@@ -1705,9 +1747,9 @@ impl State {
     /// buffers hold XRGB8888, and the damage is turned to canvas pixels for
     /// drawing and back.
     fn draw_frame(&mut self, window: WindowId, rgba: bool) {
-        let format = format(rgba);
         let State { windows, pool, glyphs, .. } = self;
         let Some(win) = windows.get_mut(&window) else { return };
+        let format = window_format(rgba, win.transparent);
         let damage = std::mem::take(&mut win.damage);
         let pending = std::mem::take(&mut win.pending);
         let (width, height, scale) = (win.px_width, win.px_height, win.scale);
@@ -1753,7 +1795,13 @@ impl State {
             // background.
             None => {
                 let px = as_pixels(win.buffers[index].buffer.canvas(pool).expect("a free buffer"));
-                let ground = if rgba { BACKGROUND } else { raster::to_xrgb(BACKGROUND) };
+                let ground = if win.transparent {
+                    0
+                } else if rgba {
+                    BACKGROUND
+                } else {
+                    raster::to_xrgb(BACKGROUND)
+                };
                 for r in &repair {
                     fill_rows(px, width, height, r, ground);
                 }

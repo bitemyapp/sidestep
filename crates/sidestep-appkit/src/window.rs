@@ -2506,6 +2506,7 @@ fn order_front(window: &NSWindowImpl) {
         sheet_of,
         layer: None,
         lock: None,
+        transparent: false,
     });
     let cursor = app::cursor();
     if cursor != Cursor::Default {

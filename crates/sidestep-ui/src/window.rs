@@ -489,6 +489,7 @@ impl WindowData {
                 sheet_of: None,
                 layer: self.layer().map(LayerOptions::placement),
                 lock: self.lock_output(),
+                transparent: self.background == Background::Transparent,
             },
         );
         if let (Kind::Toplevel { parent: Some(_) }, Some(parent)) = (&self.kind, parent) {

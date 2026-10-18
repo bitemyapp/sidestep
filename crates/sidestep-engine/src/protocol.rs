@@ -676,6 +676,9 @@ pub enum ToRender {
         /// Open as the session lock's surface on this output (by its id),
         /// sized by the compositor (see `backend::lock`).
         lock: Option<u32>,
+        /// See-through where it draws nothing (a transparent background):
+        /// its buffers carry alpha, so what's under it shows there.
+        transparent: bool,
     },
     /// A new title, with its text set in the title bar's font as drawing
     /// ops (top-left origin, `width` by `height` points) for client-side
