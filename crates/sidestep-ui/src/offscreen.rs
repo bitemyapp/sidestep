@@ -42,6 +42,32 @@ thread_local!(static GLYPHS: RefCell<Glyphs> = RefCell::default());
 /// size it maps pixel to pixel at that scale. The canvas's damage is all
 /// of it.
 pub fn render(size: Size, scale: f64, appearance: Appearance, draw: impl FnOnce(&mut Canvas)) -> Image {
+    rendered(size, scale, appearance, None, draw)
+}
+
+/// [`render`] only where `damage` says (rectangles in points), as a
+/// window redraws its damage: the canvas's [`needs`](Canvas::needs) and
+/// [`damage`](Canvas::damage) answer for those rectangles, only their
+/// pixels are rasterized, and the rest stay transparent. What a frame
+/// redrawing that damage costs a window, drawn once, its rectangles
+/// rasterized one after another rather than their bounding box.
+pub fn render_damage(
+    size: Size,
+    scale: f64,
+    appearance: Appearance,
+    damage: &[kurbo::Rect],
+    draw: impl FnOnce(&mut Canvas),
+) -> Image {
+    rendered(size, scale, appearance, Some(damage), draw)
+}
+
+fn rendered(
+    size: Size,
+    scale: f64,
+    appearance: Appearance,
+    damage: Option<&[kurbo::Rect]>,
+    draw: impl FnOnce(&mut Canvas),
+) -> Image {
     let scale = if scale.is_finite() { scale.clamp(1.0 / 16.0, 16.0) } else { 1.0 };
     let side = |points: f64| {
         let px = (points.max(0.0) * scale - 1e-6).ceil();
@@ -49,8 +75,21 @@ pub fn render(size: Size, scale: f64, appearance: Appearance, draw: impl FnOnce(
     };
     let (width, height) = (side(size.width), side(size.height));
     let bounds = protocol::Rect::new(0.0, 0.0, size.width.max(0.0) as f32, size.height.max(0.0) as f32);
+    // All of the pixels, an edge rounded up included.
+    let all = protocol::Rect::new(0.0, 0.0, (width as f64 / scale) as f32, (height as f64 / scale) as f32);
+    let (marked, painted) = match damage {
+        None => (vec![bounds], vec![all]),
+        Some(rects) => {
+            let rects: Vec<protocol::Rect> = rects
+                .iter()
+                .map(|r| protocol::Rect::new(r.x0 as f32, r.y0 as f32, r.x1 as f32, r.y1 as f32).intersect(&all))
+                .filter(|r| !r.is_empty())
+                .collect();
+            (rects.clone(), rects)
+        }
+    };
     let recording = stats::on().then(Instant::now);
-    let mut canvas = Canvas::blank(size, scale, vec![bounds], appearance);
+    let mut canvas = Canvas::blank(size, scale, marked, appearance);
     draw(&mut canvas);
     // Images the canvas made for itself live until the pixels are drawn.
     let (ops, _temporaries) = canvas.finish();
@@ -61,14 +100,12 @@ pub fn render(size: Size, scale: f64, appearance: Appearance, draw: impl FnOnce(
     // window's worth at 2× is 20 MB.
     let mut bytes = zeroed(width as usize * height as usize * 4);
     let px = pixels_of(Arc::get_mut(&mut bytes).expect("a new image's pixels are its own"));
-    if !ops.is_empty() {
+    if !ops.is_empty() && !painted.is_empty() {
         let mut target = raster::Canvas::new(px, width, height, 0.0, scale as f32);
-        // All of the pixels, an edge rounded up included.
-        let all = protocol::Rect::new(0.0, 0.0, (width as f64 / scale) as f32, (height as f64 / scale) as f32);
         GLYPHS.with(|g| match g.try_borrow_mut() {
-            Ok(mut glyphs) => raster::paint(&mut target, &mut glyphs, &[all], &ops),
+            Ok(mut glyphs) => raster::paint(&mut target, &mut glyphs, &painted, &ops),
             // Drawing offscreen from inside a drawing offscreen.
-            Err(_) => raster::paint(&mut target, &mut Glyphs::default(), &[all], &ops),
+            Err(_) => raster::paint(&mut target, &mut Glyphs::default(), &painted, &ops),
         });
     }
     if let Some((record, started)) = rasterizing {
@@ -157,6 +194,47 @@ mod tests {
         // Right of the text, white.
         let at = |x: usize, y: usize| &px[(y * 400 + x) * 4..][..4];
         assert_eq!(at(399, 43), [255, 255, 255, 255]);
+    }
+
+    /// Drawn where the damage says, the pixels there are the whole
+    /// drawing's, the rest stay transparent, and the canvas answers for
+    /// the damage alone.
+    #[test]
+    fn damage_draws_only_its_rectangles() {
+        let draw = |c: &mut Canvas| {
+            c.fill_rect(Rect::new(0.0, 0.0, 60.0, 40.0), Color::rgb(0.2, 0.3, 0.4));
+            // Inside the second rectangle: antialiased edges cut by damage
+            // come out a little differently, in windows as here.
+            c.fill(&kurbo::Circle::new((48.0, 30.0), 6.0), Color::rgba(0.9, 0.5, 0.1, 0.7));
+            let style = TextStyle::new(Font::system(9.0), Color::WHITE);
+            c.draw_label("Damage", &style, Point::new(3.0, 5.0));
+        };
+        let size = Size::new(60.0, 40.0);
+        let whole = render(size, 2.0, Appearance::DARK, draw).to_rgba8().expect("pixels").to_vec();
+        let damage = [Rect::new(2.0, 3.0, 25.5, 12.0), Rect::new(40.0, 20.0, 58.0, 39.0)];
+        let mut asked = Vec::new();
+        let part = render_damage(size, 2.0, Appearance::DARK, &damage, |c| {
+            asked = c.damage();
+            assert!(c.needs(Rect::new(41.0, 21.0, 42.0, 22.0)));
+            assert!(!c.needs(Rect::new(30.0, 13.0, 35.0, 18.0)));
+            draw(c)
+        });
+        assert_eq!(asked, damage);
+        let part = part.to_rgba8().expect("pixels");
+        let inside = |x: usize, y: usize| {
+            let (px, py) = (x as f64 / 2.0 + 0.25, y as f64 / 2.0 + 0.25);
+            damage.iter().any(|r| r.contains(Point::new(px, py)))
+        };
+        for y in 0..80 {
+            for x in 0..120 {
+                let at = (y * 120 + x) * 4;
+                if inside(x, y) {
+                    assert_eq!(part[at..at + 4], whole[at..at + 4], "({x}, {y})");
+                } else {
+                    assert_eq!(part[at + 3], 0, "({x}, {y}) is left alone");
+                }
+            }
+        }
     }
 
     #[test]
