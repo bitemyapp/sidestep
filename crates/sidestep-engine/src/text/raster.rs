@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use swash::CacheKey;
 use swash::scale::image::{Content, Image as Rendered};
@@ -91,7 +92,7 @@ impl Face {
 /// `None` marks a glyph with nothing to draw.
 #[derive(Default)]
 struct Strike {
-    glyphs: HashMap<u32, Option<Image>, FxBuild>,
+    glyphs: HashMap<u32, Option<Arc<Image>>, FxBuild>,
 }
 
 struct Image {
@@ -110,8 +111,8 @@ enum Pixels {
 }
 
 /// Roughly what a cached image costs: its pixels and its entry.
-fn cost(image: &Option<Image>) -> usize {
-    match image {
+fn cost(image: &Option<Arc<Image>>) -> usize {
+    match image.as_deref() {
         None => 16,
         Some(i) => {
             let pixels = i.width as usize * i.height as usize;
@@ -120,6 +121,48 @@ fn cost(image: &Option<Image>) -> usize {
                 Pixels::Color(_) => pixels * 4,
             }
         }
+    }
+}
+
+/// A glyph image's key across threads: face, pixel size (bits), and the
+/// glyph and its offset as a strike keys them.
+type SharedKey = (u32, u32, u32);
+
+/// Glyph images every thread's cache shares, in two generations as each
+/// cache keeps its own: a glyph one thread rasterized, another finds here
+/// rather than rasterizing it again. A window's render thread draws text
+/// another thread drew offscreen ahead of it (the first frame of a panel
+/// whose text was drawn at idle), and the raster workers drawing one
+/// frame's bands find what the others made.
+#[derive(Default)]
+struct Shared {
+    new: HashMap<SharedKey, Option<Arc<Image>>, FxBuild>,
+    old: HashMap<SharedKey, Option<Arc<Image>>, FxBuild>,
+    bytes: usize,
+}
+
+static SHARED: LazyLock<Mutex<Shared>> = LazyLock::new(Default::default);
+
+impl Shared {
+    fn get(key: SharedKey) -> Option<Option<Arc<Image>>> {
+        let mut s = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(image) = s.new.get(&key) {
+            return Some(image.clone());
+        }
+        let image = s.old.remove(&key)?;
+        s.bytes += cost(&image);
+        s.new.insert(key, image.clone());
+        Some(image)
+    }
+
+    fn put(key: SharedKey, image: Option<Arc<Image>>) {
+        let mut s = SHARED.lock().unwrap_or_else(|e| e.into_inner());
+        if s.bytes > BUDGET / 2 {
+            s.old = std::mem::take(&mut s.new);
+            s.bytes = 0;
+        }
+        s.bytes += cost(&image);
+        s.new.insert(key, image);
     }
 }
 
@@ -168,28 +211,39 @@ pub fn draw_glyphs(canvas: &mut Canvas, cache: &mut Glyphs, run: &GlyphRun, clip
         let image = match strike.glyphs.entry(glyph_key) {
             Entry::Occupied(e) => e.into_mut(),
             Entry::Vacant(e) => {
+                let shared = (run.font, size.to_bits(), glyph_key);
                 let image = match older.as_mut().and_then(|s| s.glyphs.remove(&glyph_key)) {
                     Some(image) => image,
-                    None => {
-                        if scaler.is_none()
-                            && let Some(context) = context.take()
-                        {
-                            scaler = Some(face.scaler(context, size));
+                    None => match Shared::get(shared) {
+                        Some(image) => image,
+                        None => {
+                            if scaler.is_none()
+                                && let Some(context) = context.take()
+                            {
+                                scaler = Some(face.scaler(context, size));
+                            }
+                            let image = scaler
+                                .as_mut()
+                                .and_then(|s| render(s, &face.data, size, g.id, bin as f32 / SUBPIXEL))
+                                .map(Arc::new);
+                            Shared::put(shared, image.clone());
+                            image
                         }
-                        scaler.as_mut().and_then(|s| render(s, &face.data, size, g.id, bin as f32 / SUBPIXEL))
-                    }
+                    },
                 };
                 *bytes += cost(&image);
                 e.insert(image)
             }
         };
-        if let Some(image) = image {
+        if let Some(image) = image.as_deref() {
             blit(canvas, image, px as i32 + image.left, y as i32 - image.top, (cx0, cy0, cx1, cy1), solid, alpha);
         }
     }
 }
 
 fn render(scaler: &mut Scaler<'_>, face: &FaceData, size: f32, id: u32, offset: f32) -> Option<Image> {
+    #[cfg(test)]
+    tests::RENDERED.with(|n| n.set(n.get() + 1));
     let sources = [Source::ColorOutline(0), Source::ColorBitmap(StrikeWith::BestFit), Source::Outline];
     let mut render = Render::new(&sources);
     render.format(Format::Alpha).offset(Vector::new(offset, 0.0));
@@ -279,6 +333,8 @@ fn blit(canvas: &mut Canvas, image: &Image, x: i32, y: i32, clip: (i32, i32, i32
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+
+    thread_local!(pub static RENDERED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) });
 
     use super::*;
     use crate::protocol::Glyph;
@@ -399,9 +455,40 @@ mod tests {
         assert_eq!(images(&cache), 3, "the 13-point images were in the generation dropped");
     }
 
+    /// A glyph one thread rasterized, another thread's cache finds rather
+    /// than rasterizing it again, and draws the same.
+    #[test]
+    fn threads_share_what_they_rasterize() {
+        let Some(sans) = face_id("DejaVu Sans") else { return };
+        // A size no other test draws at, so this thread is the first.
+        let size = 17.375;
+        let glyphs: Vec<Glyph> = {
+            let mut context = ScaleContext::new();
+            let face = Face::load(&mut context, sans).unwrap();
+            "Shared glyphs"
+                .chars()
+                .enumerate()
+                .map(|(i, c)| Glyph { id: glyph(&face, c), x: i as f32 * 9.1, y: 0.0 })
+                .collect()
+        };
+        let r = run(sans, size, &glyphs);
+        let draw = |r: &GlyphRun| {
+            let mut px = vec![0u32; 400 * 100];
+            let before = RENDERED.with(|n| n.get());
+            draw_glyphs(&mut canvas(&mut px, 400, 100), &mut Glyphs::default(), r, &r.clip);
+            (px, RENDERED.with(|n| n.get()) - before)
+        };
+        let (first, rendered) = draw(&r);
+        assert!(rendered > 0, "the first thread rasterizes");
+        let r2 = r.clone();
+        let (second, rendered) = std::thread::spawn(move || draw(&r2)).join().unwrap();
+        assert_eq!(rendered, 0, "the second finds them");
+        assert!(first == second, "and draws the same");
+    }
+
     #[test]
     fn masks_cost_a_byte_a_pixel_and_colors_four() {
-        let image = |pixels| Some(Image { left: 0, top: 0, width: 10, height: 10, pixels });
+        let image = |pixels| Some(Arc::new(Image { left: 0, top: 0, width: 10, height: 10, pixels }));
         assert_eq!(cost(&image(Pixels::Mask(vec![0; 100].into()))), 48 + 100);
         assert_eq!(cost(&image(Pixels::Color(vec![0; 100].into()))), 48 + 400);
     }
