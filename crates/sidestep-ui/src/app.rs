@@ -212,7 +212,24 @@ pub struct DragSource {
     items: Vec<(String, Option<Arc<[u8]>>)>,
     copy: bool,
     moving: bool,
-    icon: Option<(Image, Point)>,
+    icon: Option<(DragIconSource, Point)>,
+}
+
+/// What a drag shows under the pointer: an image, or a drawing of a size
+/// in points, drawn when the drag starts.
+#[derive(Clone)]
+enum DragIconSource {
+    Image(Image),
+    Drawn(Size, Arc<dyn Fn(&mut Canvas) + Send + Sync>),
+}
+
+impl std::fmt::Debug for DragIconSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DragIconSource::Image(image) => f.debug_tuple("Image").field(image).finish(),
+            DragIconSource::Drawn(size, _) => f.debug_tuple("Drawn").field(size).finish(),
+        }
+    }
 }
 
 impl Default for DragSource {
@@ -261,9 +278,30 @@ impl DragSource {
     }
 
     /// Show `image` under the pointer, its point `hotspot` (in points from
-    /// its top left) at the pointer.
+    /// its top left) at the pointer. It shows as large as its size in
+    /// points ([`Image::size`], its pixels by its scale): made at the
+    /// scale of the window the drag starts from (an
+    /// [`offscreen::render`](crate::offscreen::render) at
+    /// [`Window::scale`](crate::Window::scale)), it shows pixel for pixel;
+    /// made at 1, it's enlarged on a 2× output, and soft.
+    /// [`icon_drawn`](DragSource::icon_drawn) draws at the window's scale
+    /// without asking.
     pub fn icon(mut self, image: Image, hotspot: Point) -> DragSource {
-        self.icon = Some((image, hotspot));
+        self.icon = Some((DragIconSource::Image(image), hotspot));
+        self
+    }
+
+    /// Show what `draw` draws into `size` (points) under the pointer, its
+    /// point `hotspot` at the pointer: drawn when the drag starts, at the
+    /// scale of the window it starts from, so it's as sharp as the
+    /// window.
+    pub fn icon_drawn(
+        mut self,
+        size: Size,
+        hotspot: Point,
+        draw: impl Fn(&mut Canvas) + Send + Sync + 'static,
+    ) -> DragSource {
+        self.icon = Some((DragIconSource::Drawn(size, Arc::new(draw)), hotspot));
         self
     }
 }
@@ -833,14 +871,24 @@ impl Cx {
     /// [`drag_ended`](Handler::drag_ended), and is asked for promised data
     /// meanwhile. `None` if `window` isn't shown.
     pub fn start_drag(&mut self, window: WindowId, source: DragSource) -> Option<DragId> {
-        let showing = self.windows.get(&window)?.showing?;
+        let data = self.windows.get(&window)?;
+        let showing = data.showing?;
+        // Drawn at the window's scale, rounded up as the render thread
+        // draws the icon (a buffer scale).
+        let scale = data.scale.ceil().clamp(1.0, 8.0);
         let drag = self.next_drag;
         self.next_drag += 1;
-        let icon = source.icon.map(|(image, hotspot)| {
-            let size = image.size();
+        let icon = source.icon.map(|(icon, hotspot)| {
+            let size = match &icon {
+                DragIconSource::Image(image) => image.size(),
+                DragIconSource::Drawn(size, _) => *size,
+            };
             let bounds = sidestep_engine::protocol::Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
-            let mut canvas = Canvas::blank(size, 1.0, vec![bounds], Appearance::system());
-            canvas.draw_image(&image, Rect::from_origin_size(Point::ZERO, size));
+            let mut canvas = Canvas::blank(size, scale, vec![bounds], Appearance::system());
+            match icon {
+                DragIconSource::Image(image) => canvas.draw_image(&image, Rect::from_origin_size(Point::ZERO, size)),
+                DragIconSource::Drawn(_, draw) => draw(&mut canvas),
+            }
             let (ops, _) = canvas.finish();
             let side = |v: f64| v.ceil().max(1.0) as u32;
             DragIcon {

@@ -16,6 +16,8 @@
 //! - a panel that has had no input opening a grabbing menu (as from a key
 //!   binding that reached a shell over IPC): it grabs, with no serial,
 //!   and a click where no surface is dismisses it;
+//! - at 2×, drags whose icons show pixel for pixel: one drawn when the
+//!   drag starts, and an image made at 2×;
 //! - frame after frame of small damage all over a window, which with
 //!   sway holding the buffer shown has each buffer catch up with the
 //!   others: the screen is then exactly the last state drawn whole
@@ -861,6 +863,102 @@ mod linux {
         }
     }
 
+    /// At 2×, drags out of a window whose icons show pixel for pixel: one
+    /// drawn when the drag starts (`icon_drawn`), then an image made at
+    /// 2×. Each has a stripe half a point wide, which is one device pixel,
+    /// sharp against the icon either side.
+    struct Sharp {
+        started: Instant,
+        window: Option<WindowId>,
+        drags: Vec<DragId>,
+        ended: usize,
+        /// Drags started, checked, and let go.
+        checked: usize,
+        released: usize,
+        pressed: usize,
+        pointer: mpsc::Sender<pointer::Do>,
+        done: bool,
+    }
+
+    /// The icons: `MENU`, 40 × 20 points, a `BAR` stripe from 10 points
+    /// across to 10.5.
+    fn striped(c: &mut Canvas) {
+        c.fill_rect(Rect::new(0.0, 0.0, 40.0, 20.0), MENU);
+        c.fill_rect(Rect::new(10.0, 0.0, 10.5, 20.0), BAR);
+    }
+
+    impl Handler for Sharp {
+        fn launched(&mut self, cx: &mut Cx) {
+            self.window = Some(cx.open_window(WindowOptions::new("Sharp icons")));
+            cx.set_repeating_timer(Duration::from_millis(20));
+        }
+
+        fn window_event(&mut self, cx: &mut Cx, window: WindowId, event: WindowEvent) {
+            if !matches!(event, WindowEvent::PointerButton { pressed: true, .. }) {
+                return;
+            }
+            let source = DragSource::new().text("sharp");
+            let source = if self.drags.is_empty() {
+                source.icon_drawn(Size::new(40.0, 20.0), Point::ZERO, striped)
+            } else {
+                let scale = cx.window(window).expect("the window").scale();
+                let image = offscreen::render(Size::new(40.0, 20.0), scale, Appearance::LIGHT, striped);
+                source.icon(image, Point::ZERO)
+            };
+            self.drags.extend(cx.start_drag(window, source));
+        }
+
+        fn drag_ended(&mut self, _cx: &mut Cx, _drag: DragId, _action: DropAction) {
+            self.ended += 1;
+        }
+
+        fn draw(&mut self, _cx: &mut Cx, _window: WindowId, canvas: &mut Canvas) {
+            canvas.fill_rect(Rect::from_origin_size(Point::ZERO, canvas.size()), GREEN);
+        }
+
+        fn timer(&mut self, cx: &mut Cx, _timer: TimerId) {
+            let kinds = ["drawn when the drag starts", "an image made at 2x"];
+            assert!(self.started.elapsed() < DEADLINE, "stuck: {} pressed, {} checked", self.pressed, self.checked);
+            let point = |to| self.pointer.send(to).expect("the virtual pointer");
+            let window = cx.window(self.window.expect("the window")).map(|w| (w.size(), w.scale()));
+            if window != Some((Size::new(OUTPUT.width / 2.0, OUTPUT.height / 2.0), 2.0)) {
+                return;
+            }
+            // Pressed (once the last drag ended), dragged, checked, let go.
+            if self.pressed == self.ended && self.pressed < kinds.len() {
+                if !Shot::take().shows(&[((100, 100), GREEN)]) {
+                    return;
+                }
+                point(pointer::Do::MoveTo(640, 400));
+                point(pointer::Do::Press);
+                self.pressed += 1;
+            } else if self.drags.len() == self.pressed && self.checked < self.pressed {
+                // The icon's top left at the pointer, in device pixels.
+                point(pointer::Do::MoveTo(700, 440));
+                let shot = Shot::take();
+                let row: Vec<Color> = (690..800).map(|x| shot.at(x, 450)).collect();
+                if !row.iter().any(|&c| near(c, MENU)) {
+                    return;
+                }
+                let bars: Vec<usize> = (0..row.len()).filter(|&i| near(row[i], BAR)).collect();
+                let sharp = bars.len() == 1
+                    && (1..row.len() - 1).contains(&bars[0])
+                    && near(row[bars[0] - 1], MENU)
+                    && near(row[bars[0] + 1], MENU);
+                assert!(sharp, "the stripe one device pixel, sharp: {row:?}");
+                println!("  at 2x, a drag's icon {} shows pixel for pixel", kinds[self.checked]);
+                self.checked += 1;
+            } else if self.checked > self.released {
+                point(pointer::Do::Release);
+                self.released += 1;
+            } else if self.ended == kinds.len() && !self.done {
+                point(pointer::Do::Done);
+                self.done = true;
+                cx.quit();
+            }
+        }
+    }
+
     pub fn run() {
         if std::env::var_os("WAYLAND_DISPLAY").is_none() || std::env::var("WLR_BACKENDS").as_deref() != Ok("headless") {
             println!("skipped: needs the headless sway (run it under scripts/headless-wayland)");
@@ -918,6 +1016,27 @@ mod linux {
         assert_eq!(grabbed.step, Grab::Done);
         drop(grabbed);
         pointing.join().expect("the virtual pointer");
+
+        // At 2× for a while.
+        swaymsg("output HEADLESS-1 scale 2");
+        let (tx, rx) = mpsc::channel();
+        let pointing = std::thread::spawn(move || pointer::run(rx));
+        let sharp = Sharp {
+            started: Instant::now(),
+            window: None,
+            drags: Vec::new(),
+            ended: 0,
+            checked: 0,
+            released: 0,
+            pressed: 0,
+            pointer: tx,
+            done: false,
+        };
+        let sharp = App::new().run(sharp).expect("a compositor");
+        assert!(sharp.done && sharp.checked == 2);
+        drop(sharp);
+        pointing.join().expect("the virtual pointer");
+        swaymsg("output HEADLESS-1 scale 1");
 
         let (tx, rx) = mpsc::channel();
         let pointing = std::thread::spawn(move || pointer::run(rx));
