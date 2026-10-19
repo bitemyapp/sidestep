@@ -399,6 +399,8 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
                 let _ = reply.send(cropped(window, crop));
             }
             ToRender::FrameTicks { window, on } => note(Seen::FrameTicks { window, on }),
+            // No shared memory to make room in.
+            ToRender::ReserveBuffers { .. } => {}
             ToRender::LockSession => {
                 note(Seen::SessionLock { locked: true });
                 send(FromRender::SessionLocked);

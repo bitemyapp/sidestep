@@ -22,8 +22,9 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 kbvm = { version = "0.2", default-features = false, features = ["compose"] }
 # Themed cursors, for compositors without wp_cursor_shape_v1.
 wayland-cursor = "0.31"
-# Non-blocking clipboard pipes; already built for the Wayland crates.
-rustix = { version = "1", default-features = false, features = ["std"] }
+# Non-blocking clipboard pipes, and faulting in window memory ahead
+# (madvise); already built for the Wayland crates.
+rustix = { version = "1", default-features = false, features = ["std", "mm", "param"] }
 # Loads fontconfig from where it's found when the dynamic linker can't
 # find it by name (NixOS; see src/system.rs). fontique's loader uses it.
 libloading = "0.8"

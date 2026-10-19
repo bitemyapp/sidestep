@@ -783,6 +783,23 @@ impl Cx {
         ActivationRequest(request)
     }
 
+    // Window memory.
+
+    /// Have `bytes` of the shared memory the program's windows draw into
+    /// free and given pages by the system now, at a moment the program
+    /// chooses (at start, or idle): the buffers made next are carved from
+    /// it, so a surface opened later (a panel's first showing, a desktop's
+    /// first frame) draws into memory that's there, rather than its first
+    /// frame faulting in each page of a new buffer (20 MB for a
+    /// 2880 × 1800 surface) as it first writes it. A window draws into one
+    /// buffer while the compositor gives it back at once (as compositors
+    /// that copy shared memory do), else into two. Where the memory grows
+    /// to make the room, it's mapped again, and pages faulted in before
+    /// fault again where they're next written, cheaply (they're there).
+    pub fn reserve_buffers(&mut self, bytes: usize) {
+        send(&self.backend.tx, ToRender::ReserveBuffers { bytes });
+    }
+
     // The session lock.
 
     /// Lock the session (ext-session-lock), as a lock screen does: the

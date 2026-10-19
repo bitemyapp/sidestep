@@ -816,6 +816,50 @@ unsafe fn move_pixels(from: Pixels, to: Pixels, width: usize, dest: (usize, usiz
     raster::bands::scoped(others, || part(piece(0)));
 }
 
+/// Have the system give `bytes` pages now, as writing them would: in one
+/// call where the kernel can (`MADV_POPULATE_WRITE`, Linux 5.14, asked of
+/// the whole pages `bytes` touches), else by writing a byte of each page
+/// as it is.
+fn fault_in(bytes: &mut [u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    let page = rustix::param::page_size();
+    let start = bytes.as_mut_ptr() as usize;
+    let first = start & !(page - 1);
+    let end = (start + bytes.len()).next_multiple_of(page);
+    // SAFETY: whole pages of the mapping that holds `bytes`, mapped
+    // writable; asking for them changes nothing in them, nor in what else
+    // shares their first or last page.
+    let asked = unsafe { rustix::mm::madvise(first as *mut _, end - first, rustix::mm::Advice::LinuxPopulateWrite) };
+    if asked.is_err() {
+        // A byte every page from the first, and the last (whose page the
+        // steps may have stopped short of).
+        let last = bytes.len() - 1;
+        for i in (0..bytes.len()).step_by(page).chain([last]) {
+            let byte: *mut u8 = &mut bytes[i];
+            // SAFETY: a byte of the slice, written back as it was; volatile,
+            // so that the write (and with it the page's fault) stays.
+            unsafe { byte.write_volatile(byte.read_volatile()) };
+        }
+    }
+}
+
+#[cfg(test)]
+mod fault_in_tests {
+    use super::fault_in;
+
+    #[test]
+    fn faulting_memory_in_keeps_what_it_holds() {
+        // Not page-aligned, and over several pages.
+        let mut bytes: Vec<u8> = (0..5 * 4096 + 100).map(|i| (i % 251) as u8).collect();
+        let before = bytes.clone();
+        fault_in(&mut bytes[7..]);
+        assert_eq!(bytes, before);
+        fault_in(&mut []);
+    }
+}
+
 /// Copy rectangles of device pixels from buffer `from` (which the
 /// compositor may still be showing: it's only read) into buffer `to`, the
 /// same size, `dx`, `dy` back.
@@ -898,6 +942,35 @@ impl State {
         let _ = self.to_main.send(msg);
     }
 
+    /// `ToRender::ReserveBuffers`: a slot of `bytes` taken from the pool
+    /// (which grows if they don't fit), its pages faulted in, and the slot
+    /// given back, so the buffers made next are carved from memory that's
+    /// there. A window's first frame otherwise faults in every page of its
+    /// new buffer as it first writes it: 20 MB for a 2880 × 1800 surface,
+    /// some milliseconds of the system's time in the frame.
+    fn reserve_buffers(&mut self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        let started = std::time::Instant::now();
+        let slot = match self.pool.new_slot(bytes) {
+            Ok(slot) => slot,
+            Err(e) => {
+                eprintln!("sidestep: couldn't make room for {bytes} bytes of window buffers: {e}");
+                return;
+            }
+        };
+        fault_in(self.pool.raw_data_mut(&slot));
+        drop(slot);
+        if crate::trace::tracing() {
+            eprintln!(
+                "sidestep @{:.1} ms reserve: {bytes} bytes of window buffers faulted in ({:?})",
+                crate::trace::trace_ms(),
+                started.elapsed()
+            );
+        }
+    }
+
     fn handle(&mut self, msg: ToRender) {
         match msg {
             ToRender::CreateWindow {
@@ -918,6 +991,7 @@ impl State {
                     w.transparent = transparent;
                 }
             }
+            ToRender::ReserveBuffers { bytes } => self.reserve_buffers(bytes),
             ToRender::LockSession => lock::lock(self),
             ToRender::UnlockSession => lock::unlock(self),
             ToRender::RequestActivationToken { request, app_id } => self.request_token(request, app_id),

@@ -862,6 +862,14 @@ pub enum ToRender {
     LockSession,
     /// Unlock the session (or stop asking for a lock).
     UnlockSession,
+    /// Make room for `bytes` of window buffers in the shared memory windows
+    /// draw into, and have the system give it pages now: a surface opened
+    /// later (a panel's first showing, a desktop's first frame) then draws
+    /// into memory that's there, rather than faulting each page in as its
+    /// first frame first writes it.
+    ReserveBuffers {
+        bytes: usize,
+    },
     /// Start dragging `contents` out of the window, from the button press
     /// under way: offering its MIME types (data promised is asked of the
     /// main thread when a destination wants it, `FromRender::ProvideDragData`),
