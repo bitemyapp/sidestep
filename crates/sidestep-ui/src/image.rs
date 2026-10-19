@@ -5,6 +5,7 @@
 //! last clone of the image is dropped. A program reads an image's pixels
 //! with [`Image::to_rgba8`].
 
+use std::mem::ManuallyDrop;
 use std::sync::Arc;
 
 use kurbo::Size;
@@ -22,13 +23,29 @@ pub struct Image {
 
 /// The pixels, which the render thread caches by their key until the last
 /// image showing them goes.
-struct Shared(Arc<ImageData>);
+struct Shared(ManuallyDrop<Arc<ImageData>>);
 
 impl Drop for Shared {
     fn drop(&mut self) {
         sidestep_engine::backend::send_if_running(ToRender::ForgetImages { keys: vec![self.0.key] });
         // And what this thread cached of it, drawing offscreen.
-        images::forget(&[self.0.key]);
+        images::release(&[self.0.key]);
+        // SAFETY: taken once, here, and not used again.
+        let data = unsafe { ManuallyDrop::take(&mut self.0) };
+        // A photo's pixels are megabytes, which the system takes
+        // milliseconds to take back: freed on a thread of their own rather
+        // than here (a window's thread, as a rule).
+        if bytes(&data) >= images::REAP_BYTES {
+            images::reap(data);
+        }
+    }
+}
+
+/// The bytes of pixels (or of a file) an image holds of its own.
+fn bytes(data: &ImageData) -> usize {
+    match &data.pixels {
+        Pixels::Rgba(p) | Pixels::Encoded(p, _) => p.len(),
+        Pixels::Part(..) => 0,
     }
 }
 
@@ -89,7 +106,7 @@ impl Image {
     /// Pixels the engine made (a key of their own), at `scale` points per
     /// pixel.
     pub(crate) fn from_data(data: Arc<ImageData>, scale: f64) -> Image {
-        Image { pixels: Arc::new(Shared(data)), scale }
+        Image { pixels: Arc::new(Shared(ManuallyDrop::new(data))), scale }
     }
 
     /// The same pixels at `scale` points per pixel: 0.5 draws an image made

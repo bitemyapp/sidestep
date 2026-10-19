@@ -1133,7 +1133,7 @@ impl State {
                     w.set_parent(parent.as_ref());
                 }
             }
-            ToRender::ForgetImages { keys } => raster::images::forget(&keys),
+            ToRender::ForgetImages { keys } => raster::images::release(&keys),
             ToRender::MenuBar { window, height, ops } => menubar::set(self, window, height, ops),
             ToRender::ColorScheme { dark } => {
                 decor::set_dark(dark);

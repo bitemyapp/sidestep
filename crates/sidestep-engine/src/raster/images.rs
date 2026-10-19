@@ -129,6 +129,51 @@ pub fn forget(keys: &[u64]) {
     });
 }
 
+/// Forget the representations `keys`, as [`forget`] does, and free what
+/// this thread cached of them on a thread of its own when it's more than
+/// a little: the pixels of a photo and its halvings are megabytes, and
+/// the system takes milliseconds to take them back (unmapping them, or
+/// the allocator trimming its heap), which the thread forgetting them (the
+/// render thread, or a window's that draws offscreen) would otherwise pay
+/// in a frame.
+pub fn release(keys: &[u64]) {
+    let gone = CACHE
+        .try_with(|c| {
+            let Ok(mut c) = c.try_borrow_mut() else { return Vec::new() };
+            let mut gone = Vec::new();
+            for key in keys {
+                if let Some(e) = c.entries.remove(key) {
+                    c.bytes -= e.bytes;
+                    gone.push(e);
+                }
+            }
+            gone
+        })
+        .unwrap_or_default();
+    if gone.iter().map(|e| e.bytes).sum::<usize>() >= REAP_BYTES {
+        reap(gone);
+    }
+}
+
+/// What [`reap`] is for: less is freed where it's let go.
+pub const REAP_BYTES: usize = 256 << 10;
+
+/// Drop `waste` on a thread that does nothing else, so that giving its
+/// memory back to the system costs the thread letting it go nothing.
+pub fn reap<T: Send + 'static>(waste: T) {
+    static REAPER: std::sync::OnceLock<Option<std::sync::mpsc::Sender<Box<dyn Send>>>> = std::sync::OnceLock::new();
+    let reaper = REAPER.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<Box<dyn Send>>();
+        let started = std::thread::Builder::new().name("sidestep-free".into()).spawn(move || rx.iter().for_each(drop));
+        started.ok().map(|_| tx)
+    });
+    match reaper {
+        // Were the thread gone, the waste would come back, dropped here.
+        Some(tx) => drop(tx.send(Box::new(waste))),
+        None => drop(waste),
+    }
+}
+
 fn cost(p: &Pixmap) -> usize {
     p.data().len() + 64
 }
@@ -874,6 +919,28 @@ mod tests {
             assert_eq!(c.bytes, c.entries.values().map(|e| e.bytes).sum::<usize>(), "halvings counted");
         });
         forget(&[3]);
+    }
+
+    #[test]
+    fn released_images_leave_the_cache_at_once() {
+        // A megabyte, drawn at a sixteenth.
+        let img = image(6, 512, 512, |x, y| [x as u8, y as u8, 0, 255]);
+        let mut px = vec![0u32; 32 * 32];
+        draw_into(&mut px, 32, 32, &img, Rect::new(0.0, 0.0, 512.0, 512.0), Rect::new(0.0, 0.0, 32.0, 32.0), None);
+        let before = CACHE.with(|c| {
+            let c = c.borrow();
+            assert!(c.entries.contains_key(&6));
+            c.bytes
+        });
+        assert!(before >= REAP_BYTES);
+        release(&[6]);
+        CACHE.with(|c| {
+            let c = c.borrow();
+            assert!(!c.entries.contains_key(&6));
+            assert_eq!(c.bytes, c.entries.values().map(|e| e.bytes).sum::<usize>());
+        });
+        // Freed elsewhere; the reaper takes more.
+        reap(vec![0u8; 1 << 20]);
     }
 
     #[test]
