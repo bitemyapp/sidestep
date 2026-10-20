@@ -460,7 +460,9 @@ mod linux {
                 // Over the target, which would take it, the icon under the
                 // pointer.
                 Drop::Over => {
-                    if self.moved == 0 || !Shot::take().shows(&[((960, 400), MENU), ((990, 430), BAR)]) {
+                    // The compositor may include its cursor in the screenshot:
+                    // sample inside the icon, away from the pointer's hotspot.
+                    if self.moved == 0 || !Shot::take().shows(&[((950, 390), MENU), ((990, 430), BAR)]) {
                         return;
                     }
                     println!("  dragged over the other window, its icon under the pointer");

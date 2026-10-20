@@ -77,3 +77,12 @@ touches is a race. `grep -n Concurrent conformance/tests/*.rs` lists them.
 - **Linux tests wait for first frames by their condition**
   (`testing::settle_first_frames`): a window's first frame waits for the
   desktop's appearance, which the null render thread never tells.
+- **Screenshot probes stay clear of the pointer.** A compositor may
+  include its cursor in a screenshot even when `grim` wasn't asked for
+  it. Check a drag icon away from its hotspot, so its pixels aren't
+  hidden by the cursor.
+- **The test compositor must send layer surfaces their close event.**
+  Debian Trixie's Sway 1.10.1 misses it when an output is removed.
+  `scripts/linux.Dockerfile` backports Sway's upstream fix
+  [8a8c78d](https://github.com/swaywm/sway/commit/8a8c78deacd388dabbe82a4a5055458494cd6258);
+  remove the backport when the container supplies Sway 1.11 or later.
