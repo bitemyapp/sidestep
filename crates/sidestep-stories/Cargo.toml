@@ -1,0 +1,19 @@
+[package]
+name = "sidestep-stories"
+description = "Stories for sidestep-ui programs: named states of a drawing or a whole program, rendered without a display and checked against golden images"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Linux (and other non-Apple Unix) only, as sidestep-ui is.
+[target.'cfg(not(target_vendor = "apple"))'.dependencies]
+sidestep-ui.workspace = true
+sidestep-engine.workspace = true
+
+# A book of its own, rendered in children of the test, checked, broken and
+# checked again (see the file).
+[[test]]
+name = "book"
+harness = false
