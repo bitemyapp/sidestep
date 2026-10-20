@@ -198,6 +198,14 @@ default), text typed a character at a time (`typing`), 20 000 lines
 paragraph and moves the text below (`reflow`). `examples/textbench` times `setString:`,
 layout and keystrokes in 11 MB of text; see [docs/text.md](docs/text.md).
 
+`examples/stories` renders sidestep-ui programs and drawings in named
+states, without a display, and checks them against golden images, as
+Storybook does for web components (see [docs/stories.md](docs/stories.md)):
+
+```sh
+cargo run -p stories -- check
+```
+
 On Linux, drawing is recorded on the main thread and rasterized on a
 separate render thread, and scroll views are tiled onto Wayland subsurfaces;
 see [docs/architecture.md](docs/architecture.md#appkit-a-main-thread-and-a-render-thread).
