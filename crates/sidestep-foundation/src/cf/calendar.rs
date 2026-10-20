@@ -1,11 +1,10 @@
-//! `CFCalendar`: the Gregorian calendar (and ISO 8601's, the Gregorian
+//! `NSCalendar` and its toll-free bridged `CFCalendar`: the Gregorian calendar (and ISO 8601's, the Gregorian
 //! with weeks starting on Monday, the first having four days or more) in a
 //! time zone, with a locale that sets the first day of the week and the
 //! fewest days the first week of a year or month has (`locale_data`'s week
 //! data, by region).
 //!
-//! Sidestep has no `NSCalendar`, so calendars are objects of a private
-//! class. The other calendars (Buddhist, Hebrew, Islamic, Japanese,
+//! Both interfaces share one calendar object. The other calendars (Buddhist, Hebrew, Islamic, Japanese,
 //! Chinese, …) need data and arithmetic Sidestep doesn't have:
 //! `CFCalendarCreateWithIdentifier` returns NULL for them, as for an
 //! identifier it doesn't know.
@@ -17,10 +16,13 @@
 use std::ffi::c_void;
 use std::sync::Mutex;
 
-use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObject};
-use objc2::{AnyThread, DefinedClass, Message, define_class, msg_send};
-use objc2_foundation::{NSLocale, NSString, NSTimeZone};
+use crate::thread::lock;
+use objc2::rc::{Allocated, Retained};
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
+use objc2::{AnyThread, ClassType, DefinedClass, Message, define_class, msg_send};
+use objc2_foundation::{NSDate, NSLocale, NSString, NSTimeZone, NSZone};
+
+sidestep_runtime::static_class!(pub(crate) NSCALENDAR, NSCALENDAR_META = "NSCalendar", || { let _ = Calendar::class(); });
 
 use super::string::CFRange;
 use super::types::{CFTypeID, id, object, owned};
@@ -48,6 +50,7 @@ mod unit {
 }
 
 /// A calendar's settings.
+#[derive(Clone)]
 pub(crate) struct Settings {
     identifier: &'static str,
     locale: Retained<NSLocale>,
@@ -59,9 +62,70 @@ pub(crate) struct Settings {
 define_class!(
     /// A `CFCalendar`.
     #[unsafe(super(NSObject))]
-    #[name = "_SidestepCFCalendar"]
+    #[name = "NSCalendar"]
     #[ivars = Mutex<Settings>]
     pub(crate) struct Calendar;
+    impl Calendar {
+        #[unsafe(method_id(initWithCalendarIdentifier:))]
+        fn init_identifier(this: Allocated<Self>, identifier: &NSString) -> Option<Retained<Self>> {
+            new_settings(&identifier.to_string(), NSLocale::currentLocale()).map(|state| {
+                let this = this.set_ivars(Mutex::new(state));
+                unsafe { msg_send![super(this), init] }
+            })
+        }
+        #[unsafe(method_id(currentCalendar))]
+        fn current() -> Retained<Self> { make("gregorian", NSLocale::currentLocale()).unwrap() }
+        #[unsafe(method_id(autoupdatingCurrentCalendar))]
+        fn autoupdating() -> Retained<Self> { make("gregorian", NSLocale::currentLocale()).unwrap() }
+        #[unsafe(method_id(calendarWithIdentifier:))]
+        fn with_identifier(identifier: &NSString) -> Option<Retained<Self>> { make(&identifier.to_string(), NSLocale::currentLocale()) }
+        #[unsafe(method_id(copyWithZone:))]
+        fn copy(&self, _zone: *mut NSZone) -> Retained<Self> {
+            let this = Self::alloc().set_ivars(Mutex::new(lock(self.ivars()).clone()));
+            unsafe { msg_send![super(this), init] }
+        }
+        #[unsafe(method_id(calendarIdentifier))]
+        fn identifier(&self) -> Retained<NSString> { NSString::from_str(lock(self.ivars()).identifier) }
+        #[unsafe(method_id(timeZone))]
+        fn zone(&self) -> Retained<NSTimeZone> { lock(self.ivars()).zone.clone() }
+        #[unsafe(method(setTimeZone:))]
+        fn set_zone(&self, zone: &NSTimeZone) { lock(self.ivars()).zone = zone.retain(); }
+        #[unsafe(method_id(locale))]
+        fn locale(&self) -> Retained<NSLocale> { lock(self.ivars()).locale.clone() }
+        #[unsafe(method(setLocale:))]
+        fn set_locale(&self, locale: Option<&NSLocale>) {
+            let mut s = lock(self.ivars());
+            s.locale = locale.map_or_else(NSLocale::currentLocale, |l| l.retain());
+            if s.identifier != "iso8601" { (s.first_weekday, s.min_days) = week_data(crate::locale::identifier_of(&s.locale)); }
+        }
+        #[unsafe(method(firstWeekday))]
+        fn first(&self) -> usize { lock(self.ivars()).first_weekday as usize }
+        #[unsafe(method(setFirstWeekday:))]
+        fn set_first(&self, value: usize) { lock(self.ivars()).first_weekday = value as i64; }
+        #[unsafe(method(minimumDaysInFirstWeek))]
+        fn min_days(&self) -> usize { lock(self.ivars()).min_days as usize }
+        #[unsafe(method(setMinimumDaysInFirstWeek:))]
+        fn set_min_days(&self, value: usize) { lock(self.ivars()).min_days = value as i64; }
+        #[unsafe(method(component:fromDate:))]
+        fn component(&self, unit: usize, date: &NSDate) -> isize { component(&lock(self.ivars()), unit, crate::date::time_of(date)) as isize }
+        #[unsafe(method_id(startOfDayForDate:))]
+        fn start(&self, date: &NSDate) -> Retained<NSDate> {
+            let s = lock(self.ivars()); NSDate::dateWithTimeIntervalSinceReferenceDate(midnight(&s, local(&s, crate::date::time_of(date)).day))
+        }
+        #[unsafe(method(isDate:inSameDayAsDate:))]
+        fn same(&self, a: &NSDate, b: &NSDate) -> bool { same_day(&lock(self.ivars()), a, crate::date::time_of(b), 0) }
+        #[unsafe(method(isDateInToday:))]
+        fn today(&self, date: &NSDate) -> bool { same_day(&lock(self.ivars()), date, crate::date::now(), 0) }
+        #[unsafe(method(isDateInYesterday:))]
+        fn yesterday(&self, date: &NSDate) -> bool { same_day(&lock(self.ivars()), date, crate::date::now(), -1) }
+        #[unsafe(method(isDateInTomorrow:))]
+        fn tomorrow(&self, date: &NSDate) -> bool { same_day(&lock(self.ivars()), date, crate::date::now(), 1) }
+        #[unsafe(method_id(dateByAddingUnit:value:toDate:options:))]
+        fn adding(&self, unit: usize, value: isize, date: &NSDate, options: usize) -> Option<Retained<NSDate>> {
+            add(&lock(self.ivars()), unit, value as i64, crate::date::time_of(date), options).map(NSDate::dateWithTimeIntervalSinceReferenceDate)
+        }
+    }
+    unsafe impl NSObjectProtocol for Calendar {}
 );
 
 /// The first weekday and the first week's fewest days for a locale: its
@@ -112,6 +176,12 @@ pub(crate) fn week_data(identifier: &str) -> (i64, i64) {
 
 /// A new calendar, if Sidestep has one by that name.
 pub(crate) fn make(identifier: &str, locale: Retained<NSLocale>) -> Option<Retained<Calendar>> {
+    crate::load_shell(&NSCALENDAR);
+    let this = Calendar::alloc().set_ivars(Mutex::new(new_settings(identifier, locale)?));
+    Some(unsafe { msg_send![super(this), init] })
+}
+
+fn new_settings(identifier: &str, locale: Retained<NSLocale>) -> Option<Settings> {
     let (identifier, iso) = match identifier {
         "gregorian" => ("gregorian", false),
         "iso8601" => ("iso8601", true),
@@ -119,10 +189,7 @@ pub(crate) fn make(identifier: &str, locale: Retained<NSLocale>) -> Option<Retai
     };
     let (first_weekday, min_days) = if iso { (2, 4) } else { week_data(crate::locale::identifier_of(&locale)) };
     let zone = crate::time_zone::object(crate::time_zone::default_zone());
-    let settings = Settings { identifier, locale, zone, first_weekday, min_days };
-    let this = Calendar::alloc().set_ivars(Mutex::new(settings));
-    // SAFETY: NSObject's initializer.
-    Some(unsafe { msg_send![super(this), init] })
+    Some(Settings { identifier, locale, zone, first_weekday, min_days })
 }
 
 fn settings<'a>(cf: *const c_void) -> std::sync::MutexGuard<'a, Settings> {
@@ -833,4 +900,99 @@ mod tests {
         }
         assert!(range_in(&l, DAY, WEEK).is_none());
     }
+}
+
+fn same_day(s: &Settings, date: &NSDate, other: f64, delta: i64) -> bool {
+    local(s, crate::date::time_of(date)).day == local(s, other).day + delta
+}
+fn component(s: &Settings, unit: usize, time: f64) -> i64 {
+    use unit::*;
+    let l = local(s, time);
+    match unit {
+        ERA => i64::from(l.year > 0),
+        YEAR => {
+            if l.year > 0 {
+                l.year
+            } else {
+                1 - l.year
+            }
+        }
+        MONTH => l.month,
+        DAY => l.date,
+        HOUR => l.hour(),
+        MINUTE => l.minute(),
+        SECOND => l.second(),
+        WEEKDAY => weekday(l.day),
+        WEEKDAY_ORDINAL => (l.date - 1) / 7 + 1,
+        QUARTER => l.quarter(),
+        WEEK_OF_MONTH => l.week_of_month(),
+        WEEK_OF_YEAR | WEEK => l.week_of_year(),
+        YEAR_FOR_WEEK_OF_YEAR => l.week_year().0,
+        DAY_OF_YEAR => l.day_of_year(),
+        _ => isize::MAX as i64,
+    }
+}
+fn add(s: &Settings, unit: usize, value: i64, time: f64, options: usize) -> Option<f64> {
+    use jiff::Span;
+    use unit::*;
+    let zone = crate::time_zone::zone_of(&s.zone);
+    let zoned = crate::time_zone::timestamp(time).to_zoned(zone.tz.clone());
+    // WrapComponents wraps the requested field without carrying into a larger field.
+    if options & 1 != 0 {
+        let l = local(s, time);
+        let range = match unit {
+            MONTH => (1, 12),
+            DAY => (1, days_in_month(l.year, l.month)),
+            HOUR => (0, 24),
+            MINUTE | SECOND => (0, 60),
+            _ => return None,
+        };
+        let current = component(s, unit, time);
+        let wrapped = (current - range.0 + value).rem_euclid(range.1) + range.0;
+        return add(s, unit, wrapped - current, time, 0);
+    }
+    let span = match unit {
+        YEAR => Span::new().try_years(value),
+        MONTH => Span::new().try_months(value),
+        QUARTER => Span::new().try_months(value.checked_mul(3)?),
+        WEEK | WEEK_OF_MONTH | WEEK_OF_YEAR => Span::new().try_weeks(value),
+        DAY | WEEKDAY | DAY_OF_YEAR => Span::new().try_days(value),
+        HOUR => Span::new().try_hours(value),
+        MINUTE => Span::new().try_minutes(value),
+        SECOND => Span::new().try_seconds(value),
+        _ => return None,
+    }
+    .ok()?;
+    let timestamp = zoned.checked_add(span).ok()?.timestamp();
+    Some(timestamp.as_second() as f64 + f64::from(timestamp.subsec_nanosecond()) / 1e9 - crate::date::UNIX_TO_REFERENCE)
+}
+crate::constant_string!(NSCalendarIdentifierGregorian = "gregorian");
+crate::constant_string!(NSCalendarIdentifierISO8601 = "iso8601");
+identifiers! {
+    NSCalendarIdentifierBuddhist = "buddhist",
+    NSCalendarIdentifierChinese = "chinese",
+    NSCalendarIdentifierCoptic = "coptic",
+    NSCalendarIdentifierEthiopicAmeteMihret = "ethiopic",
+    NSCalendarIdentifierEthiopicAmeteAlem = "ethiopic-amete-alem",
+    NSCalendarIdentifierHebrew = "hebrew",
+    NSCalendarIdentifierIndian = "indian",
+    NSCalendarIdentifierIslamic = "islamic",
+    NSCalendarIdentifierIslamicCivil = "islamic-civil",
+    NSCalendarIdentifierIslamicTabular = "islamic-tbla",
+    NSCalendarIdentifierIslamicUmmAlQura = "islamic-umalqura",
+    NSCalendarIdentifierJapanese = "japanese",
+    NSCalendarIdentifierPersian = "persian",
+    NSCalendarIdentifierRepublicOfChina = "roc",
+    NSCalendarIdentifierBangla = "bangla",
+    NSCalendarIdentifierGujarati = "gujarati",
+    NSCalendarIdentifierKannada = "kannada",
+    NSCalendarIdentifierMalayalam = "malayalam",
+    NSCalendarIdentifierMarathi = "marathi",
+    NSCalendarIdentifierOdia = "odia",
+    NSCalendarIdentifierTamil = "tamil",
+    NSCalendarIdentifierTelugu = "telugu",
+    NSCalendarIdentifierVikram = "vikram",
+    NSCalendarIdentifierDangi = "dangi",
+    NSCalendarIdentifierVietnamese = "vietnamese",
+    NSCalendarDayChangedNotification = "NSCalendarDayChangedNotification",
 }

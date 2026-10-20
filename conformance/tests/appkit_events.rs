@@ -1642,6 +1642,78 @@ fn periodic_events(mtm: MainThreadMarker) {
     assert!(next(0.1).is_none());
 }
 
+// Events made as CGEvents.
+
+/// Scrolls synthesized as CGEvents, as tests make touchpad gestures and
+/// wheel turns: the fields set become the NSEvent's, gesture and momentum
+/// phases mapped to `NSEventPhase`, and read back from its `CGEvent`.
+fn cg_scroll_events_become_ns_events(_mtm: MainThreadMarker) {
+    use objc2_core_graphics::{CGEvent, CGEventField as F, CGEventFlags, CGEventType, CGScrollEventUnit};
+    let scroll = || CGEvent::new_scroll_wheel_event2(None, CGScrollEventUnit::Pixel, 2, 0, 0, 0).expect("a CGEvent");
+    let made = scroll();
+    let event = Some(&*made);
+    assert_eq!(CGEvent::r#type(event), CGEventType::ScrollWheel);
+    assert_eq!(CGEvent::integer_value_field(event, F::ScrollWheelEventIsContinuous), 1, "pixels are continuous");
+    CGEvent::set_double_value_field(event, F::ScrollWheelEventPointDeltaAxis1, -12.5);
+    CGEvent::set_double_value_field(event, F::ScrollWheelEventPointDeltaAxis2, 3.0);
+    CGEvent::set_integer_value_field(event, F::ScrollWheelEventScrollPhase, 2);
+    CGEvent::set_timestamp(event, 1_500_000_000);
+    CGEvent::set_flags(event, CGEventFlags::MaskShift | CGEventFlags::MaskCommand);
+    // Point deltas hold whole points: the half goes.
+    assert_eq!(CGEvent::double_value_field(event, F::ScrollWheelEventPointDeltaAxis1), -12.0);
+    assert_eq!(CGEvent::integer_value_field(event, F::ScrollWheelEventScrollPhase), 2);
+    let ns = NSEvent::eventWithCGEvent(&made).expect("an NSEvent");
+    assert_eq!(ns.r#type(), NSEventType::ScrollWheel);
+    assert!(ns.hasPreciseScrollingDeltas());
+    assert_eq!((ns.scrollingDeltaX(), ns.scrollingDeltaY()), (3.0, -12.0));
+    assert_eq!((ns.phase(), ns.momentumPhase()), (NSEventPhase::Changed, NSEventPhase::None));
+    assert!((ns.timestamp() - 1.5).abs() < 1e-6, "{}", ns.timestamp());
+    assert!(ns.modifierFlags().contains(NSEventModifierFlags::Shift | NSEventModifierFlags::Command));
+    let back = ns.CGEvent().expect("its CGEvent");
+    assert_eq!(CGEvent::double_value_field(Some(&back), F::ScrollWheelEventPointDeltaAxis1), -12.0);
+    assert_eq!(CGEvent::integer_value_field(Some(&back), F::ScrollWheelEventScrollPhase), 2);
+
+    // A gesture's phases, and the coasting after it.
+    let phases = [
+        (1, NSEventPhase::Began),
+        (2, NSEventPhase::Changed),
+        (4, NSEventPhase::Ended),
+        (8, NSEventPhase::Cancelled),
+        (128, NSEventPhase::MayBegin),
+    ];
+    for (cg, phase) in phases {
+        let made = scroll();
+        CGEvent::set_integer_value_field(Some(&made), F::ScrollWheelEventScrollPhase, cg);
+        assert_eq!(NSEvent::eventWithCGEvent(&made).unwrap().phase(), phase, "scroll phase {cg}");
+    }
+    for (cg, phase) in [(1, NSEventPhase::Began), (2, NSEventPhase::Changed), (3, NSEventPhase::Ended)] {
+        let made = scroll();
+        CGEvent::set_integer_value_field(Some(&made), F::ScrollWheelEventMomentumPhase, cg);
+        let ns = NSEvent::eventWithCGEvent(&made).unwrap();
+        assert_eq!((ns.phase(), ns.momentumPhase()), (NSEventPhase::None, phase), "momentum phase {cg}");
+    }
+
+    // A wheel turned three lines down: imprecise, in lines.
+    let wheel = CGEvent::new_scroll_wheel_event2(None, CGScrollEventUnit::Line, 1, -3, 0, 0).expect("a CGEvent");
+    assert_eq!(CGEvent::integer_value_field(Some(&wheel), F::ScrollWheelEventIsContinuous), 0);
+    assert_eq!(CGEvent::integer_value_field(Some(&wheel), F::ScrollWheelEventDeltaAxis1), -3);
+    let ns = NSEvent::eventWithCGEvent(&wheel).expect("an NSEvent");
+    assert!(!ns.hasPreciseScrollingDeltas());
+    assert!(ns.scrollingDeltaY() < 0.0 && ns.scrollingDeltaX() == 0.0, "{}", ns.scrollingDeltaY());
+
+    // A pixel event made a wheel's: not continuous, and lines set over the
+    // point deltas, which a wheel's scrolling deltas are (Upleft's
+    // synthetic wheel).
+    let made = scroll();
+    let event = Some(&*made);
+    CGEvent::set_integer_value_field(event, F::ScrollWheelEventIsContinuous, 0);
+    CGEvent::set_double_value_field(event, F::ScrollWheelEventPointDeltaAxis1, 3.0);
+    CGEvent::set_integer_value_field(event, F::ScrollWheelEventDeltaAxis1, 3);
+    let ns = NSEvent::eventWithCGEvent(&made).expect("an NSEvent");
+    assert!(!ns.hasPreciseScrollingDeltas());
+    assert!((ns.scrollingDeltaY() - 3.0).abs() < 1e-3, "{}", ns.scrollingDeltaY());
+}
+
 type Test = (&'static str, fn(MainThreadMarker));
 
 fn main() {
@@ -1691,6 +1763,7 @@ fn main() {
         ("view_controllers", view_controllers),
         ("window_controllers", window_controllers),
         ("periodic_events", periodic_events),
+        ("cg_scroll_events_become_ns_events", cg_scroll_events_become_ns_events),
     ];
     let only = std::env::args().nth(1).filter(|a| !a.starts_with('-'));
     for (name, test) in tests {

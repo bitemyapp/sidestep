@@ -66,6 +66,23 @@ touches is a race. `grep -n Concurrent conformance/tests/*.rs` lists them.
 - **Only macOS knows the other applications.** Validation of
   `hideOtherApplications:` or `unhideAllApplications:` depends on what else
   is running and hidden, so the tests pin those answers on Sidestep only.
+- **Input is injected only under the headless sway.** A test that drives
+  a compositor with a virtual pointer or keyboard (`sidestep-ui`'s
+  `tests/wayland_system.rs`) runs only where `scripts/headless-wayland`
+  set `WLR_BACKENDS=headless`, and says so and passes elsewhere: on a
+  desktop it would move the user's pointer and click. It opens popups
+  from a press, as menus open (a grab needs a press's serial), and clicks
+  outside the program's windows to have the compositor dismiss one (a
+  click on another of its windows goes to that window).
 - **Linux tests wait for first frames by their condition**
   (`testing::settle_first_frames`): a window's first frame waits for the
   desktop's appearance, which the null render thread never tells.
+- **Screenshot probes stay clear of the pointer.** A compositor may
+  include its cursor in a screenshot even when `grim` wasn't asked for
+  it. Check a drag icon away from its hotspot, so its pixels aren't
+  hidden by the cursor.
+- **The test compositor must send layer surfaces their close event.**
+  Debian Trixie's Sway 1.10.1 misses it when an output is removed.
+  `scripts/linux.Dockerfile` backports Sway's upstream fix
+  [8a8c78d](https://github.com/swaywm/sway/commit/8a8c78deacd388dabbe82a4a5055458494cd6258);
+  remove the backport when the container supplies Sway 1.11 or later.

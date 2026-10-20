@@ -34,6 +34,7 @@ type Unretained<T> = Cell<Option<NonNull<T>>>;
 // NSView
 
 pub(crate) struct ViewIvars {
+    gestures: RefCell<Vec<Retained<objc2_app_kit::NSGestureRecognizer>>>,
     frame: Cell<NSRect>,
     bounds_origin: Cell<NSPoint>,
     superview: Unretained<NSView>,
@@ -77,6 +78,7 @@ pub(crate) struct ViewIvars {
 impl ViewIvars {
     fn new(frame: NSRect) -> Self {
         ViewIvars {
+            gestures: RefCell::new(Vec::new()),
             frame: Cell::new(frame),
             bounds_origin: Cell::new(NSPoint::ZERO),
             superview: Cell::new(None),
@@ -123,6 +125,15 @@ define_class!(
     pub(crate) struct NSViewImpl;
 
     impl NSViewImpl {
+        #[unsafe(method_id(gestureRecognizers))]
+        fn gestures(&self) -> Retained<objc2_foundation::NSArray<objc2_app_kit::NSGestureRecognizer>> { objc2_foundation::NSArray::from_retained_slice(&self.ivars().gestures.borrow()) }
+        #[unsafe(method(addGestureRecognizer:))]
+        fn add_gesture(&self, gesture: &objc2_app_kit::NSGestureRecognizer) { if let Some(view)=gesture.view() { view.removeGestureRecognizer(gesture); } self.ivars().gestures.borrow_mut().push(gesture.retain()); crate::gesture::attach(gesture,Some(as_view(self))); }
+        #[unsafe(method(removeGestureRecognizer:))]
+        fn remove_gesture(&self, gesture: &objc2_app_kit::NSGestureRecognizer) { self.ivars().gestures.borrow_mut().retain(|g| !std::ptr::eq(&**g,gesture)); crate::gesture::attach(gesture,None); }
+        #[unsafe(method(setGestureRecognizers:))]
+        fn set_gestures(&self, gestures: &objc2_foundation::NSArray<objc2_app_kit::NSGestureRecognizer>) { let this=as_view(self); let old=self.ivars().gestures.borrow().clone(); for g in old { this.removeGestureRecognizer(&g); } for g in gestures { this.addGestureRecognizer(&g); } }
+
         #[unsafe(method_id(initWithFrame:))]
         fn init_with_frame(this: Allocated<Self>, frame: NSRect) -> Retained<Self> {
             let this = this.set_ivars(ViewIvars::new(frame));
@@ -897,6 +908,12 @@ pub(crate) fn overflow(view: &NSViewImpl) -> Overflow {
         let s = sticking_out(grow_by(frame(sub), out), b);
         o = Overflow { left: o.left.max(s.left), right: o.right.max(s.right), vertical: o.vertical.max(s.vertical) };
     }
+    // A TextKit 2 text view's fragments, which AppKit draws in views of
+    // their own, reach as far as its text container does.
+    if let Some(own) = crate::textkit::text_view::content_reach(as_view(view)) {
+        let s = sticking_out(own, b);
+        o = Overflow { left: o.left.max(s.left), right: o.right.max(s.right), vertical: o.vertical.max(s.vertical) };
+    }
     view.ivars().overflow.set(Some(o));
     o
 }
@@ -1179,8 +1196,12 @@ pub(crate) fn placement(view: &NSViewImpl) -> Option<Placement> {
         _ => root_xf(root, window.content_height()),
     };
     // The root's bounds are its layer's (or the window's content); between
-    // it and the view, ancestors that clip to their bounds.
-    let mut clip = xf.rect(bounds(root));
+    // it and the view, ancestors that clip to their bounds. A clip view's
+    // document that doesn't clip draws into the layer's tiles as far as it
+    // reaches (a TextKit 2 text view's fragments past its bounds), so
+    // damage there counts.
+    let mut clip =
+        if layer != ROOT_LAYER && !clips_to_bounds(root) { xf.rect(reach(root)) } else { xf.rect(bounds(root)) };
     for pair in chain.windows(2).rev() {
         let (child, parent) = (pair[0], pair[1]);
         xf = step(child, is_flipped(parent), frame(child)).then(&xf);
@@ -1207,7 +1228,14 @@ pub(crate) fn invalidate(view: &NSViewImpl, rect: NSRect) {
     }
     let Some(window) = window_of(view) else { return };
     let Some(p) = placement(view) else { return };
-    let r = p.xf.rect(rect).intersect(&p.xf.rect(bounds(view))).intersect(&p.clip).round_out();
+    // A TextKit 2 text view's fragments draw past its bounds (`overflow`),
+    // so they redraw there too; other views redraw only their bounds.
+    let limit = if !clips_to_bounds(view) && crate::textkit::text_view::draws_text_kit_2(as_view(view)) {
+        reach(view)
+    } else {
+        bounds(view)
+    };
+    let r = p.xf.rect(rect).intersect(&p.xf.rect(limit)).intersect(&p.clip).round_out();
     if !r.is_empty() {
         window.invalidate(crate::layers::damage_key(p.layer, p.overlay), r);
     }

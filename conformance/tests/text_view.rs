@@ -1309,6 +1309,39 @@ fn layout_on_another_thread(_mtm: MainThreadMarker) {
 
 type Test = (&'static str, fn(MainThreadMarker));
 
+/// A composition registers its undo as it begins: a program that groups
+/// undo itself (not by event) opens a group around `setMarkedText:…`, and
+/// `unmarkText` registers nothing, so needs none. Undoing takes the whole
+/// composition away.
+fn marked_text_undo(mtm: MainThreadMarker) {
+    let tv = text_view(mtm);
+    let d = delegate(mtm, &tv);
+    let um = NSUndoManager::new(mtm);
+    um.setGroupsByEvent(false);
+    *d.ivars().um.borrow_mut() = Some(um.clone());
+    tv.setAllowsUndo(true);
+    tv.setString(&NSString::from_str("ab"));
+    tv.setSelectedRange(NSRange::new(1, 0));
+    um.beginUndoGrouping();
+    // SAFETY: a string is marked text; NSNotFound replaces the selection.
+    unsafe {
+        tv.setMarkedText_selectedRange_replacementRange(
+            &NSString::from_str("かな"),
+            NSRange::new(2, 0),
+            NSRange::new(NSNotFound as usize, 0),
+        )
+    };
+    um.endUndoGrouping();
+    assert_eq!(tv.string().to_string(), "aかなb");
+    assert!(um.canUndo(), "registered as composing began");
+    tv.unmarkText();
+    assert!(!tv.hasMarkedText());
+    assert_eq!(tv.string().to_string(), "aかなb");
+    um.undo();
+    assert_eq!(tv.string().to_string(), "ab", "the whole composition goes");
+    tv.setDelegate(None);
+}
+
 fn main() {
     let mtm = MainThreadMarker::new().expect("the test's main runs on the main thread");
     let tests: &[Test] = &[
@@ -1330,6 +1363,7 @@ fn main() {
         ("made_with_a_frame", made_with_a_frame),
         ("replaced_storage", replaced_storage),
         ("layout_on_another_thread", layout_on_another_thread),
+        ("marked_text_undo", marked_text_undo),
     ];
     for (name, test) in tests {
         test(mtm);

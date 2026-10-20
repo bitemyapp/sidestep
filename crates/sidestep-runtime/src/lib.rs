@@ -27,6 +27,7 @@ mod cache;
 pub mod call;
 mod category;
 mod class;
+mod dyld;
 mod encoding;
 mod exception;
 mod forward;

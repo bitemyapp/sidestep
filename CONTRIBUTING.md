@@ -54,6 +54,13 @@ cargo fmt --all
 `tools/objc2-overlay` itself. If cargo says it failed to read
 `.objc2-overlay/<crate>/Cargo.toml`, run the first line.
 
+On a Linux host, NixOS included, `cargo test --workspace` also runs the
+Linux side natively (after the first line), but the container is the
+reference: a few text tests expect its fonts (DejaVu) and may differ with a
+desktop's. The keyboard tests need XKB's data and say they were skipped
+without it; on NixOS, set `XKB_CONFIG_ROOT` to xkeyboard-config's
+`share/X11/xkb` (see [docs/architecture.md](docs/architecture.md#nixos)).
+
 ## Fixes to objc2
 
 The workspace builds against objc2's published crates with a few fixes that

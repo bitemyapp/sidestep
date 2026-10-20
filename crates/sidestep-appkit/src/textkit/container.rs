@@ -265,6 +265,11 @@ impl NSTextContainerImpl {
         if let Some(m) = text_layout {
             crate::textkit2::layout_manager::container_changed(&m);
         }
+        // Its text view's fragments reach as far as it does.
+        let view = self.ivars().view.borrow().load();
+        if let Some(v) = view {
+            crate::textkit::text_view::content_reach_changed(&v);
+        }
     }
 }
 

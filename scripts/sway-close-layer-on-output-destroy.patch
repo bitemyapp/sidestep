@@ -1,0 +1,11 @@
+Backport of Sway's MIT-licensed upstream fix, released in 1.11:
+https://github.com/swaywm/sway/commit/8a8c78deacd388dabbe82a4a5055458494cd6258
+
+Destroying only the scene node leaves the layer surface alive without
+sending its client the closed event when its output is removed.
+
+--- a/sway/desktop/layer_shell.c
++++ b/sway/desktop/layer_shell.c
+@@ -224 +224 @@ static void handle_output_destroy(struct wl_listener *listener, void *data) {
+-	wlr_scene_node_destroy(&layer->scene->tree->node);
++	wlr_layer_surface_v1_destroy(layer->layer_surface);

@@ -9,13 +9,17 @@
 //! defaults, but Linux has no use for them) and calls the handler later,
 //! off the main thread, as AppKit does: with no application (Sidestep
 //! can't name another program's) and, when nothing opens the URL,
-//! `NSCocoaErrorDomain`'s 256 (260 for a missing file). It answers the accessibility
-//! display options from the desktop's settings (less motion when GNOME's
-//! animations are off, more contrast with its high-contrast setting), and
-//! has a notification center of its own, as on macOS. Wayland shows a
-//! program nothing of other programs, so the workspace knows only this
-//! one: it is the front application while active, and the only one
-//! running.
+//! `NSCocoaErrorDomain`'s 256 (260 for a missing file). Applications are
+//! desktop entries (this program is its bundle): the one that opens a type
+//! or URL by default comes from the freedesktop.org MIME lists
+//! (`default_apps`), setting a default writes the user's `mimeapps.list`,
+//! and `openApplicationAtURL:…` starts an entry's `Exec` command. It
+//! answers the accessibility display options from the desktop's settings
+//! (less motion when GNOME's animations are off, more contrast with its
+//! high-contrast setting), and has a notification center of its own, as
+//! on macOS. Wayland shows a program nothing of other programs, so the
+//! workspace knows only this one: it is the front application while
+//! active, and the only one running.
 //!
 //! `NSRunningApplication` describes this program (`currentApplication`):
 //! its process, its executable's name and URL, its bundle identifier (the
@@ -167,9 +171,63 @@ define_class!(
             false
         }
 
+        /// The desktop entry of the application that opens `url` by default:
+        /// a file by its type, another URL by its scheme.
         #[unsafe(method_id(URLForApplicationToOpenURL:))]
-        fn url_for_application_to_open_url(&self, _url: &NSURL) -> Option<Retained<NSURL>> {
-            None
+        fn url_for_application_to_open_url(&self, url: &NSURL) -> Option<Retained<NSURL>> {
+            mime_of_url(url).and_then(|mime| default_application(&mime))
+        }
+
+        /// The desktop entry of the application that opens `kind` (a
+        /// `UTType`) by default.
+        #[unsafe(method_id(URLForApplicationToOpenContentType:))]
+        fn url_for_application_to_open_content_type(&self, kind: &AnyObject) -> Option<Retained<NSURL>> {
+            mime_of_type(kind).and_then(|mime| default_application(&mime))
+        }
+
+        /// Make the application at `application` (this program's bundle, or
+        /// a desktop entry) the default for `kind` in the user's
+        /// `mimeapps.list`; the handler hears later, off the main thread,
+        /// with an error if that couldn't be done.
+        #[unsafe(method(setDefaultApplicationAtURL:toOpenContentType:completionHandler:))]
+        fn set_default_application(
+            &self,
+            application: &NSURL,
+            kind: &AnyObject,
+            handler: Option<&DynBlock<dyn Fn(*mut NSError)>>,
+        ) {
+            let result = match (desktop_id_of(application), mime_of_type(kind)) {
+                (Some(id), Some(mime)) => crate::default_apps::set_default(&mime, &id).map_err(|_| 513),
+                (None, _) => Err(4),
+                (_, None) => Err(256),
+            };
+            if let Some(handler) = handler.map(|h| ErrorHandler(h.copy())) {
+                crate::portal::later(Box::new(move || handler.call(result)));
+            }
+        }
+
+        /// Start the application at `url`: a desktop entry by its `Exec`
+        /// line, this program's bundle by its executable, or an executable
+        /// file, with the configuration's arguments. The handler hears later,
+        /// with no application (Sidestep can't name another program's) and
+        /// an error if it couldn't start.
+        #[unsafe(method(openApplicationAtURL:configuration:completionHandler:))]
+        fn open_application(
+            &self,
+            url: &NSURL,
+            configuration: &NSWorkspaceOpenConfiguration,
+            handler: Option<&DynBlock<dyn Fn(*mut NSRunningApplication, *mut NSError)>>,
+        ) {
+            let arguments: Vec<String> = config_ivars(configuration).arguments.borrow().iter().map(|a| a.to_string()).collect();
+            let result = launch(url, &arguments);
+            if let Some(handler) = handler.map(|h| Handler(h.copy())) {
+                crate::portal::later(Box::new(move || handler.call(result)));
+            }
+        }
+
+        #[unsafe(method_id(URLForApplicationWithBundleIdentifier:))]
+        fn url_for_application_with_identifier(&self, identifier: &NSString) -> Option<Retained<NSURL>> {
+            application_url(identifier)
         }
 
         #[unsafe(method_id(fullPathForApplication:))]
@@ -240,6 +298,34 @@ define_class!(
     unsafe impl NSObjectProtocol for NSWorkspaceImpl {}
 );
 
+/// Desktop IDs are the Linux equivalent of registered application identifiers.
+/// A macOS-only bundle identifier has no match unless its application installs
+/// a desktop entry under that ID.
+fn application_url(identifier: &NSString) -> Option<Retained<NSURL>> {
+    let bundle = objc2_foundation::NSBundle::mainBundle();
+    if bundle.bundleIdentifier().as_deref() == Some(identifier) {
+        return Some(bundle.bundleURL());
+    }
+    let id = identifier.to_string();
+    if id.is_empty() || id.contains('/') || id.contains('\\') || id == "." || id == ".." {
+        return None;
+    }
+    let mut roots = Vec::new();
+    if let Some(data) = std::env::var_os("XDG_DATA_HOME") {
+        roots.push(std::path::PathBuf::from(data));
+    } else if let Some(home) = std::env::var_os("HOME") {
+        roots.push(std::path::PathBuf::from(home).join(".local/share"));
+    }
+    let dirs = std::env::var_os("XDG_DATA_DIRS").unwrap_or_else(|| "/usr/local/share:/usr/share".into());
+    roots.extend(std::env::split_paths(&dirs));
+    let file = if id.ends_with(".desktop") { id } else { format!("{id}.desktop") };
+    roots
+        .into_iter()
+        .map(|r| r.join("applications").join(&file))
+        .find(|p| p.is_file())
+        .map(|p| NSURL::fileURLWithPath(&NSString::from_str(&p.to_string_lossy())))
+}
+
 /// Open `url`, then run `done` (on the portal thread) with whether it
 /// went; the Cocoa error code if it can't: 260 for a file that isn't there,
 /// 256 for a URL nothing opens.
@@ -273,6 +359,93 @@ impl Handler {
         let error = error.as_ref().map_or(std::ptr::null_mut(), |e| Retained::as_ptr(e).cast_mut());
         self.0.call((std::ptr::null_mut(), error));
     }
+}
+
+/// A completion handler that takes only an error, called off the main
+/// thread.
+struct ErrorHandler(RcBlock<dyn Fn(*mut NSError)>);
+
+// SAFETY: as `Handler`'s.
+unsafe impl Send for ErrorHandler {}
+
+impl ErrorHandler {
+    fn call(&self, result: Result<(), isize>) {
+        let error = result.err().map(|code| {
+            // SAFETY: a domain, a code and no user info.
+            unsafe { NSError::errorWithDomain_code_userInfo(&NSString::from_str("NSCocoaErrorDomain"), code, None) }
+        });
+        self.0.call((error.as_ref().map_or(std::ptr::null_mut(), |e| Retained::as_ptr(e).cast_mut()),));
+    }
+}
+
+/// The desktop entry of the application that opens `mime` by default, of
+/// those installed (see `default_apps`).
+fn default_application(mime: &str) -> Option<Retained<NSURL>> {
+    crate::default_apps::handlers(mime)
+        .iter()
+        .find_map(|id| application_url(&NSString::from_str(id.strip_suffix(".desktop").unwrap_or(id))))
+}
+
+/// A `UTType`'s MIME type.
+fn mime_of_type(kind: &AnyObject) -> Option<String> {
+    // SAFETY: a UTType answers -preferredMIMEType with a string or nil.
+    let mime: Option<Retained<NSString>> = unsafe { msg_send![kind, preferredMIMEType] };
+    mime.map(|m| m.to_string())
+}
+
+/// What decides which application opens `url`: a folder's or a file's
+/// type, else its scheme (`x-scheme-handler/https`).
+fn mime_of_url(url: &NSURL) -> Option<String> {
+    if !url.isFileURL() {
+        return Some(format!("x-scheme-handler/{}", url.scheme()?.to_string().to_lowercase()));
+    }
+    let path = url.path()?.to_string();
+    if std::path::Path::new(&path).is_dir() {
+        return Some("inode/directory".into());
+    }
+    let extension = std::path::Path::new(&path).extension()?.to_string_lossy().into_owned();
+    let class = objc2::runtime::AnyClass::get(c"UTType")?;
+    // SAFETY: +typeWithFilenameExtension: takes a string and answers a
+    // UTType or nil.
+    let kind: Option<Retained<AnyObject>> =
+        unsafe { msg_send![class, typeWithFilenameExtension: &*NSString::from_str(&extension)] };
+    mime_of_type(&*kind?)
+}
+
+/// The desktop ID of the application at `url`: this program's (its bundle
+/// identifier), or a desktop entry's file name.
+fn desktop_id_of(url: &NSURL) -> Option<String> {
+    let bundle = objc2_foundation::NSBundle::mainBundle();
+    if url.isEqual(Some(&bundle.bundleURL())) {
+        return bundle.bundleIdentifier().map(|id| format!("{id}.desktop"));
+    }
+    let path = url.path()?.to_string();
+    let name = std::path::Path::new(&path).file_name()?.to_string_lossy().into_owned();
+    (name.ends_with(".desktop") && std::path::Path::new(&path).is_file()).then_some(name)
+}
+
+/// Start the application at `url` (see `openApplicationAtURL:…`), or the
+/// Cocoa error code: 260 for nothing there, 256 for something that won't
+/// start.
+fn launch(url: &NSURL, arguments: &[String]) -> Result<(), isize> {
+    let path = std::path::PathBuf::from(url.path().ok_or(260_isize)?.to_string());
+    let bundle = objc2_foundation::NSBundle::mainBundle();
+    let mut command = if url.isEqual(Some(&bundle.bundleURL())) {
+        vec![std::env::current_exe().map_err(|_| 256_isize)?.to_string_lossy().into_owned()]
+    } else if path.extension().is_some_and(|e| e == "desktop") {
+        crate::default_apps::exec_command(&path).ok_or(if path.exists() { 256_isize } else { 260 })?
+    } else if path.is_file() {
+        vec![path.to_string_lossy().into_owned()]
+    } else {
+        return Err(if path.exists() { 256 } else { 260 });
+    };
+    command.extend(arguments.iter().cloned());
+    std::process::Command::new(&command[0])
+        .args(&command[1..])
+        .stdin(std::process::Stdio::null())
+        .spawn()
+        .map(drop)
+        .map_err(|_| 256)
 }
 
 pub(crate) struct ConfigurationIvars {

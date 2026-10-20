@@ -38,6 +38,7 @@ mod compare;
 mod components;
 mod create;
 pub(crate) mod encoding;
+mod files;
 pub(crate) mod fold;
 pub(crate) mod index;
 pub(crate) mod inline;
@@ -125,6 +126,15 @@ pub(crate) fn fast_parts(obj: &AnyObject) -> Option<(&str, NSUInteger)> {
 pub(crate) fn byte_length(s: &str, encoding: u32) -> NSUInteger {
     let text = Text::plain(s.as_bytes(), wtf8::utf16_len(s.as_bytes()), wtf8::flags_of(s.as_bytes(), false));
     encoding::byte_length(&text, encoding)
+}
+
+/// `localizedStandardCompare:` of two strings, which JSON's sorted keys
+/// follow.
+pub(crate) fn standard_order(a: &str, b: &str) -> std::cmp::Ordering {
+    fn text(s: &str) -> Text<'_> {
+        Text::plain(s.as_bytes(), wtf8::utf16_len(s.as_bytes()), wtf8::flags_of(s.as_bytes(), false))
+    }
+    compare::standard(&text(a), &text(b))
 }
 
 /// Whether `other` holds exactly the text `this`.
@@ -539,6 +549,7 @@ pub(crate) fn load() {
         components::install(target);
         numeric::install(target);
         paths::install(target);
+        files::install(target);
         objc2::ffi::objc_registerClassPair(cls);
     }
 }

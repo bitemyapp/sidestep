@@ -57,6 +57,12 @@ pub(crate) fn encode_invalid(s: &str) -> String {
     out
 }
 
+/// Whether the string's host holds an ASCII character a URL can't (a
+/// space): encoding makes no host of it, so `+URLWithString:` makes no URL.
+pub(crate) fn host_needs_encoding(s: &str) -> bool {
+    parse(s).and_then(|p| p.host).is_some_and(|h| s[h].chars().any(|c| c.is_ascii() && c != '%' && !allowed(c)))
+}
+
 /// Whether a string needs no encoding at all.
 pub(crate) fn is_valid(s: &str) -> bool {
     let bytes = s.as_bytes();

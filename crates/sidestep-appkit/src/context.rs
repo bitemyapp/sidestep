@@ -133,11 +133,14 @@ pub(crate) fn xf_affine(xf: Xf) -> Affine {
     Affine::new([1.0, 0.0, 0.0, xf.a, xf.tx, xf.ty])
 }
 
-/// The translate-and-flip nearest `a`, for string drawing, which places
-/// text with one.
-fn nearest_xf(a: Affine) -> Xf {
-    let [_, _, _, d, e, f] = a.as_coeffs();
-    Xf { tx: e, a: if d < 0.0 { -1.0 } else { 1.0 }, ty: f }
+/// The translate-and-flip nearest `a`, and its uniform scale, for string
+/// drawing, which places text with them: `a` maps (x, y) to the flip's
+/// image of (k·x, k·y).
+fn nearest_xf(a: Affine) -> (Xf, f64) {
+    let [sa, b, c, d, e, f] = a.as_coeffs();
+    let k = (sa * d - b * c).abs().sqrt();
+    let k = if k.is_finite() && k > 0.0 { k } else { 1.0 };
+    (Xf { tx: e, a: if d < 0.0 { -1.0 } else { 1.0 }, ty: f }, k)
 }
 
 /// A rectangle's image under an axis-aligned transform.
@@ -259,7 +262,7 @@ impl ContextState {
 
     /// Keep what string drawing reads in step with the state.
     pub(crate) fn sync(&mut self) {
-        self.rec.xf = nearest_xf(self.gs.ctm);
+        (self.rec.xf, self.rec.k) = nearest_xf(self.gs.ctm);
         self.rec.clip = self.gs.clip;
     }
 

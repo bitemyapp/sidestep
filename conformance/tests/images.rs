@@ -615,6 +615,17 @@ fn symbol_images(_: MainThreadMarker) {
     draw_in(&rep, |_| star.drawInRect(rect(0.0, 0.0, 20.0, 20.0)));
     assert_px(&rep, 10, 10, BLACK);
     assert_px(&rep, 0, 0, CLEAR);
+    // A symbol given colours of its own draws in them, and isn't a template.
+    let red = NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 0.0, 0.0, 1.0);
+    let palette = NSImageSymbolConfiguration::configurationWithPaletteColors(&NSArray::from_slice(&[&*red]));
+    let tinted = star.imageWithSymbolConfiguration(&palette).expect("an image");
+    assert!(!tinted.isTemplate());
+    let rep = bitmap(20, 20);
+    draw_in(&rep, |_| tinted.drawInRect(rect(0.0, 0.0, 20.0, 20.0)));
+    assert_px(&rep, 10, 10, RED);
+    let hierarchical = NSImageSymbolConfiguration::configurationWithHierarchicalColor(&red);
+    let check = symbol("checkmark.circle.fill").expect("a check").imageWithSymbolConfiguration(&hierarchical);
+    assert!(check.is_some_and(|c| !c.isTemplate()));
     // Other images don't change with a configuration.
     let plain = NSImage::initWithSize(NSImage::alloc(), NSSize::new(4.0, 4.0));
     let same = plain

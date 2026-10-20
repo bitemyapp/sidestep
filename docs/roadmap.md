@@ -600,6 +600,68 @@ Next:
 Omperor, the motivating application, building for Linux with no source
 changes beyond `use sidestep as _;`.
 
+## Native toolkit
+
+`sidestep-ui`: Linux programs on Sidestep's engine without AppKit or the
+Objective-C runtime, toward a desktop environment's own programs.
+
+Done: the engine carved out of AppKit (`sidestep-engine`, which AppKit
+now builds on, unchanged to objc2 programs); an application loop with
+timers and cross-thread wakes, applications one after another in a
+process; toplevel windows and popups (placed as the positioner allows:
+anchor corner, gravity, offset, flip, slide, resize) with their
+compositor-owned size and state, decorations where the desktop wants
+them, cursors, size limits and requests, hidden and shown again; keys
+through XKB with compose sequences, pointer buttons, wheels and touchpad
+scrolling (coasting after a flick, with AppKit's physics, now shared) and
+pinches, input methods; a canvas over the render thread's ops
+(rectangles, shapes, strokes and dashes, gradients, images, groups,
+clips, shadows, blend modes, transforms, text upright from the glyph
+cache, turned as outlines, synthesized bold thickened, color glyphs as
+pictures); text layout with styles, wrapping, alignment, truncation, hit
+testing, carets and selections; fonts from the system and from the
+program's own files, installed or loaded as one face; the clipboard's
+text; drops, the type taken as the program asks, with periodic updates;
+outputs, read without waiting, named by connector, make and model; the
+desktop's appearance and system colors; for a desktop environment's own
+programs (Aizome's, on the `aizome` branch): wlr-layer-shell surfaces
+and their popups, the session lock, input and opaque regions,
+activation tokens for launched programs, the program's app id,
+font widths for variable fonts, drawing offscreen into images, and
+frame statistics (`SIDESTEP_FRAME_STATS`). Tested headless through the
+null render thread and under a real compositor
+(`tests/wayland_system.rs`: a virtual pointer, `wtype`, `wl-clipboard`;
+`tests/wayland_desktop.rs`: layer surfaces, outputs plugged in and out,
+the session lock, screenshots with `grim`), which CI's `wayland` job
+runs with AppKit's.
+
+Next, roughly in order:
+
+- **Scrolling layers.** The tiled scroll layers AppKit's scroll views use
+  (`PlaceLayer`, tile paints drawn ahead and rasterized between frames),
+  as a native `Layer`: content that scrolls without redrawing, which
+  lists and editors need. AppKit's `layers.rs` decides which tiles to
+  paint and keep; its policy should move into the engine so both toolkits
+  share it.
+- **Animation.** The engine composites and animates Core Animation's
+  layer trees on the render thread; a native layer tree on it, with
+  implicit transitions and display-link ticks (`FrameTicks`), so
+  animations don't cost the main thread a frame each.
+- **Widgets.** A retained view tree with layout, focus and the key view
+  loop, hit testing and the theme's painting of controls (AppKit's
+  `theme` paints from data, and could move into the engine as AppKit's
+  controls' look), then controls: buttons, text fields and text views on
+  `TextLayout`, lists, scroll views, menus.
+- **Desktop surfaces**, for a desktop environment's own programs, beyond
+  layer surfaces and the session lock: output management; foreign
+  toplevel lists for task switchers.
+- **Services**: the portals AppKit's panels and workspace use (file
+  choosers, opening URIs), notifications, drags out of the program, the
+  clipboard's other types, rich text.
+- **AppKit on the toolkit.** As the native toolkit grows, AppKit's
+  window, event and layer machinery can become wrappers of its, so the
+  two share one implementation instead of two clients of the engine.
+
 ## Swift
 
 Research, after Rust works. Swift on Linux is normally built without

@@ -275,6 +275,20 @@ define_class!(
             unsafe { report(link(&from.to_string(), &to.to_string()), error).is_some() }
         }
 
+        #[unsafe(method(replaceItemAtURL:withItemAtURL:backupItemName:options:resultingItemURL:error:))]
+        fn replace_item(&self, original: &NSURL, replacement: &NSURL, backup: Option<&NSString>,
+            options: NSUInteger, resulting: *mut *mut NSURL, error: *mut *mut NSError) -> bool {
+            let result = write_path(original).and_then(|old| write_path(replacement).and_then(|new|
+                replace_item(&old, &new, backup.map(ToString::to_string).as_deref(), options)));
+            // SAFETY: both output arguments are null or writable object slots.
+            if unsafe { report(result, error) }.is_none() { return false.into(); }
+            if !resulting.is_null() {
+                use objc2::Message;
+                unsafe { resulting.write(Retained::autorelease_ptr(original.retain())) };
+            }
+            true
+        }
+
         #[unsafe(method(linkItemAtURL:toURL:error:))]
         fn link_item_at_url(&self, from: &NSURL, to: &NSURL, error: *mut *mut NSError) -> bool {
             let result = write_path(from).and_then(|f| write_path(to).and_then(|t| link(&f, &t)));
@@ -413,6 +427,18 @@ define_class!(
             let result = list(&path).map(|names| strings(&names));
             // SAFETY: the caller passes null or room for an error.
             unsafe { report(result, error) }
+        }
+
+        #[unsafe(method_id(enumeratorAtURL:includingPropertiesForKeys:options:errorHandler:))]
+        fn enumerator_url(&self, url: &NSURL, _keys: Option<&AnyObject>, options: NSUInteger,
+            handler: Option<&block2::DynBlock<dyn Fn(*mut NSURL, *mut NSError) -> Bool>>,
+        ) -> Option<Retained<objc2_foundation::NSDirectoryEnumerator>> {
+            read_path(url).ok().and_then(|path| crate::directory_enumerator::new(path.into(), options, false, handler))
+        }
+
+        #[unsafe(method_id(enumeratorAtPath:))]
+        fn enumerator_path(&self, path: &NSString) -> Option<Retained<objc2_foundation::NSDirectoryEnumerator>> {
+            crate::directory_enumerator::new(path.to_string().into(), 0, true, None)
         }
 
         #[unsafe(method_id(contentsOfDirectoryAtURL:includingPropertiesForKeys:options:error:))]
@@ -969,6 +995,65 @@ mod attributes {
         let values: Vec<Retained<AnyObject>> = entries.iter().map(|(_, v)| v.clone()).collect();
         NSDictionary::from_retained_objects(&keys, &values).into()
     }
+}
+
+/// Install the new inode with one rename, leaving no missing-path interval.
+/// A requested backup is copied before committing, so a failed rename leaves
+/// both input files intact. Directory replacement uses Linux's atomic exchange.
+fn replace_item(
+    original: &str,
+    replacement: &str,
+    backup: Option<&str>,
+    options: usize,
+) -> Result<(), Retained<NSError>> {
+    let fail = |e: io::Error| error::file(FileOp::Write, &e, original);
+    let old = std::fs::symlink_metadata(original).map_err(fail)?;
+    let new = std::fs::symlink_metadata(replacement).map_err(fail)?;
+    if (old.dev(), old.ino()) == (new.dev(), new.ino()) {
+        return Err(fail(io::Error::from_raw_os_error(libc::EINVAL)));
+    }
+    let backup = backup
+        .map(|name| {
+            let mut components = Path::new(name).components();
+            if !matches!(components.next(), Some(std::path::Component::Normal(_))) || components.next().is_some() {
+                return Err(fail(io::Error::from_raw_os_error(libc::EINVAL)));
+            }
+            let path = Path::new(original).parent().unwrap_or(Path::new(".")).join(name);
+            copy(original, &path.to_string_lossy())?;
+            Ok(path)
+        })
+        .transpose()?;
+    let preserve = options & 1 == 0 && !new.file_type().is_symlink();
+    if preserve {
+        std::fs::set_permissions(replacement, old.permissions()).map_err(fail)?;
+    }
+    let result = if old.is_dir() && new.is_dir() {
+        let a = CString::new(original).map_err(|_| fail(io::Error::from_raw_os_error(libc::EINVAL)))?;
+        let b = CString::new(replacement).map_err(|_| fail(io::Error::from_raw_os_error(libc::EINVAL)))?;
+        // SAFETY: both paths are terminated strings; exchange preserves both
+        // trees until the atomic operation succeeds.
+        if unsafe { libc::renameat2(libc::AT_FDCWD, a.as_ptr(), libc::AT_FDCWD, b.as_ptr(), libc::RENAME_EXCHANGE) }
+            == 0
+        {
+            std::fs::remove_dir_all(replacement)
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    } else {
+        std::fs::rename(replacement, original)
+    };
+    if let Err(e) = result {
+        if preserve {
+            let _ = std::fs::set_permissions(replacement, new.permissions());
+        }
+        return Err(fail(e));
+    }
+    if options & 2 == 0
+        && let Some(backup) = backup
+    {
+        remove(&backup.to_string_lossy())?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

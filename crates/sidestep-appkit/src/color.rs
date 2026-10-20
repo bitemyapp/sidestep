@@ -44,6 +44,8 @@ use objc2_app_kit::{
 use objc2_core_graphics::CGColor;
 use objc2_foundation::{NSArray, NSCopying, NSInteger, NSRect, NSString, NSUInteger, NSZone};
 
+pub(crate) use sidestep_engine::color::{encoded, gray_of, linear, luminance};
+
 use crate::palette::{self, System};
 use crate::protocol::{Blend, Color};
 
@@ -335,17 +337,6 @@ pub(crate) fn from_srgb(space: Space, rgb: [f64; 3]) -> Vec<f64> {
     }
 }
 
-/// The luminance of sRGB `rgb`, in linear light.
-fn luminance(rgb: [f64; 3]) -> f64 {
-    0.2126 * linear(rgb[0]) + 0.7152 * linear(rgb[1]) + 0.0722 * linear(rgb[2])
-}
-
-/// The gray of sRGB `rgb`: its luminance, weighed in linear light, encoded
-/// again as sRGB encodes.
-pub(crate) fn gray_of(rgb: [f64; 3]) -> f64 {
-    encoded(luminance(rgb))
-}
-
 /// Generic RGB's and Generic Gray's transfer curve, undone: a power of 1.8
 /// with no linear part. Neither space is extended, so values are clamped
 /// first, as macOS clamps them.
@@ -389,19 +380,6 @@ pub(crate) fn srgb_to_generic(c: [f64; 3]) -> [f64; 3] {
 /// sRGB to linear Generic RGB.
 pub(crate) fn srgb_to_generic_linear(c: [f64; 3]) -> [f64; 3] {
     mat(SRGB_TO_GENERIC, c.map(linear))
-}
-
-/// sRGB's transfer curve, undone; odd, so extended values keep their sign.
-pub(crate) fn linear(v: f64) -> f64 {
-    let a = v.abs();
-    let l = if a <= 0.04045 { a / 12.92 } else { ((a + 0.055) / 1.055).powf(2.4) };
-    l.copysign(v)
-}
-
-pub(crate) fn encoded(v: f64) -> f64 {
-    let a = v.abs();
-    let e = if a <= 0.003_130_8 { a * 12.92 } else { 1.055 * a.powf(1.0 / 2.4) - 0.055 };
-    e.copysign(v)
 }
 
 fn mat(m: [[f64; 3]; 3], v: [f64; 3]) -> [f64; 3] {
@@ -1425,6 +1403,27 @@ define_class!(
                 _ => self as *const Self as usize >> 4,
             }
         }
+
+        /// What the color is, as AppKit writes it: a color of components
+        /// by its space and components (`sRGB IEC61966-2.1 colorspace 1 0
+        /// 0 1`, `NSCalibratedRGBColorSpace 1 0 0 1`), a system color by
+        /// its name; others as any object.
+        #[unsafe(method_id(description))]
+        fn description(&self) -> Retained<NSString> {
+            match &self.ivars().repr {
+                Repr::Components { space, c } => {
+                    let space_text = match space.color_space_name() {
+                        "NSCustomColorSpace" => format!("{} colorspace", space.localized_name()),
+                        name => name.to_owned(),
+                    };
+                    let values: Vec<String> = c[..=space.components()].iter().map(|&v| g(v)).collect();
+                    NSString::from_str(&format!("{space_text} {}", values.join(" ")))
+                }
+                Repr::Catalog { color, alpha: None } => NSString::from_str(&format!("Catalog color: System {}", color.name())),
+                // SAFETY: NSObject's description.
+                _ => unsafe { msg_send![super(self), description] },
+            }
+        }
     }
 
     unsafe impl NSCopying for NSColorImpl {}
@@ -1803,9 +1802,29 @@ fn convert(c: &NSColorImpl, target: Space) -> Option<Retained<NSColor>> {
     }
 }
 
+/// `v` as `%g` writes it: six significant digits, no trailing zeros.
+pub(crate) fn g(v: f64) -> String {
+    if v == 0.0 || !v.is_finite() {
+        return if v == 0.0 { "0".into() } else { v.to_string() };
+    }
+    let digits = (5 - v.abs().log10().floor() as i32).clamp(0, 17) as usize;
+    let s = format!("{v:.digits$}");
+    let s = if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.') } else { &s };
+    if s == "-0" { "0".into() } else { s.to_owned() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numbers_as_percent_g() {
+        let cases =
+            [(0.2, "0.2"), (1.0, "1"), (1.0 / 3.0, "0.333333"), (12.5, "12.5"), (0.0, "0"), (123456.7, "123457")];
+        for (v, text) in cases {
+            assert_eq!(g(v), text, "{v}");
+        }
+    }
 
     #[test]
     fn hsb_round_trips() {

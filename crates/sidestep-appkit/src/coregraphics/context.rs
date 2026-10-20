@@ -44,7 +44,7 @@ use objc2_foundation::NSString;
 
 use super::color::{CGColorSpaceImpl, color_imp, space_imp};
 use super::geometry::{NULL, kurbo_of, rect as cg_rect, transform_of};
-use super::path::{Shape, new_path, path_imp};
+use super::path::{CgShape, Shape, new_path, path_imp};
 use crate::context::{ContextState, to_skia};
 use crate::protocol::{Blend, Color, Draw, Op, Paint, Rect, ShadowSpec, StrokeSpec};
 
@@ -626,7 +626,7 @@ pub extern "C-unwind" fn CGContextClosePath(c: Option<&CGContext>) {
 pub extern "C-unwind" fn CGContextAddRect(c: Option<&CGContext>, rect: CGRect) {
     with(c, |st| {
         let m = st.gs.ctm;
-        st.path.built().add_rect(rect, Some(m));
+        st.path.built().add_cg_rect(rect, Some(m));
     });
 }
 
@@ -640,7 +640,7 @@ pub unsafe extern "C-unwind" fn CGContextAddRects(c: Option<&CGContext>, rects: 
     with(c, |st| {
         let m = st.gs.ctm;
         let shape = st.path.built();
-        rects.iter().for_each(|r| shape.add_rect(*r, Some(m)));
+        rects.iter().for_each(|r| shape.add_cg_rect(*r, Some(m)));
     });
 }
 
@@ -661,7 +661,7 @@ pub unsafe extern "C-unwind" fn CGContextAddLines(c: Option<&CGContext>, points:
 pub extern "C-unwind" fn CGContextAddEllipseInRect(c: Option<&CGContext>, rect: CGRect) {
     with(c, |st| {
         let m = st.gs.ctm;
-        st.path.built().add_ellipse(rect, Some(m));
+        st.path.built().add_cg_ellipse(rect, Some(m));
     });
 }
 
@@ -843,7 +843,7 @@ pub unsafe extern "C-unwind" fn CGContextFillRects(c: Option<&CGContext>, rects:
 
 fn rect_shape(rect: CGRect) -> Shape {
     let mut s = Shape::default();
-    s.add_rect(rect, None);
+    s.add_cg_rect(rect, None);
     s
 }
 
@@ -878,7 +878,7 @@ pub extern "C-unwind" fn CGContextClearRect(c: Option<&CGContext>, rect: CGRect)
 
 fn ellipse_shape(rect: CGRect) -> Shape {
     let mut s = Shape::default();
-    s.add_ellipse(rect, None);
+    s.add_cg_ellipse(rect, None);
     s
 }
 
@@ -1012,7 +1012,7 @@ pub unsafe extern "C-unwind" fn CGContextClipToRects(c: Option<&CGContext>, rect
         _ => {
             // Their union, as one path.
             let mut shape = Shape::default();
-            rects.iter().for_each(|r| shape.add_rect(*r, None));
+            rects.iter().for_each(|r| shape.add_cg_rect(*r, None));
             match shape.drawn() {
                 Some(p) => st.clip_path(p, false, false),
                 None => st.clip_rect(NULL),

@@ -495,6 +495,8 @@ define_class!(
             self.ivars().inset.set(inset);
             self.track_frame(self.as_view().frame().size);
             self.size_to_text();
+            // Its fragments reach from where the container sits.
+            content_reach_changed(self.as_view());
             self.as_view().setNeedsDisplay(true);
         }
 
@@ -552,6 +554,31 @@ define_class!(
         #[unsafe(method(isEditable))]
         fn is_editable(&self) -> bool {
             self.has(flag::EDITABLE)
+        }
+
+        /// Itself, for the Services menu, when its selection can go out as
+        /// text (plain, or RTF in a rich text view) or nothing goes out, and
+        /// text can come back where it's editable or nothing comes back;
+        /// else what the responders after it answer.
+        #[unsafe(method_id(validRequestorForSendType:returnType:))]
+        fn valid_requestor(&self, send: Option<&NSString>, take: Option<&NSString>) -> Option<Retained<AnyObject>> {
+            let rich = self.has(flag::RICH);
+            let text = |kind: &NSString| {
+                let kind = kind.to_string();
+                ["public.utf8-plain-text", "NSStringPboardType"].contains(&kind.as_str())
+                    || (rich && ["public.rtf", "NSRTFPboardType"].contains(&kind.as_str()))
+            };
+            // SAFETY: -selectedRange takes nothing and returns an NSRange.
+            let selected: NSRange = unsafe { msg_send![self, selectedRange] };
+            let sends = send.is_none_or(|kind| text(kind) && selected.length > 0);
+            let takes = take.is_none_or(|kind| text(kind) && self.has(flag::EDITABLE));
+            if (send.is_some() || take.is_some()) && sends && takes {
+                // SAFETY: every object is an AnyObject.
+                Some(unsafe { Retained::cast_unchecked::<AnyObject>(self.retain()) })
+            } else {
+                // SAFETY: NSResponder's answer, up the chain.
+                unsafe { msg_send![super(self), validRequestorForSendType: send, returnType: take] }
+            }
         }
 
         /// The view's drag types follow (`updateDragTypeRegistration`),
@@ -1626,6 +1653,31 @@ pub(crate) fn draws_text_kit_2(view: &AnyObject) -> bool {
     ANY_TEXT_KIT_2.load(std::sync::atomic::Ordering::Relaxed) && as_impl(view).is_some_and(|tv| tv.tlm().is_some())
 }
 
+/// Where a TextKit 2 text view's fragments may draw, in its coordinates:
+/// its text container's rectangle across, as tall as the view. AppKit
+/// draws fragments in views of their own, so text laid out wider than its
+/// text view shows past it (views don't clip to their bounds); `None` for
+/// other views.
+pub(crate) fn content_reach(view: &AnyObject) -> Option<NSRect> {
+    if !draws_text_kit_2(view) {
+        return None;
+    }
+    let tv = as_impl(view)?;
+    let container = tv.container()?.size();
+    let origin = tv.origin();
+    let bounds = tv.as_view().bounds();
+    Some(NSRect::new(NSPoint::new(origin.x, bounds.origin.y), NSSize::new(container.width, bounds.size.height)))
+}
+
+/// Where a text view's fragments may draw changed (its container's size
+/// or its inset): the overflows that take them in, and its layer's canvas,
+/// follow.
+pub(crate) fn content_reach_changed(view: &NSView) {
+    let v = crate::views::imp(view);
+    crate::views::reach_changed(v, false);
+    crate::quartzcore::backing::extent_changed(v);
+}
+
 /// Draw a TextKit 2 text view's fragments, marked text and caret, over
 /// `dirty` (the view's points), after its `drawRect:`.
 pub(crate) fn draw_content(view: &AnyObject, dirty: NSRect) {
@@ -2188,7 +2240,15 @@ impl NSTextViewImpl {
         let sel = self.selection();
         let moved = moved_by_edit(sel, old, range.length);
         if moved != sel || self.ivars().ranges.borrow().len() > 1 {
-            self.set_selection_internal(moved, false);
+            if self.tlm().is_some() {
+                // TextKit 2 keeps the selection as the layout manager's text
+                // selections, which move with the text: the view's own setter
+                // isn't sent while the storage is mid-edit, as TextKit 1's is.
+                // (Upleft's override reads state it updates after the edit.)
+                self.apply_selection(moved, false);
+            } else {
+                self.set_selection_internal(moved, false);
+            }
         }
     }
 
@@ -2391,6 +2451,14 @@ impl NSTextViewImpl {
                 NSPoint::new(b.origin.x, top),
                 NSSize::new(b.size.width, bottom - top),
             ));
+            // Fragments past the bounds, which AppKit's fragment views mark
+            // themselves (`setNeedsDisplayInRect:` stops at the bounds).
+            if let Some(r) = content_reach(view)
+                && (r.origin.x < b.origin.x || r.origin.x + r.size.width > b.origin.x + b.size.width)
+            {
+                let rows = NSRect::new(NSPoint::new(r.origin.x, top), NSSize::new(r.size.width, bottom - top));
+                crate::views::invalidate(crate::views::imp(view), rows);
+            }
         }
     }
 
