@@ -122,6 +122,35 @@ mod linux {
         );
         assert_eq!(heard(&rx), Some(260));
 
+        // What it starts isn't this process's child (a parent-death signal,
+        // as `bwrap --die-with-parent` sets, would kill it when this one
+        // quit), and it has a session of its own.
+        let report = root.join("probe-stat");
+        std::fs::write(
+            root.join("probe.sh"),
+            format!("cat /proc/$$/stat > \"{0}.tmp\"\nmv \"{0}.tmp\" \"{0}\"\n", report.display()),
+        )
+        .unwrap();
+        let probe = applications.join("test-probe.desktop");
+        let exec = format!("sh {}", root.join("probe.sh").display());
+        std::fs::write(&probe, format!("[Desktop Entry]\nType=Application\nName=test-probe\nExec={exec}\n")).unwrap();
+        workspace.openApplicationAtURL_configuration_completionHandler(&url(&probe), &configuration, Some(&started));
+        assert_eq!(heard(&rx), None);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let stat = loop {
+            if let Ok(stat) = std::fs::read_to_string(&report) {
+                break stat;
+            }
+            assert!(std::time::Instant::now() < deadline, "the probe wrote nothing");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        // pid (comm) state ppid pgrp session …
+        let pid: u32 = stat.split_whitespace().next().and_then(|p| p.parse().ok()).unwrap();
+        let fields: Vec<u32> =
+            stat.rsplit_once(')').unwrap().1.split_whitespace().skip(1).take(3).map(|f| f.parse().unwrap()).collect();
+        assert_ne!(fields[0], std::process::id(), "not our child: {stat}");
+        assert_eq!(fields[2], pid, "its own session: {stat}");
+
         std::fs::remove_dir_all(&root).unwrap();
         println!("default_applications_linux: ok");
     }
