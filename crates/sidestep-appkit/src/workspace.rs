@@ -427,6 +427,11 @@ fn desktop_id_of(url: &NSURL) -> Option<String> {
 /// Start the application at `url` (see `openApplicationAtURL:…`), or the
 /// Cocoa error code: 260 for nothing there, 256 for something that won't
 /// start.
+///
+/// It isn't this program's child (see [`detach`]): a program with a
+/// parent-death signal, as `bwrap --die-with-parent` sets for every Nix
+/// `buildFHSEnv` app, would otherwise be killed when this one quit, and
+/// nothing here would reap it when it ended.
 fn launch(url: &NSURL, arguments: &[String]) -> Result<(), isize> {
     let path = std::path::PathBuf::from(url.path().ok_or(260_isize)?.to_string());
     let bundle = objc2_foundation::NSBundle::mainBundle();
@@ -440,12 +445,42 @@ fn launch(url: &NSURL, arguments: &[String]) -> Result<(), isize> {
         return Err(if path.exists() { 256 } else { 260 });
     };
     command.extend(arguments.iter().cloned());
-    std::process::Command::new(&command[0])
-        .args(&command[1..])
-        .stdin(std::process::Stdio::null())
-        .spawn()
-        .map(drop)
-        .map_err(|_| 256)
+    let mut start = std::process::Command::new(&command[0]);
+    start.args(&command[1..]).stdin(std::process::Stdio::null());
+    // Safety: detach makes only async-signal-safe calls.
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(&mut start, detach);
+    }
+    // spawn returns once the program has exec'd (or failed to), and the
+    // go-between, which exits as soon as it has forked, is reaped here.
+    let mut go_between = start.spawn().map_err(|_| 256_isize)?;
+    let _ = go_between.wait();
+    Ok(())
+}
+
+/// Between fork and exec: fork again and exit, as `g_spawn_async` does, so
+/// the program becomes the nearest subreaper's (the user's systemd) or
+/// init's, and waits until it has before anything of it runs. Then a new
+/// session, so a terminal's Ctrl-C to this program doesn't reach it.
+fn detach() -> std::io::Result<()> {
+    // Safety: getpid, fork, _exit, getppid, sched_yield and setsid are
+    // async-signal-safe.
+    unsafe {
+        let go_between = libc::getpid();
+        match libc::fork() {
+            -1 => Err(std::io::Error::last_os_error()),
+            0 => {
+                while libc::getppid() == go_between {
+                    libc::sched_yield();
+                }
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            }
+            _ => libc::_exit(0),
+        }
+    }
 }
 
 pub(crate) struct ConfigurationIvars {

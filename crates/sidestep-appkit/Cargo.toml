@@ -41,6 +41,8 @@ kbvm = { version = "0.2", default-features = false, features = ["compose"] }
 wayland-cursor = "0.31"
 # Non-blocking clipboard pipes; already built for the Wayland crates.
 rustix = { version = "1", default-features = false, features = ["std"] }
+# fork() for openApplicationAtURL:, which starts programs apart from this one.
+libc = "0.2"
 # Text: parley lays out (bidi, line breaking, shaping with harfrust),
 # fontique finds fonts through the system's fontconfig, loaded at run time
 # with dlopen, and swash rasterizes glyphs. See docs/architecture.md.
