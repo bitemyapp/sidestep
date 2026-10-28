@@ -395,6 +395,12 @@ pub(crate) struct WindowData {
     /// Rectangles of the content to move at the next pass (points), and by
     /// how much, in order.
     pub scrolls: Vec<(Rect, Vec2)>,
+    /// Videos placed in the content (see `video`), placed again at each
+    /// showing.
+    pub videos: Vec<(crate::video::VideoId, crate::video::VideoPlace)>,
+    /// The current showing for video sinks on other threads (0 while
+    /// hidden).
+    pub shared_showing: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 /// The most rectangles a window's damage keeps; past them, the two that
@@ -478,6 +484,8 @@ impl WindowData {
             layer_size: options.size,
             popup_size: None,
             scrolls: Vec::new(),
+            videos: Vec::new(),
+            shared_showing: Default::default(),
         }
     }
 
@@ -569,6 +577,10 @@ impl WindowData {
         if self.opaque_region.is_some() {
             send(tx, ToRender::SetOpaqueRegion { window: showing, rects: regions(&self.opaque_region) });
         }
+        for &(video, place) in &self.videos {
+            send(tx, ToRender::PlaceVideo { window: showing, video, place: Some(place) });
+        }
+        self.shared_showing.store(showing, std::sync::atomic::Ordering::Release);
         self.text_input = (false, None);
         self.showing = Some(showing);
         self.configured = false;
@@ -582,6 +594,7 @@ impl WindowData {
 
     /// Take the window off the screen.
     pub fn hide(&mut self, tx: &Sender<ToRender>) {
+        self.shared_showing.store(0, std::sync::atomic::Ordering::Release);
         if let Some(showing) = self.showing.take() {
             send(tx, ToRender::CloseWindow { window: showing });
         }
@@ -760,6 +773,32 @@ impl Window<'_> {
         if let Some(showing) = self.data.showing {
             send(self.tx, ToRender::SetOpaqueRegion { window: showing, rects: regions(&self.data.opaque_region) });
         }
+    }
+
+    /// Show video `video` at `place` in the content, or take it away
+    /// (`None`); see [`video`](crate::video). The place goes with the
+    /// window's next frame, so it moves with what's drawn around it; a
+    /// new place is a frame's change, and the window redraws (the rect of
+    /// an under video, at least, which it draws clear).
+    pub fn place_video(&mut self, video: crate::video::VideoId, place: Option<crate::video::VideoPlace>) {
+        let old = self.data.videos.iter().position(|(v, _)| *v == video);
+        let same = old.map(|i| self.data.videos[i].1) == place;
+        match (old, place) {
+            (Some(i), Some(p)) => self.data.videos[i].1 = p,
+            (Some(i), None) => {
+                self.data.videos.remove(i);
+            }
+            (None, Some(p)) => self.data.videos.push((video, p)),
+            (None, None) => {}
+        }
+        if !same && let Some(showing) = self.data.showing {
+            send(self.tx, ToRender::PlaceVideo { window: showing, video, place });
+        }
+    }
+
+    /// Where video `video`'s frames go, from any thread.
+    pub fn video_sink(&self, video: crate::video::VideoId) -> crate::video::VideoSink {
+        crate::video::VideoSink::new(self.tx.clone(), self.data.shared_showing.clone(), video)
     }
 
     /// Scroll `rect` (content points) by `delta`, as a list or an editor
