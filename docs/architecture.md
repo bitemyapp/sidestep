@@ -1417,6 +1417,29 @@ otherwise): an item per window after the menu's own items and a
 separator, sorted by title ignoring case, sending `makeKeyAndOrderFront:`
 to its window; a represented file's window is listed by the file's name.
 
+### Video
+
+The native toolkit shows a player's frames without drawing them
+(`sidestep_engine::video`, `sidestep_ui::video`). A window places a video
+in its content (`Window::place_video`): a subsurface of the window's main
+surface, beside the content like the tiles and decorations, over the
+content or under it, scaled by its viewport. Its frames come from any
+thread through a `VideoSink`, straight to the render thread
+(`ToRender::ShowVideo`): a linux-dmabuf buffer (a hardware decoder's
+surface) or a wl_shm buffer on the producer's memfd, each made into a
+compositor buffer the first time it shows and kept while the producer
+keeps it, so a decoder's surfaces are imported once. Each frame is
+attached and committed on its own (the subsurface is desynchronized),
+with the time it's for (wp_commit_timing_v1), asks wp_presentation
+whether it reached the screen, and is kept until the compositor releases
+its buffer. A new place is applied with the window's next present: the
+subsurface is synchronized, placed, committed with the window, and
+desynchronized again. Videos take no pointer input, say they're opaque
+and a video (wp_content_type_v1), and can hold an idle inhibitor.
+`video::caps` says what the compositor takes (dmabuf formats and
+modifiers, its render device, commit timing, the presentation clock). The
+null render thread presents every frame at once (`Seen::VideoShown`).
+
 ### The clipboard
 
 The general `NSPasteboard` is the Wayland selection. Writes never wait: the

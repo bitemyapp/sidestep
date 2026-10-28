@@ -81,6 +81,7 @@ mod image;
 pub mod layer_shell;
 pub mod offscreen;
 mod text;
+pub mod video;
 mod window;
 
 #[doc(hidden)]

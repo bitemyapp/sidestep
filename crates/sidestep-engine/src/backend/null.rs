@@ -111,6 +111,19 @@ pub enum Seen {
         window: u32,
         rects: Option<Vec<crate::protocol::Rect>>,
     },
+    /// A video of the window was placed there, or taken away.
+    VideoPlaced {
+        window: u32,
+        video: u32,
+        place: Option<crate::video::VideoPlace>,
+    },
+    /// A frame of a video showed (at once, as presented), so big in
+    /// pixels; or the video was cleared (none).
+    VideoShown {
+        window: u32,
+        video: u32,
+        size: Option<(u32, u32)>,
+    },
 }
 
 /// A run of text the main thread asked the null render thread to paint.
@@ -242,6 +255,17 @@ pub fn chosen() -> bool {
 
 pub fn start(wake: Waker) -> Backend {
     RUNNING.store(true, Ordering::Relaxed);
+    // A compositor that takes shared memory and dmabufs of nothing, and
+    // shows frames at the times they ask for.
+    crate::video::publish_caps(crate::video::VideoCaps {
+        known: true,
+        dmabuf: Vec::new(),
+        shm: vec![0, 1],
+        commit_timing: true,
+        presentation: true,
+        monotonic: true,
+        main_device: 0,
+    });
     let (tx, channel) = channel::channel();
     let (to_main, rx) = mpsc::channel();
     let to_main = MainSender::new(to_main, wake);
@@ -482,6 +506,17 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
             }),
             ToRender::SelectionData { token, data } => note(Seen::Provided { token, data: data.map(|d| d.to_vec()) }),
             ToRender::SetOpaqueRegion { window, rects } => note(Seen::OpaqueRegion { window, rects }),
+            ToRender::PlaceVideo { window, video, place } => note(Seen::VideoPlaced { window, video, place }),
+            ToRender::ShowVideo { window, video, mut frame } => {
+                // Shown at once, as a compositor always ready for a frame
+                // would, and released at once.
+                let size = Some(frame.buffer.size());
+                let time = crate::video::monotonic_now();
+                frame.report(crate::video::Shown::Presented { time, refresh: 16_666_667 });
+                drop(frame);
+                note(Seen::VideoShown { window, video, size });
+            }
+            ToRender::ClearVideo { window, video } => note(Seen::VideoShown { window, video, size: None }),
             ToRender::Paint { window: _, target: crate::protocol::Target::Content(layer), rects, ops } => {
                 with_ca(|ca| ca.paint_content(layer, &rects, &ops, &mut glyphs));
             }

@@ -897,6 +897,25 @@ pub enum ToRender {
         request: u64,
         app_id: Option<String>,
     },
+    /// Show video `video` of the window there (see `crate::video`), or
+    /// none: in order with the paints, so it moves with the next present.
+    PlaceVideo {
+        window: WindowId,
+        video: crate::video::VideoId,
+        place: Option<crate::video::VideoPlace>,
+    },
+    /// A frame for video `video` to show (from a player's thread, sent
+    /// straight here): dropped, as discarded, if the video isn't placed.
+    ShowVideo {
+        window: WindowId,
+        video: crate::video::VideoId,
+        frame: Box<crate::video::VideoFrame>,
+    },
+    /// Show nothing in video `video` until its next frame.
+    ClearVideo {
+        window: WindowId,
+        video: crate::video::VideoId,
+    },
     /// Composite and copy a crop on the null render thread, then answer
     /// without involving the main thread. Other backends answer `None`.
     CaptureWindow {
