@@ -717,7 +717,7 @@ pub unsafe extern "C-unwind" fn dispatch_async_f(
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn dispatch_async(queue: *mut c_void, block: *const DynBlock<dyn Fn()>) {
     // SAFETY: the caller passes a block.
-    enqueue(queue, block_work(unsafe { &*block }), false);
+    enqueue(queue, block_work(unsafe { &*block }), super::block::is_barrier(block));
 }
 
 #[unsafe(no_mangle)]
@@ -747,7 +747,7 @@ pub unsafe extern "C-unwind" fn dispatch_sync_f(
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn dispatch_sync(queue: *mut c_void, block: *const DynBlock<dyn Fn()>) {
     let work = block_work(unsafe { &*block });
-    sync(queue, work.ctx, work.f, false);
+    sync(queue, work.ctx, work.f, super::block::is_barrier(block));
 }
 
 #[unsafe(no_mangle)]
@@ -776,7 +776,12 @@ pub unsafe extern "C-unwind" fn dispatch_async_and_wait_f(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C-unwind" fn dispatch_async_and_wait(queue: *mut c_void, block: *const DynBlock<dyn Fn()>) {
-    run_and_wait(queue, block_work(unsafe { &*block }));
+    if super::block::is_barrier(block) {
+        let work = block_work(unsafe { &*block });
+        sync(queue, work.ctx, work.f, true);
+    } else {
+        run_and_wait(queue, block_work(unsafe { &*block }));
+    }
 }
 
 #[unsafe(no_mangle)]

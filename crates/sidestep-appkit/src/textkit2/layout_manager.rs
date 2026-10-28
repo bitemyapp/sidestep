@@ -1450,6 +1450,7 @@ impl NSTextLayoutManagerImpl {
         // override it.
         let frame: NSRect = unsafe { msg_send![&*fragment, layoutFragmentFrame] };
         let height = frame.size.height.max(0.0);
+        let extent = self.usage_bounds();
         let mut st = self.ivars().state.borrow_mut();
         let q = st.index.locate(start);
         if q.start != start || st.index.get(q).slot.as_ref().is_none_or(|s| !std::ptr::eq(&*s.fragment, &*fragment)) {
@@ -1472,6 +1473,13 @@ impl NSTextLayoutManagerImpl {
             st.damage.mark_moved(top);
         } else {
             st.damage.mark_redraw(top, top + height);
+            drop(st);
+            // As tall as estimated, but laying it out can still move the
+            // usage bounds (the first fragment laid out gives the text its
+            // extent, and one wider than the rest widens it).
+            if self.usage_bounds() != extent {
+                self.ivars().state.borrow_mut().damage.resized = true;
+            }
         }
         Some(height)
     }

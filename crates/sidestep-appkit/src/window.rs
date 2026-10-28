@@ -190,6 +190,7 @@ struct Settings {
     /// None: the title.
     miniwindow_title: Option<Retained<NSString>>,
     represented_filename: Retained<NSString>,
+    represented_url: Option<Retained<objc2_foundation::NSURL>>,
     resize_increments: NSSize,
     content_resize_increments: NSSize,
     aspect_ratio: NSSize,
@@ -231,6 +232,7 @@ impl Default for Settings {
             recalculates_key_view_loop: false,
             miniwindow_title: None,
             represented_filename: NSString::new(),
+            represented_url: None,
             resize_increments: NSSize::new(1.0, 1.0),
             content_resize_increments: NSSize::new(1.0, 1.0),
             aspect_ratio: NSSize::new(0.0, 0.0),
@@ -248,6 +250,25 @@ define_class!(
     pub(crate) struct NSWindowImpl;
 
     impl NSWindowImpl {
+        #[unsafe(method_id(toolbar))]
+        fn toolbar(&self) -> Option<Retained<objc2_app_kit::NSToolbar>> { self.events().toolbar.borrow().clone() }
+        #[unsafe(method(setToolbar:))]
+        fn set_toolbar(&self, toolbar: Option<&objc2_app_kit::NSToolbar>) { let old=self.events().toolbar.replace(toolbar.map(Message::retain)); if let Some(old)=old { crate::toolbar::view(&old).removeFromSuperview(); } crate::toolbar::mount(as_window(self)); }
+        #[unsafe(method(toolbarStyle))]
+        fn toolbar_style(&self) -> isize { self.events().toolbar_style.get() }
+        #[unsafe(method(setToolbarStyle:))]
+        fn set_toolbar_style(&self, style: isize) { self.events().toolbar_style.set(style); }
+        #[unsafe(method(titlebarSeparatorStyle))]
+        fn separator_style(&self) -> isize { self.events().titlebar_separator.get() }
+        #[unsafe(method(setTitlebarSeparatorStyle:))]
+        fn set_separator_style(&self, style: isize) { self.events().titlebar_separator.set(style); }
+        #[unsafe(method_id(titlebarAccessoryViewControllers))]
+        fn accessories(&self) -> Retained<objc2_foundation::NSArray<objc2_app_kit::NSTitlebarAccessoryViewController>> { objc2_foundation::NSArray::from_retained_slice(&self.events().accessories.borrow()) }
+        #[unsafe(method(addTitlebarAccessoryViewController:))]
+        fn add_accessory(&self, accessory: &objc2_app_kit::NSTitlebarAccessoryViewController) { self.events().accessories.borrow_mut().push(accessory.retain()); crate::toolbar::mount(as_window(self)); }
+        #[unsafe(method(removeTitlebarAccessoryViewControllerAtIndex:))]
+        fn remove_accessory(&self, index: isize) { if index>=0 && (index as usize)<self.events().accessories.borrow().len() { let item=self.events().accessories.borrow_mut().remove(index as usize); item.view().removeFromSuperview(); crate::toolbar::mount(as_window(self)); } }
+
         #[unsafe(method_id(initWithContentRect:styleMask:backing:defer:))]
         fn init(
             this: Allocated<Self>,
@@ -505,7 +526,9 @@ define_class!(
 
         #[unsafe(method(setDocumentEdited:))]
         fn set_document_edited(&self, flag: bool) {
+            sidestep_foundation::observing::will_change(self, "documentEdited");
             self.ivars().settings.borrow_mut().edited = flag;
+            sidestep_foundation::observing::did_change(self, "documentEdited");
         }
 
         #[unsafe(method_id(subtitle))]
@@ -515,7 +538,9 @@ define_class!(
 
         #[unsafe(method(setSubtitle:))]
         fn set_subtitle(&self, subtitle: &NSString) {
+            sidestep_foundation::observing::will_change(self, "subtitle");
             self.ivars().settings.borrow_mut().subtitle = subtitle.copy();
+            sidestep_foundation::observing::did_change(self, "subtitle");
         }
 
         #[unsafe(method(hidesOnDeactivate))]
@@ -666,6 +691,19 @@ define_class!(
         #[unsafe(method_id(representedFilename))]
         fn represented_filename(&self) -> Retained<NSString> {
             self.ivars().settings.borrow().represented_filename.clone()
+        }
+
+        #[unsafe(method_id(representedURL))]
+        fn represented_url(&self) -> Option<Retained<objc2_foundation::NSURL>> {
+            self.ivars().settings.borrow().represented_url.clone()
+        }
+
+        #[unsafe(method(setRepresentedURL:))]
+        fn set_represented_url(&self, url: Option<&objc2_foundation::NSURL>) {
+            sidestep_foundation::observing::will_change(self, "representedURL");
+            let old = std::mem::replace(&mut self.ivars().settings.borrow_mut().represented_url, url.map(Message::retain));
+            drop(old);
+            sidestep_foundation::observing::did_change(self, "representedURL");
         }
 
         #[unsafe(method(setRepresentedFilename:))]
@@ -1015,12 +1053,14 @@ define_class!(
         /// A new title for a window on screen renames its Window menu item.
         #[unsafe(method(setTitle:))]
         fn set_title(&self, title: &NSString) {
+            sidestep_foundation::observing::will_change(self, "title");
             let old = self.ivars().title.replace(title.copy());
             self.ivars().title_dirty.set(true);
             self.ivars().needs_display.set(true);
             if self.ivars().visible.get() && !old.isEqualToString(title) && listable(self) {
                 app::window_retitled(as_window(self));
             }
+            sidestep_foundation::observing::did_change(self, "title");
         }
 
         #[unsafe(method(styleMask))]
@@ -1076,7 +1116,9 @@ define_class!(
 
         #[unsafe(method(contentLayoutRect))]
         fn content_layout_rect(&self) -> NSRect {
-            NSRect::new(NSPoint::ZERO, self.ivars().size.get())
+            let mut size = self.ivars().size.get();
+            size.height = (size.height - crate::toolbar::height(as_window(self))).max(0.0);
+            NSRect::new(NSPoint::ZERO, size)
         }
 
         #[unsafe(method(frameRectForContentRect:))]
@@ -1588,6 +1630,7 @@ define_class!(
                 crate::appearance::refresh(&content);
             }
             self.damage_all();
+            crate::menubar::appearance_changed();
         }
 
         #[unsafe(method_id(effectiveAppearance))]
@@ -2304,8 +2347,13 @@ impl NSWindowImpl {
 fn set_content_view(window: &NSWindowImpl, view: Option<&NSView>) {
     let old = window.ivars().content.replace(view.map(|v| v.retain()));
     if let Some(old) = old {
-        // SAFETY: the window no longer holds the view.
-        unsafe { old.setNextResponder(None) };
+        // A view the program has already put in another view (often the
+        // new content view) keeps the link its new superview gave it (to its
+        // view controller, when it has one).
+        if views::superview_of(views::imp(&old)).is_none() {
+            // SAFETY: the window no longer holds the view.
+            unsafe { old.setNextResponder(None) };
+        }
         views::set_window(views::imp(&old), None);
     }
     if let Some(view) = view {
@@ -2315,6 +2363,7 @@ fn set_content_view(window: &NSWindowImpl, view: Option<&NSView>) {
         unsafe { view.setNextResponder(Some(window)) };
         views::set_window(views::imp(view), Some(NonNull::from(as_window(window))));
     }
+    crate::toolbar::mount(as_window(window));
     window.damage_all();
 }
 
@@ -2455,6 +2504,9 @@ fn order_front(window: &NSWindowImpl) {
         limits: window.limits(),
         popup: if sheet_of.is_some() { None } else { ivars.popup.get() },
         sheet_of,
+        layer: None,
+        lock: None,
+        transparent: false,
     });
     let cursor = app::cursor();
     if cursor != Cursor::Default {
@@ -2704,6 +2756,7 @@ fn send_event(window: &NSWindowImpl, event: &NSEvent) {
             if owner {
                 window.ivars().mouse_view.replace(Some((view.clone(), button)));
             }
+            crate::gesture::event(&view, event);
             match kind {
                 NSEventType::LeftMouseDown => view.mouseDown(event),
                 NSEventType::RightMouseDown => view.rightMouseDown(event),
@@ -2721,6 +2774,7 @@ fn send_event(window: &NSWindowImpl, event: &NSEvent) {
             if released == owner {
                 window.ivars().mouse_view.replace(None);
             }
+            crate::gesture::event(&view, event);
             match kind {
                 NSEventType::LeftMouseUp => view.mouseUp(event),
                 NSEventType::RightMouseUp => view.rightMouseUp(event),
@@ -2730,6 +2784,7 @@ fn send_event(window: &NSWindowImpl, event: &NSEvent) {
         NSEventType::LeftMouseDragged | NSEventType::RightMouseDragged | NSEventType::OtherMouseDragged => {
             let held = window.ivars().mouse_view.borrow().clone();
             let Some((view, _)) = held else { return };
+            crate::gesture::event(&view, event);
             match kind {
                 NSEventType::LeftMouseDragged => view.mouseDragged(event),
                 NSEventType::RightMouseDragged => view.rightMouseDragged(event),

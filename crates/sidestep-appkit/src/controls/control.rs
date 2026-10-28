@@ -353,12 +353,17 @@ define_class!(
 
         #[unsafe(method(setStringValue:))]
         fn set_string_value(&self, string: &NSString) {
-            // A programmatic replacement ends editing, discarding the
-            // unvalidated editor text before changing the cell's value.
-            self.as_control().abortEditing();
             match self.the_cell() {
                 Some(c) => c.setStringValue(string),
                 None => self.set_loose(Value::String(string.copy())),
+            }
+            // Editing goes on, as in AppKit: the field editor takes the new
+            // value, caret at its end (quietly: no text-did-change), so the
+            // unvalidated text it held can't come back, and the keyboard
+            // stays where the user left it.
+            if let Some(editor) = self.as_control().currentEditor() {
+                editor.setString(string);
+                self.as_view().setNeedsDisplay(true);
             }
         }
 
@@ -620,14 +625,19 @@ define_class!(
             size
         }
 
+        /// Measure again, and Auto Layout learns the size changed (NSView's).
         #[unsafe(method(invalidateIntrinsicContentSize))]
         fn invalidate_intrinsic_content_size(&self) {
             self.ivars().intrinsic.set(None);
+            // SAFETY: NSView's invalidateIntrinsicContentSize takes nothing.
+            let _: () = unsafe { msg_send![super(self), invalidateIntrinsicContentSize] };
         }
 
         #[unsafe(method(invalidateIntrinsicContentSizeForCell:))]
         fn invalidate_intrinsic_content_size_for_cell(&self, _cell: &NSCell) {
-            self.ivars().intrinsic.set(None);
+            // SAFETY: invalidateIntrinsicContentSize takes nothing; a
+            // subclass may override it.
+            let _: () = unsafe { msg_send![self, invalidateIntrinsicContentSize] };
         }
 
         #[unsafe(method(calcSize))]
@@ -640,9 +650,12 @@ define_class!(
             self.as_view().setNeedsDisplay(true);
         }
 
+        /// What the cell shows changed, maybe its size: measured again, as
+        /// Auto Layout learns, and drawn again.
         #[unsafe(method(updateCell:))]
-        fn update_cell(&self, _cell: &NSCell) {
-            self.ivars().intrinsic.set(None);
+        fn update_cell(&self, cell: &NSCell) {
+            // SAFETY: the method's own types; a subclass may override it.
+            let _: () = unsafe { msg_send![self, invalidateIntrinsicContentSizeForCell: cell] };
             self.as_view().setNeedsDisplay(true);
         }
 

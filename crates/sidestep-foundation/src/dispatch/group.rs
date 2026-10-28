@@ -118,7 +118,7 @@ pub unsafe extern "C-unwind" fn dispatch_group_notify(
 }
 
 /// Queue `work` on `queue` as part of the group.
-fn group_async(g: *mut c_void, queue: *mut c_void, work: Work) {
+fn group_async(g: *mut c_void, queue: *mut c_void, work: Work, barrier: bool) {
     struct Member {
         group: Obj,
         work: Work,
@@ -141,7 +141,7 @@ fn group_async(g: *mut c_void, queue: *mut c_void, work: Work) {
     // SAFETY: the caller passes a group.
     unsafe { dispatch_group_enter(g) };
     let member = Box::new(Member { group: Obj::retain(g), work });
-    enqueue(queue, Work { f: run, ctx: Box::into_raw(member).cast() }, false);
+    enqueue(queue, Work { f: run, ctx: Box::into_raw(member).cast() }, barrier);
 }
 
 #[unsafe(no_mangle)]
@@ -151,7 +151,7 @@ pub unsafe extern "C-unwind" fn dispatch_group_async_f(
     ctx: *mut c_void,
     f: unsafe extern "C" fn(*mut c_void),
 ) {
-    group_async(g, queue, Work { f: function(f), ctx });
+    group_async(g, queue, Work { f: function(f), ctx }, false);
 }
 
 #[unsafe(no_mangle)]
@@ -161,5 +161,5 @@ pub unsafe extern "C-unwind" fn dispatch_group_async(
     block: *const DynBlock<dyn Fn()>,
 ) {
     // SAFETY: the caller passes a block.
-    group_async(g, queue, block_work(unsafe { &*block }));
+    group_async(g, queue, block_work(unsafe { &*block }), super::block::is_barrier(block));
 }

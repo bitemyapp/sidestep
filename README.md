@@ -104,7 +104,8 @@ SCENARIO=scroll cargo run -p appkit-slice
 
 **Linux** runs the same source on Sidestep. It needs a Wayland session (X11
 isn't supported yet). Fonts come from the system's fontconfig, loaded when
-the program runs, as every desktop has it; `SIDESTEP_FONT` and
+the program runs, as every desktop has it (NixOS's too, from its store;
+see [docs/architecture.md](docs/architecture.md#nixos)); `SIDESTEP_FONT` and
 `SIDESTEP_MONO_FONT` can name a sans and a monospaced font file to use
 instead. Nothing else is needed: no libobjc, no GNUstep, and nothing to
 build against beyond the C runtime every Rust program links.
@@ -200,6 +201,91 @@ layout and keystrokes in 11 MB of text; see [docs/text.md](docs/text.md).
 On Linux, drawing is recorded on the main thread and rasterized on a
 separate render thread, and scroll views are tiled onto Wayland subsurfaces;
 see [docs/architecture.md](docs/architecture.md#appkit-a-main-thread-and-a-render-thread).
+
+## File watching and metadata
+
+`sidestep` also links `sidestep-core-services`. Existing objc2 programs can
+use CoreServices' FSEvents streams on Linux: recursive file notifications,
+batched callbacks on dispatch queues or run loops, CFArray or C-string
+paths, stop/restart, exclusion paths, and root-change notifications.
+The objc2 overlay now includes `objc2-core-services`; regenerate it after
+updating Sidestep.
+
+`MDItem` supports filesystem attributes and the common metadata keys,
+including the keys Upleft's metadata exporter writes. Linux has no
+Spotlight index: indexed content attributes are absent. FSEvents has no
+persistent journal here; historical requests report that a rescan is
+needed. Per-device streams, writer-identity flags and extended event data
+are not implemented. This is the file-watching and metadata slice of
+CoreServices, not its legacy Carbon or LaunchServices APIs.
+
+UniformTypeIdentifiers is linked as well: UTType objects resolve common
+filename extensions and MIME tags, preserve conformance relationships and
+read custom types from the app's bundle declarations. Open/save panels use
+these objects for their file filters. Dispatch work items support cancellation,
+completion and barriers, and NSFileManager supports atomic file replacement
+for save-and-watch workflows. See [the ABI coverage](docs/abi.md#uniformtypeidentifiers-and-cancellable-work)
+for limits.
+
+Foundation and AppKit also provide the framework classes used to link Upleft
+through its original objc2 API: URL sessions and protocols, file handles,
+calendars and formatters, distributed notifications, container controllers,
+toolbars, pan gestures, text layers, glass views, printing and sharing.
+The [Upleft compatibility runner](tools/upleft-compat/README.md) builds an
+archived consumer checkout; [framework coverage](docs/abi.md#framework-classes-used-by-upleft)
+describes the implemented behavior and remaining limits.
+
+## Native Linux programs
+
+Programs written for Linux alone can skip AppKit and Objective-C entirely:
+`sidestep-ui` is a Rust toolkit on the engine AppKit runs on (the render
+thread, its rasterizer, the text engine, keyboards and input methods, the
+clipboard, drag and drop, decorations, the desktop's appearance), with no
+Objective-C runtime in the program. A program is a `Handler`: it opens
+windows, hears their events, and draws them on a `Canvas` when they need
+it.
+
+```toml
+[dependencies]
+sidestep-ui = { git = "https://github.com/bitemyapp/sidestep" }
+```
+
+```rust
+use sidestep_ui::kurbo::{Point, RoundedRect};
+use sidestep_ui::*;
+
+struct Hello;
+
+impl Handler for Hello {
+    fn launched(&mut self, cx: &mut Cx) {
+        cx.open_window(WindowOptions::new("Hello").size(400.0, 200.0));
+    }
+
+    fn draw(&mut self, _cx: &mut Cx, _window: WindowId, canvas: &mut Canvas) {
+        let accent = canvas.system_color(SystemColor::Accent);
+        canvas.fill(&RoundedRect::new(20.0, 20.0, 380.0, 180.0, 12.0), accent);
+        let style = TextStyle::new(Font::system(24.0).bold(), Color::WHITE);
+        canvas.draw_label("Hello from Sidestep", &style, Point::new(40.0, 80.0));
+    }
+}
+
+fn main() {
+    App::new().run(Hello).expect("a Wayland display");
+}
+```
+
+It doesn't depend on objc2, so it needs no overlay, and its programs link
+no Objective-C runtime or framework classes. The API is early (no widgets yet: programs draw their own, on events, a canvas and
+text layout with hit testing, carets and selections); see the
+[roadmap](docs/roadmap.md#native-toolkit) for what comes next.
+`examples/ui-gallery` draws shapes, gradients, shadows and text in every
+script, and writes a button and a text field (typing, input methods,
+selection, the clipboard) on the toolkit:
+
+```sh
+scripts/linux-cargo build -p ui-gallery
+SHOT=/work/target/ui.png scripts/linux-run scripts/headless-wayland /target/debug/ui-gallery
+```
 
 ## How it works
 

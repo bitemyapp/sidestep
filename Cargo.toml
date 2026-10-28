@@ -24,11 +24,17 @@ objc2-core-graphics = { version = "0.3.2", default-features = false, features = 
 objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std"] }
 objc2-core-text = { version = "0.3.2", default-features = false, features = ["std"] }
 objc2-image-io = { version = "0.3.2", default-features = false, features = ["std"] }
+objc2-core-services = { version = "0.3.2", default-features = false, features = ["std"] }
+objc2-uniform-type-identifiers = { version = "0.3.2", default-features = false, features = ["std"] }
 
 sidestep = { path = "crates/sidestep" }
 sidestep-runtime = { path = "crates/sidestep-runtime" }
 sidestep-foundation = { path = "crates/sidestep-foundation" }
 sidestep-appkit = { path = "crates/sidestep-appkit" }
+sidestep-core-services = { path = "crates/sidestep-core-services" }
+sidestep-uniform-type-identifiers = { path = "crates/sidestep-uniform-type-identifiers" }
+sidestep-engine = { path = "crates/sidestep-engine" }
+sidestep-ui = { path = "crates/sidestep-ui" }
 
 # tiny-skia's portable SIMD (every target but aarch64 with NEON) multiplies
 # 16-bit lanes expecting them to wrap, as the NEON path does; overflow checks
@@ -57,3 +63,5 @@ objc2-core-graphics = { path = ".objc2-overlay/objc2-core-graphics-0.3.2" }
 objc2-quartz-core = { path = ".objc2-overlay/objc2-quartz-core-0.3.2" }
 objc2-core-text = { path = ".objc2-overlay/objc2-core-text-0.3.2" }
 objc2-image-io = { path = ".objc2-overlay/objc2-image-io-0.3.2" }
+objc2-core-services = { path = ".objc2-overlay/objc2-core-services-0.3.2" }
+objc2-uniform-type-identifiers = { path = ".objc2-overlay/objc2-uniform-type-identifiers-0.3.2" }

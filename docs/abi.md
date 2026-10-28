@@ -23,7 +23,7 @@ at the end, which `tools/objc2-overlay` applies; other versions are untested.
 | Blocks | `_Block_copy`, `_Block_release`, `_Block_object_assign`, `_Block_object_dispose`, `_Block_has_signature`, `_Block_signature`, and the classes `_NSConcreteStackBlock`, `_NSConcreteMallocBlock`, `_NSConcreteGlobalBlock` |
 | Class symbols | `._OBJC_CLASS_<Name>` and `._OBJC_METACLASS_<Name>` for `NSObject` and `NSProxy` (runtime) and each Foundation, AppKit and QuartzCore class, each also listed in the `sidestep_classes` linker section |
 | Categories | `._SIDESTEP_CATEGORY_<Class>_<Name>` for each category a framework links, also listed in the `sidestep_categories` linker section |
-| libdispatch | `dispatch_get_global_queue`, `_dispatch_main_q`, `_dispatch_queue_attr_concurrent`, `dispatch_queue_create(_with_target)`, `dispatch_queue_attr_make_*`, `dispatch_(barrier_)async(_f)`, `dispatch_(barrier_)sync(_f)`, `dispatch_(barrier_)async_and_wait(_f)`, `dispatch_apply(_f)`, `dispatch_after(_f)`, `dispatch_once(_f)`, `dispatch_group_*`, `dispatch_semaphore_*`, `dispatch_source_*` (data add/or/replace, timer, vnode), `dispatch_time`, `dispatch_walltime`, `dispatch_retain`/`release`/`suspend`/`resume`/`activate`, `dispatch_set_context`/`get_context`/`set_finalizer_f`/`set_target_queue`, `dispatch_queue_set_specific`/`get_specific`, `dispatch_assert_queue*`, `dispatch_main` |
+| libdispatch | `dispatch_get_global_queue`, `_dispatch_main_q`, `_dispatch_queue_attr_concurrent`, `dispatch_queue_create(_with_target)`, `dispatch_queue_attr_make_*`, `dispatch_(barrier_)async(_f)`, `dispatch_(barrier_)sync(_f)`, `dispatch_(barrier_)async_and_wait(_f)`, `dispatch_apply(_f)`, `dispatch_after(_f)`, `dispatch_block_*`, `dispatch_once(_f)`, `dispatch_group_*`, `dispatch_semaphore_*`, `dispatch_source_*` (data add/or/replace, timer, vnode), `dispatch_time`, `dispatch_walltime`, `dispatch_retain`/`release`/`suspend`/`resume`/`activate`, `dispatch_set_context`/`get_context`/`set_finalizer_f`/`set_target_queue`, `dispatch_queue_set_specific`/`get_specific`, `dispatch_assert_queue*`, `dispatch_main` |
 | CoreFoundation | Retain/release/equality (`CFRetain`, `CFRelease`, `CFAutorelease`, `CFEqual`, `CFHash`, `CFGetTypeID`, `CFCopyDescription`, `CFCopyTypeIDDescription`, `CFShow`, `CFShowStr`); the run loop (`CFRunLoop*` with `CFRunLoopCopyAllModes`, `CFRunLoopTimer*`, `CFRunLoopObserver*`, `kCFRunLoopDefaultMode`, `kCFRunLoopCommonModes`); and toll-free `CFString` (editing, searching, comparing with a locale, case, folding, normalization, transforms, encodings and their names, external, file system and Pascal representations), `CFAttributedString` (bidi levels too), `CFCharacterSet` (bitmap representations too), `CFData` (`CFDataFind`), `CFDate`, `CFError`, `CFURL` (its parts as CoreFoundation sees them, bytes and byte ranges, percent escapes, resource properties and keys, file reference and path URLs, security-scoped access, bookmarks), `CFDictionary`, `CFArray` (with any callbacks, or none) and `CFSet` (mutable ones too, with the apply, search, sort and count functions), `CFNumber` (`kCFNumberNaN` and the infinities), `CFLocale`, `CFCalendar`, `CFBundle`, `CFReadStream` and `CFWriteStream` (files, memory, buffers, bound pairs, TCP sockets, clients on run loops), `CFFileSecurity`, `CFMachPort` and `CFMessagePort` (see the known gaps), `CFPreferences`; the `kCFAllocator*` constants and the `kCFType…CallBacks` |
 | Foundation functions | `NSUnionRange`, `NSIntersectionRange`, `NSStringFromRange`, `NSRangeFromString`; the `NSGeometry` functions (`NSEqualRects`, `NSInsetRect`, `NSIntegralRectWithOptions`, `NSDivideRect`, `NSPointInRect`, `NSStringFromRect`, `NSRectFromString` and the rest objc2-foundation declares); `NSHomeDirectory(ForUser)`, `NSTemporaryDirectory`, `NSUserName`, `NSFullUserName`, `NSOpenStepRootDirectory`, `NSSearchPathForDirectoriesInDomains`, `NSClassFromString`, `NSStringFromClass`, `NSSelectorFromString`, `NSStringFromSelector`, `NSProtocolFromString`, `NSStringFromProtocol`; zones (`NSDefaultMallocZone`, `NSZoneMalloc` and the rest: one default zone over `malloc`), pages (`NSPageSize`, `NSAllocateMemoryPages`, …), `NSGetSizeAndAlignment`, `NSAllocateObject`, `NSCopyObject`, `NSDeallocateObject`, the extra reference count (`NSIncrementExtraRefCount`, `NSDecrementExtraRefCountWasZero`, `NSExtraRefCount`), `NSSetUncaughtExceptionHandler` and `NSGetUncaughtExceptionHandler` |
 | Foundation constants | Every string constant objc2-foundation declares under the features Sidestep's crates enable, with macOS's value (run-loop modes, error domains and keys, file attribute and URL resource keys, defaults domains, notification names, exception names, locale keys, …); `NSZeroPoint`, `NSZeroSize`, `NSZeroRect`, `NSEdgeInsetsZero`, `NSFoundationVersionNumber` (macOS 26's); `kCFBooleanTrue`, `kCFBooleanFalse` and `kCFNull`, `kCFAbsoluteTimeIntervalSince1970` and `…1904` |
@@ -216,7 +216,7 @@ The QuartzCore functions (16, and 83 constants) come from sidestep-appkit's
   anonymous files (`vm.memfd_noexec=2`), makes pages executable after
   writing them instead, which a process denied that can't do.
 - libdispatch: no `dispatch_io_*`, `dispatch_read`/`write`,
-  `dispatch_data_*`, `dispatch_block_*` or workloops; dispatch2 declares
+  `dispatch_data_*` or workloops; dispatch2 declares
   them, so an app calling one fails to link.
 - Declared by objc2 under Sidestep's features but not exported (a program
   naming one doesn't link): the `NSHashTable` and `NSMapTable` C functions
@@ -338,6 +338,102 @@ The QuartzCore functions (16, and 83 constants) come from sidestep-appkit's
   `CAMetalLayer`, `CAOpenGLLayer`, `CAEDRMetadata`, `CARenderer` or
   `CAConstraint`, and none of the constants their features declare.
 
+## UniformTypeIdentifiers and cancellable work
+
+`sidestep-uniform-type-identifiers` supplies UTType objects and the common
+text, image, archive, directory and document constants. Factories resolve
+identifiers, extensions and MIME tags; conformance walks the type hierarchy.
+Immutable objects support equality, hashing and copying. The main bundle's
+imported/exported declarations supply application types. Unknown tags produce
+process-local dynamic identifiers; their spelling is not Apple's encoding.
+The system type catalogue, secure coding and LaunchServices registration are
+not implemented.
+
+Dispatch blocks implement creation, cancellation, test-cancel, completion
+waits, notification and synchronous execution. Copies share state; cancelling
+prevents future invocations and does not interrupt work already running.
+Barrier blocks retain their queue ordering. QoS hints do not change Linux
+thread scheduling.
+
+NSFileManager supports atomic item replacement, optional backups and the
+new-metadata flag. File replacements use rename; nonempty directories use
+atomic exchange. Default metadata preservation currently covers POSIX
+permissions, not creation dates, ownership or extended attributes. Cross-volume
+replacement fails without deleting either input.
+
+## Framework classes used by Upleft
+
+These classes are registered under their Cocoa names and used through the
+published objc2 bindings. They implement a bounded surface, not every selector
+in their respective frameworks:
+
+| Classes | Implemented behavior |
+| --- | --- |
+| NSURLRequest, NSMutableURLRequest, NSURLResponse, NSHTTPURLResponse | Request copying, headers/body, response status and metadata |
+| NSURLSessionConfiguration, NSURLSession, NSURLSessionTask, NSURLSessionDataTask, NSURLProtocol | HTTP/HTTPS completion-handler tasks on worker threads, serial completion queues, cancellation, session-configured custom protocols |
+| NSFileHandle, NSDirectoryEnumerator | File descriptors, bounded reads, seeking, writing, closing; lazy directory traversal, subtree skipping and no symlink recursion |
+| NSCalendar | Shared CFCalendar storage, Gregorian/ISO calendars, time zones, date components and daylight-saving-aware addition |
+| NSNumberFormatter, NSByteCountFormatter, NSRelativeDateTimeFormatter | Decimal parsing/formatting and range checks, byte units, relative date phrases |
+| NSDistributedNotificationCenter | Selector observers, string filters, suspension/coalescing, per-user Unix datagram delivery between processes |
+| NSSplitViewController, NSSplitViewItem, NSTabViewController, NSTitlebarAccessoryViewController | Child-controller ownership, pane/tab selection, collapsed panes and accessory views |
+| NSToolbar, NSToolbarItem | Delegate-created items, insertion/removal, target/action validation, a client-area toolbar |
+| NSGestureRecognizer, NSPanGestureRecognizer | Mouse-driven pan states, translation, velocity, button masks and weak view/target links |
+| CATextLayer | Shaped text rendered through the layer's CGContext |
+| NSGlassEffectView, NSGlassEffectContainerView | Content ownership/resizing and rounded tinted surfaces |
+| NSPrintInfo, NSPrintOperation | Paper/margin settings, paginated raster PDF saving, `lp` spooling without a print panel |
+| NSSharingService, NSSharingServicePicker | Custom handler services, picker delegates, menus and local clipboard copy |
+| NSAppleScript | Source storage and explicit unsupported-platform compile/execute errors |
+
+Supporting methods include application Services/Help menu ownership, window
+represented URLs, safe-area guides/insets, explicit scalar KVO registration
+and change delivery, and raw-DEFLATE NSData compression/decompression. Window
+title, subtitle, edited-state and represented-URL setters emit KVO changes.
+Application-defined setters must use `willChangeValueForKey:` /
+`didChangeValueForKey:`; automatic setter replacement, dependent/dotted paths
+and collection observation are not implemented.
+
+URL loading currently covers completion-handler data tasks. Delegate-driven
+transfers, downloads/uploads, persistent cookies/caches, global protocol
+registration and suspension are not implemented. Cancellation completes once
+without waiting for I/O; an outstanding socket read can remain until its
+timeout. Response URLs do not yet track redirects. Distributed notifications
+support selector registrations, not inherited block registrations; remote
+payloads must fit a 60 KiB property-list datagram. Calendar autoupdating access
+returns a snapshot. Non-Gregorian calendars and NSDateComponents-based methods
+remain unsupported. Number formatting does not cover the complete locale
+pattern/rounding API; byte/relative phrases currently use English.
+
+Container split-size limits, automatic tab toolbars, toolbar customization and
+autosaving, gesture arbitration, optical glass effects, print panels and
+native desktop sharing providers remain incomplete. Printing produces raster
+PDFs, fits content to width and paginates vertically; orientation and
+pagination-policy properties are stored but do not alter that layout.
+Directory enumeration supports the three skip flags, not post-order/relative
+URL flags. NSData compression currently supports Zlib only, using the
+[documented raw DEFLATE format](https://developer.apple.com/documentation/compression/compression_zlib).
+
+Public-API conformance tests cover these implemented paths. New tests have
+been run on Linux; macOS validation is still pending.
+
+## CoreServices
+
+CoreServices' FSEvents and MDItem symbols are supplied by
+`sidestep-core-services`, which `sidestep` links even without AppKit.
+FSEvents owns its callback context until the stream and its queued
+deliveries are released. Stop invalidates queued batches; no callback
+runs under the stream's state lock. Linux notifications come from inotify
+through `notify`, and callback delivery uses Sidestep's existing dispatch
+and CoreFoundation run loops. Unsupported creation flags return a null
+stream. Historical requests deliver a dropped-history/rescan indication;
+there is no persistent or per-device event journal.
+
+MDItem is a retained Foundation object with its own CF type ID. Its
+filesystem attributes are queried from the item's path and identity;
+missing or index-only attributes return null. It exports common metadata
+keys for clients which populate their own metadata dictionaries. Carbon,
+LaunchServices, metadata queries and Spotlight indexing remain outside
+the implemented CoreServices surface.
+
 ## Fixed in the objc2 fork, pending upstream
 
 Sidestep builds against the published crates with the fixes below. Each is
@@ -354,6 +450,17 @@ Sidestep nor the fork may contain generated code, see
 [legal.md](legal.md) §3.6). The workspace's `[patch.crates-io]` points at its
 output in `.objc2-overlay/`; `scripts/linux-env` and CI run it before cargo.
 The tool's README maps each patch and rule to its commit.
+
+- **UniformTypeIdentifiers off Apple** (commit 11, prepared on both fork branches).
+  The translation config enables GNUstep. The overlay gates the framework
+  link and exposes the corresponding AppKit dependency and methods.
+
+- **CoreServices off Apple** (commit 10, prepared on both fork branches).
+  The translation config marks CoreServices as supporting GNUstep.
+  The overlay gates its framework link, Security dependency and
+  Security/Darwin-dependent items, and exposes Foundation's CoreServices
+  dependency and methods on Linux. The upstream-ready config patch is
+  checked in under `tools/objc2-overlay/fork-patches/`.
 
 - **`Retained::retain_autoreleased`** (commit 1, objc2's #862 cherry-picked
   for issue #861). Release builds of objc2 0.6.4 can use an object after

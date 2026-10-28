@@ -299,33 +299,9 @@ pub(crate) fn current_look() -> Look {
     current().look()
 }
 
-/// The desktop's preference: dark, and high contrast (set by `settings`).
-static SYSTEM: AtomicU8 = AtomicU8::new(0);
-const DARK: u8 = 1;
-const CONTRAST: u8 = 2;
-/// Set once the desktop answered (or said nothing within the wait).
-const KNOWN: u8 = 4;
-
-/// The desktop's appearance.
+/// The desktop's appearance (kept by `sidestep_engine::settings`).
 pub(crate) fn system() -> Id {
-    let bits = SYSTEM.load(Ordering::Relaxed);
-    Id::of_look(match (bits & DARK != 0, bits & CONTRAST != 0) {
-        (false, false) => Look::Light,
-        (true, false) => Look::Dark,
-        (false, true) => Look::LightContrast,
-        (true, true) => Look::DarkContrast,
-    })
-}
-
-/// Record the desktop's appearance; true if it changed.
-pub(crate) fn set_system(dark: bool, contrast: bool) -> bool {
-    let bits = KNOWN | if dark { DARK } else { 0 } | if contrast { CONTRAST } else { 0 };
-    SYSTEM.swap(bits, Ordering::Relaxed) != bits
-}
-
-/// Whether the desktop's appearance is known yet.
-pub(crate) fn system_known() -> bool {
-    SYSTEM.load(Ordering::Relaxed) & KNOWN != 0
+    Id::of_look(sidestep_engine::settings::system_look())
 }
 
 pub(crate) fn app_appearance() -> Option<Id> {
@@ -337,7 +313,12 @@ pub(crate) fn set_app_appearance(id: Option<Id>) {
 }
 
 pub(crate) fn app_effective() -> Id {
-    app_appearance().unwrap_or_else(system)
+    app_effective_with(app_appearance())
+}
+
+/// What the application's effective appearance is with `own` its own.
+pub(crate) fn app_effective_with(own: Option<Id>) -> Id {
+    own.unwrap_or_else(system)
 }
 
 // Views and windows.
@@ -409,7 +390,7 @@ fn walk(view: &crate::views::NSViewImpl, changed: &mut Vec<Retained<NSView>>) {
 }
 
 /// The application's or the desktop's appearance changed: refresh every
-/// window.
+/// window, and the menu bars in them.
 pub(crate) fn refresh_all() {
     for window in crate::app::windows_for_appearance() {
         if let Some(content) = window.contentView() {
@@ -417,6 +398,7 @@ pub(crate) fn refresh_all() {
         }
         crate::window::imp(&window).damage_all();
     }
+    crate::menubar::appearance_changed();
 }
 
 #[cfg(test)]

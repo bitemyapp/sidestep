@@ -166,16 +166,13 @@ pub(crate) fn url_kind(uri: &str) -> &'static str {
     if is_file_uri(uri) { FILE_URL } else { URL }
 }
 
-/// The MIME types that mark this process's own selections and drags.
-pub(crate) const OWNER_PREFIX: &str = "application/x-sidestep-owner";
+use sidestep_engine::clipboard::{GNOME_FILES, MOZ_URL};
+pub(crate) use sidestep_engine::clipboard::{
+    OWNER_PREFIX, TEXT_MIMES, URI_LIST, file_path, is_file_uri, parse_urls, url_mime,
+};
+
 /// Types with no MIME type of their own travel under this prefix.
 const UTI_PREFIX: &str = "application/x-sidestep-uti.";
-pub(crate) const URI_LIST: &str = "text/uri-list";
-const GNOME_FILES: &str = "x-special/gnome-copied-files";
-const MOZ_URL: &str = "text/x-moz-url";
-
-/// The MIME types text is offered and read as, best first.
-pub(crate) const TEXT_MIMES: &[&str] = &["text/plain;charset=utf-8", "UTF8_STRING", "text/plain", "STRING", "TEXT"];
 
 /// The MIME types a type is offered as, best first. URLs aren't here:
 /// every item's URL goes into one `text/uri-list` (see `uri_list`).
@@ -219,36 +216,6 @@ pub(crate) fn type_for_mime(mime: &str) -> Option<Cow<'static, str>> {
     Some(Cow::Borrowed(kind))
 }
 
-/// Where another program's URLs are, among the MIME types it offers: the
-/// best of them, if any.
-pub(crate) fn url_mime(mimes: &[String]) -> Option<&'static str> {
-    [URI_LIST, GNOME_FILES, MOZ_URL].into_iter().find(|m| mimes.iter().any(|o| o == m))
-}
-
-/// The URLs in data of `mime` (see `url_mime`).
-pub(crate) fn parse_urls(mime: &str, data: &[u8]) -> Vec<String> {
-    match mime {
-        URI_LIST => parse_uri_list(&String::from_utf8_lossy(data)),
-        GNOME_FILES => {
-            // "copy" or "cut", then a URI per line.
-            let text = String::from_utf8_lossy(data);
-            text.lines().skip(1).map(str::trim).filter(|l| !l.is_empty()).map(str::to_owned).collect()
-        }
-        MOZ_URL => {
-            // UTF-16 (as Firefox writes it) or UTF-8: the URL, then its title.
-            let text = decode_moz(data);
-            text.lines().next().map(str::trim).filter(|l| !l.is_empty()).map(|l| vec![l.to_owned()]).unwrap_or_default()
-        }
-        _ => Vec::new(),
-    }
-}
-
-/// A `text/uri-list`: one URI a line, lines ending in CRLF (or LF), `#`
-/// starting a comment line.
-pub(crate) fn parse_uri_list(text: &str) -> Vec<String> {
-    text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(str::to_owned).collect()
-}
-
 /// URIs as a `text/uri-list`.
 pub(crate) fn uri_list<'a>(uris: impl IntoIterator<Item = &'a str>) -> String {
     uris.into_iter().fold(String::new(), |mut list, uri| {
@@ -268,58 +235,6 @@ pub(crate) fn gnome_copied_files<'a>(uris: impl IntoIterator<Item = &'a str>) ->
 }
 
 pub(crate) const GNOME_FILES_MIME: &str = GNOME_FILES;
-
-fn decode_moz(data: &[u8]) -> String {
-    let utf16 = data.len() >= 2 && data.len().is_multiple_of(2) && (data.starts_with(&[0xff, 0xfe]) || data[1] == 0);
-    if !utf16 {
-        return String::from_utf8_lossy(data).into_owned();
-    }
-    let units = data.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c));
-    char::decode_utf16(units).map(|c| c.unwrap_or('\u{fffd}')).filter(|c| *c != '\u{feff}').collect()
-}
-
-/// Whether a URI names a file, to read as `public.file-url` rather than
-/// `public.url`.
-pub(crate) fn is_file_uri(uri: &str) -> bool {
-    uri.get(..5).is_some_and(|s| s.eq_ignore_ascii_case("file:"))
-}
-
-/// The path a `file:` URL names, with its escapes decoded, for
-/// `NSFilenamesPboardType`.
-pub(crate) fn file_path(uri: &str) -> Option<String> {
-    let rest = uri.get(5..).filter(|_| is_file_uri(uri))?;
-    // file:///path, or file://localhost/path.
-    let path = match rest.strip_prefix("//") {
-        Some(authority_and_path) => {
-            let slash = authority_and_path.find('/')?;
-            let host = &authority_and_path[..slash];
-            if !(host.is_empty() || host.eq_ignore_ascii_case("localhost")) {
-                return None;
-            }
-            &authority_and_path[slash..]
-        }
-        None => rest,
-    };
-    let path = path.split(['?', '#']).next().unwrap_or(path);
-    percent_decode(path)
-}
-
-fn percent_decode(text: &str) -> Option<String> {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            let hex = text.get(i + 1..i + 3)?;
-            out.push(u8::from_str_radix(hex, 16).ok()?);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).ok()
-}
 
 /// A path as a `file:` URL, escaping what a URL can't hold.
 pub(crate) fn file_url(path: &str) -> String {
@@ -396,6 +311,7 @@ sidestep_foundation::constant_string!(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sidestep_engine::clipboard::parse_uri_list;
 
     #[test]
     fn old_names_name_the_new_types() {

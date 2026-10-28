@@ -19,8 +19,8 @@ use std::hash::Hasher;
 use std::sync::Arc;
 
 use objc2::rc::{Allocated, Retained};
-use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
-use objc2::{AnyThread, DefinedClass, Message, define_class, msg_send};
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, Sel};
+use objc2::{AnyThread, DefinedClass, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSLineBreakMode, NSLineBreakStrategy, NSMutableParagraphStyle, NSParagraphStyle,
     NSTabColumnTerminatorsAttributeName, NSTextAlignment, NSTextBlock, NSTextTab, NSTextTabType, NSWritingDirection,
@@ -28,6 +28,66 @@ use objc2_app_kit::{
 use objc2_foundation::{NSArray, NSCopying, NSDictionary, NSString, NSZone};
 
 use crate::text::layout::{Align, DEFAULT_TABS, Direction, LineBreak, Paragraph, Tab, TabKind};
+
+/// A paragraph style's description, in AppKit's words and order.
+fn describe(s: &NSParagraphStyle) -> String {
+    use crate::color::g;
+    let tabs: Vec<String> = s
+        .tabStops()
+        .iter()
+        .map(|t| {
+            let kind = match t.alignment() {
+                NSTextAlignment::Right => "R",
+                NSTextAlignment::Center => "C",
+                _ => "L",
+            };
+            format!("    {}{kind}", g(t.location()))
+        })
+        .collect();
+    let list = |items: Vec<String>| if items.is_empty() { String::new() } else { format!("{}\n", items.join(",\n")) };
+    let described = |key: Sel| -> Vec<String> {
+        if !s.respondsToSelector(key) {
+            return Vec::new();
+        }
+        // SAFETY: textBlocks and textLists take nothing and return arrays.
+        let items: Retained<NSArray<AnyObject>> = unsafe { msg_send![s, performSelector: key] };
+        items
+            .iter()
+            .map(|o| {
+                // SAFETY: description takes nothing and returns a string.
+                let d: Retained<NSString> = unsafe { msg_send![&*o, description] };
+                format!("    {d}")
+            })
+            .collect()
+    };
+    let (blocks, lists) = (described(sel!(textBlocks)), described(sel!(textLists)));
+    format!(
+        "Alignment {}, LineSpacing {}, ParagraphSpacing {}, ParagraphSpacingBefore {}, HeadIndent {}, TailIndent {}, \
+         FirstLineHeadIndent {}, LineHeight {}/{}, LineHeightMultiple {}, LineBreakMode {}, Tabs (\n{}), \
+         DefaultTabInterval {}, Blocks (\n{}), Lists (\n{}), BaseWritingDirection {}, HyphenationFactor {}, \
+         TighteningForTruncation {}, HeaderLevel {} LineBreakStrategy {}",
+        s.alignment().0,
+        g(s.lineSpacing()),
+        g(s.paragraphSpacing()),
+        g(s.paragraphSpacingBefore()),
+        g(s.headIndent()),
+        g(s.tailIndent()),
+        g(s.firstLineHeadIndent()),
+        g(s.minimumLineHeight()),
+        g(s.maximumLineHeight()),
+        g(s.lineHeightMultiple()),
+        s.lineBreakMode().0,
+        list(tabs),
+        g(s.defaultTabInterval()),
+        list(blocks),
+        list(lists),
+        s.baseWritingDirection().0,
+        g(f64::from(s.hyphenationFactor())),
+        if s.allowsDefaultTighteningForTruncation() { "YES" } else { "NO" },
+        s.headerLevel(),
+        s.lineBreakStrategy().0,
+    )
+}
 
 /// Everything a paragraph style holds.
 #[derive(Clone, Debug, PartialEq)]
@@ -356,6 +416,15 @@ define_class!(
                 h.write_usize(set.stop.hash());
             }
             h.finish() as usize
+        }
+
+        /// The style's values, as AppKit lists them, so equal styles
+        /// describe alike.
+        #[unsafe(method_id(description))]
+        fn description(&self) -> Retained<NSString> {
+            // SAFETY: the receiver is an NSParagraphStyle.
+            let s: &NSParagraphStyle = unsafe { &*(self as *const Self).cast() };
+            NSString::from_str(&describe(s))
         }
     }
 

@@ -1,0 +1,9 @@
+[package]
+name = "ui-gallery"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+# sidestep-ui is Linux's: on macOS this example says so and stops.
+[target.'cfg(not(target_vendor = "apple"))'.dependencies]
+sidestep-ui.workspace = true

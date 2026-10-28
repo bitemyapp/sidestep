@@ -369,16 +369,23 @@ pub(crate) fn encode_units(
                 scratch.extend_from_slice(&if utf32_little { c.to_le_bytes() } else { c.to_be_bytes() });
                 true
             }
-            _ if is_single_byte(encoding) => match single_byte_of(c, encoding) {
-                Some(b) => {
-                    scratch.push(b);
+            _ if is_single_byte(encoding) => match precomposed(text, loc + consumed, loc + len, encoding) {
+                Some((bytes, units)) => {
+                    scratch.extend_from_slice(&bytes);
+                    n = units;
                     true
                 }
-                None if lossy => {
-                    scratch.push(lossy_byte(c, encoding));
-                    true
-                }
-                None => false,
+                None => match single_byte_of(c, encoding) {
+                    Some(b) => {
+                        scratch.push(b);
+                        true
+                    }
+                    None if lossy => {
+                        scratch.push(lossy_byte(c, encoding));
+                        true
+                    }
+                    None => false,
+                },
             },
             _ => false,
         };
@@ -388,6 +395,47 @@ pub(crate) fn encode_units(
         consumed += n;
     }
     Encoded { used, consumed }
+}
+
+/// The character at UTF-16 index `at` (before `end`) and how many units it
+/// takes: a pair when both halves are there.
+fn char_at(text: &Text, at: usize, end: usize) -> (u32, usize) {
+    let mut units = [0u16; 2];
+    text.copy_units(at, 1, &mut units[..1]);
+    if (0xD800..0xDC00).contains(&units[0]) && at + 1 < end {
+        text.copy_units(at + 1, 1, &mut units[1..]);
+        if (0xDC00..0xE000).contains(&units[1]) {
+            return (0x1_0000 + ((u32::from(units[0]) - 0xD800) << 10) + (u32::from(units[1]) - 0xDC00), 2);
+        }
+    }
+    (u32::from(units[0]), 1)
+}
+
+/// A character at UTF-16 index `at` followed by combining marks, written
+/// in a single-byte encoding as its canonical composition, as Foundation
+/// precomposes: `e` + U+0301 as `é`. The bytes and the units they stand for,
+/// or `None` when no mark follows or the composition has a character the
+/// encoding lacks. A character alone is never remapped (U+212B ANGSTROM
+/// SIGN isn't written as `Å`).
+fn precomposed(text: &Text, at: usize, end: usize, encoding: u32) -> Option<(Vec<u8>, usize)> {
+    use icu_properties::props::GeneralCategoryGroup;
+    let (base, mut units) = char_at(text, at, end);
+    let mut sequence = String::new();
+    sequence.push(char::from_u32(base)?);
+    while at + units < end {
+        let (c, n) = char_at(text, at + units, end);
+        if !GeneralCategoryGroup::Mark.contains(super::fold::general_category(c)) {
+            break;
+        }
+        sequence.push(char::from_u32(c)?);
+        units += n;
+    }
+    if sequence.chars().count() < 2 {
+        return None;
+    }
+    let composed = icu_normalizer::ComposingNormalizerBorrowed::new_nfc().normalize(&sequence);
+    let bytes = composed.chars().map(|c| single_byte_of(u32::from(c), encoding)).collect::<Option<Vec<u8>>>()?;
+    Some((bytes, units))
 }
 
 /// What a lossy conversion writes for a character the encoding lacks: its

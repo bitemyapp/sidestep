@@ -499,8 +499,14 @@ pub fn apply(krate: &str, files: &mut [File]) -> Result<Stats, String> {
                 let text = &own[fi][k];
                 if uses_darwin_libc(text) || identifiers(text).any(|id| names.contains(id)) {
                     darwin[fi].insert(k);
-                    if item.indent == 0
-                        && let Some(name) = defined_name(&files[fi].lines[item.header])
+                    let header = files[fi].lines[item.header].trim();
+                    // Public declarations in a top-level extern block are
+                    // indented, but their re-exports still need the same gate.
+                    let extern_declaration = item.indent == 4
+                        && (header.starts_with("pub fn ") || header.starts_with("pub static "))
+                        && files[fi].lines[item.end].trim_end().ends_with(';');
+                    if (item.indent == 0 || extern_declaration)
+                        && let Some(name) = defined_name(header)
                     {
                         names.insert(name.to_string());
                     }
@@ -789,6 +795,23 @@ pub use self::__CFWidget::CFWidgetContext;
             text(&files[1]),
             "#[cfg(all(feature = \"CFWidget\", feature = \"libc\"))]\n#[cfg(target_vendor = \"apple\")]\npub use self::__CFWidget::CFWidgetContext1;\n#[cfg(feature = \"CFWidget\")]\npub use self::__CFWidget::CFWidgetContext;\n"
         );
+    }
+
+    #[test]
+    fn nested_extern_reexports_keep_darwin_gates() {
+        let declarations = r#"extern "C-unwind" {
+    #[cfg(feature = "libc")]
+    pub fn WidgetGetPort() -> libc::mach_port_t;
+}
+"#;
+        let module = r#"#[cfg(all(feature = "Widget", feature = "libc"))]
+pub use self::__Widget::WidgetGetPort;
+"#;
+        let mut files = [file("Group/Widget.rs", declarations), file("Group/mod.rs", module)];
+        let stats = apply("objc2-core-foundation", &mut files).unwrap();
+        assert_eq!(stats.darwin_items, 2);
+        assert_eq!(stats.gates_added, 2);
+        assert!(text(&files[1]).contains("#[cfg(target_vendor = \"apple\")]\npub use"));
     }
 
     #[test]

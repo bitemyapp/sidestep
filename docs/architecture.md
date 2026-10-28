@@ -13,11 +13,21 @@ objc2, block2                     from crates.io (objc2 with the fork's fixes);
           class symbols ._OBJC_CLASS_<Name>, _Block_copy, _NSConcreteStackBlock
 sidestep-runtime                  the Objective-C runtime, in Rust
 sidestep-foundation, -appkit      framework classes, in Rust, via define_class!
+sidestep-engine                   the render thread, rasterizer and text
+                                  engine under AppKit; no Objective-C
 ```
+
+A program written for Linux alone can use the engine through a native Rust
+toolkit instead, `sidestep-ui`, and link no Objective-C at all (see
+[The native toolkit](#the-native-toolkit)).
 
 The objc2 fork's fixes are pending upstream; `tools/objc2-overlay` applies
 them to the published crates at build time (see
 [abi.md](abi.md#fixed-in-the-objc2-fork-pending-upstream)).
+
+AppKit's half that never touches the Objective-C runtime is a crate of its
+own, `sidestep-engine` (see [The engine](#the-engine)), so other toolkits
+can draw and take input through it too.
 
 [objc2]: https://github.com/madsmtm/objc2
 
@@ -665,6 +675,271 @@ This design keeps GPU wake-ups and uploads proportional to what changed,
 which is what dominates power on a mostly idle desktop. A GPU rasterizer can
 replace the CPU one behind the same operations later.
 
+### The engine
+
+Everything below the line the two threads talk across lives in
+`crates/sidestep-engine`, which links no Objective-C: the messages
+(`protocol`), the render thread and its Wayland backends, the real one
+and the null one tests use (`backend`), the rasterizer (`raster`), Core
+Animation's layer trees as plain data and their compositing (`ca`), the
+text engine (`text`), the clipboard's shared state (`clipboard`), the
+compositor's outputs (`outputs`), the desktop's settings and the system
+colors they choose (`settings`, `desktop`, `palette`), image files
+(`codec`), CoreGraphics-style paths (`path`), touchpad coasting's physics
+(`momentum`), `SIDESTEP_TRACE_FRAMES` (`trace`) and `SIDESTEP_FRAME_STATS`
+(`stats`). `sidestep-appkit`
+re-exports those modules at its crate root,
+so its code names them as it always has (`crate::protocol`,
+`crate::backend`, …); the main-thread halves of mixed modules stay in
+AppKit and re-export the engine's halves (`quartzcore::tree` builds
+commits, `quartzcore::render` draws layers into a CGContext, `screen`
+makes `NSScreen`s of the published outputs, `settings` turns a change
+into a run-loop perform and a redraw).
+
+Three seams keep the engine free of AppKit:
+
+- **Waking the main thread.** `backend::start` takes a `Waker`, a
+  closure the render thread calls after every message it sends and once
+  more when it stops. AppKit's signals its run-loop source; another
+  toolkit can signal a condition variable.
+- **Hearing of the desktop's settings.** The engine keeps the desktop's
+  light or dark preference and accent itself and calls the hook a toolkit
+  gives `settings::on_change` (AppKit's performs `apply_changes` on the
+  main run loop, which refreshes every view's appearance).
+- **AppKit's values.** Key events carry `NSEventModifierFlags` bits and
+  AppKit's function-key characters, which `NSEvent` passes on as they
+  are; the engine defines them itself (`keys`), and a test in AppKit holds
+  each to objc2-app-kit's.
+
+A process has one render thread at a time, started by whichever toolkit
+runs it: the render thread ends when its `Backend` is dropped (its
+channel closes), and the next `backend::start` replaces what other
+threads send through (`send_if_running`), as a toolkit's next
+`settings::on_change` replaces its hook, so one application can run after
+another.
+
+### The native toolkit
+
+`crates/sidestep-ui` is the engine's other toolkit: a Rust API for
+programs written for Linux alone, with no Objective-C runtime in them
+(its dependency tree has no objc2 crate). It drives the render thread
+through the same protocol AppKit does, and keeps AppKit's rhythm:
+
+- **The loop** (`app.rs`) runs on the thread that calls `App::run`. The
+  render thread's waker and the settings hook signal a condition variable
+  (and so do `Proxy`s from other threads); each turn handles the render
+  thread's messages, oldest first (a move followed by another move of the
+  same window, and a key repeat followed by a newer key, are dropped, as
+  AppKit drops them), a proxy's wake, a change of the desktop's look or
+  accent (every window redraws), timers that came due (kept in a
+  `BTreeMap` by due time; a repeating timer keeps its phase and skips what
+  it missed) and coasting that no frame moved on, then runs the display
+  pass and sleeps until woken or the next deadline. An idle program sleeps
+  with nothing armed. One application runs at a time; when `run` returns,
+  its windows close and its render thread stops, and another may run.
+- **Windows and showings.** A window keeps its `WindowId` for its life;
+  each time it's shown (`show_window`, after `hide_window`) it is a new
+  window to the render thread, a *showing* with an id of its own: a
+  window's first showing has the window's number, later ones count from
+  2³¹. Messages name showings and are mapped back to windows, so what the
+  render thread still says of a showing that went finds nothing (drags
+  over one are still answered). Hiding a window closes its popups and
+  tells the handler it lost the keyboard and the pointer if it had them;
+  showing it sends its title, style, size, size limits, cursor and parent
+  anew. Closing a window closes its popups first, as Wayland needs. A
+  popup opens below its anchor unless a `PopupPosition` says otherwise
+  (the positioner's anchor corner, gravity, offset, and flip, slide and
+  resize adjustments, `ResizeX` added to the protocol for it). An open
+  popup is placed anew (`Window::set_popup_position`, `set_popup_anchor`,
+  and `request_size`, which a popup takes as a placement at the new
+  size): `WindowRequest::Reposition` carries its placement and size, and
+  the render thread hands a new positioner to xdg_popup.reposition
+  (xdg-shell 3; before it the popup stays), whose configure resizes it.
+  A placement asked before the compositor answers the last keeps the
+  size last asked.
+- **Layer surfaces** (`layer_shell.rs`; the engine's `backend::layer`): a
+  desktop's own panels, wallpapers and notifications, through
+  wlr-layer-shell, are windows opened with `WindowOptions::layer`, whose
+  `CreateWindow` carries a `LayerPlacement` (layer, anchored edges,
+  exclusive zone, margins, keyboard interactivity, namespace, output by
+  id). The render thread makes the content's surface a layer surface (no
+  frame, no decorations, no window geometry), and its role is the
+  root's, so input reaches it as any window's content. A configure's
+  side of 0 is the size asked for; a size asked with a side of 0 (where
+  the surface is anchored to both edges that way) is the compositor's to
+  decide. `closed` is a close request. Popups of a layer surface are
+  xdg_popups made with no xdg parent and given to it before their first
+  commit (`get_popup`), as a panel's menus are; a grabbing one grabs with
+  the latest press's or keyboard entry's serial, or with 0 when the
+  program has had none (a shell's menu opened by a key binding that
+  reached it over IPC), which Aizome's compositor and sway take. Other
+  popups don't grab without a serial, since a compositor that checks
+  serials dismisses a popup whose grab it refuses. A layer surface's
+  size, layer, anchors, zone, margins and keyboard change while it shows
+  (`WindowRequest`'s layer requests, `Window::set_layer_…`), and a
+  showing after a hide is placed as it was left. Without wlr-layer-shell
+  the window is closed at once. The null render thread places them on a
+  1280 × 800 point output and gives the keyboard to those that take it
+  exclusively; under sway, `tests/wayland_desktop.rs` checks a panel's
+  exclusive zone tiles a window under it, a wallpaper fills the output,
+  a menu opens from the panel's press, a panel that has had no input
+  opens a menu that grabs (a click where no surface is dismisses it),
+  and the panel takes the keyboard and grows.
+- **Activation for others**: `Window::activate` asks for a token for
+  the program's own window and activates it; `Cx::request_activation_token`
+  asks for one (`RequestActivationToken`) for a program the program
+  launches (`app_id` the launched program's), with the latest input's
+  serial and the surface with the keyboard, and the handler hears it
+  (`activation_token`; none without xdg-activation) to hand on as
+  `XDG_ACTIVATION_TOKEN`. Under sway, a click on a panel gets one.
+- **Regions**: `Window::set_input_region` limits where a window's content
+  takes pointer input (a panel's or a menu's shadow lets clicks through to
+  what's behind), and `set_opaque_region` tells the compositor where it
+  needn't draw what's behind, both in content points and kept for later
+  showings (`SetInputRegion`, `SetOpaqueRegion`); the render thread sets
+  them on the content's surface, a passthrough style still emptying the
+  input region. Under sway, a panel taking clicks on its left half only
+  lets those on its right through to the wallpaper.
+- **The session lock** (the engine's `backend::lock`): `Cx::lock_session`
+  sends `LockSession`, and the render thread asks for an
+  ext-session-lock; a window opened with `WindowOptions::lock(output)`
+  (`CreateWindow`'s `lock`) is the lock's surface on that output, the
+  content's surface itself, never committed before the compositor
+  configures it (the protocol forbids it), its role the root's, so it
+  takes the keyboard and pointer. The compositor sizes it. `locked`
+  reaches the handler as `session_locked`; `finished` (refused or ended)
+  unlocks or destroys the lock as it was or wasn't locked, closes the
+  lock's windows and reaches the handler as `session_lock_finished`.
+  `Cx::unlock_session` unlocks (or withdraws a lock not yet confirmed),
+  then closes the lock's windows, so outputs don't blank first. A second
+  lock surface on an output, a protocol error, is refused (the window
+  closes), as is one without a lock. A render thread that stops while it
+  holds the lock leaves it to the connection's end rather than destroying
+  it, which would be a protocol error: the session stays locked, as the
+  protocol wants of a lock screen that dies. The null render thread locks
+  at once and sizes lock surfaces as its output; under sway the test
+  locks, sees only the lock screen in a screenshot, clicks and types into
+  it, and unlocks to the window under it.
+- **The display pass** gives each window that needs it a `Canvas`: a
+  window draws once configured, only when the render thread showed its
+  last frame (so drawing keeps pace with the compositor's frame
+  callbacks, and a window the compositor isn't showing stops drawing),
+  and only if it has damage or a new title. The canvas starts by clearing
+  the damage to the window's background (`FillWith` with `Copy`), records
+  the handler's drawing as ops in window points, and the pass sends one
+  `Paint` of the root target and a `Present`, then drops the images the
+  pass made for itself, so the message that forgets them follows the
+  paint. First frames wait, as AppKit's do, for the desktop's light or
+  dark (`settings::ready`).
+- **The canvas** (`canvas.rs`) keeps a transform (a kurbo `Affine`), a clip
+  (bounds, and clip paths where it isn't a rectangle) and a blend mode and
+  shadow, and turns calls into ops: a rectangle through an axis-aligned
+  transform with nothing else set is a `Fill` of whole pixels; shapes are
+  `FillPath`s and `StrokePath`s of their kurbo paths; images are `Image`
+  ops of the engine's `ImageData` (a file is decoded on the render thread
+  the first time it's drawn, and its cache entry goes when the last
+  `Image` does), smooth ones bicubic but those landing one to one on
+  whole device pixels (within a float's rounding) linear, which the
+  engine blits; groups are `BeginGroup`/`EndGroup`. Text is the glyph
+  runs the text engine placed, as `Glyphs` ops from the render thread's
+  glyph cache while the transform keeps glyphs upright and scales both
+  ways alike (the size scaled with it). Turned, mirrored or stretched, or
+  drawn with a shadow, a clip path or a blend mode, which a glyph run
+  can't carry, text is drawn through the drawing state another way: its
+  outlines, filled (and for a synthesized bold face stroked too, as thick
+  as the glyph cache emboldens, a 24th of the size in pixels between a
+  quarter pixel and two; a synthesized oblique leans them); or, for a
+  color font's glyphs (COLR, CBDT, sbix or SVG, which have no outlines),
+  a picture: the run drawn upright into an image at the scale it shows at
+  (`ca::render::rasterize`), drawn through the transform.
+- **Offscreen** (`offscreen.rs`): `offscreen::render` gives a canvas for
+  an image of a size and scale, with no application running and no
+  display, on any thread, and rasterizes its ops with `raster::paint` into
+  pixels of its own, through a glyph cache kept by the thread (as the
+  render thread keeps its own), so text drawn offscreen is what a window
+  at the same scale shows, pixel for pixel (`tests/offscreen.rs` holds a
+  window's captured pixels to it). A compositor draws its own labels with
+  it; `Image::to_rgba8` reads the pixels back, straight or premultiplied.
+  An image dropped on a thread that drew it offscreen goes from that
+  thread's image cache too.
+- **Text** (`text.rs`): a `TextLayout` is the engine's `text::lines::Frame`
+  (TextKit's line layout), so it has what editing needs (the character at
+  a point, carets with their secondary caret where directions meet,
+  selection rectangles) as well as lines and size; its API takes byte
+  offsets of UTF-8 and converts to the frame's UTF-16 indexes. A layout
+  limited to a number of lines can end the last with an ellipsis while
+  the lines before it wrap (`TextLayoutBuilder::ellipsis`: the frame's
+  container truncates its last line, as TextKit's does under
+  `maximumNumberOfLines`), for a list row's two-line description.
+  `Canvas::draw_label` and `measure` go through string drawing's layout
+  cache instead, for labels drawn pass after pass. Font files a program
+  brings are installed in the shared font collection under their own
+  families (`fonts::install`, after which names like `Family-Bold` are
+  looked up again), so weights and styles are matched among a family's
+  faces as among the system's, or loaded as one face exactly as the file
+  has it (`Font::from_data`, through the private families CoreText's
+  data fonts use). A font's width (`Font::with_width`, CSS's
+  `font-stretch`) is the spec's stretch, which fontique matches faces
+  by and sets a variable font's `wdth` axis to, as it sets `wght`:
+  Archivo at 87.5% sets `Soroban — Untitled` at 12 points 11% narrower
+  (a test, given the font's file in `SIDESTEP_TEST_ARCHIVO`).
+- **Input** (`event.rs`) is translated from AppKit's values: modifier
+  flags to `Modifiers`; a key's characters to a `Key` (AppKit's control
+  characters and function-key characters to `NamedKey`s) and the text it
+  types (none for keys that type nothing, for releases, and while Control
+  or Super is held); input methods' changes to `Ime` commits and preedits.
+  Pointer moves, presses, releases and scrolls carry the modifiers held
+  (the keyboard's, as the seat last told them), and the testing helpers
+  inject them too (`inject_button_with`, `inject_motion_with`,
+  `inject_wheel_with`); under sway a shift-click's press carries shift.
+  A touchpad gesture that ends fast coasts, with AppKit's physics (the
+  engine's `momentum`, which AppKit's coasting now uses too): scroll
+  events with a `momentum` phase, a step per frame of the window or every
+  50 ms without frames, stopped by another scroll or a press (programs may
+  turn it off, `App::momentum_scrolling`).
+- **The rest**: the clipboard is the engine's shared state (text offered
+  under the text MIME types, this program's own text answered without a
+  round trip while its change is current); outputs are its published
+  snapshot, read without waiting (the render thread describes them by
+  itself once it connects, and the handler hears `outputs_changed`),
+  each with its id (the wl_output global's name, which layer surfaces
+  are put on it by), connector name, description, make and model,
+  logical frame, and integer and fractional scales (`testing::inject_outputs`
+  describes some to a test); and
+  drags are answered position by position, as the render thread needs,
+  from the handler's `drag_moved`: a `DropResponse` with the action, the
+  MIME type to take (one the drag offers, else the toolkit's choice: the
+  URL list, read before the drag is announced, else text, else the first
+  type offered) and whether to be asked again while the drag waits.
+  Drags go out too: `Cx::start_drag` sends a `DragSource` (data by MIME
+  type, given or promised, the actions allowed, an icon: an image as
+  large as its size in points, or a drawing, `icon_drawn`) as
+  `StartDrag` (the icon as ops, recorded at the window's scale rounded
+  up), and the render thread's `drag_out` makes a wl_data_source and
+  starts the drag from the latest press, on the window's content, with
+  an icon surface drawn at that scale (a buffer scale) and offset to its
+  hotspot, so a drawn icon, or an image made at the window's scale,
+  shows pixel for pixel. A destination's
+  request for promised data asks the handler (`ProvideDragData`, answered
+  as the clipboard's promises are); the drop's finish, or a cancel, is
+  `DragEnded` with the action chosen. A drop on the program's own window
+  reads only data given up front: the main thread can't keep a promise
+  while it waits for the data itself. Under sway a drag from one window
+  into another shows its icon under the pointer, and the text it carries
+  is read where it's dropped; at 2×, a drawn icon and an image made at
+  2× show a stripe half a point wide as one sharp device pixel.
+
+Its tests run through the null render thread (`tests/headless.rs`): an
+application's handler plays every step, each waiting for its condition
+with a deadline, and a second application runs after the first;
+`testing` queues input as if the render thread had sent it. Under a real
+compositor (`tests/wayland_system.rs`, run under the headless sway, and
+in CI's `wayland` job in the container `scripts/linux-run` uses), a
+virtual pointer of the test's own clicks, double-clicks and turns the
+wheel over the window and dismisses a popup by clicking outside it,
+`wtype` types, `wl-copy` and `wl-paste` trade the clipboard with it, and
+the window is hidden, shown again and clicked.
+
 ### Scale
 
 Operations stay in points. Each window renders at its output's scale: the
@@ -705,7 +980,8 @@ Wayland shows a client no other program's input.
 - **Keys.** Keymaps are compiled with [kbvm], a pure Rust XKB
   implementation, so neither building nor running needs libxkbcommon.
   `characters` apply every modifier (Control-A types U+0001, as on macOS)
-  and the locale's compose sequences and dead keys;
+  and the locale's compose sequences and dead keys (X11's compose tables,
+  found as [NixOS](#nixos) needs);
   `charactersIgnoringModifiers` apply Shift only. Keys that type nothing
   get AppKit's function-key characters (`NSUpArrowFunctionKey`, …) and
   control characters (Return is `\r`, Backspace `NSDeleteCharacter`).
@@ -1075,7 +1351,15 @@ sends it as operations), and nothing runs a subprocess to find a font.
 their own (sway). They're light or dark as the desktop prefers, as the
 views are (see [Colors and appearance](#colors-and-appearance)).
 `SIDESTEP_THEME=dark` or `light` (or a dark `GTK_THEME`) overrides the
-desktop for both.
+desktop for both. A titled toplevel asks for server-side decorations
+(zxdg_decoration_manager_v1) and draws none where they're granted;
+`tests/wayland_desktop.rs` checks under sway, which grants them, that the
+content shows from the window's top left.
+
+Toplevels are created with the program's name as their app id, which
+compositors match windows to desktop entries and icons by; a toolkit may
+name the application otherwise (`backend::set_app_id`, sidestep-ui's
+`App::app_id`), and activation tokens are asked for with the same id.
 
 A window keeps the settings programs give it (background color, level,
 shadow, alpha, collection behavior and the rest) and reads them back. The
@@ -1320,8 +1604,11 @@ compositor.
 - **Rasterizing.** Canvases hold premultiplied RGBA, tiny-skia's format,
   which buffers show as they are where the compositor takes XBGR8888
   (wlroots, Mutter and KWin do; the formats are read once they've
-  arrived, at the first buffer), and swizzled to XRGB8888 in the same
-  copy otherwise. Each operation draws into a scratch copy of just the
+  arrived, at the first buffer), and otherwise as XRGB8888, swizzled in
+  place around drawing (`SIDESTEP_SHM_FORMAT=xrgb8888` asks for that
+  anyway). A fill painted over whole by the opaque fill after it (a pass
+  clears what it redraws, then a view fills its background) is left out.
+  Each operation draws into a scratch copy of just the
   pixels it can reach, so a clip rectangle needs no mask; a clip path's
   mask is kept while the next operations ask for the same one. The 29
   compositing operations map onto tiny-skia's blend modes, except
@@ -1341,9 +1628,21 @@ compositor.
   exact multiply for each mean, so a window-wide group with a soft shadow
   costs what its shadow covers. An image whose pixels land one to one on
   whole device pixels (a view's drawing, composited where it was drawn) is
-  sampled without filtering, which leaves the same pixels. Gradients are
-  tiny-skia shaders, two-point conical for the radial ones; where the
-  options don't extend them, the filled shape is the band they cover.
+  sampled without filtering, which leaves the same pixels. An image drawn
+  that way or nearest-neighbour, upright (scaled any amount, mirrored or
+  not) onto whole device pixels with nothing else set (no tint, mask,
+  shadow or opacity; drawn over or copied) is blitted: the image pixel
+  each column and row takes is worked out once, with tiny-skia's sums in
+  the same floats (pixel centers through the inverse transform, clamped
+  to the image), and rows are copied (`memcpy` one to one) where the
+  image is opaque or copied, or composited a pixel at a time where not
+  (in integers, which round as tiny-skia's floats do for every value),
+  in bands on the raster workers when large; the pixels are the ones
+  tiny-skia draws (a test holds every case to them), at about the cost
+  of a solid fill (a 2800 × 1800 photo one to one in under a millisecond
+  rather than 23). Gradients are tiny-skia shaders, two-point conical
+  for the radial ones; where the options don't extend them, the filled
+  shape is the band they cover.
 - **Images.** An `NSImage` holds representations and draws the smallest
   bitmap whose pixels cover the destination in device pixels. Files are
   read with the pure-Rust codecs of the `image` crate (PNG, JPEG, GIF,
@@ -1917,6 +2216,12 @@ answered or 150 ms have passed, so a dark desktop doesn't flash a light
 window; without a bus or a portal the answer is light at once.
 `SIDESTEP_APPEARANCE=light` or `dark` (else `SIDESTEP_THEME`) and
 `SIDESTEP_ACCENT=#rrggbb` override the desktop.
+Programs hear of its light or dark as macOS tells them: `NSGlobalDomain`'s
+`AppleInterfaceStyle` is "Dark" while it is dark (asked of the engine at
+each lookup, never stored), a switch posts
+`AppleInterfaceThemeChangedNotification` to the program's own distributed
+observers (every program hears the desktop itself), and the application's
+`effectiveAppearance`, unless it set its own, changes observably.
 
 
 ### Views, layout and containers
@@ -2271,6 +2576,109 @@ each slow paint of the window's surface its damage and its slowest
 operations (what they are, how long each took), which show what a slow
 present was redrawing.
 
+`SIDESTEP_FRAME_STATS=1` (the engine's `stats`) measures each frame a
+main thread presents, by the window, and every five seconds prints a
+line for each window that showed frames: how many, and the median, 95th
+percentile and slowest, in microseconds, of recording it on the main
+thread (sidestep-ui notes how long its display pass drew and made ops
+before sending the present; AppKit notes nothing), rasterizing its paints
+of the window's surface into a buffer, and presenting it (catching the
+buffer up with the last, layer trees drawn for it, decorations, the
+commit), of
+the three together, and how much of the window it redrew. The render
+thread pairs each present with the recording the main thread noted for
+it, in order; frames it draws on its own aren't counted. sidestep-ui's
+`Cx::set_frame_stats` measures without printing, summarizing every period
+it asks for, and `Cx::frame_stats` reads the latest summaries. Drawings into
+images (`offscreen::render`, on any thread) are measured the same way,
+recording and rasterizing, as frames of a window of their own
+(`stats::OFFSCREEN`, printed as `offscreen`): `offscreen::set_frame_stats`
+and `offscreen::frame_stats` need no application, for a compositor
+setting its labels or a test harness. Off, each
+measuring point is one relaxed atomic load.
+
+#### Frame time
+
+A desktop that holds frames to 4 ms (Aizome's budget) needs a whole
+window's repaint at scale 2 well inside it. `sidestep-ui`'s
+`tests/frame_budget.rs` measures one under the headless sway, in a
+release build: a window tiled over the output with plain content (a
+background, a sidebar, 93 labels, six rounded rectangles) drawn whole
+frame after frame for three seconds, then only a caret's rectangle for
+three more, with `SIDESTEP_FRAME_STATS`'s numbers printed. On an 8-core
+Core Ultra 7 365 laptop (a busy one: other builds held its load average
+between 13 and 18 throughout, so the 95th percentiles are generous):
+
+| 1440 × 900 points | before | after |
+|---|---|---|
+| at 2×, whole: rasterize p50 / p95 | 3.5–5.0 / 6.2–8.8 ms | 0.86 / 2.0–3.1 ms |
+| at 2×, whole: present p50 / p95 | 1.6–2.0 / 2.2–7.7 ms | 0.02 / 0.03 ms |
+| at 2×, whole: total p50 / p95 | 5.2–7.5 / 8.8–16.3 ms | 0.93 / 2.2–3.5 ms |
+| at 1×, whole: total p50 / p95 | 1.8 / 3.0 ms | 0.67–0.72 / 1.1–1.3 ms |
+| at 2×, a caret: total p50 / p95 | 0.08 / 0.09–0.14 ms | 0.08 / 0.09 ms |
+
+Three things made the difference, each measured on its own first
+(`sidestep-ui`'s `timing_whole_window_rasterizing` times rasterizing
+the same window by kind of op; with `SIDESTEP_TRACE_FRAMES=tiles` a slow
+paint names its slowest ops):
+
+- **Drawing straight into the buffer.** The window's paints were
+  rasterized into a canvas of its own as they came and copied into a
+  shared-memory buffer at the present, 20 MB read and written for a
+  whole window at 2×. They now wait for the present and are rasterized
+  into the buffer itself: the one presented last if the compositor is
+  done with it (as compositors that copy shared memory into textures are
+  at once), else one it's done with, which first catches up with the
+  last where it missed frames (each buffer keeps where, as tiles'
+  buffers do), except where the frame's first paint replaces what's
+  there before drawing over it (a pass clears what it redraws first).
+  So a frame after a whole repaint, on a compositor that keeps the last
+  buffer until the next comes (pixman's sway), still copies the rest of
+  the window once; one that doesn't (GL compositors) copies nothing.
+- **Not filling twice.** Every pass cleared what it redrew to the
+  window's background, and then the view filled its own background over
+  it: two full writes of 20 MB at 2×, 1.6 ms each. A fill painted over
+  whole by the opaque fill after it is now left out (`ops::overdrawn`):
+  the same pixels.
+- **Bands on several threads.** A paint covering 2¹⁸ pixels or more is
+  rasterized in bands of rows on the render thread and up to three
+  workers (`raster::bands`), each band drawing every op clipped to its
+  rows. Fills and glyphs come out the same however the rows are cut, but
+  tiny-skia's antialiased paths don't quite (a cut through one moves its
+  edge coverage by a few levels), so cuts are made where no path, clip
+  path or slow fill is drawn, at the nearer edge of what spans the ideal
+  place; ops that read pixels outside their own (shadows) or need an
+  image cache (images, image masks) keep a paint on one thread. Tests
+  hold banded paints to one thread's, pixel for pixel.
+
+Scrolling redrew all of what scrolled, every notch: the kit measured a
+full-window list at 2× at 28 ms at the 95th percentile, most of it its
+own drawing. `Window::scroll(rect, delta)` moves the pixels instead:
+the next pass sends a `Scroll` before its paint, and the handler draws
+only the strips the move uncovered (with what was waiting to be redrawn
+in `rect`, moved along); moves before a pass add up, and one that isn't
+whole device pixels, or moves all of `rect` out, redraws it. The render
+thread keeps a scroll in order with the paints until the present. In a
+buffer behind the last one shown, a frame that starts with a move takes
+the moved pixels straight from the last, moved, and catches up only
+around them; otherwise it moves them within the buffer. A large move
+(or catching up) is shared with the raster workers, in bands of rows
+between buffers or of columns for a vertical move within one. The null
+render thread moves its captured pixels too, so `tests/scrolling.rs`
+holds a scrolled list to the list drawn whole, and under sway the
+screen is exactly that after 25 frames of moves. `frame_budget`'s list,
+scrolled 40 points a frame (a wheel's notch), redrawn whole against
+moved:
+
+| 1440 × 900 points, list scrolled | redrawn: record, total p50 / p95 | moved: record, total p50 / p95 |
+|---|---|---|
+| at 2× | 0.22 ms, 1.66–1.69 / 2.7–3.0 ms | 0.18 ms, 1.18–1.21 / 2.3–2.4 ms |
+| at 1× | 0.22 ms, 0.63 / 1.1 ms | 0.17 ms, 0.50 / 0.73 ms |
+
+Here the list's rows are cheap to draw, so redrawing them banded is
+nearly as quick; a list whose rows take longer to lay out and draw
+saves all of that but a strip's.
+
 ### Core Animation
 
 QuartzCore (`quartzcore/`) follows Core Animation as
@@ -2525,11 +2933,12 @@ AppKit measures text synchronously (`sizeWithAttributes:`,
 `boundingRectWithSize:options:attributes:context:`), so text is shaped and
 laid out on the thread that asks, and the render thread only ever sees
 glyphs: a glyph-run op names a registered face, a size, and glyph ids with
-positions in points. `crates/sidestep-appkit/src/text/` holds the stack.
+positions in points. `crates/sidestep-engine/src/text/` holds the stack.
 
 - **Fonts.** fontique finds the system's fonts through fontconfig, loaded
   at run time with `dlopen` (every Linux desktop has `libfontconfig.so.1`;
-  nothing is linked at build time). So the desktop's configuration decides
+  nothing is linked at build time; on NixOS it's found as
+  [below](#nixos)). So the desktop's configuration decides
   what `system-ui`, `sans-serif` and `monospace` are and which families
   fill in for missing glyphs, as it does for GTK and Qt programs. The system
   font is `system-ui` (else `sans-serif`), the monospaced one `monospace`.
@@ -2992,8 +3401,9 @@ the workspace against stand-ins for the desktop's programs.
   bar in the window, and Wayland has nowhere else for it. Every titled
   window that isn't a panel or a sheet shows the main menu as a bar under
   the title bar (or at the top, when the compositor draws the
-  decorations), drawn on the main thread as ops and rasterized on the
-  render thread onto a subsurface. The window grows by the bar and its
+  decorations), drawn on the main thread as ops in its window's
+  appearance, like the rest of the chrome, and rasterized on the render
+  thread onto a subsurface. The window grows by the bar and its
   content keeps its size: to the frame arithmetic the bar is part of the
   title bar (`frameRectForContentRect:` includes it, `contentLayoutRect`
   leaves it out). A click on a title opens its menu; moving across titles
@@ -3071,3 +3481,38 @@ has no display and passes without checking:
 ```sh
 scripts/linux-run scripts/headless-wayland cargo test -p sidestep-appkit --test wayland_system
 ```
+
+### NixOS
+
+A distribution laid out as most are keeps what the engine loads at run time
+where every program looks: `libfontconfig.so.1` on the library path, X11's
+compose tables in `/usr/share/X11/locale` (and XKB's keymap data, which
+only tests use, in `/usr/share/X11/xkb`). NixOS keeps each package under
+its own prefix in the store, so a program built there with plain Cargo
+finds none of them by name. `sidestep-engine`'s `system` module looks for
+each in turn, so the same source runs on both without wrappers:
+
+1. where the environment says (`LD_LIBRARY_PATH`, `XLOCALEDIR`,
+   `XKB_CONFIG_ROOT`);
+2. where the build said: `SIDESTEP_FONTCONFIG` (the library file),
+   `SIDESTEP_XLOCALEDIR` and `SIDESTEP_XKB_CONFIG_ROOT`, read when the
+   engine compiles. A Nix package or shell sets them to store paths, as
+   nixpkgs builds libxkbcommon, and the program's closure then keeps them;
+3. the usual places;
+4. the data directories (`$XDG_DATA_DIRS`, which on NixOS lists the
+   system's and the user's profiles); for fontconfig, the `lib` directory
+   beside each, and the library the system's own `fc-match` runs with, read
+   from its ELF run path. NixOS's font configuration installs `fc-match`,
+   so a plain `cargo build` there loads the system's fontconfig.
+
+Only the compose tables have no place on a NixOS system unless a profile
+links `share/X11/locale` (libX11's) or the build names it; without them
+dead keys type nothing, as on any system without compose data. Foundation's
+time zones are read where jiff reads them: `$TZDIR`, `/usr/share/zoneinfo`,
+then NixOS's `/etc/zoneinfo`.
+
+On a NixOS host, `cargo test` runs the Linux tests natively, with the
+system's fonts rather than the container's DejaVu, which a few text tests
+expect. The keyboard tests build keymaps by layout name, which needs XKB's
+data: they say they were skipped without it (set `XKB_CONFIG_ROOT` to
+xkeyboard-config's `share/X11/xkb` to run them).

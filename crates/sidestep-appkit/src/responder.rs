@@ -235,6 +235,18 @@ define_class!(
                 // SAFETY: tryToPerform:with: takes a selector and an object.
                 || self.ivars().next.get().is_some_and(|n| unsafe { n.as_ref().tryToPerform_with(action, object) })
         }
+
+        /// The Services menu's question, which a responder that can send
+        /// or take the types answers with itself; this one asks up the
+        /// chain (there's no Services menu here, but programs ask, and
+        /// subclasses call this).
+        #[unsafe(method_id(validRequestorForSendType:returnType:))]
+        fn valid_requestor(&self, send: Option<&objc2_foundation::NSString>, take: Option<&objc2_foundation::NSString>) -> Option<Retained<AnyObject>> {
+            // SAFETY: the next responder answers the same question.
+            self.ivars().next.get().and_then(|next| unsafe {
+                msg_send![next.as_ref(), validRequestorForSendType: send, returnType: take]
+            })
+        }
     }
 
     unsafe impl NSObjectProtocol for NSResponderImpl {}

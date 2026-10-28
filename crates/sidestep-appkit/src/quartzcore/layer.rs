@@ -1419,9 +1419,7 @@ fn sublayers_of(layer: &CALayerImpl) -> Option<Retained<NSArray<CALayer>>> {
     (!subs.is_empty()).then(|| NSArray::from_retained_slice(&subs))
 }
 
-/// Expansion of a continuous corner beyond its radius (measured:
-/// `+cornerCurveExpansionFactor:`).
-pub(crate) const CONTINUOUS_EXPANSION: f64 = 1.528665;
+pub(crate) use super::render::CONTINUOUS_EXPANSION;
 
 fn ivars() -> LayerIvars {
     LayerIvars {

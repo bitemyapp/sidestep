@@ -1,0 +1,25 @@
+From 3a1771d399e86db114eaaede94c3465d0516e8a2 Mon Sep 17 00:00:00 2001
+From: Chris Allen <cma@bitemyapp.com>
+Date: Fri, 9 Oct 2026 15:40:08 -0500
+Subject: [PATCH] Allow CoreServices bindings on non-Apple runtimes
+
+Signed-off-by: Chris Allen <cma@bitemyapp.com>
+---
+ framework-crates/objc2-core-services/translation-config.toml | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/framework-crates/objc2-core-services/translation-config.toml b/framework-crates/objc2-core-services/translation-config.toml
+index 2b10e3c4..7e4251b2 100644
+--- a/framework-crates/objc2-core-services/translation-config.toml
++++ b/framework-crates/objc2-core-services/translation-config.toml
+@@ -8,6 +8,7 @@ ios = "12.0"
+ tvos = "12.0"
+ watchos = "5.0"
+ visionos = "1.0"
++gnustep = true
+ 
+ # Deprecated, replaced with functionality in Security.
+ module.OSServices.module.KeychainCore.skipped = true
+-- 
+2.55.0
+

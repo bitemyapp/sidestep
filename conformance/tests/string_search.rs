@@ -439,6 +439,21 @@ fn composed_character_sequences() {
     assert_eq!(for_range("a🎉", 1, 2), (1, 2));
 }
 
+/// A zero width joiner after an ordinary character isn't part of its
+/// composed character sequence, so a match may end before one; a
+/// non-joiner (U+200C) or a mark after it extends it, and holds the match
+/// back. (Emoji joined by U+200D stay one sequence, above.)
+#[test]
+fn matches_end_before_joiners() {
+    let removed = |h: &str, t: &str| s(h).stringByReplacingOccurrencesOfString_withString(&s(t), &s("")).to_string();
+    assert_eq!(removed("a*\u{200D}b", "*"), "a\u{200D}b");
+    assert_eq!(removed("a*\u{200C}b", "*"), "a*\u{200C}b");
+    assert_eq!(removed("a*\u{301}b", "*"), "a*\u{301}b");
+    assert!(s("a:\u{200D}b").containsString(&s(":")));
+    let r = s("# H {#\u{200D}x}").rangeOfString(&s("{#"));
+    assert_eq!((r.location, r.length), (4, 2));
+}
+
 #[test]
 fn character_set_searches() {
     let t = s("ab🎉c 1");
@@ -888,7 +903,7 @@ fn trimming() {
     };
     assert_eq!(trim("🎉hello🎉", &others), "hello".encode_utf16().collect::<Vec<_>>());
     assert_eq!(trim("hi!👋", &others), [0x68, 0x69]);
-    assert_eq!(trim("👋", &others), []);
+    assert!(trim("👋", &others).is_empty());
     let high = NSCharacterSet::characterSetWithRange(NSRange::new(0xD83C, 1));
     assert_eq!(trim("🎉", &high), [0xDF89]);
     assert_eq!(trim("a🎉", &high), [0x61, 0xD83C, 0xDF89]);
