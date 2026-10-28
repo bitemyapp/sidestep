@@ -1,5 +1,6 @@
 //! The toolkit end to end through the null render thread: a window
-//! opening at the size it asked for, drawing (the pixels and text the
+//! opening at the size it asked for (over another program's window, by
+//! the handle it exported), drawing (the pixels and text the
 //! render thread rasterized), invalidating part of it, input, timers, a
 //! proxy waking the loop, cursors and maximizing, drag and drop (the type
 //! taken as the handler asks), touchpad coasting, hiding and showing a
@@ -231,6 +232,7 @@ mod linux {
                     let log = testing::take_render_log();
                     let id = testing::render_id(w);
                     assert!(log.contains(&Seen::Cursor { window: id, name: "pointer".into() }), "{log:?}");
+                    assert!(log.contains(&Seen::ForeignParent { window: id, handle: "exported-1".into() }), "{log:?}");
                     assert!(
                         log.iter().any(|s| matches!(s, Seen::Request { request, .. } if request.contains("Maximize")))
                     );
@@ -397,7 +399,11 @@ mod linux {
     impl Handler for Test {
         fn launched(&mut self, cx: &mut Cx) {
             self.started = Some(Instant::now());
-            let options = WindowOptions::new("Headless").size(200.0, 100.0).background(Background::Color(GROUND));
+            // Kept over another program's window, as a portal's dialog is.
+            let options = WindowOptions::new("Headless")
+                .size(200.0, 100.0)
+                .background(Background::Color(GROUND))
+                .foreign_parent("exported-1");
             self.window = Some(cx.open_window(options));
             self.poll = Some(cx.set_repeating_timer(Duration::from_millis(2)));
         }

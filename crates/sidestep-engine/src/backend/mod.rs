@@ -36,6 +36,7 @@
 mod decor;
 mod dnd;
 mod drag_out;
+mod foreign;
 mod keyboard;
 mod layer;
 mod lock;
@@ -91,6 +92,7 @@ use smithay_client_toolkit::reexports::protocols::wp::fractional_scale::v1::clie
 };
 use smithay_client_toolkit::reexports::protocols::wp::viewporter::client::wp_viewport::{self, WpViewport};
 use smithay_client_toolkit::reexports::protocols::wp::viewporter::client::wp_viewporter::WpViewporter;
+use smithay_client_toolkit::reexports::protocols::xdg::foreign::zv2::client::zxdg_imported_v2::ZxdgImportedV2;
 use smithay_client_toolkit::reexports::protocols::xdg::shell::client::xdg_positioner::{
     Anchor, ConstraintAdjustment, Gravity,
 };
@@ -283,6 +285,7 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
         subcompositor,
         viewporter,
         fractional,
+        foreign: foreign::Foreign::new(&globals, &qh),
         xdg,
         shm,
         pool,
@@ -348,6 +351,8 @@ pub struct State {
     subcompositor: SubcompositorState,
     viewporter: SimpleGlobal<WpViewporter, 1>,
     fractional: Option<WpFractionalScaleManagerV1>,
+    /// xdg-foreign v2, to keep windows over other programs' (see `foreign`).
+    foreign: foreign::Foreign,
     xdg: XdgShell,
     shm: Shm,
     pool: SlotPool,
@@ -473,6 +478,8 @@ pub struct Win {
     shell: Shell,
     viewport: WpViewport,
     fractional: Option<WpFractionalScaleV1>,
+    /// The other program's window this one is kept over, imported.
+    foreign_parent: Option<ZxdgImportedV2>,
     /// Content size in points.
     width: u32,
     height: u32,
@@ -1133,6 +1140,14 @@ impl State {
                     w.set_parent(parent.as_ref());
                 }
             }
+            ToRender::SetForeignParent { window, handle } => {
+                let Some(win) = self.windows.get_mut(&window) else { return };
+                if let Some(old) = win.foreign_parent.take() {
+                    old.destroy();
+                }
+                let Some(surface) = win.toplevel().map(|t| t.wl_surface().clone()) else { return };
+                win.foreign_parent = self.foreign.import(&handle, &surface, &self.qh);
+            }
             ToRender::ForgetImages { keys } => raster::images::release(&keys),
             ToRender::MenuBar { window, height, ops } => menubar::set(self, window, height, ops),
             ToRender::ColorScheme { dark } => {
@@ -1244,6 +1259,7 @@ impl State {
                 shell,
                 viewport,
                 fractional,
+                foreign_parent: None,
                 width,
                 height,
                 scale,
@@ -1381,6 +1397,9 @@ impl State {
             f.destroy();
         }
         win.viewport.destroy();
+        if let Some(i) = &win.foreign_parent {
+            i.destroy();
+        }
         // Tiles and decorations go first: they're subsurfaces of the root.
         drop(win.layers);
         drop(win.decor);

@@ -816,6 +816,13 @@ pub enum ToRender {
         window: WindowId,
         parent: Option<WindowId>,
     },
+    /// The window belongs over another program's window, named by the
+    /// handle that program exported (xdg-foreign v2): a portal's dialog
+    /// over the app that asked for it.
+    SetForeignParent {
+        window: WindowId,
+        handle: String,
+    },
     /// Where the window's content takes pointer input, in its points (none:
     /// all of it); clicks elsewhere go to what's behind. A passthrough style
     /// takes none anywhere.

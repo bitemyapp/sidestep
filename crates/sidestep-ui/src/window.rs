@@ -159,6 +159,7 @@ pub struct WindowOptions {
     visible: bool,
     background: Background,
     kind: Kind,
+    foreign_parent: Option<String>,
 }
 
 impl WindowOptions {
@@ -179,6 +180,7 @@ impl WindowOptions {
             visible: true,
             background: Background::System,
             kind: Kind::Toplevel { parent: None },
+            foreign_parent: None,
         }
     }
 
@@ -315,6 +317,17 @@ impl WindowOptions {
         self
     }
 
+    /// Keep the window over another program's window, named by the handle
+    /// that program exported (xdg-foreign v2): a portal's dialog over the
+    /// app that asked for it. Where the compositor offers no importer, or
+    /// doesn't know the handle, the window stands on its own.
+    pub fn foreign_parent(mut self, handle: impl Into<String>) -> Self {
+        if let Kind::Toplevel { .. } = self.kind {
+            self.foreign_parent = Some(handle.into());
+        }
+        self
+    }
+
     pub(crate) fn is_visible(&self) -> bool {
         self.visible
     }
@@ -350,6 +363,7 @@ pub(crate) struct WindowData {
     pub background: Background,
     pub close_on_request: bool,
     pub kind: Kind,
+    pub foreign_parent: Option<String>,
     pub size: Size,
     pub scale: f64,
     pub state: WindowState,
@@ -445,6 +459,7 @@ impl WindowData {
             background: options.background,
             close_on_request: options.close_on_request,
             kind: options.kind.clone(),
+            foreign_parent: options.foreign_parent.clone(),
             size: options.size,
             scale: 1.0,
             state: WindowState::default(),
@@ -539,6 +554,9 @@ impl WindowData {
         );
         if let (Kind::Toplevel { parent: Some(_) }, Some(parent)) = (&self.kind, parent) {
             send(tx, ToRender::SetParent { window: showing, parent: Some(parent) });
+        }
+        if let Some(handle) = &self.foreign_parent {
+            send(tx, ToRender::SetForeignParent { window: showing, handle: handle.clone() });
         }
         // A new showing knows nothing of the pointer's appearance or of
         // input methods; its regions are set again.

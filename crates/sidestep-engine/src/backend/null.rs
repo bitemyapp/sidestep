@@ -60,6 +60,11 @@ pub enum Seen {
         window: u32,
         parent: Option<u32>,
     },
+    /// The other program's window a window belongs over, by its handle.
+    ForeignParent {
+        window: u32,
+        handle: String,
+    },
     /// Display links asked for each frame of the window, or stopped.
     FrameTicks {
         window: u32,
@@ -466,6 +471,7 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
             ToRender::SetCursor { window, cursor } => note(Seen::Cursor { window, name: cursor.name().into() }),
             ToRender::HideCursor { hidden, until_moved } => note(Seen::CursorHidden { hidden, until_moved }),
             ToRender::SetParent { window, parent } => note(Seen::Parent { window, parent }),
+            ToRender::SetForeignParent { window, handle } => note(Seen::ForeignParent { window, handle }),
             ToRender::SetInputRegion { window, rects } => note(Seen::InputRegion { window, rects }),
             ToRender::StartDrag { window, drag, contents, actions, icon } => note(Seen::DragStarted {
                 window,
