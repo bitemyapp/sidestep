@@ -875,6 +875,42 @@ impl Cx {
         }
     }
 
+    /// The types the clipboard holds (MIME types): this program's text, or
+    /// what another program offers (a screenshot as `image/png`, files as
+    /// `text/uri-list`).
+    pub fn clipboard_types(&self) -> Vec<String> {
+        let shared = clipboard::shared();
+        match &self.clipboard {
+            Some((generation, _)) if shared.change_count() == *generation => {
+                clipboard::TEXT_MIMES.iter().map(|m| (*m).to_owned()).collect()
+            }
+            _ => shared.foreign_mimes(),
+        }
+    }
+
+    /// The clipboard's contents as `mime` (one of [`clipboard_types`]),
+    /// which may take a moment to arrive from another program, as
+    /// [`clipboard_text`](App::clipboard_text) may.
+    pub fn clipboard_data(&self, mime: &str) -> Option<Vec<u8>> {
+        self.clipboard_reader()(mime)
+    }
+
+    /// [`clipboard_data`], to call on another thread: a picture another
+    /// program offers can take a while to arrive, and the windows needn't
+    /// wait for it. It reads what the clipboard holds when it's called.
+    pub fn clipboard_reader(&self) -> impl Fn(&str) -> Option<Vec<u8>> + Send + Sync + 'static {
+        let own = self.clipboard.clone();
+        move |mime| {
+            let shared = clipboard::shared();
+            match &own {
+                Some((generation, text)) if shared.change_count() == *generation => {
+                    clipboard::TEXT_MIMES.contains(&mime).then(|| text.clone().into_bytes())
+                }
+                _ => shared.read_foreign(mime),
+            }
+        }
+    }
+
     /// The data a drag over one of the windows offers as `mime`, while the
     /// handler hears of it (most useful in [`Handler::dropped`]).
     pub fn drag_data(&self, mime: &str) -> Option<Vec<u8>> {
