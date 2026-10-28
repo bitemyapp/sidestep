@@ -48,6 +48,7 @@ mod selection;
 mod sheet;
 mod textinput;
 mod tiles;
+mod video;
 
 pub use decor::{HEADER, TITLE_SIZE, explicit_theme};
 
@@ -167,6 +168,7 @@ impl Drop for MainSender {
 /// it drops the `Backend` the render thread ends (its channel closes), so
 /// another may start after it.
 pub fn start(wake: Waker) -> Backend {
+    crate::video::render_started();
     let backend = if null::chosen() {
         null::start(wake)
     } else {
@@ -271,6 +273,7 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
     } else {
         globals.bind::<WpFractionalScaleManagerV1, _, _>(&qh, 1..=1, ()).ok()
     };
+    let videos = video::Videos::new(&globals, &qh);
     let mut state = State {
         registry: RegistryState::new(&globals),
         outputs: OutputState::new(&globals, &qh),
@@ -300,10 +303,12 @@ fn run(channel: Channel<ToRender>, to_main: MainSender) {
         // The environment isn't changed: other threads may be reading it.
         startup_token: std::env::var("XDG_ACTIVATION_TOKEN").ok().filter(|t| !t.is_empty()),
         empty_region: None,
+        videos,
         ca: crate::ca::tree::Compositor::default(),
         exit: false,
     };
     seat::bind_existing(&mut state, &globals);
+    state.videos.ask_caps(&state.conn, &state.qh);
     outputs::started(&state, &globals);
     while !state.exit {
         // While tiles have paints to rasterize, look for events without
@@ -372,6 +377,8 @@ pub struct State {
     /// An input region with nothing in it, made the first time a window
     /// lets pointer input through.
     empty_region: Option<Region>,
+    /// Video subsurfaces and the buffers their frames show (see `video`).
+    videos: video::Videos,
     /// Core Animation's layer trees, animated here (see `ca::tree`).
     ca: crate::ca::tree::Compositor,
     exit: bool,
@@ -1110,6 +1117,9 @@ impl State {
                 // Pixel capture is a null-backend diagnostic only.
                 let _ = reply.send(None);
             }
+            ToRender::PlaceVideo { window, video, place } => video::place(self, window, video, place),
+            ToRender::ShowVideo { window, video, frame } => video::show(self, window, video, *frame),
+            ToRender::ClearVideo { window, video } => video::clear(self, window, video),
             ToRender::SetSelection { contents } => selection::set(self, contents),
             ToRender::ReadSelection { mime, token, source, drag } => selection::read(self, mime, token, source, drag),
             ToRender::SelectionData { token, data } => selection::provided(self, token, data),
@@ -1400,7 +1410,9 @@ impl State {
         if let Some(i) = &win.foreign_parent {
             i.destroy();
         }
-        // Tiles and decorations go first: they're subsurfaces of the root.
+        // Tiles, videos and decorations go first: they're subsurfaces of
+        // the root.
+        self.videos.window_closed(window);
         drop(win.layers);
         drop(win.decor);
         drop(win.menubar);
@@ -1824,9 +1836,11 @@ impl State {
             self.draw_frame(window, rgba);
         }
         self.place_decorations(window);
+        let placed = video::before_commit(self, window);
         let Some(win) = self.windows.get(&window) else { return };
         win.surface().frame(&self.qh, FrameTag { window, seq });
         win.commit();
+        video::after_commit(self, placed);
     }
 
     /// Draw the paints since the last present straight into a buffer, and

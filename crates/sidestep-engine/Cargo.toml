@@ -24,7 +24,7 @@ kbvm = { version = "0.2", default-features = false, features = ["compose"] }
 wayland-cursor = "0.31"
 # Non-blocking clipboard pipes, and faulting in window memory ahead
 # (madvise); already built for the Wayland crates.
-rustix = { version = "1", default-features = false, features = ["std", "mm", "param"] }
+rustix = { version = "1", default-features = false, features = ["std", "mm", "param", "time"] }
 # Loads fontconfig from where it's found when the dynamic linker can't
 # find it by name (NixOS; see src/system.rs). fontique's loader uses it.
 libloading = "0.8"

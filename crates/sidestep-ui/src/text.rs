@@ -208,6 +208,22 @@ pub struct TextStyle {
     pub letter_spacing: f64,
     /// Points to raise the text by (negative lowers it).
     pub baseline_offset: f64,
+    /// The box each U+FFFC the style covers is laid out as, if any.
+    pub attachment: Option<TextAttachment>,
+}
+
+/// Room in a line for something drawn there that isn't text (a formula in
+/// a sentence, a chip): a box laid out in place of a U+FFFC, wrapping with
+/// the words around it, as an `NSTextAttachment` is. The text doesn't draw
+/// it: [`TextLayout::attachments`] says where each went, for whoever drew
+/// the text to fill.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextAttachment {
+    /// Its size, in points.
+    pub width: f64,
+    pub height: f64,
+    /// Where its bottom is from the baseline: below it when negative.
+    pub y: f64,
 }
 
 impl TextStyle {
@@ -220,7 +236,14 @@ impl TextStyle {
             strikethrough: false,
             letter_spacing: 0.0,
             baseline_offset: 0.0,
+            attachment: None,
         }
+    }
+
+    /// Lay each U+FFFC it covers out as `attachment`.
+    pub fn with_attachment(mut self, attachment: TextAttachment) -> TextStyle {
+        self.attachment = Some(attachment);
+        self
     }
 
     pub fn underlined(mut self) -> TextStyle {
@@ -243,6 +266,11 @@ impl TextStyle {
         attrs.strikethrough = single(self.strikethrough);
         attrs.kern = (self.letter_spacing != 0.0).then_some(self.letter_spacing as f32);
         attrs.baseline_offset = self.baseline_offset as f32;
+        attrs.attachment = self.attachment.map(|a| layout::Attachment {
+            width: a.width as f32,
+            height: a.height as f32,
+            y: a.y as f32,
+        });
         attrs.paragraph = paragraph.clone();
         attrs
     }
@@ -597,6 +625,21 @@ impl TextLayout {
         })
     }
 
+    /// Where the attachments' boxes went: the byte of each one's U+FFFC,
+    /// and its rectangle from the layout's top left.
+    pub fn attachments(&self) -> Vec<(usize, Rect)> {
+        let mut placed = Vec::new();
+        for l in self.frame.lines() {
+            let (start, top) = (l.range().start, l.top());
+            for a in l.line.attachments.iter() {
+                let [x0, y0, x1, y1] = a.rect;
+                let rect = Rect::new(f64::from(x0), f64::from(top + y0), f64::from(x1), f64::from(top + y1));
+                placed.push((self.byte(start + a.index), rect));
+            }
+        }
+        placed
+    }
+
     /// The rectangles that show bytes `range` selected, line by line.
     pub fn selection_rects(&self, range: Range<usize>) -> Vec<Rect> {
         let range = self.utf16(range.start)..self.utf16(range.end);
@@ -693,6 +736,30 @@ mod tests {
         let rects = layout.selection_rects(0..5);
         assert_eq!(rects.len(), 1);
         assert!((rects[0].x1 - caret.x).abs() < 0.5);
+    }
+
+    #[test]
+    fn attachments_take_their_room_and_say_where_they_went() {
+        let text = "x = \u{FFFC} here, and on";
+        let at = text.find('\u{FFFC}').unwrap();
+        let boxed = style().with_attachment(TextAttachment { width: 40.0, height: 30.0, y: -8.0 });
+        let plain = TextLayout::new("x =  here, and on", &style());
+        let layout = TextLayout::builder(text, &style()).style(at..at + 3, boxed).build();
+        let placed = layout.attachments();
+        assert_eq!(placed.len(), 1);
+        let (byte, rect) = placed[0];
+        assert_eq!(byte, at);
+        assert!((rect.width() - 40.0).abs() < 0.01 && (rect.height() - 30.0).abs() < 0.01, "{rect:?}");
+        assert!(rect.x0 > 0.0 && (layout.size().width - plain.size().width - 40.0).abs() < 0.5, "{rect:?}");
+        assert!((rect.y1 - layout.first_baseline() - 8.0).abs() < 0.01, "8 below the baseline: {rect:?}");
+        assert!(layout.size().height >= 30.0);
+        // Wrapped onto a second line, it goes there.
+        let narrow = TextLayout::builder(text, &style())
+            .style(at..at + 3, style().with_attachment(TextAttachment { width: 40.0, height: 30.0, y: -8.0 }));
+        let narrow = narrow.width(plain.size().width / 2.0).build();
+        let (_, rect) = narrow.attachments()[0];
+        let lines = narrow.lines();
+        assert!(lines.len() > 1 && lines.iter().any(|l| l.top <= rect.y0 && rect.y1 <= l.top + l.height + 0.01));
     }
 
     #[test]

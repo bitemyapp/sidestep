@@ -81,6 +81,7 @@ mod image;
 pub mod layer_shell;
 pub mod offscreen;
 mod text;
+pub mod video;
 mod window;
 
 #[doc(hidden)]
@@ -100,6 +101,7 @@ pub use event::{
 pub use image::Image;
 pub use kurbo;
 pub use text::{
-    Alignment, Caret, Font, FontMetrics, Hit, LineMetrics, TextLayout, TextLayoutBuilder, TextStyle, Wrap, measure,
+    Alignment, Caret, Font, FontMetrics, Hit, LineMetrics, TextAttachment, TextLayout, TextLayoutBuilder, TextStyle,
+    Wrap, measure,
 };
 pub use window::{Background, Corner, Cursor, PopupPosition, Window, WindowId, WindowOptions, gather_damage};

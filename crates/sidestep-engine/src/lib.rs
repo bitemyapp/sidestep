@@ -41,3 +41,4 @@ pub mod stats;
 pub mod system;
 pub mod text;
 pub mod trace;
+pub mod video;
